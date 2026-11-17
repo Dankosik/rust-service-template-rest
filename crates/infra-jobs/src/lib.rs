@@ -8,7 +8,6 @@ mod kind;
 mod listener;
 mod maintenance;
 pub mod operator;
-mod peers;
 mod session;
 mod state;
 mod trace_context;
@@ -21,9 +20,9 @@ pub use enqueue::{
     compare_live_payload, enqueue, json_payload_len,
 };
 pub use kind::{
-    CompleteError, DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind,
-    KindError, Kinds, KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy,
-    assert_valid_kind_name,
+    DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind, KindError, Kinds,
+    KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy, TransactionalHandler,
+    TransactionalJob, assert_valid_kind_name,
 };
 pub use session::StartupError;
 

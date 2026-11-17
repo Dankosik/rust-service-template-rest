@@ -8,9 +8,7 @@ use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, RegistrationState, provider_timeout};
 use crate::{
-    AcquisitionError, ConfigurationError, TokenTarget,
-    token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TokenEndpoint},
+    AcquisitionError, ConfigurationError, TokenTarget, token::Token, token_endpoint::TokenEndpoint,
 };
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
@@ -59,9 +57,9 @@ impl ExchangeState {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
+        let (context, request_context) = deadline.fetch_contexts(Instant::now());
         let result = endpoint
-            .fetch_exchange(subject, target, fetch_deadline)
+            .fetch_exchange(subject, target, &context, request_context.as_ref())
             .await
             .map(Arc::new);
         if let Some(error) = deadline.stopped_error() {

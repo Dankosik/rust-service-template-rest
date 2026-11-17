@@ -474,6 +474,10 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "postgres", database == "postgres")
     assert_profile_pack(source, target, "authn", authn != "none")
     assert_profile_pack(source, target, "oidc-jwt", authn == "oidc-jwt")
+    if authn == "oidc-jwt":
+        overlay = tomllib.loads((target / "env/config/oidc-jwt.toml").read_text(encoding="utf-8"))
+        if overlay["authn"].get("mode") != "oidc-jwt" or overlay["authn"].get("token_profile") != "rfc9068":
+            raise AssertionError("JWT overlay must select RFC 9068 access tokens")
     assert_profile_pack(source, target, "oidc-introspection", authn == "oidc-introspection")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     assert_profile_pack(source, target, "outbound-auth", outbound_auth == "oauth2-client-credentials")

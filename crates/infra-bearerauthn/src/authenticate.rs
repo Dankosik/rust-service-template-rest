@@ -3,7 +3,7 @@ use std::{mem::DropGuard, sync::OnceLock};
 use enum_map::EnumMap;
 use operation_context::{OperationContext, Stopped};
 
-use crate::{Failure, Principal, Verifier, parse_bearer};
+use crate::{Failure, PresentedToken, Principal, Verifier, parse_bearer};
 
 pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
@@ -114,6 +114,17 @@ impl Verifier {
         transport: Transport,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
+        self.authenticate_presented_with_context(authorization, transport, context)
+            .await
+            .map(|(principal, _)| principal)
+    }
+
+    pub async fn authenticate_presented_with_context<'a>(
+        &self,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+        transport: Transport,
+        context: &OperationContext,
+    ) -> Result<(Principal, PresentedToken<'a>), Failure> {
         let counters = &self.counters.transport;
         let outcome = DropGuard::new(transport, |transport| {
             let refusal = context
@@ -122,7 +133,10 @@ impl Verifier {
             counters.record_refusal(transport, refusal);
         });
         let result = match parse_bearer(authorization) {
-            Ok(token) => self.verify_with_context(&token, context).await,
+            Ok(token) => self
+                .verify_with_context(&token, context)
+                .await
+                .map(|principal| (principal, token)),
             Err(failure) => Err(failure),
         };
         if let Err(stopped) = context.check() {

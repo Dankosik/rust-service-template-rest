@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
@@ -52,25 +55,31 @@ impl From<SignatureVerificationError> for VerificationError {
 
 struct JwtKey {
     kid: Option<String>,
-    parsed_keys: Vec<(JwtAlgorithm, ParsedPublicKey)>,
-}
-
-impl JwtKey {
-    fn parsed_key(&self, algorithm: JwtAlgorithm) -> Option<&ParsedPublicKey> {
-        self.parsed_keys
-            .iter()
-            .find_map(|(bound, key)| (*bound == algorithm).then_some(key))
-    }
+    algorithm: JwtAlgorithm,
+    public_key: ParsedPublicKey,
 }
 
 pub(crate) struct KeySet {
     keys: Vec<JwtKey>,
     generation: u64,
+    acquired_at: tokio::time::Instant,
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
+    pub(crate) fn require_fresh(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<(), VerificationError> {
+        if self.acquired_at.elapsed() >= max_age {
+            return Err(VerificationError::unavailable(
+                VerificationReason::StaleJwks,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
@@ -82,8 +91,10 @@ impl KeySet {
     ) -> impl Iterator<Item = &ParsedPublicKey> {
         self.keys
             .iter()
-            .filter(move |key| kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))
-            .filter_map(move |key| key.parsed_key(algorithm))
+            .filter(move |key| {
+                key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
+            })
+            .map(|key| &key.public_key)
     }
 
     pub(crate) fn verify(
@@ -138,7 +149,7 @@ impl KeyRejection {
 fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
-    let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
+    let mut rejected = BTreeMap::<KeyRejection, u64>::new();
     let mut keys = Vec::new();
     for value in raw.keys {
         let key = serde_json::from_value::<Jwk>(value)
@@ -147,6 +158,12 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
         match key {
             Ok(key) => keys.push(key),
             Err(reason) => *rejected.entry(reason).or_default() += 1,
+        }
+    }
+    if configured.contains(&JwtAlgorithm::Rs256) && configured.contains(&JwtAlgorithm::Ps256) {
+        let conflicts = reject_conflicting_rsa_keys(&mut keys);
+        if conflicts != 0 {
+            *rejected.entry(KeyRejection::AlgorithmBinding).or_default() += conflicts;
         }
     }
     for (reason, count) in rejected {
@@ -163,7 +180,31 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
     Ok(KeySet {
         keys,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+        acquired_at: tokio::time::Instant::now(),
     })
+}
+
+fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
+    let mut bindings = HashMap::<Box<[u8]>, Option<JwtAlgorithm>>::new();
+    for key in keys
+        .iter()
+        .filter(|key| key.algorithm.family() == KeyFamily::Rsa)
+    {
+        let bound = bindings
+            .entry(key.public_key.as_ref().into())
+            .or_insert(Some(key.algorithm));
+        if *bound != Some(key.algorithm) {
+            *bound = None;
+        }
+    }
+    let mut rejected = 0;
+    keys.retain(|key| {
+        let conflict = key.algorithm.family() == KeyFamily::Rsa
+            && bindings.get(key.public_key.as_ref()) == Some(&None);
+        rejected += u64::from(conflict);
+        !conflict
+    });
+    rejected
 }
 
 fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
@@ -171,32 +212,30 @@ fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejecti
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithms = match jwk.common.key_algorithm {
-        Some(explicit) => vec![
-            Algorithm::try_from(explicit)
-                .ok()
-                .and_then(JwtAlgorithm::from_jsonwebtoken)
-                .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
-                .ok_or(KeyRejection::AlgorithmBinding)?,
-        ],
-        None => configured
+    let algorithm = if let Some(explicit) = jwk.common.key_algorithm {
+        Algorithm::try_from(explicit)
+            .ok()
+            .and_then(JwtAlgorithm::from_jsonwebtoken)
+            .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
+            .ok_or(KeyRejection::AlgorithmBinding)?
+    } else {
+        let mut matching = configured
             .iter()
             .copied()
-            .filter(|algorithm| algorithm.family() == family)
-            .collect(),
+            .filter(|algorithm| algorithm.family() == family);
+        let algorithm = matching.next().ok_or(KeyRejection::AlgorithmBinding)?;
+        if matching.any(|other| other != algorithm) {
+            return Err(KeyRejection::AlgorithmBinding);
+        }
+        algorithm
     };
-    if algorithms.is_empty() {
-        return Err(KeyRejection::AlgorithmBinding);
-    }
-    let material = key_material(&jwk.algorithm).ok_or(KeyRejection::InvalidMaterial)?;
-    let parsed_keys = algorithms
-        .into_iter()
-        .map(|algorithm| material.parse(algorithm).map(|key| (algorithm, key)))
-        .collect::<Option<_>>()
+    let public_key = key_material(&jwk.algorithm)
+        .and_then(|material| material.parse(algorithm))
         .ok_or(KeyRejection::InvalidMaterial)?;
     Ok(JwtKey {
         kid: jwk.common.key_id,
-        parsed_keys,
+        algorithm,
+        public_key,
     })
 }
 
@@ -456,6 +495,38 @@ pub(crate) mod tests {
         assert!(keys.has_kid("padded"));
         assert!(!keys.has_kid("bad-point"));
         assert!(!keys.has_kid("unconfigured"));
+    }
+
+    #[test]
+    fn rsa_aliases_must_bind_the_same_key_material_to_the_same_algorithm() {
+        let signing = rsa_signing();
+        let primary = jwk(&signing, Algorithm::RS256, Some("primary"), true);
+        let unrelated = jwk(&ec_signing(), Algorithm::ES256, Some("unrelated"), true);
+        let algorithms = [
+            JwtAlgorithm::Rs256,
+            JwtAlgorithm::Ps256,
+            JwtAlgorithm::Es256,
+        ];
+        for (algorithm, admitted) in [(Algorithm::RS256, true), (Algorithm::PS256, false)] {
+            let mut alias = jwk(&signing, algorithm, Some("alias"), true);
+            for field in ["n", "e"] {
+                let bytes = URL_SAFE_NO_PAD
+                    .decode(alias[field].as_str().unwrap())
+                    .unwrap();
+                alias[field] = URL_SAFE_NO_PAD
+                    .encode([[0].as_slice(), &bytes].concat())
+                    .into();
+            }
+            for (first, second) in [(&primary, &alias), (&alias, &primary)] {
+                let keys = key_set(
+                    &[first.clone(), second.clone(), unrelated.clone()],
+                    &algorithms,
+                );
+                assert_eq!(keys.has_kid("primary"), admitted, "{algorithm:?}");
+                assert_eq!(keys.has_kid("alias"), admitted, "{algorithm:?}");
+                assert!(keys.has_kid("unrelated"));
+            }
+        }
     }
 
     #[test]

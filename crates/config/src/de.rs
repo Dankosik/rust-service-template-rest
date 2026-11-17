@@ -265,7 +265,7 @@ where
 
 #[allow(
     dead_code,
-    reason = "only OIDC introspection decodes an optional duration"
+    reason = "removing both OIDC profiles leaves no optional duration fields"
 )]
 pub(crate) fn optional_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
 where

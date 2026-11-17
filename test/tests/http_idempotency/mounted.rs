@@ -28,8 +28,8 @@ use infra_http::idempotency::{
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
-    Application, Authentication, Code, HardenOptions, HttpContract, Problem, REQUEST_ID_HEADER,
-    VerifiedPrincipal,
+    Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
+    REQUEST_ID_HEADER, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
@@ -51,7 +51,7 @@ use tokio_util::task::AbortOnDropHandle;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::commit_proxy::{CommitProxy, Fault};
+use crate::commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close_pools, count, make_read_only, template_pool,
 };
@@ -65,6 +65,7 @@ const KEY: &str = "idempotency-key";
 const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
 const BUDGET: Duration = Duration::from_secs(5);
 const SHORT_BUDGET: Duration = Duration::from_secs(2);
+const COMMAND_BUDGET: Duration = Duration::from_secs(1);
 const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
@@ -265,13 +266,8 @@ impl FreshCommand for CreateWidget {
         created_response(&widget)
     }
 
-    fn attempt_timeout(&self) -> Option<(Duration, Problem)> {
-        self.handler_timeout.then(|| {
-            (
-                Duration::from_secs(1),
-                Problem::new(Code::GatewayTimeout).detail("widget handler deadline expired"),
-            )
-        })
+    fn attempt_timeout(&self) -> Option<Duration> {
+        self.handler_timeout.then_some(COMMAND_BUDGET)
     }
 }
 
@@ -283,7 +279,6 @@ fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
         LOCATION,
         HeaderValue::from_str(&location).expect("a location"),
     );
-    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("br"));
     headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("en"));
     headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("fr"));
     headers.insert(
@@ -700,6 +695,25 @@ fn problem(response: &TestResponse, status: StatusCode, code: &str, request_id: 
     body
 }
 
+fn command_timed_out(response: &TestResponse, request_id: &str) {
+    let body = problem(
+        response,
+        StatusCode::GATEWAY_TIMEOUT,
+        "gateway_timeout",
+        request_id,
+    );
+    assert_eq!(
+        body["detail"],
+        concat!(
+            "the idempotent request outcome is unknown. Retry the same request with the same ",
+            "Idempotency-Key within the published retry window. If the window has expired, ",
+            "reconcile the outcome before attempting the operation again",
+        )
+    );
+    assert!(retry_after(response).is_none());
+    assert!(response.maybe_header("idempotent-replayed").is_none());
+}
+
 fn created(response: &TestResponse, request_id: &str) -> Value {
     assert_eq!(
         response.status_code(),
@@ -730,10 +744,7 @@ fn created(response: &TestResponse, request_id: &str) -> Value {
             .collect::<Vec<_>>(),
         vec![b"en".as_slice(), b"fr".as_slice()]
     );
-    assert_eq!(
-        response.maybe_header(CONTENT_ENCODING),
-        Some(HeaderValue::from_static("br"))
-    );
+    assert!(response.maybe_header(CONTENT_ENCODING).is_none());
     assert_eq!(
         response.maybe_header(CONTENT_DISPOSITION),
         Some(HeaderValue::from_static("attachment; filename=widget.json"))
@@ -896,6 +907,7 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
 )]
 async fn authorized_without_idempotency(
     principal: VerifiedPrincipal,
+    credential: Option<Extension<DelegationCredential>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     #[derive(Deserialize)]
@@ -913,10 +925,7 @@ async fn authorized_without_idempotency(
     assert_eq!(claims.scope, "widgets:write");
     assert_eq!(principal.scopes(), ["widgets:write"]);
     assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
-    assert_ne!(
-        secrecy::ExposeSecret::expose_secret(principal.access_token()),
-        ""
-    );
+    assert!(credential.is_none());
     assert!(principal.actor().is_none());
     (
         StatusCode::OK,
@@ -929,6 +938,7 @@ async fn authorized_without_idempotency(
     get,
     path = "/_test/scoped-alternatives",
     operation_id = "scopedAlternatives",
+    extensions(("x-bearer-delegation" = json!(true))),
     security(
         ("bearerAuth" = ["scope-a", "scope-b"]),
         ("bearerAuth" = ["scope-c"]),
@@ -938,8 +948,13 @@ async fn authorized_without_idempotency(
         infra_http::authn::ProtectedOperationProblemResponses,
     )
 )]
-async fn scoped_alternatives(Extension(calls): Extension<Arc<AtomicUsize>>) -> &'static str {
-    calls.fetch_add(1, Ordering::SeqCst);
+async fn scoped_alternatives(
+    Extension(calls): Extension<Arc<Mutex<Vec<DelegationCredential>>>>,
+    Extension(credential): Extension<DelegationCredential>,
+    headers: axum::http::HeaderMap,
+) -> &'static str {
+    assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+    calls.lock().unwrap().push(credential);
     "granted"
 }
 
@@ -955,7 +970,8 @@ fn bearer_document() -> utoipa::openapi::OpenApi {
 }
 
 #[utoipa::path(head, path = "/_test/authorization", security(), responses((status = 204, description = "public HEAD")))]
-async fn public_head() -> StatusCode {
+async fn public_head(credential: Option<Extension<DelegationCredential>>) -> StatusCode {
+    assert!(credential.is_none());
     StatusCode::NO_CONTENT
 }
 
@@ -1094,11 +1110,15 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
     let response = bounded("outer request completed", response).await.unwrap();
-    problem(
+    let body = problem(
         &response,
         StatusCode::GATEWAY_TIMEOUT,
         "gateway_timeout",
         "outer-timeout",
+    );
+    assert_eq!(
+        body["detail"],
+        "request budget expired before a response could be committed"
     );
     assert!(response.maybe_header(WWW_AUTHENTICATE).is_none());
     assert_eq!(
@@ -1193,9 +1213,10 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
 #[tokio::test(flavor = "current_thread")]
 async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
     let provider = Provider::start().await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let contract =
-        OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
+    let calls = Arc::new(Mutex::new(Vec::<DelegationCredential>::new()));
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .routes(routes!(authorized_without_idempotency, public_head))
+        .routes(routes!(scoped_alternatives));
     let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
         .with_probes("/")
         .unwrap()
@@ -1205,7 +1226,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
             &options(BUDGET),
         )
         .unwrap();
-    let server = TestServer::new(app.into_make_service());
+    let server = TestServer::new(app.clone().into_make_service());
     let granted_by_and = server
         .get("/_test/scoped-alternatives")
         .authorization_bearer(SCOPE_A_AND_B)
@@ -1217,7 +1238,6 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         .authorization_bearer(SCOPE_C)
         .await;
     assert_eq!(granted_by_or.status_code(), StatusCode::OK);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let denied = server
         .get("/_test/scoped-alternatives")
@@ -1228,11 +1248,36 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         denied.header(WWW_AUTHENTICATE),
         HeaderValue::from_static("Bearer error=\"insufficient_scope\"")
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "the handler must not run when every alternative is denied"
-    );
+    let forged = {
+        let calls = calls.lock().unwrap();
+        let delegated: Vec<_> = calls
+            .iter()
+            .map(|c| secrecy::ExposeSecret::expose_secret(c.access_token()))
+            .collect();
+        assert_eq!(delegated, [SCOPE_A_AND_B, SCOPE_C]);
+        calls[0].clone()
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test injects a forged extension outside the finalized application"
+    )]
+    let injected = axum::Router::new()
+        .fallback_service(app)
+        .layer(Extension(forged));
+    let server = TestServer::new(injected.into_make_service());
+    for (method, expected) in [
+        (axum::http::Method::GET, StatusCode::OK),
+        (axum::http::Method::HEAD, StatusCode::NO_CONTENT),
+    ] {
+        assert_eq!(
+            server
+                .method(method, "/_test/authorization")
+                .authorization_bearer(ALICE)
+                .await
+                .status_code(),
+            expected
+        );
+    }
     provider.stop().await;
 }
 
@@ -1811,13 +1856,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         mounted.create(ALICE, "k-handler", &input, "req-abandoned"),
         pause_on_entry
     );
-    let body = problem(
-        &abandoned,
-        StatusCode::GATEWAY_TIMEOUT,
-        "gateway_timeout",
-        "req-abandoned",
-    );
-    assert_eq!(body["detail"], "widget handler deadline expired");
+    command_timed_out(&abandoned, "req-abandoned");
     tokio::time::resume();
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
     let (stored, retry_conflicts) =
@@ -1835,13 +1874,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         .create(ALICE, "k-handler", &input, "req-acquiring")
         .await;
     drop(connections);
-    let body = problem(
-        &blocked,
-        StatusCode::GATEWAY_TIMEOUT,
-        "gateway_timeout",
-        "req-acquiring",
-    );
-    assert_eq!(body["detail"], "widget handler deadline expired");
+    command_timed_out(&blocked, "req-acquiring");
     let replay = mounted
         .create(ALICE, "k-handler", &input, "req-replay")
         .await;
@@ -2029,6 +2062,47 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
         Some(HeaderValue::from_static("true"))
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    mounted.finish().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_command_timeout_awaiting_commit_ack_replays_the_committed_effect(pool: PgPool) {
+    create_widgets(&pool).await;
+    let (proxy, proxied) = CommitProxy::start_for(&pool).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
+
+    proxy.arm_ready_hold(ReadyBoundary::Commit);
+    let pause_on_commit = async {
+        proxy.ready_held().await;
+        tokio::time::pause();
+    };
+    let (timed_out, ()) = tokio::join!(
+        mounted.create(ALICE, "k-commit-timeout", &input, "req-commit-timeout"),
+        pause_on_commit
+    );
+    tokio::time::resume();
+    command_timed_out(&timed_out, "req-commit-timeout");
+
+    let original: Vec<u8> = sqlx::query_scalar("SELECT body FROM http_idempotency_records")
+        .fetch_one(&pool)
+        .await
+        .expect("PostgreSQL committed the response while the proxy held its acknowledgement");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    proxy.release_ready();
+
+    let replay = mounted
+        .create(ALICE, "k-commit-timeout", &input, "req-replay")
+        .await;
+    created(&replay, "req-replay");
+    assert_eq!(replay.as_bytes().as_ref(), original.as_slice());
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        1
+    );
     mounted.finish().await;
     proxy.shutdown().await;
 }

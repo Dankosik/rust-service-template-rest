@@ -28,7 +28,6 @@ opentelemetry = { workspace = true, features = ["trace"] }
 parking_lot = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-shared-rules = { workspace = true }
 smallvec = { workspace = true, features = ["const_generics"] }
 sqlx = { workspace = true, features = ["macros", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
 thiserror = { workspace = true }

@@ -101,13 +101,27 @@ configured.
   ([`infra-jobs`](crates/infra-jobs)).
 <!-- template:end jobs:readme-jobs-profile -->
 <!-- template:begin http-idempotency:readme-http-idempotency-profile -->
-- `HTTP_IDEMPOTENCY=postgres`: `Idempotency-Key` support
-  ([`infra-idempotency-store`](crates/infra-idempotency-store)).
+- `HTTP_IDEMPOTENCY=postgres` enables `Idempotency-Key` on opted-in operations.
+  The client retry window is one minute from the first send unless the service
+  publishes a longer window. The service must check the key before the window
+  ends. Allow for transit, request processing and database queueing. If there
+  may be too little time left, check whether the original operation took
+  effect before sending it again.
+  [PostgreSQL idempotency store](crates/infra-idempotency-store)
 <!-- template:end http-idempotency:readme-http-idempotency-profile -->
 <!-- template:begin authn:readme-authn-profile -->
 - `AUTHN=oidc-jwt|oidc-introspection`: bearer authentication against an OIDC
   provider ([`infra-bearerauthn`](crates/infra-bearerauthn)).
 <!-- template:end authn:readme-authn-profile -->
+<!-- template:begin oidc-jwt:readme-jwt-migration -->
+  For a new JWT service, pass `--config-overlay env/config/oidc-jwt.toml` and
+  supply the issuer, API audience and `authn.jwks_max_age` for the deployment.
+  The overlay selects RFC 9068 access tokens. When migrating an existing JWT
+  service, set `authn.token_profile` explicitly. An omitted profile previously
+  selected `resource-server`. Qualify the issuer and choose the key-revocation
+  window before rolling out the new binary. See the
+  [production contract](docs/production-contract.md#edge-and-trust).
+<!-- template:end oidc-jwt:readme-jwt-migration -->
 <!-- template:begin outbound-http:readme-outbound-http-profile -->
 - `OUTBOUND_HTTP=bounded`: an HTTPS client with budgets
   ([`infra-outbound-http`](crates/infra-outbound-http)).

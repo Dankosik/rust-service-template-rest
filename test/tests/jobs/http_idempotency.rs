@@ -88,7 +88,7 @@ async fn committed_job_id(pool: &PgPool) -> String {
     let payload = serde_json::to_string(&WidgetWelcome { widget: WIDGET }).expect("payload text");
     sqlx::query_scalar(
         "SELECT id::text FROM background_jobs \
-         WHERE kind = $1 AND payload = $2::jsonb AND unique_key = $3 AND state = 'pending'",
+         WHERE kind = $1 AND payload_text = $2 AND unique_key = $3 AND state = 'pending'",
     )
     .bind(WidgetWelcome::NAME)
     .bind(payload)

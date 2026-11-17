@@ -499,6 +499,8 @@ fn container_command(image: &str, name: &str, peers: &Peers, primary_failure: bo
         ("APP__GRPC__SECURITY", "plaintext"),
         ("APP__GRPC__REQUEST_TIMEOUT", "8s"),
         ("APP__AUTHN__MODE", "oidc-jwt"),
+        ("APP__AUTHN__TOKEN_PROFILE", "resource-server"),
+        ("APP__AUTHN__JWKS_MAX_AGE", "1h"),
         ("APP__AUTHN__ISSUER", peers.issuer.as_str()),
         ("APP__AUTHN__AUDIENCE", "runtime-progress"),
         ("APP__LOG__FORMAT", "json"),

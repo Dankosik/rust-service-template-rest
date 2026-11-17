@@ -248,6 +248,20 @@ impl PreparedRequest<'_> {
         self.stops.wait_stopped().await
     }
 
+    #[must_use]
+    pub fn child_contexts(
+        &self,
+        ceiling: Deadline,
+    ) -> (OperationContext, Option<OperationContext>) {
+        (
+            self.stops.operation.child_until(ceiling),
+            self.stops
+                .request
+                .as_ref()
+                .map(OperationContext::child_context),
+        )
+    }
+
     pub fn set_authorization(&mut self, value: http::HeaderValue) {
         self.request
             .headers_mut()

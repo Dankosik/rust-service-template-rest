@@ -4,13 +4,17 @@ use std::time::Duration;
 
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, StreamBody};
+use operation_context::{OperationContext, Stopped};
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::AbortHandle;
-use tokio::time::Instant;
 
 use super::*;
 use crate::observe::{Histograms, Operation};
 use crate::tests::{Records, in_tracing_child};
+
+fn local_context(timeout: Duration) -> CallContext {
+    CallContext::new(&OperationContext::unbounded(), timeout)
+}
 
 fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>) {
     let admission = Arc::new(Semaphore::new(1));
@@ -34,7 +38,7 @@ fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>
             ByteStream::from_body_1_x(body),
             guard,
             permit,
-            OperationContext::with_timeout(timeout),
+            local_context(timeout),
         ),
         admission,
         send_eof,
@@ -56,10 +60,11 @@ async fn collection_reserves_only_the_unread_tail() {
             assert!(download.is_end_stream());
         }
         assert_eq!(download.metadata().size, 5);
-        let bytes = tokio::time::timeout(Duration::from_secs(1), download.into_bytes())
-            .await
-            .unwrap()
-            .unwrap();
+        let bytes =
+            tokio::time::timeout(Duration::from_secs(1), download.into_bytes(expected.len()))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(bytes.as_ref(), expected);
         let buffer = Vec::from(bytes);
         assert_eq!(buffer.capacity(), expected.len());
@@ -77,7 +82,7 @@ async fn cancelled_final_chunk_poll_is_collected_only_after_eof() {
         assert!(next.as_mut().poll(&mut context).is_pending());
     }
     assert_eq!(admission.available_permits(), 0);
-    let mut collect = std::pin::pin!(download.into_bytes());
+    let mut collect = std::pin::pin!(download.into_bytes(2));
     let mut context = Context::from_waker(Waker::noop());
     assert!(collect.as_mut().poll(&mut context).is_pending());
     assert_eq!(admission.available_permits(), 0);
@@ -89,6 +94,37 @@ async fn cancelled_final_chunk_poll_is_collected_only_after_eof() {
     assert_eq!(bytes, "de");
     assert_eq!(Vec::from(bytes).capacity(), 2);
     assert_eq!(admission.available_permits(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn collection_rejects_an_oversized_unread_tail_before_eof() {
+    for (hold_final_chunk, limit) in [(false, 4), (true, 1)] {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let (mut download, admission, eof) = download(Duration::from_mins(1));
+        let mut context = Context::from_waker(Waker::noop());
+        if hold_final_chunk {
+            assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
+            assert!(
+                std::pin::pin!(download.next_chunk())
+                    .poll(&mut context)
+                    .is_pending()
+            );
+        }
+        assert_eq!(
+            std::pin::pin!(download.into_bytes(limit)).poll(&mut context),
+            Poll::Ready(Err(ObjectStorageError::TooLarge))
+        );
+        assert!(eof.is_closed());
+        assert_eq!(admission.available_permits(), 1);
+        let rendered = handle.render();
+        assert!(rendered.contains(
+            r#"object_storage_operation_duration_seconds_count{operation="get",outcome="too_large"} 1"#
+        ), "{rendered}");
+        assert!(!rendered.contains("outcome=\"cancelled\""), "{rendered}");
+        assert!(!rendered.contains("outcome=\"ok\""), "{rendered}");
+    }
 }
 
 struct ObservedBody {
@@ -159,7 +195,7 @@ fn assert_download_failure(
         }),
         OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
         Arc::clone(&admission).try_acquire_owned().unwrap(),
-        OperationContext::with_timeout(Duration::from_mins(1)),
+        local_context(Duration::from_mins(1)),
     );
     let mut context = Context::from_waker(Waker::noop());
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -192,11 +228,12 @@ fn assert_download_failure(
 async fn retained_failed_download_releases_body_and_finishes_once() {
     type BodyError = Box<dyn std::error::Error + Send + Sync>;
     for frames in [false, true] {
-        let cases: [(&[u8], Option<BodyError>, _, _); 4] = [
+        let cases: [(&[u8], Option<BodyError>, _, _, _); 4] = [
             (
                 b"data",
                 Some(std::io::Error::other("broken body").into()),
                 ObjectStorageError::Unavailable,
+                "unavailable",
                 false,
             ),
             (
@@ -209,12 +246,25 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
                     .into(),
                 ),
                 ObjectStorageError::Integrity,
+                "integrity",
                 false,
             ),
-            (b"ab", None, ObjectStorageError::Integrity, true),
-            (b"extra", None, ObjectStorageError::Integrity, false),
+            (
+                b"ab",
+                None,
+                ObjectStorageError::Integrity,
+                "integrity",
+                true,
+            ),
+            (
+                b"extra",
+                None,
+                ObjectStorageError::Integrity,
+                "integrity",
+                false,
+            ),
         ];
-        for (chunk, error, expected, partial) in cases {
+        for (chunk, error, expected, outcome, partial) in cases {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
             let (mut download, drops) = metrics::with_local_recorder(&recorder, || {
@@ -228,12 +278,11 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
                 Poll::Ready(Err(expected))
             );
             assert_eq!(
-                std::pin::pin!(download.into_bytes()).poll(&mut context),
+                std::pin::pin!(download.into_bytes(0)).poll(&mut context),
                 Poll::Ready(Err(expected))
             );
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             let rendered = handle.render();
-            let outcome = expected.label();
             assert!(rendered.contains(&format!(
                 "object_storage_operation_duration_seconds_count{{operation=\"get\",outcome=\"{outcome}\"}} 1"
             )), "{rendered}");
@@ -263,13 +312,15 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
             ByteStream::from_body_1_x(body),
             guard,
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            context.child_context(),
+            CallContext::new(&context, Duration::from_mins(1)),
         );
-        if cancelled {
+        let stopped = if cancelled {
             context.cancel();
+            Stopped::Cancelled
         } else {
             tokio::time::advance(Duration::from_secs(2)).await;
-        }
+            Stopped::Deadline
+        };
         joined(&mut download.timer).await;
         tokio::time::timeout(Duration::from_secs(1), body_dropped)
             .await
@@ -278,7 +329,7 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
         assert_eq!(admission.available_permits(), 1);
         assert_eq!(
             download.next_chunk().await,
-            Err(ObjectStorageError::Unavailable)
+            Err(ObjectStorageError::Stopped(stopped))
         );
         drop(download);
         let rendered = handle.render();
@@ -329,11 +380,11 @@ async fn a_provider_chunk_or_eof_at_the_original_cutoff_is_not_delivered() {
             ByteStream::from_body_1_x(LateChunk { cutoff, chunk }),
             OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            context,
+            CallContext::new(&context, Duration::from_mins(1)),
         );
         assert_eq!(
             download.next_chunk().await,
-            Err(ObjectStorageError::Unavailable)
+            Err(ObjectStorageError::Stopped(Stopped::Deadline))
         );
         assert_eq!(admission.available_permits(), 1);
         joined(&mut download.timer).await;
@@ -375,7 +426,7 @@ impl Drop for LifecycleBody {
     }
 }
 
-fn open(body: LifecycleBody, size: u64, end: Instant) -> (Download, Arc<Semaphore>) {
+fn open(body: LifecycleBody, size: u64, timeout: Duration) -> (Download, Arc<Semaphore>) {
     let slots = Arc::new(Semaphore::new(1));
     let permit = Arc::clone(&slots).try_acquire_owned().unwrap();
     let guard = OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None);
@@ -391,7 +442,7 @@ fn open(body: LifecycleBody, size: u64, end: Instant) -> (Download, Arc<Semaphor
             ByteStream::from_body_1_x(body),
             guard,
             permit,
-            OperationContext::from_deadline(operation_context::Deadline::at(end)),
+            local_context(timeout),
         ),
         slots,
     )
@@ -408,6 +459,24 @@ fn body(chunk: Option<Bytes>) -> (LifecycleBody, oneshot::Receiver<()>) {
         },
         destroyed,
     )
+}
+
+#[tokio::test]
+async fn download_debug_hides_metadata_and_held_payload() {
+    let payload = Bytes::from_static(b"private-download-data");
+    let size = payload.len() as u64;
+    let (body, _destroyed) = body(Some(payload));
+    let (mut download, _slots) = open(body, size, Duration::from_mins(1));
+    download.metadata.e_tag = Some("private-object-tag".into());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        std::pin::pin!(download.next_chunk())
+            .poll(&mut context)
+            .is_pending()
+    );
+    let rendered = format!("{download:?}");
+    assert!(!rendered.contains("private-download-data"), "{rendered}");
+    assert!(!rendered.contains("private-object-tag"), "{rendered}");
 }
 
 async fn joined(timer: &mut JoinHandle<()>) {
@@ -443,14 +512,14 @@ async fn expiry_destroys_the_unpolled_body_and_withheld_chunk() {
     let freed = Arc::new(AtomicBool::new(false));
     let bytes = Bytes::from_owner(Tracked(Arc::clone(&freed)));
     let (body, destroyed) = body(Some(bytes));
-    let end = tokio::time::sleep(Duration::from_millis(20)).deadline();
-    let (mut download, slots) = open(body, 4, end);
+    let timeout = Duration::from_millis(20);
+    let (mut download, slots) = open(body, 4, timeout);
     assert!(
         download
             .poll_chunk(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
-    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::time::advance(timeout).await;
     joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
@@ -468,13 +537,12 @@ async fn expiry_destroys_the_unpolled_body_and_withheld_chunk() {
 async fn empty_eof_and_pending_consumers_share_the_deadline() {
     for consumer in 0..3 {
         let (body, destroyed) = body(None);
-        let end = tokio::time::sleep(Duration::from_millis(20)).deadline();
-        let (mut download, slots) = open(body, 0, end);
+        let (mut download, slots) = open(body, 0, Duration::from_millis(20));
         let completion = download.timer.abort_handle();
         let result = match consumer {
             0 => download.next_chunk().await.map(|_| ()),
             1 => download.frame().await.unwrap().map(|_| ()),
-            _ => download.into_bytes().await.map(|_| ()),
+            _ => download.into_bytes(0).await.map(|_| ()),
         };
         assert_eq!(result, Err(ObjectStorageError::Unavailable));
         wait_for_timer(&completion).await;
@@ -495,8 +563,7 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
     let _subscriber = tracing::subscriber::set_default(records.clone());
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
     let (body, destroyed) = body(None);
-    let end = tokio::time::sleep(Duration::from_mins(1)).deadline();
-    let (mut download, slots) = open(body, 4, end);
+    let (mut download, slots) = open(body, 4, Duration::from_mins(1));
     download.timer.abort();
     joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
@@ -523,8 +590,7 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
     for panic in [false, true] {
         let (mut body, mut destroyed) = body(None);
         body.panic = panic;
-        let end = tokio::time::sleep(Duration::from_mins(1)).deadline();
-        let (mut download, slots) = open(body, 4, end);
+        let (mut download, slots) = open(body, 4, Duration::from_mins(1));
         let completion = download.timer.abort_handle();
         if panic {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -552,8 +618,7 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
     let (mut body, destroyed) = body(None);
     let polls = Arc::new(AtomicUsize::new(0));
     body.empty_polls = Some(Arc::clone(&polls));
-    let end = tokio::time::sleep(Duration::from_millis(20)).deadline();
-    let (mut download, slots) = open(body, 4, end);
+    let (mut download, slots) = open(body, 4, Duration::from_millis(20));
     let progressed = Arc::new(AtomicBool::new(false));
     let progress = Arc::clone(&progressed);
     let other = tokio::spawn(async move {

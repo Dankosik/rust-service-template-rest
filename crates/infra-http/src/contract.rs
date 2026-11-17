@@ -367,6 +367,7 @@ pub(crate) enum Access {
     Protected(
         // template:begin authn:http-contract-protected-scopes
         Box<[Box<[String]>]>,
+        bool,
         // template:end authn:http-contract-protected-scopes
     ),
 }
@@ -621,6 +622,10 @@ impl Policy {
 }
 
 async fn enforce_public(State(policy): State<Policy>, request: Request, next: Next) -> Response {
+    // template:begin authn:http-public-strip-identity
+    let mut request = request;
+    crate::authn::strip_identity(request.extensions_mut());
+    // template:end authn:http-public-strip-identity
     let route = contract_path(request.extensions());
     let public = route
         .and_then(|path| policy.access(path, request.method()))
@@ -646,6 +651,8 @@ const BEARER_SCHEME: &str = "bearerAuth";
 
 #[derive(Clone, Copy, Debug)]
 enum PolicyFault {
+    InvalidDelegation,
+    PublicDelegation,
     MissingBearerScheme,
     UnsupportedRequirement,
     UnreadableRequirement,
@@ -654,6 +661,8 @@ enum PolicyFault {
 impl PolicyFault {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::InvalidDelegation => "invalid_bearer_delegation",
+            Self::PublicDelegation => "delegation_requires_authentication",
             Self::MissingBearerScheme => "missing_bearer_scheme",
             Self::UnsupportedRequirement => "unsupported_requirement",
             Self::UnreadableRequirement => "unreadable_requirement",
@@ -663,8 +672,19 @@ impl PolicyFault {
 
 impl Access {
     fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, PolicyFault> {
+        let delegate = match operation
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("x-bearer-delegation"))
+        {
+            Some(value) => value.as_bool().ok_or(PolicyFault::InvalidDelegation)?,
+            None => false,
+        };
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
+            if delegate {
+                return Err(PolicyFault::PublicDelegation);
+            }
             return Ok(Self::Public);
         };
         if !declares_bearer_scheme(document) {
@@ -686,6 +706,7 @@ impl Access {
                 .flat_map(BTreeMap::into_values)
                 .map(Vec::into_boxed_slice)
                 .collect(),
+            delegate,
             // template:end authn:http-contract-protected-value
         ))
     }
@@ -945,6 +966,29 @@ mod tests {
             path: "/_test/policy".to_owned(),
             method: "GET".to_owned(),
             fault,
+        }
+    }
+
+    #[test]
+    fn delegation_requires_a_boolean_opt_in_on_a_protected_operation() {
+        for (value, fault) in [
+            (
+                serde_json::json!(true),
+                "delegation_requires_authentication",
+            ),
+            (serde_json::json!("true"), "invalid_bearer_delegation"),
+        ] {
+            let document = serde_json::from_value(serde_json::json!({
+                "openapi": "3.1.0", "info": {"title":"fixture","version":"1"},
+                "paths": {"/_test/policy": {"get": {
+                    "x-bearer-delegation": value, "responses": {"200": {"description": "ok"}}
+                }}}
+            }))
+            .unwrap();
+            assert_eq!(
+                public_app(OpenApiRouter::with_openapi(document)).unwrap_err(),
+                invalid(fault)
+            );
         }
     }
 

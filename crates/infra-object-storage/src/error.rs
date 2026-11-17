@@ -10,12 +10,12 @@ use compact_str::CompactString;
 use operation_context::Stopped;
 use shared_rules::error_chain::causes;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum, thiserror::Error)]
+use crate::call::{CallStop, Interrupted};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ObjectStorageError {
     #[error("object not found")]
     NotFound,
-    #[error("object already exists")]
-    AlreadyExists,
     #[error("object exceeds the configured size limit")]
     TooLarge,
     #[error("object storage admission limit reached")]
@@ -24,25 +24,36 @@ pub enum ObjectStorageError {
     Unavailable,
     #[error("object storage rejected the request")]
     Rejected,
-    #[error("object storage mutation outcome is unknown")]
-    OutcomeUnknown,
     #[error("object storage integrity check failed")]
     Integrity,
+    #[error("object storage operation stopped: {0:?}")]
+    Stopped(Stopped),
 }
 
-impl ObjectStorageError {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::NotFound => "not_found",
-            Self::AlreadyExists => "already_exists",
-            Self::TooLarge => "too_large",
-            Self::Busy => "busy",
-            Self::Unavailable => "unavailable",
-            Self::Rejected => "rejected",
-            Self::OutcomeUnknown => "outcome_unknown",
-            Self::Integrity => "integrity",
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MutationError {
+    #[error("object storage mutation was not applied: {0}")]
+    NotApplied(#[source] MutationFailure),
+    #[error("object storage mutation outcome is unknown: {0}")]
+    OutcomeUnknown(#[source] MutationFailure),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MutationFailure {
+    #[error("object already exists")]
+    AlreadyExists,
+    #[error("object storage conditional write conflicted with another operation")]
+    Conflict,
+    #[error("object exceeds the configured size limit")]
+    TooLarge,
+    #[error("object storage admission limit reached")]
+    Busy,
+    #[error("object storage unavailable")]
+    Unavailable,
+    #[error("object storage rejected the request")]
+    Rejected,
+    #[error("object storage operation stopped: {0:?}")]
+    Stopped(Stopped),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -72,43 +83,65 @@ pub(crate) enum Call {
     CreateOnly,
 }
 
-impl Call {
-    fn ambiguous(self) -> ObjectStorageError {
-        match self {
-            Self::Read => ObjectStorageError::Unavailable,
-            Self::UnconditionalMutation | Self::CreateOnly => ObjectStorageError::OutcomeUnknown,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind<'a> {
     NotSent,
     NoCredentials,
     Lost,
+    Timeout,
     Status { status: u16, code: Option<&'a str> },
 }
 
 #[derive(Debug)]
-pub(crate) struct Failure {
-    pub(crate) error: ObjectStorageError,
+pub(crate) struct Failure<E = ObjectStorageError> {
+    pub(crate) error: E,
     pub(crate) error_type: CompactString,
 }
 
-impl Failure {
-    const fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
+impl<E> Failure<E> {
+    const fn with_label(error: E, error_type: &'static str) -> Self {
         Self {
             error,
             error_type: CompactString::const_new(error_type),
         }
     }
+}
 
-    pub(crate) fn stopped(stopped: Stopped) -> Self {
-        Self::with_label(ObjectStorageError::Unavailable, stop_label(stopped))
+impl Failure {
+    pub(crate) fn stopped(stopped: CallStop) -> Self {
+        let error = match stopped {
+            CallStop::Parent(stopped) => ObjectStorageError::Stopped(stopped),
+            CallStop::Timeout => ObjectStorageError::Unavailable,
+        };
+        Self::with_label(error, stop_label(stopped))
+    }
+}
+
+impl Failure<MutationError> {
+    pub(crate) fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
+        Self::with_label(MutationError::NotApplied(reason), error_type)
     }
 
-    pub(crate) fn stopped_after_poll(call: Call, stopped: Stopped) -> Self {
-        Self::with_label(classify(call, FailureKind::Lost), stop_label(stopped))
+    pub(crate) fn mutation_stopped(
+        stopped: CallStop,
+        outcome: fn(MutationFailure) -> MutationError,
+    ) -> Self {
+        let reason = match stopped {
+            CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
+            CallStop::Timeout => MutationFailure::Unavailable,
+        };
+        Self::with_label(outcome(reason), stop_label(stopped))
+    }
+
+    pub(crate) fn mutation_interrupted(interrupted: Interrupted) -> Self {
+        Self::mutation_stopped(
+            interrupted.stopped,
+            if interrupted.polled {
+                MutationError::OutcomeUnknown
+            } else {
+                MutationError::NotApplied
+            },
+        )
     }
 }
 
@@ -116,8 +149,7 @@ impl Failure {
 pub(crate) enum LocalFailure {
     Busy,
     TooLarge,
-    UploadBody,
-    UploadLengthMismatch,
+    DownloadAllocation,
     DownloadBody,
     DownloadTimerExited,
     ContentLength,
@@ -133,8 +165,7 @@ impl From<LocalFailure> for Failure {
         let (error, label) = match cause {
             LocalFailure::Busy => (E::Busy, "busy"),
             LocalFailure::TooLarge => (E::TooLarge, "too_large"),
-            LocalFailure::UploadBody => (E::Rejected, "body"),
-            LocalFailure::UploadLengthMismatch => (E::Rejected, "body_length"),
+            LocalFailure::DownloadAllocation => (E::Unavailable, "download_allocation"),
             LocalFailure::DownloadBody => (E::Unavailable, "body"),
             LocalFailure::DownloadTimerExited => (E::Unavailable, "download_timer_exited"),
             LocalFailure::ContentLength => (E::Integrity, "content_length"),
@@ -147,10 +178,26 @@ impl From<LocalFailure> for Failure {
     }
 }
 
-fn stop_label(stopped: Stopped) -> &'static str {
+#[derive(Debug)]
+pub(crate) enum UploadFailure {
+    Body,
+    Length,
+}
+
+impl From<UploadFailure> for Failure<MutationError> {
+    fn from(cause: UploadFailure) -> Self {
+        let label = match cause {
+            UploadFailure::Body => "body",
+            UploadFailure::Length => "body_length",
+        };
+        Self::not_applied(MutationFailure::Rejected, label)
+    }
+}
+
+fn stop_label(stopped: CallStop) -> &'static str {
     match stopped {
-        Stopped::Deadline => "timeout",
-        Stopped::Cancelled => "cancelled",
+        CallStop::Parent(Stopped::Deadline) | CallStop::Timeout => "timeout",
+        CallStop::Parent(Stopped::Cancelled) => "cancelled",
     }
 }
 
@@ -158,19 +205,60 @@ type SdkFailure<E> = SdkError<E, HttpResponse>;
 
 pub(crate) fn interpret_delete_result(
     result: &Result<DeleteObjectOutput, SdkFailure<DeleteObjectError>>,
-) -> Result<(), Failure> {
+    stopped_on_reply: Option<CallStop>,
+) -> Result<(), Failure<MutationError>> {
     match result {
         Ok(_) => Ok(()),
         Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
-        Err(error) => Err(from_sdk(Call::UnconditionalMutation, error)),
+        Err(error) => Err(from_sdk_mutation(
+            error,
+            Call::UnconditionalMutation,
+            false,
+            stopped_on_reply,
+        )),
     }
 }
 
-pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
+pub(crate) fn from_sdk<E>(error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let (kind, error_type) = match error {
+    let (kind, error_type) = sdk_failure(error);
+    Failure {
+        error: classify_read(kind),
+        error_type,
+    }
+}
+
+pub(crate) fn from_sdk_mutation<E>(
+    error: &SdkFailure<E>,
+    call: Call,
+    length_mismatch: bool,
+    stopped_on_reply: Option<CallStop>,
+) -> Failure<MutationError>
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    let (kind, error_type) = sdk_failure(error);
+    if length_mismatch && matches!(kind, FailureKind::Lost | FailureKind::Timeout) {
+        return UploadFailure::Length.into();
+    }
+    if kind == FailureKind::Timeout
+        && let Some(stopped @ CallStop::Parent(Stopped::Deadline)) = stopped_on_reply
+    {
+        return Failure::mutation_stopped(stopped, MutationError::OutcomeUnknown);
+    }
+    Failure {
+        error: classify_mutation(kind, call),
+        error_type,
+    }
+}
+
+fn sdk_failure<E>(error: &SdkFailure<E>) -> (FailureKind<'_>, CompactString)
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    match error {
         SdkError::ConstructionFailure(_) => (
             FailureKind::NotSent,
             CompactString::const_new("construction"),
@@ -196,16 +284,12 @@ where
                 CompactString::const_new("credentials"),
             )
         }
-        SdkError::TimeoutError(_) => (FailureKind::Lost, CompactString::const_new("timeout")),
+        SdkError::TimeoutError(_) => (FailureKind::Timeout, CompactString::const_new("timeout")),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Lost, CompactString::const_new("timeout"))
+            (FailureKind::Timeout, CompactString::const_new("timeout"))
         }
         SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
         _ => (FailureKind::Lost, CompactString::const_new("response")),
-    };
-    Failure {
-        error: classify(call, kind),
-        error_type,
     }
 }
 
@@ -213,21 +297,53 @@ fn is_identifier(code: &str) -> bool {
     !code.is_empty() && code.len() <= 64 && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
+fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
-    match kind {
-        FailureKind::NotSent => E::Rejected,
-        FailureKind::NoCredentials => E::Unavailable,
-        FailureKind::Lost => call.ambiguous(),
-        FailureKind::Status { status, code } => match (classification_status(status, code), code) {
-            (_, Some("NoSuchBucket")) => E::Rejected,
-            (404, _) if call == Call::Read => E::NotFound,
-            (412, _) if call == Call::CreateOnly => E::AlreadyExists,
-            (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => E::Unavailable,
-            (501, _) => E::Rejected,
-            (500..=599, _) => call.ambiguous(),
-            _ => E::Rejected,
-        },
+    match kind.reply(Call::Read) {
+        Reply::NotFound => E::NotFound,
+        Reply::Unavailable | Reply::Conflict | Reply::Lost => E::Unavailable,
+        Reply::Rejected | Reply::PreconditionFailed => E::Rejected,
+    }
+}
+
+fn classify_mutation(kind: FailureKind<'_>, call: Call) -> MutationError {
+    use MutationFailure as F;
+    let reason = match kind.reply(call) {
+        Reply::PreconditionFailed => F::AlreadyExists,
+        Reply::Conflict => F::Conflict,
+        Reply::Unavailable => F::Unavailable,
+        Reply::Lost => return MutationError::OutcomeUnknown(F::Unavailable),
+        Reply::Rejected | Reply::NotFound => F::Rejected,
+    };
+    MutationError::NotApplied(reason)
+}
+
+enum Reply {
+    NotFound,
+    PreconditionFailed,
+    Conflict,
+    Unavailable,
+    Rejected,
+    Lost,
+}
+
+impl FailureKind<'_> {
+    fn reply(self, call: Call) -> Reply {
+        match self {
+            Self::NotSent => Reply::Rejected,
+            Self::NoCredentials => Reply::Unavailable,
+            Self::Lost | Self::Timeout => Reply::Lost,
+            Self::Status { status, code } => match (classification_status(status, code), code) {
+                (_, Some("NoSuchBucket")) => Reply::Rejected,
+                (404, _) if call == Call::Read => Reply::NotFound,
+                (412, _) if call == Call::CreateOnly => Reply::PreconditionFailed,
+                (409, _) if call == Call::CreateOnly => Reply::Conflict,
+                (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => Reply::Unavailable,
+                (501, _) => Reply::Rejected,
+                (500..=599, _) => Reply::Lost,
+                _ => Reply::Rejected,
+            },
+        }
     }
 }
 
@@ -255,113 +371,154 @@ pub(crate) fn from_download_body(error: &ByteStreamError) -> Failure {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use aws_smithy_runtime_api::client::result::ConnectorError;
+    use operation_context::{OperationContext, Stopped};
+
     use super::Call::UnconditionalMutation as Unconditional;
-    use super::{Call, FailureKind, ObjectStorageError, classify};
+    use super::MutationError::{NotApplied, OutcomeUnknown};
+    use super::{
+        Call, DeleteObjectError, FailureKind, MutationFailure, ObjectStorageError, SdkFailure,
+        classify_mutation, classify_read, from_sdk_mutation,
+    };
+    use crate::call::CallContext;
 
     #[test]
     fn classification_separates_not_applied_from_unknown() {
-        use ObjectStorageError as E;
+        use MutationFailure as F;
         let status = |status, code| FailureKind::Status { status, code };
+        let unknown = OutcomeUnknown(F::Unavailable);
+        let rejected = NotApplied(F::Rejected);
+        let unavailable = NotApplied(F::Unavailable);
         let cases = [
-            (Call::Read, FailureKind::Lost, E::Unavailable),
-            (Unconditional, FailureKind::Lost, E::OutcomeUnknown),
-            (Call::CreateOnly, FailureKind::Lost, E::OutcomeUnknown),
-            (Unconditional, FailureKind::NotSent, E::Rejected),
-            (Call::Read, status(404, Some("NoSuchKey")), E::NotFound),
-            (Call::Read, status(404, Some("NotFound")), E::NotFound),
-            (Call::Read, status(404, None), E::NotFound),
-            (Call::Read, status(404, Some("NoSuchBucket")), E::Rejected),
-            (
-                Unconditional,
-                status(404, Some("NoSuchBucket")),
-                E::Rejected,
-            ),
+            (Unconditional, FailureKind::Lost, unknown),
+            (Call::CreateOnly, FailureKind::Lost, unknown),
+            (Unconditional, FailureKind::NotSent, rejected),
+            (Unconditional, FailureKind::NoCredentials, unavailable),
+            (Unconditional, status(404, Some("NoSuchBucket")), rejected),
             (
                 Call::CreateOnly,
                 status(412, Some("PreconditionFailed")),
-                E::AlreadyExists,
+                NotApplied(F::AlreadyExists),
             ),
             (
                 Unconditional,
                 status(412, Some("PreconditionFailed")),
-                E::Rejected,
+                rejected,
             ),
             (
                 Call::CreateOnly,
                 status(409, Some("ConditionalRequestConflict")),
-                E::Unavailable,
+                NotApplied(F::Conflict),
             ),
             (
                 Unconditional,
                 status(429, Some("TooManyRequests")),
-                E::Unavailable,
+                unavailable,
             ),
-            (Unconditional, status(503, Some("SlowDown")), E::Unavailable),
-            (
-                Unconditional,
-                status(500, Some("InternalError")),
-                E::OutcomeUnknown,
-            ),
-            (Call::CreateOnly, status(502, None), E::OutcomeUnknown),
-            (
-                Call::Read,
-                status(500, Some("InternalError")),
-                E::Unavailable,
-            ),
-            (Call::Read, status(403, Some("AccessDenied")), E::Rejected),
-            (Unconditional, status(400, Some("BadDigest")), E::Rejected),
+            (Unconditional, status(503, Some("SlowDown")), unavailable),
+            (Unconditional, status(500, Some("InternalError")), unknown),
+            (Call::CreateOnly, status(502, None), unknown),
+            (Unconditional, status(400, Some("BadDigest")), rejected),
             (
                 Unconditional,
                 status(403, Some("SignatureDoesNotMatch")),
-                E::Rejected,
+                rejected,
             ),
             (
                 Unconditional,
                 status(400, Some("RequestTimeout")),
-                E::Unavailable,
+                unavailable,
             ),
-            (
-                Unconditional,
-                status(501, Some("NotImplemented")),
-                E::Rejected,
-            ),
-            (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
-            (
-                Unconditional,
-                status(200, Some("InternalError")),
-                E::OutcomeUnknown,
-            ),
-            (Unconditional, status(200, Some("SlowDown")), E::Unavailable),
+            (Unconditional, status(501, Some("NotImplemented")), rejected),
+            (Unconditional, status(200, Some("InternalError")), unknown),
+            (Unconditional, status(200, Some("SlowDown")), unavailable),
             (
                 Call::CreateOnly,
                 status(200, Some("PreconditionFailed")),
-                E::AlreadyExists,
+                NotApplied(F::AlreadyExists),
             ),
             (
                 Call::CreateOnly,
                 status(200, Some("ConditionalRequestConflict")),
-                E::Unavailable,
+                NotApplied(F::Conflict),
             ),
-            (Unconditional, status(200, None), E::OutcomeUnknown),
-            (
-                Unconditional,
-                status(200, Some("NoSuchBucket")),
-                E::Rejected,
-            ),
+            (Unconditional, status(200, None), unknown),
+            (Unconditional, status(200, Some("NoSuchBucket")), rejected),
         ];
         for (call, reply, expected) in cases {
-            assert_eq!(classify(call, reply), expected, "{call:?} {reply:?}");
+            assert_eq!(
+                classify_mutation(reply, call),
+                expected,
+                "{call:?} {reply:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sdk_mutation_timeout_preserves_the_effective_parent_deadline() {
+        let budget = Duration::from_secs(1);
+        let parent = OperationContext::with_timeout(budget);
+        let parent_limited = CallContext::new(&parent, 2 * budget);
+        let locally_limited = CallContext::new(&OperationContext::unbounded(), budget);
+        let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
+        let errors: [SdkFailure<DeleteObjectError>; 2] = [
+            SdkFailure::timeout_error(timed_out()),
+            SdkFailure::dispatch_failure(ConnectorError::timeout(Box::new(timed_out()))),
+        ];
+        for error in &errors {
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Unavailable)
+            );
+        }
+
+        tokio::time::advance(budget).await;
+
+        for error in &errors {
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Stopped(Stopped::Deadline))
+            );
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, locally_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Unavailable)
+            );
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, true, parent_limited.stopped()).error,
+                NotApplied(MutationFailure::Rejected)
+            );
+        }
+    }
+
+    #[test]
+    fn read_classification_preserves_absence_and_rejection() {
+        use ObjectStorageError as E;
+        let status = |status, code| FailureKind::Status { status, code };
+        let cases = [
+            (FailureKind::Lost, E::Unavailable),
+            (status(404, Some("NoSuchKey")), E::NotFound),
+            (status(404, Some("NotFound")), E::NotFound),
+            (status(404, None), E::NotFound),
+            (status(404, Some("NoSuchBucket")), E::Rejected),
+            (status(500, Some("InternalError")), E::Unavailable),
+            (status(403, Some("AccessDenied")), E::Rejected),
+            (status(501, Some("NotImplemented")), E::Rejected),
+        ];
+        for (reply, expected) in cases {
+            assert_eq!(classify_read(reply), expected, "{reply:?}");
         }
     }
 
     #[test]
     fn errors_display_no_provider_detail() {
-        for error in [
-            ObjectStorageError::NotFound,
-            ObjectStorageError::OutcomeUnknown,
-            ObjectStorageError::Integrity,
+        for rendered in [
+            ObjectStorageError::NotFound.to_string(),
+            OutcomeUnknown(MutationFailure::Unavailable).to_string(),
+            ObjectStorageError::Integrity.to_string(),
         ] {
-            let rendered = error.to_string();
             assert!(rendered.starts_with("object"), "{rendered}");
         }
     }

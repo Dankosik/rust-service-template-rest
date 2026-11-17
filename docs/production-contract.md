@@ -49,6 +49,18 @@ unable to serve, and budget every downstream deadline inside
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
+<!-- template:begin http-idempotency:production-contract-retry-window -->
+- For mounted idempotent HTTP operations, publish the client retry window and
+  how to look up the original effect in the service's public API documentation.
+  Measure the window from the client's first send to the database check on
+  retry. Include transit, request processing and pool wait in the client's
+  budget. Set `http_idempotency.retention` on every writer replica to at least
+  the published window. The database sets expiry when it writes the success,
+  before commit and delivery. Publish a longer window only after every writer
+  supports it, with an effective time for new requests. Earlier requests keep
+  their original window. When shortening retention or rolling back, honor
+  requests first sent under the earlier promise until that window expires.
+<!-- template:end http-idempotency:production-contract-retry-window -->
 - RPO, RTO, backup/key custody, and restore-compatible versions: Unresolved.
 - Cache staleness, TTL, invalidation, and token/key revocation lag: N/A for the
   health-only scaffold; reopen when cached state or authentication is enabled.
@@ -62,6 +74,44 @@ unable to serve, and budget every downstream deadline inside
   diagnostics port unreachable from untrusted networks).
 - Egress, identity, and authorization authorities (trusted issuers, audiences,
   callers, and destination origins): Unresolved.
+
+<!-- template:begin authn:production-bearer-delegation -->
+When migrating a handler that used `VerifiedPrincipal::access_token()`, keep
+identity-only handlers on `VerifiedPrincipal`. For each HTTP operation that
+exchanges the caller's token, declare `x-bearer-delegation: true` alongside
+its bearer security requirement. The handler can then read
+`infra_http::DelegationCredential` from request extensions. Record the
+authorized downstream audience for that exchange.
+<!-- template:end authn:production-bearer-delegation -->
+<!-- template:begin grpc-authn:production-rpc-delegation -->
+Register an RPC that performs token exchange with
+`require_scopes_for_delegation` and its required scopes. Read
+`infra_grpc::DelegationCredential` from the Tonic request extensions after
+admission.
+<!-- template:end grpc-authn:production-rpc-delegation -->
+
+<!-- template:begin oidc-jwt:production-jwt-issuer-contract -->
+For each JWT issuer, qualify the access-token profile against the provider's
+actual configuration. Verify an access token for this API succeeds and an ID
+token from the same issuer is refused on each enabled transport. For a
+`resource-server` integration, record how the issuer separates these token
+kinds, for example by reserving a distinct audience for the API. Confirm that
+each signing key is bound to one algorithm, including during rotation.
+
+Choose `authn.jwks_max_age` from the maximum acceptable delay in observing a
+withdrawn key and the provider outage the service must survive. Allow for the
+normal refresh interval and acquisition time. Exercise an outage across the
+chosen limit, then restore the endpoint and confirm authentication recovers.
+<!-- template:end oidc-jwt:production-jwt-issuer-contract -->
+
+<!-- template:begin oidc-introspection:production-introspection-issuer-contract -->
+Qualify the introspection endpoint with the credentials assigned to this API.
+Confirm a valid access token is admitted and that a token for another resource
+and a refresh token are refused, including when sent with the access-token
+hint. The hint assists lookup. The issuer must supply enough evidence to
+distinguish tokens usable at this resource. If positive caching is enabled,
+record the revocation delay the service accepts.
+<!-- template:end oidc-introspection:production-introspection-issuer-contract -->
 
 ## Operation and recovery
 
@@ -87,3 +137,26 @@ snapshot guarantee. Any multi-store recovery runbook must:
 4. Invalidate pre-restore tokens, operator commands, and receipts, re-inspecting
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
+
+<!-- template:begin jobs:production-contract-jobs-rollout -->
+### Rolling out exact background-job payloads
+
+For a service that uses PostgreSQL jobs, inventory every worker, outbox
+publisher, operator and rollback image that reads the jobs table. Before
+enabling a producer that writes only `payload_text`, move those readers to a
+release that prefers `payload_text` and accepts historical `payload` JSONB.
+Include tooling that compares a live duplicate, and exercise a retained failed
+job through redrive. If an older JSONB-only reader is still in the rollout or
+rollback window, deploy the dual-writing, dual-reading release first.
+
+Apply the forward migration that permits either representation before starting
+text-only producers. During overlap, exercise an old producer with a new worker
+and a new producer with the oldest supported worker. Roll back the application
+to the dual-reading release while keeping the expanded schema. Leave historical
+JSONB-only rows in their original format: reconstructing text from JSONB cannot
+recover the original encoding and changes how live duplicates are compared.
+
+For an incompatible handler payload, register the new kind under a new name
+before switching producers. Keep the old handler available until pending,
+running and recoverable failed jobs of the old kind have a disposition.
+<!-- template:end jobs:production-contract-jobs-rollout -->

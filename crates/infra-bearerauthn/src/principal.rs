@@ -1,41 +1,12 @@
 use std::sync::Arc;
 
-use crate::{BearerToken, claims::Scopes};
+use crate::claims::Scopes;
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
     expiry_epoch_seconds: u64,
-    access_token: Arc<secrecy::SecretString>,
-}
-
-#[derive(Clone, derive_more::Debug)]
-#[debug("VerifiedIdentity([REDACTED])")]
-pub(crate) struct VerifiedIdentity {
-    identity: Arc<Identity>,
-    expiry_epoch_seconds: u64,
-}
-
-impl VerifiedIdentity {
-    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
-        Self {
-            identity: Arc::new(identity),
-            expiry_epoch_seconds,
-        }
-    }
-
-    pub(crate) const fn expires_at(&self) -> u64 {
-        self.expiry_epoch_seconds
-    }
-
-    pub(crate) fn presented_as(&self, token: &BearerToken<'_>) -> Principal {
-        Principal {
-            identity: Arc::clone(&self.identity),
-            expiry_epoch_seconds: self.expiry_epoch_seconds,
-            access_token: Arc::new(token.to_secret()),
-        }
-    }
 }
 
 pub(crate) struct Identity {
@@ -48,6 +19,13 @@ pub(crate) struct Identity {
 }
 
 impl Principal {
+    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
+        Self {
+            identity: Arc::new(identity),
+            expiry_epoch_seconds,
+        }
+    }
+
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
         serde_json::from_str(&self.identity.payload).map_err(|_| ClaimAccessError::InvalidShape)
     }
@@ -82,11 +60,6 @@ impl Principal {
         self.expiry_epoch_seconds
     }
 
-    #[must_use]
-    pub fn access_token(&self) -> &secrecy::SecretString {
-        &self.access_token
-    }
-
     /// RFC 8693 §4.1
     #[must_use]
     pub fn actor(&self) -> Option<&Actor> {
@@ -97,15 +70,10 @@ impl Principal {
 #[cfg(test)]
 impl Principal {
     pub(crate) fn fields(&self) -> impl PartialEq + std::fmt::Debug + '_ {
-        use secrecy::ExposeSecret as _;
         let identity = &*self.identity;
         (
             (&identity.issuer, &identity.subject, &identity.client_id),
-            (
-                self.scopes(),
-                &identity.payload,
-                self.access_token.expose_secret(),
-            ),
+            (self.scopes(), &identity.payload),
             (&identity.actor, self.expiry_epoch_seconds),
         )
     }
@@ -142,7 +110,7 @@ pub enum ClaimAccessError {
 }
 
 // template:begin oidc-introspection:authn-retained-payload
-impl VerifiedIdentity {
+impl Principal {
     pub(crate) fn payload_len(&self) -> usize {
         self.identity.payload.len()
     }

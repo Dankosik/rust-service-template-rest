@@ -336,10 +336,11 @@ impl ServiceTokens {
         if let Some(error) = inner.completed_failure(now) {
             return Err(error);
         }
+        let (context, request_context) = deadline.fetch_contexts(now);
         let result = inner
             .registration
             .endpoint
-            .fetch_service_token(&inner.target, deadline.cutoff.min(now + FETCH_TIMEOUT))
+            .fetch_service_token(&inner.target, &context, request_context.as_ref())
             .await;
         self.check_admission(deadline)?;
         match result.map_err(provider_timeout) {
@@ -442,8 +443,9 @@ impl ServiceState {
             return;
         }
         let endpoint = &self.registration.endpoint;
+        let context = OperationContext::from_deadline(Deadline::at(request.deadline));
         match endpoint
-            .fetch_service_token(&self.target, request.deadline)
+            .fetch_service_token(&self.target, &context, None)
             .await
         {
             Ok(token) => {
@@ -484,6 +486,14 @@ pub(crate) struct AcquisitionDeadline<'a> {
 }
 
 impl AcquisitionDeadline<'_> {
+    fn fetch_contexts(self, now: Instant) -> (OperationContext, Option<OperationContext>) {
+        let ceiling = Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT));
+        match self.context {
+            AcquisitionContext::Operation(context) => (context.child_until(ceiling), None),
+            AcquisitionContext::Http(request) => request.child_contexts(ceiling),
+        }
+    }
+
     fn expired_error(self) -> Option<AcquisitionError> {
         (Instant::now() >= self.cutoff).then_some(self.expiry)
     }
@@ -557,7 +567,7 @@ fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     }
 }
 
-fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
+pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
     match stopped {
         Stopped::Deadline => AcquisitionError::Timeout,
         Stopped::Cancelled => AcquisitionError::Cancelled,

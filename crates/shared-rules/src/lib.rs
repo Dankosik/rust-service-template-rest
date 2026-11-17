@@ -26,6 +26,14 @@ pub mod hyper {
     pub const HTTP1_MIN_READ_BUFFER_BYTES: u16 = 8 * 1024;
 }
 pub mod jitter;
+// template:begin oidc-jwt:jwks-freshness-policy
+pub mod oidc_jwt {
+    use std::time::Duration;
+
+    pub const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+    pub const MIN_JWKS_MAX_AGE: Duration = REFRESH_COOLDOWN.saturating_mul(2);
+}
+// template:end oidc-jwt:jwks-freshness-policy
 // template:begin oidc-introspection:introspection-cache-ranges
 pub mod oidc_introspection {
     use std::{ops::RangeInclusive, time::Duration};

@@ -1,7 +1,6 @@
 use crate::{
-    Actor, BearerToken, JsonObject, PreparationError, Principal, VerificationError,
-    VerificationReason,
-    principal::{Identity, VerifiedIdentity},
+    Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+    principal::Identity,
 };
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
@@ -178,18 +177,14 @@ struct ActiveClaims<'a> {
 // template:begin oidc-jwt:authn-claims-jwt-validation
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedJwt {
-    pub(crate) identity: VerifiedIdentity,
+    pub(crate) identity: Principal,
     not_before: Option<u64>,
 }
 
 impl VerifiedJwt {
-    pub(crate) fn deliver(
-        &self,
-        now: u64,
-        token: &BearerToken<'_>,
-    ) -> Result<Principal, VerificationError> {
+    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
         check_lifetime(self.identity.expires_at(), self.not_before, now)?;
-        Ok(self.identity.presented_as(token))
+        Ok(self.identity.clone())
     }
 }
 
@@ -240,7 +235,7 @@ pub(crate) fn validate_jwt_claims(
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(VerifiedJwt {
         not_before: claims.nbf,
-        identity: VerifiedIdentity::new(
+        identity: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 subject,
@@ -288,7 +283,7 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 // template:begin oidc-introspection:authn-claims-introspection-validation
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedIntrospection {
-    pub(crate) identity: VerifiedIdentity,
+    pub(crate) identity: Principal,
     not_before: Option<u64>,
 }
 
@@ -297,13 +292,9 @@ impl VerifiedIntrospection {
         now < self.identity.expires_at() && !not_yet_valid(self.not_before, now)
     }
 
-    pub(crate) fn deliver(
-        &self,
-        now: u64,
-        token: &BearerToken<'_>,
-    ) -> Result<Principal, VerificationError> {
+    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
         check_lifetime(self.identity.expires_at(), self.not_before, now)?;
-        Ok(self.identity.presented_as(token))
+        Ok(self.identity.clone())
     }
 }
 
@@ -341,7 +332,7 @@ pub(crate) fn validate_introspection_claims(
         .map_err(|()| malformed())?;
     Ok(VerifiedIntrospection {
         not_before: claims.nbf,
-        identity: VerifiedIdentity::new(
+        identity: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 subject,
@@ -449,10 +440,6 @@ mod tests {
         ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap()
     }
 
-    fn presented() -> crate::BearerToken<'static> {
-        crate::parse_bearer([b"Bearer presented-token".as_slice()]).unwrap()
-    }
-
     fn assert_actor_evidence(
         verify: impl Fn(serde_json::Value) -> Result<crate::Principal, crate::VerificationError>,
         malformed_failure: Failure,
@@ -506,7 +493,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 100,
             )
-            .map(|verified| verified.identity.presented_as(&presented()))
+            .map(|verified| verified.identity)
         };
         let principal = verify(serde_json::json!({
             "exp": 130, "sub": null, "client_id": "", "azp": "client", "cid": "other",
@@ -628,7 +615,7 @@ mod tests {
                 TokenProfile::Rfc9068,
                 100,
             )
-            .map(|verified| verified.identity.presented_as(&presented()))
+            .map(|verified| verified.identity)
             .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
@@ -658,7 +645,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 100,
             )
-            .map(|verified| verified.identity.presented_as(&presented()))
+            .map(|verified| verified.identity)
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
@@ -727,7 +714,7 @@ mod tests {
         let principal = validate_introspection_claims(
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"private-value","region":"first","region":"second","accounts":[{"id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
             &policy(), 100,
-        ).unwrap().identity.presented_as(&presented());
+        ).unwrap().identity;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, ["write", "read", "read"]);
@@ -753,7 +740,7 @@ mod tests {
                 &extra,
             );
             validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
-                .map(|verified| verified.identity.presented_as(&presented()))
+                .map(|verified| verified.identity)
         };
         assert_actor_evidence(verify, Failure::Unavailable);
     }
@@ -841,10 +828,7 @@ mod tests {
                     100,
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(
-                        result.unwrap().identity.presented_as(&presented()).scopes(),
-                        expected.as_slice()
-                    );
+                    assert_eq!(result.unwrap().identity.scopes(), expected.as_slice());
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Unavailable, "{extra}");
                 }
@@ -859,10 +843,7 @@ mod tests {
                     100,
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(
-                        result.unwrap().identity.presented_as(&presented()).scopes(),
-                        expected.as_slice()
-                    );
+                    assert_eq!(result.unwrap().identity.scopes(), expected.as_slice());
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Invalid, "{extra}");
                 }

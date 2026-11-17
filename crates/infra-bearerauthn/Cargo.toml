@@ -33,8 +33,6 @@ reqwest = { workspace = true, features = [
     "form",
 # template:end oidc-introspection:authn-introspection-reqwest-form
 ] }
-# `Principal::access_token()` retains the presented bearer token as a secret
-# regardless of the selected engine, so this dependency is unconditional.
 secrecy = { workspace = true }
 moka = { workspace = true, features = [
   # template:begin oidc-introspection:authn-introspection-moka-future
