@@ -33,7 +33,13 @@ fn app() -> (axum::Router, ::health::Readiness) {
     let methods = Arc::new(services.methods());
     let routes = services.routes.routes().into_axum_router();
     (
-        native_router(routes, readiness.reader(), services.names, methods, OPENING),
+        native_router(
+            routes,
+            readiness.control().reader(),
+            services.names,
+            methods,
+            OPENING,
+        ),
         readiness,
     )
 }
@@ -145,7 +151,7 @@ async fn opened_health_watch_obeys_only_the_caller_deadline() {
             ServingStatus::NotServing
         );
         tokio::time::advance(OPENING * 2).await;
-        readiness.refresh().await;
+        let _refresher = readiness.prepare().await.unwrap().activate().unwrap();
         let next = tokio::time::timeout(OPENING, watch.message())
             .await
             .unwrap()

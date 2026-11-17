@@ -72,18 +72,32 @@ pub enum CacheError {
     InvalidClientKey,
     #[error("cache client could not be built")]
     ClientBuild,
+    #[error("cache startup admission timed out")]
+    AdmissionTimedOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("cache unavailable")]
-pub struct Unavailable;
+pub enum OperationError {
+    #[error("cache operation stopped by caller ({0:?})")]
+    Stopped(operation_context::Stopped),
+    #[error("cache unavailable")]
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MutationError {
+    #[error("cache mutation was not applied: {0}")]
+    NotApplied(#[source] OperationError),
+    #[error("cache mutation outcome is unknown: {0}")]
+    OutcomeUnknown(#[source] OperationError),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SetError {
-    #[error("cache ttl must be between 1 and {} whole milliseconds", i64::MAX)]
+    #[error("cache ttl is outside the supported expiration range")]
     InvalidTtl,
     #[error(transparent)]
-    Unavailable(#[from] Unavailable),
+    Mutation(#[from] MutationError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,14 +114,23 @@ pub struct Cache {
 
 impl Cache {
     pub async fn start(options: CacheOptions) -> Result<Self, CacheError> {
+        use tokio_util::task::AbortOnDropHandle;
+
+        const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let deadline = tokio::time::Instant::now() + ADMISSION_TIMEOUT;
         let command_timeout = options.command_timeout;
+        let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+            admission::admit(options)
+        }));
         let Admitted {
             server,
             dial,
             settings,
             password_file,
-        } = tokio::task::spawn_blocking(move || admission::admit(options))
+        } = tokio::time::timeout_at(deadline, admission)
             .await
+            .map_err(|_| CacheError::AdmissionTimedOut)?
             .map_err(|_| CacheError::ClientBuild)??;
         observe::describe();
         Ok(Self {

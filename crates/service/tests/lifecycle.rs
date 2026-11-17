@@ -351,44 +351,26 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 
 #[cfg(unix)]
 #[test]
-fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
-    assert_stop_reaches_blocking_password_file(
-        "APP__CACHE__PASSWORD_FILE",
-        &[
-            ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
-            ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
-            ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
-        ],
+fn a_cache_password_fifo_is_rejected_before_binding_the_listener() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("password");
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
+        ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+        ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
+        ("APP__CACHE__PASSWORD_FILE", path.to_str().unwrap()),
+    ]);
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(
+        stdout.contains("cache password file could not be read"),
+        "{stdout}"
     );
+    assert!(!stdout.contains("http listener bound"), "{stdout}");
 }
 // template:end cache:service-cache-lifecycle-admission
-
-#[cfg(unix)]
-#[allow(
-    dead_code,
-    clippy::disallowed_methods,
-    reason = "the postgres and cache profiles are optional; the fixture creates and removes its owned FIFO directory and waits briefly for startup to reach the blocking read"
-)]
-fn assert_stop_reaches_blocking_password_file(
-    password_key: &'static str,
-    extra: &[(&'static str, &'static str)],
-) {
-    let directory = tempfile::tempdir().expect("create fixture directory");
-    let password_file = directory.path().join("password");
-    nix::unistd::mkfifo(&password_file, nix::sys::stat::Mode::S_IRWXU).expect("create FIFO");
-
-    let mut env = vec![(
-        password_key,
-        password_file.to_str().expect("UTF-8 fixture path"),
-    )];
-    env.extend_from_slice(extra);
-    let service = Service::spawn(&env);
-    service.await_record("service_starting");
-    std::thread::sleep(Duration::from_millis(100));
-    service.terminate();
-    let (code, stderr) = service.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-}
 
 // template:begin postgres:service-postgres-lifecycle-admission
 #[test]
@@ -449,17 +431,27 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 
 #[cfg(unix)]
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the child must enter its blocking startup read before receiving the signal"
+)]
 fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {
-    assert_stop_reaches_blocking_password_file(
-        "APP__POSTGRES__PASSWORD_FILE",
-        &[
-            ("APP__POSTGRES__ENABLED", "true"),
-            (
-                "APP__POSTGRES__DSN",
-                "postgres://service@127.0.0.1:1/service?sslmode=disable",
-            ),
-        ],
-    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("password");
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let service = Service::spawn(&[
+        ("APP__POSTGRES__PASSWORD_FILE", path.to_str().unwrap()),
+        ("APP__POSTGRES__ENABLED", "true"),
+        (
+            "APP__POSTGRES__DSN",
+            "postgres://service@127.0.0.1:1/service?sslmode=disable",
+        ),
+    ]);
+    service.await_record("service_starting");
+    std::thread::sleep(Duration::from_millis(100));
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 // template:end postgres:service-postgres-lifecycle-admission
 

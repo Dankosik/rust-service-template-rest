@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
-use infra_listener::{Drained, Server, ServerOptions};
+use infra_http_transport::{Drained, Server, ServerOptions};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,7 +26,7 @@ fn options() -> ServerOptions {
 }
 
 fn harden(app: Router) -> Router {
-    crate::harden(
+    crate::harden::harden(
         app,
         &crate::HardenOptions {
             max_body_bytes: 64,
@@ -61,20 +61,21 @@ fn capture_request_spans() -> (
 async fn drain_budget_expiry_forces_an_in_flight_connection() {
     let (_subscriber, _provider, exporter) = capture_request_spans();
     let entered = Arc::new(tokio::sync::Notify::new());
-    let notify = entered.clone();
-    let handler_1 = move || {
-        let entered = notify.clone();
-        async move {
-            entered.notify_one();
-            std::future::pending::<&'static str>().await
-        }
-    };
     #[expect(
         clippy::disallowed_methods,
-        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        reason = "test fixture registers a raw route"
     )]
-    let app = Router::new().route("/pending", get(handler_1));
-    let server = Server::bind(loopback(), harden(app), options()).unwrap();
+    let routes = Router::new().route(
+        "/pending",
+        get({
+            let entered = entered.clone();
+            move || {
+                entered.notify_one();
+                std::future::pending::<&'static str>()
+            }
+        }),
+    );
+    let server = Server::bind(loopback(), harden(routes), options()).unwrap();
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -89,11 +90,10 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
             remaining_connections: 1
         }
     );
-    let mut response = Vec::new();
-    let closed =
-        tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
+    let mut body = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut body)).await;
     std::assert_matches!(closed, Ok(Ok(0) | Err(_)));
-    assert_eq!(response.as_slice(), b"");
+    assert_eq!(body.as_slice(), b"");
     let spans = exporter.get_finished_spans().unwrap();
     let access = spans
         .iter()
@@ -111,25 +111,27 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
     )));
 }
 
-// template:begin grpc:http-listener-tls-observation
-use infra_listener::BoundListener;
-use tokio_rustls::{TlsConnector, rustls::pki_types::ServerName};
+// template:begin grpc:http-server-span-tls-test
+use infra_http_transport::BoundListener;
+use rustls::pki_types::ServerName;
+use tls_test_support::localhost_tls;
+use tokio_rustls::TlsConnector;
 
 #[tokio::test]
 async fn tls_http1_origin_form_reports_https_in_the_server_span() {
     let (_subscriber, _provider, exporter) = capture_request_spans();
-    let (server_config, client_config) = tls_test_support::localhost_tls(b"http/1.1");
+    let (server_config, client_config) = localhost_tls(b"http/1.1");
     let opts = ServerOptions {
         header_read_timeout: Duration::from_secs(2),
         ..options()
     };
     #[expect(
         clippy::disallowed_methods,
-        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        reason = "test fixture registers a raw route"
     )]
-    let app = Router::new().route("/ok", get(|| async { "ok" }));
+    let route = Router::new().route("/ok", get(|| async { "ok" }));
     let server = BoundListener::bind(loopback()).unwrap().serve_tls(
-        harden(app),
+        harden(route),
         opts,
         Arc::new(server_config),
     );
@@ -159,4 +161,5 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
             .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
     );
 }
-// template:end grpc:http-listener-tls-observation
+
+// template:end grpc:http-server-span-tls-test

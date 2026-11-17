@@ -24,7 +24,7 @@ health = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-infra-listener = { workspace = true }
+infra-http-transport = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
 infra-bearerauthn = { workspace = true }
 serde = { workspace = true, features = ["std"] }
@@ -33,10 +33,10 @@ serde = { workspace = true, features = ["std"] }
 infra-serviceauth = { workspace = true }
 # template:end service-auth:grpc-service-auth-dependency
 metrics = { workspace = true }
-regex = { workspace = true, features = ["std"] }
 opentelemetry = { workspace = true, features = ["trace"] }
 prost = { workspace = true, features = ["std"] }
 prost-types = { workspace = true, features = ["std"] }
+regex = { workspace = true, features = ["std"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }

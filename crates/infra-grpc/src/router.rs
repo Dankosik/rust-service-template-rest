@@ -128,8 +128,8 @@ pub fn router(
 }
 
 #[must_use]
-pub fn server_options(limits: Limits) -> infra_listener::ServerOptions {
-    infra_listener::ServerOptions {
+pub fn server_options(limits: Limits) -> infra_http_transport::ServerOptions {
+    infra_http_transport::ServerOptions {
         header_read_timeout: Duration::from_secs(5),
         max_header_bytes: 16 * 1024,
         max_connections: limits.max_connections,
@@ -192,7 +192,9 @@ async fn business_call(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let listener_drain = infra_listener::take_listener_drain_token(request.extensions_mut());
+    let connection = request
+        .extensions_mut()
+        .remove::<infra_http_transport::ConnectionInfo>();
     sanitize_extensions(request.extensions_mut());
 
     let path = request.uri().path();
@@ -206,8 +208,8 @@ async fn business_call(
         method.call_type,
         Some(CallType::ServerStream | CallType::BidiStream)
     );
-    let response_token = match listener_drain.filter(|_| is_streaming) {
-        Some(drain) => drain.child_token(),
+    let response_token = match connection.filter(|_| is_streaming) {
+        Some(info) => info.child_drain_token(),
         None => CancellationToken::new(),
     };
     let opening_context =
@@ -323,7 +325,7 @@ async fn acquire_permit(
     };
     let wait = admission_wait(*remaining_wait, opening_context);
     let Ok((permit, waited)) =
-        infra_listener::acquire_within(permits, wait, observe::admission_waiting).await
+        infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
     else {
         if let Some(reason) = opening_context.stopped() {
             return Err(server_stopped(reason).into_http());
@@ -362,7 +364,9 @@ async fn health_call(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let _ = infra_listener::take_listener_drain_token(request.extensions_mut());
+    request
+        .extensions_mut()
+        .remove::<infra_http_transport::ConnectionInfo>();
     sanitize_extensions(request.extensions_mut());
 
     let path = request.uri().path();

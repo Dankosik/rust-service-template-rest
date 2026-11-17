@@ -1,8 +1,8 @@
 use std::{panic::AssertUnwindSafe, time::Duration};
 
 use futures_util::FutureExt;
-use health::Readiness;
-use infra_http::{Drained, Server};
+use health::ReadinessControl;
+use infra_http_transport::{Drained, Server};
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports
@@ -129,7 +129,7 @@ impl Dependencies {
 
 #[derive(Default)]
 pub(crate) struct Serving {
-    pub(crate) readiness: Option<Readiness>,
+    pub(crate) readiness: Option<ReadinessControl>,
     pub(crate) app_listener: Option<Server>,
     pub(crate) diagnostics: Option<Server>,
     // template:begin grpc:shutdown-serving-grpc-field

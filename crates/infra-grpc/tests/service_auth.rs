@@ -18,7 +18,7 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Authentication, Caller, Error, Limits, Services, server_options};
-use infra_listener::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, Drained, Server};
 use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
@@ -142,7 +142,7 @@ fn limits() -> Limits {
     }
 }
 
-fn readiness() -> Readiness {
+fn readiness() -> health::ReadinessControl {
     Readiness::new(
         Vec::new(),
         RefreshPolicy::try_new(
@@ -152,6 +152,7 @@ fn readiness() -> Readiness {
         )
         .unwrap(),
     )
+    .control()
 }
 
 fn echo_services(echo: &Echo) -> Services {

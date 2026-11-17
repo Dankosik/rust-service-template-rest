@@ -25,7 +25,7 @@ workspace = true
 [features]
 hotpath = [
     "dep:hotpath", "hotpath/hotpath", "hotpath/threads", "hotpath/tokio",
-    "hotpath/axum-0-8", "infra-http/hotpath", "infra-telemetry/hotpath",
+    "infra-http/hotpath", "infra-telemetry/hotpath",
     # template:begin inbound-webhooks:service-hotpath-webhooks-feature
     "infra-webhooks/hotpath",
     # template:end inbound-webhooks:service-hotpath-webhooks-feature
@@ -44,6 +44,7 @@ axum = { workspace = true, features = ["macros"] }
 derive_more = { workspace = true, features = ["debug"] }
 health = { workspace = true }
 infra-http = { workspace = true }
+infra-http-transport = { workspace = true }
 tikv-jemallocator = { workspace = true }
 rlimit = { workspace = true }
 # template:begin grpc:service-grpc-dependencies

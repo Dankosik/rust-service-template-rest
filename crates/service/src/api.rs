@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use infra_http::HttpContract;
 use utoipa_axum::router::OpenApiRouter;
 // template:begin http-idempotency:service-api-http-idempotency-import
 use infra_http::idempotency::Composer;
@@ -68,17 +69,16 @@ pub fn contract(
     // template:begin http-idempotency:service-api-contract-composer
     idempotency: &mut Composer,
     // template:end http-idempotency:service-api-contract-composer
-) -> Result<OpenApiRouter<AppState>, ContractError> {
+) -> Result<HttpContract<AppState>, ContractError> {
     let contract = assemble();
     // template:begin http-idempotency:service-api-idempotency-components
     let contract = contract.merge(OpenApiRouter::with_openapi(idempotency.components()));
     // template:end http-idempotency:service-api-idempotency-components
-    Ok(contract)
+    Ok(HttpContract::new(contract).with_probes("/"))
 }
 
 fn assemble() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .merge(infra_http::router())
         // template:begin inbound-webhooks:service-api-webhooks-router
         .merge(infra_webhooks::inbound::route::router())
     // template:end inbound-webhooks:service-api-webhooks-router
@@ -90,7 +90,7 @@ pub fn document() -> Result<Document, ContractError> {
         &mut Composer::inert(),
         // template:end http-idempotency:service-api-document-composer
     )
-    .map(OpenApiRouter::into_openapi)
+    .map(HttpContract::into_openapi)
 }
 
 pub fn render() -> Result<String, ContractError> {
@@ -139,21 +139,40 @@ mod tests {
         }
     }
 
-    fn protected_test_contract() -> OpenApiRouter<AppState> {
-        assemble().routes(utoipa_axum::routes!(protected))
+    fn public_check(
+        document: Document,
+    ) -> Result<infra_http::Application, infra_http::FinalizeError> {
+        HttpContract::new(OpenApiRouter::with_openapi(document)).build(
+            (),
+            infra_http::Authentication::Public,
+            &infra_http::HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: std::time::Duration::from_secs(1),
+                max_in_flight: None,
+                admission_wait: std::time::Duration::ZERO,
+                log_health_probes: false,
+                draining: None,
+            },
+        )
     }
 
     #[test]
     fn protected_contract_refuses_public_finalization_without_a_composer() {
-        assert!(
-            infra_http::finalize_public(protected_test_contract()).is_err(),
-            "protected operations must refuse startup when authentication is disabled"
-        );
+        let document = assemble()
+            .routes(utoipa_axum::routes!(protected))
+            .into_openapi();
+        assert!(matches!(
+            public_check(document),
+            Err(infra_http::FinalizeError::ProtectedOperation { .. })
+        ));
     }
 
     #[test]
     fn public_probe_contract_does_not_depend_on_a_verifier() {
-        assert!(infra_http::finalize_public(assemble()).is_ok());
+        let document = HttpContract::new(assemble())
+            .with_probes("/")
+            .into_openapi();
+        assert!(public_check(document).is_ok());
     }
 }
 // template:end authn:service-api-protected-test-route
@@ -162,7 +181,7 @@ mod tests {
 mod idempotency_tests {
     use axum::http::StatusCode;
     use axum::response::Response;
-    use infra_http::idempotency::{Activation, Idempotency, Tx};
+    use infra_http::idempotency::{Activation, Idempotency, ReplayableResponse, Tx};
 
     use super::*;
 
@@ -186,18 +205,27 @@ mod idempotency_tests {
     )]
     async fn idempotent(idempotency: Idempotency) -> Response {
         idempotency
-            .execute(async |_: &mut Tx<'_>| (StatusCode::CREATED, "created"))
+            .execute(async |_: &mut Tx<'_>| {
+                let headers = axum::http::HeaderMap::from_iter([(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/plain"),
+                )]);
+                ReplayableResponse::bytes(StatusCode::CREATED, &headers, "created".into())
+            })
             .await
     }
 
     fn with_test_route(
         idempotency: &mut Composer,
-    ) -> Result<OpenApiRouter<AppState>, ContractError> {
-        Ok(contract(idempotency)?.routes(idempotency.route(utoipa_axum::routes!(idempotent))?))
+    ) -> Result<HttpContract<AppState>, ContractError> {
+        let routes = assemble()
+            .routes(idempotency.route(utoipa_axum::routes!(idempotent))?)
+            .merge(OpenApiRouter::with_openapi(idempotency.components()));
+        Ok(HttpContract::new(routes).with_probes("/"))
     }
 
     fn finished(
-        compose: impl FnOnce(&mut Composer) -> Result<OpenApiRouter<AppState>, ContractError>,
+        compose: impl FnOnce(&mut Composer) -> Result<HttpContract<AppState>, ContractError>,
     ) -> Activation {
         let mut composer = Composer::inert();
         let _contract = compose(&mut composer).expect("the route composes");
@@ -226,6 +254,7 @@ mod idempotency_tests {
             ("400", "IdempotencyBadRequest"),
             ("401", "AuthenticationUnauthorized"),
             ("403", "AuthenticationForbidden"),
+            ("408", "RequestTimeout"),
             ("409", "IdempotencyRequestInProgress"),
             ("413", "RequestEntityTooLarge"),
             ("422", "IdempotencyKeyMismatch"),

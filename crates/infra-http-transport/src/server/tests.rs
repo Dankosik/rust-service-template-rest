@@ -65,6 +65,39 @@ async fn serves_and_drains_completely() {
 }
 
 #[tokio::test]
+async fn a_request_can_cancel_its_own_work_while_listener_drain_reaches_every_child() {
+    let (send, mut tokens) = tokio::sync::mpsc::channel(2);
+    let handler = move |Extension(info): Extension<ConnectionInfo>| {
+        let send = send.clone();
+        async move {
+            send.send(info.child_drain_token()).await.unwrap();
+            "ok"
+        }
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "transport fixture registers a raw route"
+    )]
+    let app = Router::new().route("/", get(handler));
+    let server = Server::bind(loopback(), app, options()).unwrap();
+    for _ in 0..2 {
+        assert!(fetch(server.local_addr(), "/").await.ends_with("ok"));
+    }
+    let first = tokens.recv().await.unwrap();
+    let second = tokens.recv().await.unwrap();
+    first.cancel();
+    assert!(!second.is_cancelled());
+    assert!(fetch(server.local_addr(), "/").await.ends_with("ok"));
+    let third = tokens.recv().await.unwrap();
+    assert_eq!(
+        server.drain(Duration::from_secs(2)).await.unwrap(),
+        Drained::Complete
+    );
+    assert!(second.is_cancelled());
+    assert!(third.is_cancelled());
+}
+
+#[tokio::test]
 async fn an_unbounded_drain_budget_drains_completely() {
     let server = Server::bind(loopback(), app(), options()).unwrap();
     assert!(
@@ -212,7 +245,7 @@ async fn accept_panic_after_stop_is_still_observed() {
         connection_builder(options()),
         move |stream| {
             let _ = &marker;
-            async move { Some((stream, ListenerScheme::Http)) }
+            async move { Some((stream, "http")) }
         },
     );
     stop.set(server.connection_shutdown.finish.clone()).unwrap();
@@ -553,7 +586,7 @@ async fn http2_listener_serves_http2_over_tls() {
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    let request = axum::http::Request::builder()
+    let request = http::Request::builder()
         .uri(format!("https://localhost:{}/ok", addr.port()))
         .body(axum::body::Body::empty())
         .unwrap();
@@ -561,7 +594,7 @@ async fn http2_listener_serves_http2_over_tls() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(response.status(), http::StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
     server.drain(Duration::from_secs(1)).await.unwrap();

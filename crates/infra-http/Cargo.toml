@@ -1,6 +1,6 @@
 [package]
 name = "infra-http"
-description = "HTTP transport adapter, hardened middleware chain, problem details and health probes."
+description = "REST adapter for HTTP operations, problem details, and health probes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,14 @@ publish.workspace = true
 workspace = true
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/axum-0-8"]
 
 [dependencies]
 operation-context = { workspace = true }
 hotpath = { workspace = true, optional = true }
 service-failure = { workspace = true }
 shared-rules = { workspace = true }
-infra-listener = { workspace = true }
+infra-http-transport = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
 mime = { workspace = true }
@@ -30,6 +30,7 @@ infra-bearerauthn = { workspace = true }
 secrecy = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
+bytes = { workspace = true, features = ["std"] }
 const-hex = { workspace = true }
 infra-idempotency-store = { workspace = true }
 infra-postgres = { workspace = true }
@@ -63,8 +64,9 @@ uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 # template:begin grpc:http-tls-test-dependencies
-tls-test-support = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tls-test-support = { workspace = true }
 # template:end grpc:http-tls-test-dependencies
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }

@@ -38,7 +38,42 @@ fn admission_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + infra_postgres::ACQUIRE_TIMEOUT
 }
 
-fn mounted_receiver(receiver: Receiver, budget: Duration) -> axum::Router {
+#[tokio::test(start_paused = true)]
+async fn unfinished_webhook_upload_returns_the_declared_timeout() {
+    use axum::body::{Body, to_bytes};
+    use infra_webhooks::inbound::route::{WebhookState, router};
+    use tower::ServiceExt as _;
+
+    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+    let app = mounted_receiver(receiver(pool), Duration::from_secs(1));
+    let upload =
+        Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+    let response = app
+        .oneshot(
+            http::Request::post("/webhooks/partner%2Fa%3F%23")
+                .body(upload)
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json"
+    );
+    let bytes = to_bytes(response.into_body(), 4096)
+        .await
+        .expect("problem body");
+    let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
+    assert_eq!(problem["code"], "request_timeout");
+    let document = serde_json::to_value(router::<WebhookState>().into_openapi()).expect("document");
+    assert_eq!(
+        document["paths"]["/webhooks/{endpoint_id}"]["post"]["responses"]["408"]["$ref"],
+        "#/components/responses/RequestTimeout"
+    );
+}
+
+fn mounted_receiver(receiver: Receiver, budget: Duration) -> infra_http::Application {
     mounted_receiver_with_limit(
         receiver,
         budget,
@@ -50,23 +85,21 @@ fn mounted_receiver_with_limit(
     receiver: Receiver,
     budget: Duration,
     max_body_bytes: usize,
-) -> axum::Router {
-    let app = infra_http::finalize_public(infra_webhooks::inbound::route::router())
+) -> infra_http::Application {
+    infra_http::HttpContract::new(infra_webhooks::inbound::route::router())
+        .build(
+            infra_webhooks::inbound::route::WebhookState::active(receiver),
+            infra_http::Authentication::Public,
+            &infra_http::HardenOptions {
+                max_body_bytes,
+                request_timeout: budget,
+                max_in_flight: None,
+                admission_wait: budget,
+                log_health_probes: false,
+                draining: None,
+            },
+        )
         .expect("webhook operation is public")
-        .with_state(infra_webhooks::inbound::route::WebhookState::active(
-            receiver,
-        ));
-    infra_http::harden(
-        app,
-        &infra_http::HardenOptions {
-            max_body_bytes,
-            request_timeout: budget,
-            max_in_flight: None,
-            admission_wait: budget,
-            log_health_probes: false,
-            draining: None,
-        },
-    )
 }
 
 fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
@@ -684,7 +717,7 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
     let app = mounted_receiver(receiver(pool.clone()), Duration::from_secs(8));
-    let response = TestServer::new(app)
+    let response = TestServer::new(axum::ServiceExt::into_make_service(app))
         .post("/webhooks/partner%2Fa%3F%23")
         .add_header("webhook-id", "message-decoded")
         .add_header("webhook-timestamp", "0")

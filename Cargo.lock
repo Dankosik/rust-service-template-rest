@@ -2579,6 +2579,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "nix",
  "operation-context",
  "parking_lot",
  "pem 4.0.0",
@@ -2618,7 +2619,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
- "infra-listener",
+ "infra-http-transport",
  "infra-outbound-grpc",
  "infra-serviceauth",
  "metrics",
@@ -2660,6 +2661,7 @@ dependencies = [
  "arc-swap",
  "axum",
  "axum-test",
+ "bytes",
  "compact_str",
  "const-hex",
  "enum-map",
@@ -2670,8 +2672,8 @@ dependencies = [
  "http-body",
  "http-body-util",
  "infra-bearerauthn",
+ "infra-http-transport",
  "infra-idempotency-store",
- "infra-listener",
  "infra-postgres",
  "itertools 0.15.0",
  "metrics",
@@ -2683,6 +2685,7 @@ dependencies = [
  "parking_lot",
  "proptest",
  "regex",
+ "rustls",
  "secrecy",
  "serde",
  "serde_html_form",
@@ -2707,6 +2710,28 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "uuid",
+]
+
+[[package]]
+name = "infra-http-transport"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "rustls",
+ "shared-rules",
+ "socket2",
+ "thiserror",
+ "tls-test-support",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -2753,27 +2778,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
-]
-
-[[package]]
-name = "infra-listener"
-version = "0.1.0"
-dependencies = [
- "axum",
- "http-body-util",
- "hyper",
- "hyper-util",
- "metrics",
- "rustls",
- "shared-rules",
- "socket2",
- "thiserror",
- "tls-test-support",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tower",
- "tracing",
 ]
 
 [[package]]
@@ -2914,7 +2918,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper-util",
- "infra-listener",
+ "infra-http-transport",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3148,6 +3152,7 @@ dependencies = [
  "infra-bearerauthn",
  "infra-grpc",
  "infra-http",
+ "infra-http-transport",
  "infra-idempotency-store",
  "infra-jobs",
  "infra-messaging",
@@ -3353,6 +3358,7 @@ dependencies = [
  "futures-util",
  "health",
  "infra-http",
+ "infra-http-transport",
  "infra-jobs",
  "infra-messaging",
  "infra-outbound-http",
@@ -5180,6 +5186,7 @@ dependencies = [
  "infra-cache",
  "infra-grpc",
  "infra-http",
+ "infra-http-transport",
  "infra-idempotency-store",
  "infra-messaging",
  "infra-object-storage",

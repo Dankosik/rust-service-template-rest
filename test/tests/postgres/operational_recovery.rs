@@ -1,8 +1,9 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routing::get};
-use health::{Readiness, RefreshPolicy};
-use infra_http::{Drained, HardenOptions, Server, ServerOptions};
+use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
+use health::{Readiness, ReadinessControl, RefreshPolicy};
+use infra_http::HardenOptions;
+use infra_http_transport::{Drained, Server, ServerOptions};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
 use integration_tests::poll_until;
 use tokio::{
@@ -42,6 +43,7 @@ async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
         .await
 }
 
+#[utoipa::path(get, path = "/useful", responses((status = 200), (status = 503)))]
 async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
     match value(&pool).await {
         Ok(value) => value.into_response(),
@@ -49,33 +51,30 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "non-shipped fixture operation; platform probes retain their canonical contract"
-)]
-fn http_router(pool: PgPool, readiness: &Readiness) -> axum::Router {
-    let probes = infra_http::finalize_public(infra_http::router())
-        .unwrap()
-        .with_state(readiness.reader());
-    let work = axum::Router::new()
-        .route("/useful", get(http_value))
+fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
+    let work = utoipa_axum::router::OpenApiRouter::new()
+        .routes(utoipa_axum::routes!(http_value))
         .with_state(pool);
-    infra_http::harden(
-        probes.merge(work),
-        &HardenOptions {
-            max_body_bytes: 1024 * 1024,
-            request_timeout: Duration::from_secs(8),
-            max_in_flight: NonZeroU32::new(256),
-            admission_wait: Duration::from_secs(8),
-            log_health_probes: false,
-            draining: None,
-        },
-    )
+    infra_http::HttpContract::new(work)
+        .with_probes("/")
+        .build(
+            readiness.reader(),
+            infra_http::Authentication::Public,
+            &HardenOptions {
+                max_body_bytes: 1024 * 1024,
+                request_timeout: Duration::from_secs(8),
+                max_in_flight: NonZeroU32::new(256),
+                admission_wait: Duration::from_secs(8),
+                log_health_probes: false,
+                draining: None,
+            },
+        )
+        .unwrap()
 }
 
 struct Instance {
     pool: PgPool,
-    readiness: Readiness,
+    readiness: ReadinessControl,
     cancel: CancellationToken,
     refresh: JoinHandle<()>,
     server: Server,
@@ -89,28 +88,27 @@ struct Instance {
 
 impl Instance {
     async fn start(pool: PgPool) -> Self {
-        let readiness = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
-        readiness.refresh().await;
+        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+        let readiness = probes.control();
+        let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());
         let cancel = CancellationToken::new();
         let events = PoolEvents::default();
         let refresh = tokio::spawn({
-            let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.refresh_until(cancel).await }
+            refresher
+                .refresh_until(cancel)
                 .with_subscriber(events.subscriber())
         });
-        let server = Server::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            http_router(pool.clone(), &readiness),
+        let server = http_router(pool.clone(), &readiness).serve(
+            infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap(),
             ServerOptions {
                 header_read_timeout: Duration::from_secs(5),
                 max_header_bytes: 16 * 1024,
                 max_connections: NonZeroU32::new(HTTP_CONNECTIONS),
                 max_connection_age: None,
             },
-        )
-        .unwrap();
+        );
         let address = server.local_addr();
         // template:begin postgres-grpc-consumers:recovery-start-grpc
         let grpc = grpc::Consumer::start(pool.clone(), readiness.reader()).await;
@@ -572,7 +570,7 @@ mod grpc {
                 max_connection_age: None,
             };
             let router = infra_grpc::router(services, reader, authentication, limits).unwrap();
-            let server = infra_http::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+            let server = infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
                 .unwrap()
                 .serve_h2(router, infra_grpc::server_options(limits), None);
             let destination = format!("http://{}", server.local_addr());
@@ -695,7 +693,7 @@ mod grpc {
             EndpointUrl, IntrospectionOptions, IssuerUrl,
             test_support::{FixtureTransport, prepare_introspection_with_fixture},
         };
-        use infra_http::BoundListener;
+        use infra_http_transport::BoundListener;
         use std::{num::NonZeroUsize, sync::Arc};
         use tokio_rustls::rustls::{
             self,

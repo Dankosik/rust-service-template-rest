@@ -18,14 +18,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tower::ServiceBuilder;
 
-mod admission;
 mod sniff;
-
-pub use admission::acquire_within;
 
 use sniff::SniffDeadline;
 
-const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
+pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 const LISTEN_BACKLOG: u32 = 65_535;
 
@@ -81,32 +78,21 @@ struct ConnectionShutdown {
     force: CancellationToken,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum ListenerScheme {
-    Http,
-    Https,
-}
-
-impl ListenerScheme {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ConnectionInfo {
-    scheme: ListenerScheme,
+    scheme: &'static str,
     forced: Arc<AtomicBool>,
     drain: CancellationToken,
 }
 
 impl ConnectionInfo {
     #[must_use]
-    pub const fn scheme(&self) -> ListenerScheme {
+    pub fn child_drain_token(&self) -> CancellationToken {
+        self.drain.child_token()
+    }
+
+    #[must_use]
+    pub const fn scheme(&self) -> &'static str {
         self.scheme
     }
 
@@ -114,12 +100,6 @@ impl ConnectionInfo {
     pub fn was_forced(&self) -> bool {
         self.forced.load(Ordering::Relaxed)
     }
-}
-
-pub fn take_listener_drain_token(
-    extensions: &mut axum::http::Extensions,
-) -> Option<CancellationToken> {
-    extensions.remove::<ConnectionInfo>().map(|info| info.drain)
 }
 
 #[derive(Debug)]
@@ -184,7 +164,7 @@ fn serve_plaintext(
     builder: auto::Builder<TokioExecutor>,
 ) -> Server {
     serve_listener(bound, app, options, builder, |stream| async move {
-        Some((stream, ListenerScheme::Http))
+        Some((stream, "http"))
     })
 }
 
@@ -203,7 +183,7 @@ fn serve_tls(
         async move {
             let peer = stream.peer_addr().ok();
             match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                Ok(Ok(tls_stream)) => Some((tls_stream, ListenerScheme::Https)),
+                Ok(Ok(tls_stream)) => Some((tls_stream, "https")),
                 Ok(Err(error)) => {
                     tracing::debug!(
                         peer = peer.map(tracing::field::display),
@@ -347,7 +327,7 @@ fn serve_listener<F, Fut, IO>(
 ) -> Server
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let BoundListener {
@@ -415,7 +395,7 @@ async fn accept_loop<F, Fut, IO>(
     prepare_io: F,
 ) where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
@@ -474,7 +454,7 @@ fn serve_connection<F, Fut, IO>(
 ) -> impl Future<Output = ()>
 where
     F: Fn(TcpStream) -> Fut,
-    Fut: Future<Output = Option<(IO, ListenerScheme)>>,
+    Fut: Future<Output = Option<(IO, &'static str)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let age_deadline = options

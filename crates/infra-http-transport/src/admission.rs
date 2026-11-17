@@ -4,6 +4,8 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
+/// A permit that frees only after `patience` ran out is refused, so the
+/// caller's remaining budget still covers sending the refusal.
 pub async fn acquire_within<G>(
     permits: &Arc<Semaphore>,
     patience: Duration,

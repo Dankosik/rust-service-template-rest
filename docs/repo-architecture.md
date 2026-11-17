@@ -10,13 +10,11 @@ for concrete modules, types, and commands.
 
 1. Business behavior lives in `crates/<feature>`; transports and providers in
    `crates/infra-<provider>`; concrete wiring and process lifecycle in the
-   composition root `crates/service`. `quality/architecture.json` (`make
-   architecture-check`) enforces the crate dependency graph: feature HTTP and
-   gRPC modules may use `infra-http`'s and `infra-grpc`'s inbound contract
-   surfaces, no feature depends on an outbound or persistence provider crate,
-   and no crate a feature depends on may depend on that feature. Both inbound
-   transports use `infra-listener` for socket lifecycle and admission so that
-   gRPC services can run without REST contracts or their persistence providers.
+   composition root `crates/service`. A feature may use the capabilities
+   explicitly allowed by the feature rule in `quality/architecture.json`.
+   For shared caching, the composition root supplies the namespace, and the
+   feature owns its keys, TTL, invalidation, and fallback. No crate a feature
+   depends on may depend on that feature.
 2. One fact has one canonical writer; generated or projected views (`api/openapi/service.yaml`
    from `utoipa` annotations, `crates/grpc-contracts` from `api/proto/`, `.sqlx/`
    from `migrations/*.sql` + `sqlx::query!`, and materialized harness files from

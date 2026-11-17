@@ -1,6 +1,6 @@
 [package]
-name = "infra-listener"
-description = "Shared Hyper listener, connection drain and bounded request admission."
+name = "infra-http-transport"
+description = "Shared bounded HTTP listener and admission for REST and gRPC."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,26 +13,25 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
-hyper-util = { workspace = true, features = ["server-auto", "service", "tokio"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
 metrics = { workspace = true }
 shared-rules = { workspace = true }
+socket2 = { workspace = true, features = ["all"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std"] }
-# template:begin grpc:listener-tls-dependencies
+# template:begin grpc:transport-tls-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
-# template:end grpc:listener-tls-dependencies
-
-[target.'cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))'.dependencies]
-socket2 = { workspace = true, features = ["all"] }
+# template:end grpc:transport-tls-dependencies
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "test-util"] }
-# template:begin grpc:listener-tls-test-dependencies
+# template:begin grpc:transport-http2-client-tests
+http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }
 tls-test-support = { workspace = true }
-# template:end grpc:listener-tls-test-dependencies
+# template:end grpc:transport-http2-client-tests
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "test-util"] }

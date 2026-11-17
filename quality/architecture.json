@@ -46,8 +46,8 @@
           "crates/infra-cache/Cargo.toml",
           "crates/infra-grpc/Cargo.toml",
           "crates/infra-http/Cargo.toml",
+          "crates/infra-http-transport/Cargo.toml",
           "crates/infra-jobs/Cargo.toml",
-          "crates/infra-listener/Cargo.toml",
           "crates/infra-messaging/Cargo.toml",
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
@@ -64,7 +64,7 @@
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
-    "crates/infra-listener/Cargo.toml": {"role": "listener"},
+    "crates/infra-http-transport/Cargo.toml": {"role": "http-transport"},
     "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
     "crates/infra-jobs/Cargo.toml": {"role": "postgres-provider"},
     "crates/infra-messaging/Cargo.toml": {"role": "messaging"},
@@ -86,11 +86,10 @@
   "roles": {
     "root": {
       "rule": "composition-root-direction",
-      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-grpc", "outbound-http", "telemetry", "cache", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
+      "allow_roles": ["config", "health", "contract", "http", "http-transport", "grpc", "bearer", "service-auth", "outbound-grpc", "outbound-http", "telemetry", "cache", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
     },
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
-    "listener": {"rule": "shared-listener-dependencies"},
     "contract": {"rule": "independent-shared-contract"},
     "shared-rules": {"rule": "std-only-shared-rules", "std_only": true},
     "bearer": {"rule": "independent-bearer-provider"},
@@ -145,9 +144,10 @@
       "rule": "feature-provider-explicit-reviewed-dependencies",
       "deny_roles": ["root", "config", "test"]
     },
+    "http-transport": {"rule": "shared-http-listener"},
     "http": {
       "rule": "http-inbound-contract-dependencies",
-      "allow_roles": ["health", "bearer", "listener"],
+      "allow_roles": ["health", "bearer", "http-transport"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "HTTP projects shared failure codes into Problem responses.",
@@ -165,7 +165,7 @@
     },
     "grpc": {
       "rule": "grpc-transport-dependencies",
-      "allow_roles": ["health", "bearer", "service-auth", "listener"],
+      "allow_roles": ["health", "bearer", "service-auth", "http-transport"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "gRPC projects shared failure codes into tonic Status.",

@@ -66,6 +66,10 @@ pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
     [
         (Code::BadRequest, component::<IdempotencyBadRequest>()),
         (
+            Code::RequestTimeout,
+            component::<responses::RequestTimeout>(),
+        ),
+        (
             Code::IdempotencyRequestInProgress,
             component::<IdempotencyRequestInProgress>(),
         ),
@@ -166,6 +170,7 @@ pub(super) struct IdempotencyUnavailable(pub Problem);
 /// [`super::Composer::components`]: their only registration path.
 #[derive(OpenApi)]
 #[openapi(components(responses(
+    responses::RequestTimeout,
     IdempotencyBadRequest,
     IdempotencyRequestInProgress,
     IdempotencyKeyMismatch,
@@ -213,6 +218,7 @@ mod tests {
             family,
             json!({
                 "400": reference("IdempotencyBadRequest"),
+                "408": reference("RequestTimeout"),
                 "409": reference("IdempotencyRequestInProgress"),
                 "413": reference("RequestEntityTooLarge"),
                 "422": reference("IdempotencyKeyMismatch"),
@@ -235,6 +241,7 @@ mod tests {
                 "IdempotencyKeyMismatch",
                 "IdempotencyRequestInProgress",
                 "IdempotencyUnavailable",
+                "RequestTimeout",
             ])
         );
     }

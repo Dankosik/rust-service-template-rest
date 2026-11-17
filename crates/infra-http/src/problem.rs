@@ -193,18 +193,14 @@ impl IntoResponse for Problem {
     }
 }
 
-pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
-    let Some(id) = request_id else {
-        return response;
-    };
+pub(crate) fn complete_problem(response: &mut Response, request_id: &str) {
     let Some(problem) = response.extensions_mut().remove::<Problem>() else {
-        return response;
+        return;
     };
-    let problem = problem.with_request_id(id);
+    let problem = problem.with_request_id(request_id);
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
     response.extensions_mut().insert(problem);
-    response
 }
 
 fn retry_after_value(after: Duration) -> HeaderValue {
@@ -256,6 +252,11 @@ pub mod responses {
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json")]
     pub struct RequestEntityTooLarge(pub Problem);
+
+    /// request body was not received within the request budget
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct RequestTimeout(pub Problem);
 
     /// unexpected server failure
     #[derive(Debug, ToResponse)]

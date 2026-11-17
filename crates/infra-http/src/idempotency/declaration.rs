@@ -356,7 +356,7 @@ mod tests {
             let contract = OpenApiRouter::with_openapi(serde_json::from_value(document).unwrap())
                 .routes(composer.route(carrier).expect("route composes"));
 
-            let error = crate::finalize_public(contract).unwrap_err();
+            let error = crate::contract::finalize_public(contract).unwrap_err();
             if protected {
                 assert_eq!(
                     error,

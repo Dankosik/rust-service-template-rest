@@ -32,7 +32,7 @@ use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
-use infra_listener::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, Drained, Server};
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
@@ -404,7 +404,8 @@ fn notify_on_drop(notify: Arc<Notify>) -> impl Drop {
 
 struct Fixture {
     server: Option<Server>,
-    readiness: Readiness,
+    readiness: health::ReadinessControl,
+    pending_activation: Option<health::PreparedReadiness>,
     echo: Echo,
     address: SocketAddr,
     // template:begin authn:grpc-transport-test-auth-provider-field
@@ -481,9 +482,14 @@ impl Fixture {
             )
             .unwrap(),
         );
-        if seed {
-            seed_ready(&readiness).await;
-        }
+        let control = readiness.control();
+        let prepared = readiness.prepare().await.unwrap();
+        let pending_activation = if seed {
+            prepared.activate().unwrap();
+            None
+        } else {
+            Some(prepared)
+        };
         let echo = Echo::new();
         let mut services = Services::new();
         services
@@ -500,7 +506,7 @@ impl Fixture {
             .require_scopes(UNARY_PATH, &["echo.read"])
             .expect("unary scopes register once");
         // template:end authn:grpc-transport-test-scope-requirement
-        let app = infra_grpc::router(services, readiness.reader(), authentication, limits)
+        let app = infra_grpc::router(services, control.reader(), authentication, limits)
             .expect("router builds");
         let tls = tls.map(|(pki, mtls)| {
             let certificate = pem(&pki.server_certificate);
@@ -519,7 +525,8 @@ impl Fixture {
         let address = bound.local_addr();
         Self {
             server: Some(bound),
-            readiness,
+            readiness: control,
+            pending_activation,
             echo,
             address,
             // template:begin authn:grpc-transport-test-auth-provider-init
@@ -642,10 +649,6 @@ fn watch_request(service: &str) -> Request<HealthCheckRequest> {
     request(HealthCheckRequest {
         service: service.to_owned(),
     })
-}
-
-async fn seed_ready(readiness: &Readiness) {
-    readiness.refresh().await;
 }
 
 fn assert_seen(echo: &Echo, expected: &[Seen]) {
@@ -1047,7 +1050,7 @@ fn opening_app_waiting(
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
     infra_grpc::router(
         services,
-        readiness.reader(),
+        readiness.control().reader(),
         infra_grpc::Authentication::Bearer(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
@@ -2201,7 +2204,12 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
     .unwrap_err();
     assert_eq!(unknown.code(), Code::NotFound);
 
-    seed_ready(&fixture.readiness).await;
+    fixture
+        .pending_activation
+        .take()
+        .unwrap()
+        .activate()
+        .unwrap();
     let mut known = timeout(WAIT, health.watch(watch_request(ECHO_SERVICE)))
         .await
         .expect("known watch")
