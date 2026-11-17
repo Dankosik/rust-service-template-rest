@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::pull;
-use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
+use async_nats::jetstream::consumer::{
+    AckPolicy, Config, DeliverPolicy, PullConsumer, ReplayPolicy,
+};
 use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
 use futures_util::{FutureExt as _, StreamExt as _};
 use tokio::sync::watch;
@@ -61,6 +63,35 @@ pub struct Consumer {
     pull_delivery_bytes: usize,
     retained_pull_bytes: usize,
     handler: Arc<DeliveryHandler>,
+}
+
+struct PullLimits {
+    messages: usize,
+    bytes: usize,
+    expires: Duration,
+}
+
+impl PullLimits {
+    fn for_durable(config: &Config, delivery_bytes: usize) -> Option<Self> {
+        fn positive_limit(value: i64) -> usize {
+            usize::try_from(value)
+                .ok()
+                .filter(|limit| *limit > 0)
+                .unwrap_or(usize::MAX)
+        }
+
+        let bytes = positive_limit(config.max_bytes);
+        let messages = positive_limit(config.max_batch).min(bytes / delivery_bytes);
+        (messages > 0).then_some(Self {
+            messages,
+            bytes,
+            expires: if config.max_expires.is_zero() {
+                PULL_EXPIRES
+            } else {
+                PULL_EXPIRES.min(config.max_expires)
+            },
+        })
+    }
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -156,6 +187,10 @@ impl Consumer {
             ),
         )
         .await?;
+        if PullLimits::for_durable(&pull.cached_info().config, delivery_bytes).is_none() {
+            tracing::warn!(operation = "bind_consumer", error.type = "durable_max_bytes", reason = %MessagingError::Topology, "messaging_admission_failed");
+            return Err(MessagingError::Topology);
+        }
         Ok(Self {
             handler: Arc::new(DeliveryHandler::new(
                 Arc::clone(&shared),
@@ -243,14 +278,14 @@ impl Consumer {
             if stop.is_cancelled() {
                 break;
             }
-            let loss_check = tokio::select! {
+            let limits = tokio::select! {
                 biased;
                 () = stop.cancelled() => break 'pulls,
-                loss_check = check_durable_loss(&self.pull) => loss_check,
+                limits = self.durable_pull_limits() => limits,
             };
-            match loss_check {
-                Ok(false) => {}
-                Ok(true) => return Err(ConsumerError::ConsumerLost),
+            let limits = match limits {
+                Ok(Some(limits)) => limits,
+                Ok(None) => return Err(ConsumerError::ConsumerLost),
                 Err(error) => {
                     if stop.is_cancelled() {
                         break 'pulls;
@@ -263,19 +298,19 @@ impl Consumer {
                     }
                     continue;
                 }
-            }
+            };
             if stop.is_cancelled() {
                 break 'pulls;
             }
             let (slots, max_bytes) =
-                self.pull_budget(deliveries.len(), retry_large_retained_record);
+                self.pull_budget(deliveries.len(), retry_large_retained_record, &limits);
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
                     .batch()
                     .max_messages(slots)
                     .max_bytes(max_bytes)
-                    .expires(PULL_EXPIRES)
+                    .expires(limits.expires)
                     .messages(),
             );
             tokio::pin!(request);
@@ -297,7 +332,7 @@ impl Consumer {
                         let lost = tokio::select! {
                             biased;
                             () = stop.cancelled() => break 'pulls,
-                            lost = durable_confirmed_lost(&self.pull) => lost,
+                            lost = self.durable_pull_limits() => matches!(lost, Ok(None)),
                         };
                         if lost {
                             return Err(ConsumerError::ConsumerLost);
@@ -312,7 +347,14 @@ impl Consumer {
                 }
             };
             match self
-                .fill(&mut messages, deliveries, stop, force, slots)
+                .fill(
+                    &mut messages,
+                    deliveries,
+                    stop,
+                    force,
+                    slots,
+                    limits.expires,
+                )
                 .await
             {
                 Ok(BatchEnd::Filled) => {
@@ -334,7 +376,7 @@ impl Consumer {
                     let lost = tokio::select! {
                         biased;
                         () = stop.cancelled() => break 'pulls,
-                        lost = durable_confirmed_lost(&self.pull) => lost,
+                        lost = self.durable_pull_limits() => matches!(lost, Ok(None)),
                     };
                     if lost {
                         return Err(ConsumerError::ConsumerLost);
@@ -376,15 +418,43 @@ impl Consumer {
         Ok(())
     }
 
+    async fn durable_pull_limits(&self) -> Result<Option<PullLimits>, ConsumerInfoError> {
+        let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, self.pull.get_info())
+            .await
+            .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
+        match result {
+            Ok(info)
+                if info.created == self.pull.cached_info().created
+                    && same_durable_contract(&self.pull.cached_info().config, &info.config) =>
+            {
+                Ok(PullLimits::for_durable(
+                    &info.config,
+                    self.pull_delivery_bytes,
+                ))
+            }
+            Ok(_) => Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn pull_budget(
         &self,
         active_deliveries: usize,
         retry_large_retained_record: bool,
+        limits: &PullLimits,
     ) -> (usize, usize) {
         if retry_large_retained_record {
-            (1, self.retained_pull_bytes)
+            (1, self.retained_pull_bytes.min(limits.bytes))
         } else {
-            let slots = self.concurrency.get() - active_deliveries;
+            let slots = (self.concurrency.get() - active_deliveries).min(limits.messages);
             (slots, slots * self.pull_delivery_bytes)
         }
     }
@@ -396,8 +466,9 @@ impl Consumer {
         stop: &CancellationToken,
         force: &CancellationToken,
         slots: usize,
+        pull_expires: Duration,
     ) -> Result<BatchEnd, ConsumerError> {
-        let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
+        let expires = Instant::now() + pull_expires + PULL_EXPIRY_GRACE;
         let mut remaining = slots;
         while remaining > 0 {
             tokio::select! {
@@ -413,11 +484,11 @@ impl Consumer {
                                     release_message(&message, stop).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
-                                loss_check = check_durable_loss(&self.pull) => loss_check,
+                                limits = self.durable_pull_limits() => limits,
                             };
                             match loss_check {
-                                Ok(false) => {}
-                                Ok(true) => return Err(ConsumerError::ConsumerLost),
+                                Ok(Some(_)) => {}
+                                Ok(None) => return Err(ConsumerError::ConsumerLost),
                                 Err(error) => {
                                     release_message(&message, stop).await;
                                     return Ok(BatchEnd::Failed {
@@ -476,29 +547,6 @@ fn check_delivery_task_result(
     match joined {
         Some(result) => result.map_err(|_| ConsumerError::TaskEnded).flatten(),
         None => Ok(()),
-    }
-}
-
-async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
-    matches!(check_durable_loss(pull).await, Ok(true))
-}
-
-async fn check_durable_loss(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
-    let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, pull.get_info())
-        .await
-        .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
-    match result {
-        Ok(info) => Ok(info.created != pull.cached_info().created
-            || !same_durable_contract(&pull.cached_info().config, &info.config)),
-        Err(error)
-            if matches!(
-                error.kind(),
-                ConsumerInfoErrorKind::NotFound | ConsumerInfoErrorKind::StreamNotFound
-            ) =>
-        {
-            Ok(true)
-        }
-        Err(error) => Err(error),
     }
 }
 

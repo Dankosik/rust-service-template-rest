@@ -48,11 +48,11 @@ use super::kv::{MAX_HISTORY, Store};
 use super::object_store::{ObjectStore, is_valid_bucket_name};
 #[cfg(any(feature = "kv", feature = "object-store"))]
 use super::stream::DiscardPolicy;
-#[cfg(feature = "server_2_10")]
-use super::stream::{Compression, ConsumerCreateStrictError, ConsumerUpdateError};
 use super::stream::{
     Config, ConsumerError, ConsumerErrorKind, DeleteStatus, External, Info, Stream,
 };
+#[cfg(feature = "server_2_10")]
+use super::stream::{ConsumerCreateStrictError, ConsumerUpdateError};
 
 pub mod traits {
     use std::{future::Future, time::Duration};
@@ -1669,7 +1669,7 @@ impl Context {
                 allow_direct: true,
                 #[cfg(feature = "server_2_10")]
                 compression: if config.compression {
-                    Some(Compression::S2)
+                    Some(super::stream::Compression::S2)
                 } else {
                     None
                 },
@@ -2863,7 +2863,7 @@ fn kv_to_stream_config(
         mirror_direct,
         #[cfg(feature = "server_2_10")]
         compression: if config.compression {
-            Some(Compression::S2)
+            Some(super::stream::Compression::S2)
         } else {
             None
         },

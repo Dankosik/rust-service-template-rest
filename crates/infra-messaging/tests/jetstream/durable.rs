@@ -95,53 +95,58 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
 
 #[tokio::test]
 async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmission() {
-    let fixture = Fixture::create(true).await;
-    let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
-        options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .unwrap();
-    let mut registered = fixture.registry.clone();
-    registered
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
-    let before = durable(&fixture).await.cached_info().clone();
-    let admitted = messaging
-        .consumer(registered.clone(), deadline(), &cancel)
+    for small_pull in [false, true] {
+        let fixture = Fixture::create(true).await;
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, Some(consumer_options(&fixture)), 1024),
+            deadline(),
+            cancel.clone(),
+        ))
         .await
         .unwrap();
-    let after = durable(&fixture).await.cached_info().clone();
-    assert_eq!(after.config, before.config);
-    assert_eq!(after.created, before.created);
-
-    let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
-    let mut config = after.config;
-    config.max_deliver = 3;
-    let changed = stream.update_consumer(config).await.unwrap();
-    std::assert_matches!(
-        messaging.consumer(registered, deadline(), &cancel).await,
-        Err(infra_messaging::MessagingError::Topology)
-    );
-    let actual = durable(&fixture).await.cached_info().clone();
-    assert_eq!(actual.config, changed.cached_info().config);
-    assert_eq!(actual.config.max_deliver, 3);
-    assert_eq!(actual.created, before.created);
-    let mut handle = admitted.start(&cancel);
-    std::assert_matches!(
-        timeout(Duration::from_secs(5), handle.failed())
+        let mut registered = fixture.registry.clone();
+        registered
+            .register(&fixture.route, |_, _| async { Ok(()) })
+            .unwrap();
+        let before = durable(&fixture).await.cached_info().clone();
+        let admitted = messaging
+            .consumer(registered.clone(), deadline(), &cancel)
             .await
-            .unwrap(),
-        ConsumerError::ConsumerLost
-    );
-    std::assert_matches!(
-        handle.finish(deadline()).await,
-        Err(ConsumerError::ConsumerLost)
-    );
-    close(messaging).await;
-    fixture.cleanup().await;
+            .unwrap();
+        let after = durable(&fixture).await.cached_info().clone();
+        assert_eq!(after.config, before.config);
+        assert_eq!(after.created, before.created);
+
+        let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+        let mut config = after.config;
+        if small_pull {
+            config.max_bytes = 1024;
+        } else {
+            config.max_deliver = 3;
+        }
+        let changed = stream.update_consumer(config).await.unwrap();
+        std::assert_matches!(
+            messaging.consumer(registered, deadline(), &cancel).await,
+            Err(infra_messaging::MessagingError::Topology)
+        );
+        let actual = durable(&fixture).await.cached_info().clone();
+        assert_eq!(actual.config, changed.cached_info().config);
+        assert_eq!(actual.created, before.created);
+        let mut handle = admitted.start(&cancel);
+        std::assert_matches!(
+            timeout(Duration::from_secs(5), handle.failed())
+                .await
+                .unwrap(),
+            ConsumerError::ConsumerLost
+        );
+        std::assert_matches!(
+            handle.finish(deadline()).await,
+            Err(ConsumerError::ConsumerLost)
+        );
+        close(messaging).await;
+        fixture.cleanup().await;
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

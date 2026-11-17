@@ -507,8 +507,16 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut limits = durable(&fixture).await.cached_info().config.clone();
+    limits.max_batch = 1;
+    limits.max_bytes = 24 * 1024;
+    limits.max_expires = Duration::from_secs(2);
+    source.update_consumer(limits).await.unwrap();
+    let mut worker = consumer_options(&fixture);
+    worker.concurrency = std::num::NonZeroUsize::new(3).unwrap();
     let messaging = Box::pin(Messaging::connect(
-        options(&fixture, Some(consumer_options(&fixture)), 32),
+        options(&fixture, Some(worker), 32),
         deadline(),
         cancel.clone(),
     ))
@@ -553,6 +561,51 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         .await
         .expect("an oversized delivery must not stop the consumer");
 
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let retained = retain_record_before_shrinking_source(&fixture, &cancel).await;
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 32),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .unwrap();
+    let mut registered = fixture.registry.clone();
+    registered
+        .register(&fixture.route, |_, _| async { Ok(()) })
+        .unwrap();
+    let admitted = messaging
+        .consumer(registered, deadline(), &cancel)
+        .await
+        .unwrap();
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut limits = durable(&fixture).await.cached_info().config.clone();
+    limits.max_bytes = 10 * 1024;
+    source.update_consumer(limits).await.unwrap();
+    let mut handle = admitted.start(&cancel);
+    std::assert_matches!(
+        timeout(Duration::from_secs(5), handle.failed())
+            .await
+            .unwrap(),
+        ConsumerError::RetainedMessageTooLarge
+    );
+    std::assert_matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::RetainedMessageTooLarge)
+    );
+    let info = durable(&fixture).await.cached_info().clone();
+    assert_eq!(info.ack_floor.stream_sequence, 0);
+    assert_eq!(
+        source.get_raw_message(1).await.unwrap().payload.as_ref(),
+        retained.payload().as_ref()
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }

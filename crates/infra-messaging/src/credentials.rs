@@ -342,8 +342,8 @@ mod tests {
                 assert!(futures_util::poll!(challenge.as_mut()).is_pending());
             }
             std::assert_matches!(
-                futures_util::poll!(std::pin::pin!(file.answer(b"nonce"))),
-                std::task::Poll::Ready(Err(CredentialsFileError::Unreadable(
+                futures_util::poll!(std::pin::pin!(file.answer(b"nonce"))).map(Result::err),
+                std::task::Poll::Ready(Some(CredentialsFileError::Unreadable(
                     std::io::ErrorKind::ResourceBusy
                 )))
             );
