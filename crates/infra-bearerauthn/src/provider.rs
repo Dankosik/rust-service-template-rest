@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use operation_context::{OperationContext, Stopped};
+use operation_context::Stopped;
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
 #[cfg(
@@ -223,7 +223,7 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form: &[(&str, &str)],
-        context: &OperationContext,
+        caller_stop: CallerStop<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let client_id = form_encode(client_id);
         let client_secret = form_encode(client_secret);
@@ -233,7 +233,7 @@ impl ProviderClient {
             .basic_auth(&client_id, Some(&client_secret))
             .form(form);
         Exchange::start("introspection", "POST", url)
-            .run(request, ExchangeMode::Introspection(context))
+            .run(request, ExchangeMode::Introspection { caller_stop })
             .await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
@@ -274,8 +274,10 @@ enum ExchangeMode<'a> {
         dead_code,
         reason = "the JWT-only profile removes introspection requests"
     )]
-    Introspection(&'a OperationContext),
+    Introspection { caller_stop: CallerStop<'a> },
 }
+
+pub(crate) type CallerStop<'a> = &'a (dyn Fn() -> Option<Stopped> + Sync);
 
 struct Exchange {
     operation: &'static str,
@@ -310,24 +312,24 @@ impl Exchange {
         mode: ExchangeMode<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let span = self.span.clone();
-        let caller = match mode {
-            ExchangeMode::Introspection(context) => Some(context),
+        let caller_stop = match mode {
+            ExchangeMode::Introspection { caller_stop } => Some(caller_stop),
             ExchangeMode::Document { .. } => None,
         };
         let guard = std::mem::DropGuard::new(self, |exchange| {
             exchange.record(
                 &span,
                 Some(
-                    caller
-                        .and_then(OperationContext::stopped)
+                    caller_stop
+                        .and_then(|stopped| stopped())
                         .map_or("cancelled", stopped_label),
                 ),
             );
         });
-        let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
+        let require_json_content_type = matches!(mode, ExchangeMode::Introspection { .. });
         let receive = receive(request, require_json_content_type, &span).instrument(span.clone());
         let result = match mode {
-            ExchangeMode::Introspection(_) | ExchangeMode::Document { deadline: None } => {
+            ExchangeMode::Introspection { .. } | ExchangeMode::Document { deadline: None } => {
                 receive.await
             }
             ExchangeMode::Document {
@@ -914,7 +916,7 @@ mod tests {
                 "a:b",
                 "c d",
                 &[("token", "opaque")],
-                &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
+                &|| None,
             )
             .await
             .unwrap();
@@ -937,7 +939,7 @@ mod tests {
                         "fixture",
                         "secret",
                         &[("token", "opaque")],
-                        &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
+                        &|| None,
                     )
                     .with_subscriber(dispatch.clone())
                     .await,
