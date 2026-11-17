@@ -268,19 +268,31 @@ tests:
     input_series:
       - *service_up
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w1"}'
-        values: "0+60x20"
+        values: "_ 60+60x23"
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w2"}'
         values: "0x20"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w1",kind="email"}'
-        values: "400x20"
+        values: "_ 400x23"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w2",kind="email"}'
         values: "0x20"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w1",kind="report"}'
-        values: "100x20"
+        values: "_ 100x23"
       - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="email",outcome="exhausted"}'
-        values: "0 0 0 1x17"
+        values: "_ _ _ 1x21"
       - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="report",outcome="retry"}'
-        values: "0+5x20"
+        values: "_ 0+5x23"
+      - series: 'up{job="jobs-worker",instance="w1"}'
+        values: "_ 1x24"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w1"}'
+        values: "_ 60x24"
+      - series: 'up{job="jobs-worker",instance="w3"}'
+        values: "1x1 0x17 1x5"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w3"}'
+        values: "0x1 stale _x17 0x5"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="cleanup",outcome="permanent"}'
+        values: "_ 1x17 2x6"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w3",kind="invoice",outcome="permanent"}'
+        values: "1x1 stale _x17 1x5"
     promql_expr_test:
       - expr: 'ALERTS{alertstate="firing"}'
         eval_time: 12m
@@ -291,21 +303,79 @@ tests:
             value: 1
           - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
             value: 1
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 2m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="cleanup",severity="ticket"}'
+            value: 1
   # template:end jobs:monitoring-jobs-fixture
 
   # template:begin messaging:monitoring-messaging-fixture
-  - name: "A dead-lettered event opens a ticket naming its type, reason and publication outcome"
+  - name: "Dead-letter publication attempts open tickets naming each outcome"
     interval: 1m
     input_series:
       - *service_up
       - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w1",event_type="order.created",reason="permanent",outcome="accepted"}'
-        values: "0 0 1x10"
+        values: "_ _ _ 1x22"
       - series: 'messaging_handler_total{job="jobs-worker",instance="w1",event_type="order.created",outcome="retryable"}'
-        values: "0+3x12"
+        values: "_ 0+3x23"
+      - series: 'up{job="jobs-worker",instance="w1"}'
+        values: "_ 1x24"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w1"}'
+        values: "_ 60x24"
+      - series: 'up{job="jobs-worker",instance="w3"}'
+        values: "1x1 0x17 1x5"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w3"}'
+        values: "0x1 stale _x17 0x5"
+      - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w1",event_type="order.created",reason="permanent",outcome="ambiguous"}'
+        values: "_ _ _ 1x22"
+      - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w1",event_type="order.created",reason="permanent",outcome="rejected"}'
+        values: "_ _ _ 1x22"
+      - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w1",event_type="invoice.created",reason="permanent",outcome="accepted"}'
+        values: "_ 1x17 2x6"
+      - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w3",event_type="order.changed",reason="permanent",outcome="accepted"}'
+        values: "1x1 stale _x17 1x5"
     promql_expr_test:
-      - expr: 'ALERTS{alertstate="firing"}'
-        eval_time: 5m
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 2m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 20m
         exp_samples:
-          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.created",outcome="accepted",reason="permanent",severity="ticket"}'
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="invoice.created",outcome="accepted",reason="permanent",severity="ticket"}'
             value: 1
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: MessagingDeadLettered
+        exp_alerts:
+          - exp_labels:
+              event_type: order.created
+              outcome: accepted
+              reason: permanent
+              severity: ticket
+            exp_annotations:
+              summary: Dead-letter publication was attempted for consumed events
+              description: Dead-letter publication for order.created events with reason permanent had outcome accepted in the last 15 minutes.
+              runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
+          - exp_labels:
+              event_type: order.created
+              outcome: ambiguous
+              reason: permanent
+              severity: ticket
+            exp_annotations:
+              summary: Dead-letter publication was attempted for consumed events
+              description: Dead-letter publication for order.created events with reason permanent had outcome ambiguous in the last 15 minutes.
+              runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
+          - exp_labels:
+              event_type: order.created
+              outcome: rejected
+              reason: permanent
+              severity: ticket
+            exp_annotations:
+              summary: Dead-letter publication was attempted for consumed events
+              description: Dead-letter publication for order.created events with reason permanent had outcome rejected in the last 15 minutes.
+              runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
   # template:end messaging:monitoring-messaging-fixture

@@ -14,20 +14,44 @@ only with that profile.
 
 ## Install
 
-1. Load the file through `rule_files` or a `PrometheusRule`, next to
-   `env/monitoring/postgres-maintenance.rules.yml` when the PostgreSQL profile is kept.
-2. Replace the scrape-job selector `job=~"service|jobs-worker"`, and the
-   `absent(up{job="service"})` dead-man check, with your scrape job names:
-   `sd 'service\|jobs-worker' 'orders-api|orders-worker' env/monitoring/service.rules.yml`.
-3. Point `runbook_url` at this page in your repository.
+1. Set the scrape job names in both the rules and their fixtures. For an
+   `orders-api` service with an `orders-worker`, run these commands from the
+   repository root.
+
+   ```sh
+   sd -F 'job=~"service|jobs-worker"' 'job=~"orders-api|orders-worker"' env/monitoring/service.rules.yml
+   sd -F 'job="service"' 'job="orders-api"' env/monitoring/service.rules.yml env/monitoring/tests/service-rules.yml
+   sd -F 'job="jobs-worker"' 'job="orders-worker"' env/monitoring/tests/service-rules.yml
+   ```
+
+   If the worker is required, append `or absent(up{job="orders-worker"})`
+   to the `ServiceDown` expression. Give the normal fixtures a reachable
+   worker and add a case with only the API present. Use one exact selector
+   for each job that must stay in discovery.
+2. When installing `env/monitoring/postgres-maintenance.rules.yml`, first
+   replace its example `pg:expected` rows with the actual database, scrape job,
+   instance and maintenance population for each expected writer. Give the
+   scrape targets the matching `database` label. Set each
+   `pg:writer_set_changed_timestamp_seconds` to the Unix time in seconds of
+   the last writer-set change.
+3. Point `runbook_url` at this page in your repository. Check the configured
+   rules with `make monitoring-rules`, then load them through `rule_files` or
+   a `PrometheusRule`.
 4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
-   Burn-rate alerts share their name across windows and differ by
-   `long_window`, so inhibit the slower window while a faster one fires:
+   This Alertmanager example suppresses a ticket while the same SLO is paging
+   for the same job. It also suppresses the slower of two active pages or two
+   active tickets.
 
 ```yaml
 inhibit_rules:
   - source_matchers: [severity="page"]
     target_matchers: [severity="ticket"]
+    equal: [alertname, job]
+  - source_matchers: [severity="page", long_window="1h"]
+    target_matchers: [severity="page", long_window="6h"]
+    equal: [alertname, job]
+  - source_matchers: [severity="ticket", long_window="1d"]
+    target_matchers: [severity="ticket", long_window="3d"]
     equal: [alertname, job]
 ```
 
@@ -65,8 +89,10 @@ within minutes of a fault and reset promptly after recovery.
   `http_route!~`. The gRPC latency SLI counts only `grpc_type="unary"`, because a
   streaming call stays open for its whole lifetime; exclude a slow-by-design
   unary method via `grpc_method!~`.
-- **Low traffic.** Below ~1 req/min, use ticket windows only or gate page rules
-  on minimum request rate (`and sum by(job) (rate(...[1h])) > 1`).
+- **Low traffic.** To page only above one request per minute, append
+  `and (sum by(job) (rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1h])) > 1/60)`
+  to the HTTP page expression. Use the same job and route selectors as the
+  SLI denominator. Prometheus reports the rate in requests per second.
 - **Labels.** Recording rules aggregate `by(job)`; add `http_route` only for
   routes that genuinely require an independent SLO. The template ships no
   Grafana JSON model because series in `service.rules.yml` (`job:slo_*`,
@@ -90,15 +116,19 @@ for the frequency and duration of those waits. For an admitted webhook with
 Expiry during a tracked request-body read returns `408 request_timeout` and
 does not count here. An access log with `termination="server_shutdown"`
 records a forced shutdown before the response head as 503 for the SLO.
-The client received no HTTP status. Correlate by `http_route`.
+The client received no HTTP status. Match the metric's `http_route` to
+`route` in the access log for the affected job, then follow `request_id`.
 
 ```promql
-sum by(http_route, http_response_status_code) (
-  rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+sum by(job, http_route, http_response_status_code) (
+  rate(http_server_request_duration_seconds_count{http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[5m]))
 ```
 
-Roll back a fresh deployment first; add replicas for shedding; for a failed
-dependency, follow its own alert.
+For shedding, check capacity. For `authentication_unavailable`, inspect
+`authn_provider_request_duration_seconds_count` by `operation` and `outcome`.
+For a route using object storage, look for `object_storage_operation_failed`
+with its `error.type` and provider request ID. Compare the start of errors
+with the deployment history.
 
 ### HTTPLatencyBudgetBurn
 
@@ -139,8 +169,9 @@ stop the process before it serves.
 
 ### ServiceTargetDown
 
-One instance has not answered a scrape for 15 minutes while the job still runs
-elsewhere. Capacity is reduced; clients are fine unless the SLO alerts fire.
+One instance has not answered a scrape for 15 minutes. Check `up` for the
+other instances of that job and look for a concurrent `ServiceDown` page to
+determine whether any scrape targets are reachable.
 Check whether the instance is wedged (no logs) or the metrics listener alone is
 unreachable (network policy, port).
 
@@ -170,10 +201,11 @@ timeout and inspect `readiness_probe_checks_total` by probe and outcome.
 
 More than 1% of the 100 ms runtime progress samples ran over 100 ms late for
 15 minutes: tasks wait that long for a worker, and request latency follows.
-`tokio_busy_ratio` near 1 means the workers are saturated; add replicas or
-raise `runtime.worker_threads` up to the CPU allocation. A low ratio with late
-samples means workers are held off the CPU: a blocking call inside a task, or
-the container's CPU limit throttling the process.
+`tokio_busy_ratio / on(job,instance) tokio_workers_count` gives the mean
+fraction of worker time spent busy. A value near 1 during the lag indicates
+little idle worker time. Compare with CPU use and container throttling
+before changing replica or thread counts. With idle worker time, inspect
+blocking calls and scheduling delays.
 `runtime_scheduler_lag_max_seconds` gives the longest single stall.
 
 A build with `RUSTFLAGS="--cfg tokio_unstable"` adds per-poll and queue detail
