@@ -848,7 +848,7 @@ async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_ready_watch_reports_a_stall_while_the_refresher_holds_a_check_in_flight() {
+async fn a_ready_watch_reports_a_stall_that_ends_in_a_timed_out_check_of_a_running_refresher() {
     let hold = Arc::new(AtomicBool::new(false));
     let readiness = Readiness::new(
         vec![Box::new(Gated {
