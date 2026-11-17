@@ -11,7 +11,7 @@ use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 
-use crate::contract::{Access, FinalizeError, Policy, layer_routes};
+use crate::contract::{Access, Policy, layer_routes};
 pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
@@ -84,18 +84,18 @@ where
 
 pub(crate) fn finalize<S>(
     contract: OpenApiRouter<S>,
+    policy: Policy,
     verifier: Verifier,
-) -> Result<Router<S>, FinalizeError>
+) -> Router<S>
 where
     S: Send + Sync + Clone + 'static,
 {
-    let policy = Policy::compile(contract.get_openapi())?;
-    Ok(layer_routes(contract, |router| {
+    layer_routes(contract, |router| {
         router.route_layer(middleware::from_fn_with_state(
             AuthState { verifier, policy },
             authenticate,
         ))
-    }))
+    })
 }
 
 #[derive(Clone)]
@@ -234,17 +234,17 @@ fn failure_response(failure: Failure) -> Response {
 
 /// bearer authentication is malformed
 #[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
+#[response(content_type = "application/problem+json", headers(("WWW-Authenticate" = String, description = "Bearer challenge with invalid_request when the Authorization header is malformed")))]
 pub struct AuthenticationMalformed(pub Problem);
 
 /// bearer authentication is required or invalid
 #[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
+#[response(content_type = "application/problem+json", headers(("WWW-Authenticate" = String, description = "Bearer challenge for missing credentials or invalid_token for an invalid token")))]
 pub struct AuthenticationUnauthorized(pub Problem);
 
 /// the verified principal lacks the operation's scopes, or the handler denied it
 #[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
+#[response(content_type = "application/problem+json", headers(("WWW-Authenticate" = String, description = "Bearer challenge with insufficient_scope when the verified principal lacks the required scopes")))]
 pub struct AuthenticationForbidden(pub Problem);
 
 /// bearer authentication trust or provider is unavailable
@@ -252,10 +252,6 @@ pub struct AuthenticationForbidden(pub Problem);
 #[response(content_type = "application/problem+json")]
 pub struct AuthenticationUnavailable(pub Problem);
 
-/// Responses every protected operation declares in addition to its own
-/// success shape. 403 is never a verification failure: it answers a
-/// verified principal that lacks the operation's scopes, or a handler's
-/// own authorization.
 #[derive(Debug, IntoResponses)]
 pub enum ProtectedOperationProblemResponses {
     #[response(status = 400)]

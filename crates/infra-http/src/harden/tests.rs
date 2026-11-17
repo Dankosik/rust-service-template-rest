@@ -293,7 +293,10 @@ async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connec
 async fn a_cancelled_body_read_does_not_turn_a_handler_timeout_into_408() {
     let handler = |context: crate::RequestContext, request: Request| async move {
         let mut body = request.into_body();
-        let read = tokio::time::timeout(Duration::from_millis(10), context.read_body(body.frame()));
+        let read = tokio::time::timeout(
+            Duration::from_millis(10),
+            context.read_body_frame(&mut body),
+        );
         assert!(read.await.is_err());
         tokio::time::sleep(Duration::from_secs(1)).await;
         drop(body);
@@ -778,7 +781,9 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     options.request_timeout = Duration::from_secs(30);
     let app = crate::HttpContract::new(routes)
         .with_probes("/")
+        .unwrap()
         .with_probes("/api")
+        .unwrap()
         .build(readiness.reader(), crate::Authentication::Public, &options)
         .unwrap();
 

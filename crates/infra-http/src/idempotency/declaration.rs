@@ -1,5 +1,6 @@
 use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
+use axum::routing::MethodFilter;
 use itertools::Itertools as _;
 use utoipa::openapi::RefOr;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
@@ -12,8 +13,6 @@ use super::openapi::{
 };
 use super::stored;
 use super::{KEY_HEADER, REPLAYED_HEADER};
-
-const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent route composition is invalid: {subject}: {rule}")]
@@ -67,6 +66,7 @@ enum Rule {
 #[derive(Debug)]
 pub(super) struct PreparedOperation {
     pub(super) id: String,
+    pub(super) method: MethodFilter,
     pub(super) fingerprint_headers: Vec<HeaderName>,
 }
 
@@ -91,9 +91,13 @@ pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, Compositio
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
-    if !SUPPORTED_IDEMPOTENCY_METHODS.contains(&method) {
-        return Err(CompositionError::new(&operation_id, Rule::Method));
-    }
+    let method = match method {
+        "POST" => MethodFilter::POST,
+        "PUT" => MethodFilter::PUT,
+        "PATCH" => MethodFilter::PATCH,
+        "DELETE" => MethodFilter::DELETE,
+        _ => return Err(CompositionError::new(&operation_id, Rule::Method)),
+    };
 
     prepare_key_parameter(operation, &operation_id)?;
     collect_fingerprint_headers(
@@ -107,6 +111,7 @@ pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, Compositio
     prepare_success_responses(operation, &operation_id)?;
     Ok(PreparedOperation {
         id: operation_id,
+        method,
         fingerprint_headers,
     })
 }
@@ -322,6 +327,18 @@ mod tests {
         routes!(create_widget)
     }
 
+    struct TestCommand;
+
+    impl crate::idempotency::FreshCommand for TestCommand {
+        fn execute(
+            self,
+            _: &mut super::super::Tx<'_>,
+        ) -> impl Future<Output = Result<super::super::ReplayableResponse, super::super::Rollback>> + Send
+        {
+            std::future::poll_fn(|_| unreachable!("offline export"))
+        }
+    }
+
     #[test]
     fn finalization_requires_effective_authentication_for_idempotent_routes() {
         let bearer = serde_json::json!([{ "bearerAuth": [] }]);
@@ -352,22 +369,18 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .security = operation_security.map(|value| serde_json::from_value(value).unwrap());
-            let mut composer = crate::idempotency::Composer::inert();
-            let contract = OpenApiRouter::with_openapi(serde_json::from_value(document).unwrap())
-                .routes(composer.route(carrier).expect("route composes"));
+            let document = OpenApiRouter::with_openapi(serde_json::from_value(document).unwrap())
+                .routes(carrier)
+                .into_openapi();
+            let contract: crate::HttpContract<()> =
+                crate::idempotency::route(document, |(): ()| async { Ok(TestCommand) }).unwrap();
 
-            let error = crate::contract::finalize_public(contract).unwrap_err();
+            let result = contract.into_openapi().map(|_| ());
             if protected {
-                assert_eq!(
-                    error,
-                    crate::FinalizeError::ProtectedOperation {
-                        path: WIDGETS.to_owned(),
-                        method: "POST".to_owned(),
-                    }
-                );
+                result.expect("protected operations can be exported offline");
             } else {
                 assert_eq!(
-                    error,
+                    result.unwrap_err(),
                     crate::FinalizeError::InvalidPolicy {
                         path: WIDGETS.to_owned(),
                         method: "POST".to_owned(),

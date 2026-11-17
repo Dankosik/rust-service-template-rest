@@ -239,7 +239,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 }
 
 pub mod responses {
-    use utoipa::{IntoResponses, OpenApi, ToResponse};
+    use utoipa::{OpenApi, ToResponse};
 
     use super::Problem;
 
@@ -255,7 +255,7 @@ pub mod responses {
 
     /// request body was not received within the request budget
     #[derive(Debug, ToResponse)]
-    #[response(content_type = "application/problem+json")]
+    #[response(content_type = "application/problem+json", headers(("Connection" = String, description = "close when the upload times out over HTTP/1.x")))]
     pub struct RequestTimeout(pub Problem);
 
     /// unexpected server failure
@@ -268,36 +268,19 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct GatewayTimeout(pub Problem);
 
-    /// The shared transport answers operations can declare without colliding
-    /// with probe-owned 503 `text/plain`.
-    /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
-    /// stay out of this group (ready already documents 503 as `text/plain`).
-    /// Header overflow is hyper-native 431 before the router, not a
-    /// `Problem`. Name this type in `responses(...)` beside the operation's
-    /// own answers; a new shared *Problem* status joins here once instead
-    /// of in every operation.
-    #[derive(Debug, IntoResponses)]
-    pub enum TransportProblemResponses {
-        #[response(status = 400)]
-        BadRequest(#[ref_response] BadRequest),
-        #[response(status = 413)]
-        RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-        #[response(status = 500)]
-        InternalServerError(#[ref_response] InternalServerError),
-    }
+    /// request admission is at capacity
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json", headers(("Retry-After" = u64, description = "seconds to wait before retrying when admission rejects the request at capacity")))]
+    pub struct AdmissionUnavailable(pub Problem);
 
-    /// Components referenced by responses rather than by a handler's `body`,
-    /// which utoipa does not collect on its own; the router seeds its
-    /// document with them. `info` is irrelevant here: the service document
-    /// keeps its own when it merges this one.
     #[derive(OpenApi)]
     #[openapi(components(
         schemas(Problem),
-        responses(BadRequest, RequestEntityTooLarge, InternalServerError
+        responses(BadRequest, RequestEntityTooLarge, RequestTimeout, GatewayTimeout,
+            InternalServerError, AdmissionUnavailable
             // template:begin authn:http-authentication-problem-components
             , crate::authn::AuthenticationMalformed, crate::authn::AuthenticationUnauthorized,
-            crate::authn::AuthenticationForbidden, crate::authn::AuthenticationUnavailable,
-            crate::authn::GatewayTimeout
+            crate::authn::AuthenticationForbidden, crate::authn::AuthenticationUnavailable
             // template:end authn:http-authentication-problem-components
         )
     ))]

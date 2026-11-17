@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 const COMMITTED: &str = include_str!("../../../api/openapi/service.yaml");
 
 const HTTP_METHODS: &[&str] = &[
-    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+    "get", "put", "post", "delete", "options", "head", "patch", "trace", "query",
 ];
 
 const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "503", "504"];
@@ -36,6 +36,13 @@ fn operations(document: &Value) -> Vec<(String, String, &Value)> {
             if let Some(operation) = item.get(*method) {
                 found.push((method.to_uppercase(), path.clone(), operation));
             }
+        }
+        if let Some(additional) = item["additionalOperations"].as_object() {
+            found.extend(
+                additional
+                    .iter()
+                    .map(|(method, operation)| (method.clone(), path.clone(), operation)),
+            );
         }
     }
     found
@@ -67,9 +74,10 @@ fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
         }
         requirement.iter().all(|(name, scopes)| {
             let scheme = &document["components"]["securitySchemes"][name];
-            scopes
-                .as_array()
-                .is_some_and(|scopes| scopes.iter().all(Value::is_string))
+            name == "bearerAuth"
+                && scopes
+                    .as_array()
+                    .is_some_and(|scopes| scopes.iter().all(Value::is_string))
                 && scheme["type"]
                     .as_str()
                     .is_some_and(|t| t.eq_ignore_ascii_case("http"))
@@ -142,6 +150,32 @@ fn document_has_the_probe_operations() {
     }
 }
 
+#[test]
+fn security_gate_checks_query_and_extension_methods() {
+    let fixture = json!({"paths": {"/v": {
+        "description": "versioned resource",
+        "query": {"security": []},
+        "additionalOperations": {"COPY": {"security": [{"otherBearer": []}]}}
+    }}, "components":{"securitySchemes":{"otherBearer":{"type":"http","scheme":"bearer"}}}});
+    let checked: Vec<_> = operations(&fixture)
+        .into_iter()
+        .map(|(method, _, operation)| {
+            (
+                method,
+                is_public(&fixture, operation),
+                uses_bearer_only(&fixture, operation),
+            )
+        })
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            ("QUERY".to_owned(), true, false),
+            ("COPY".to_owned(), false, false)
+        ]
+    );
+}
+
 // template:begin inbound-webhooks:service-webhooks-contract-test
 #[test]
 fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_contracts() {
@@ -174,12 +208,25 @@ fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_c
             "missing required {required}"
         );
     }
-    for status in ["204", "400", "404", "413", "500", "503"] {
+    for status in ["204", "400", "404", "408", "413", "500", "503", "504"] {
         assert!(
             response(&document, operation, status).is_some(),
             "webhook ingress lacks {status}"
         );
     }
+    let unavailable = response(&document, operation, "503").unwrap();
+    assert!(declares_optional_retry_after(unavailable));
+    let description = unavailable["description"].as_str().unwrap();
+    assert!(
+        description.contains("storage") && description.contains("capacity"),
+        "{description}"
+    );
+    assert!(
+        !operation["responses"]
+            .as_object()
+            .unwrap()
+            .contains_key("401")
+    );
     assert!(
         operation["responses"].get("409").is_none(),
         "authenticated webhook replays must not declare a conflict response"
@@ -229,16 +276,30 @@ fn problem_schemas_are_closed() {
 }
 
 #[test]
-fn probe_operations_declare_the_shared_problem_responses() {
+fn operations_declare_the_shared_problem_responses_and_probes_bypass_admission() {
     let document = document();
     for (method, path, operation) in operations(&document) {
-        for status in ["400", "413", "500"] {
+        for status in ["413", "500", "504"] {
             assert!(
                 has_problem_response(&document, operation, status),
                 "{method} {path} lacks the {status} problem response"
             );
         }
     }
+    let ready = &document["paths"]["/health/ready"]["get"];
+    let unavailable = response(&document, ready, "503").unwrap();
+    assert!(unavailable["content"]["text/plain"].is_object());
+    assert!(
+        unavailable["content"]
+            .get("application/problem+json")
+            .is_none()
+    );
+    assert!(!declares_optional_retry_after(unavailable));
+    assert!(
+        document["paths"]["/health/live"]["get"]["responses"]
+            .get("503")
+            .is_none()
+    );
 }
 
 // template:begin authn:service-openapi-authn-contract
@@ -266,7 +327,6 @@ fn retained_authentication_document_declares_one_bearer_default_and_public_probe
     }
 }
 // template:end authn:service-openapi-authn-contract
-// template:begin http-idempotency:service-openapi-http-idempotency-contract
 fn declares_optional_retry_after(response: &Value) -> bool {
     response["headers"].as_object().is_some_and(|headers| {
         headers.iter().any(|(name, header)| {
@@ -275,48 +335,17 @@ fn declares_optional_retry_after(response: &Value) -> bool {
     })
 }
 
-#[test]
-fn retained_idempotency_document_declares_the_family_components() {
-    let document = document();
-    let responses = &document["components"]["responses"];
-    for component in [
-        "IdempotencyBadRequest",
-        "IdempotencyRequestInProgress",
-        "IdempotencyKeyMismatch",
-        "IdempotencyUnavailable",
-    ] {
-        assert_eq!(
-            responses[component]["content"]["application/problem+json"]["schema"]["$ref"],
-            "#/components/schemas/Problem",
-            "components.responses.{component} is not a Problem response"
-        );
-    }
-    for component in ["IdempotencyRequestInProgress", "IdempotencyUnavailable"] {
-        assert!(
-            declares_optional_retry_after(&responses[component]),
-            "components.responses.{component} lacks an optional Retry-After"
-        );
-    }
-}
-
+// template:begin http-idempotency:service-openapi-http-idempotency-contract
 #[test]
 fn only_composed_operations_declare_the_idempotency_key() {
-    use infra_http::idempotency::{Activation, Composer};
-
-    let mut composer = Composer::inert();
-    let contract = service::api::contract(&mut composer).expect("contract composes");
-    let document = serde_json::to_value(contract.get_openapi()).expect("document serializes");
+    let contract = service::api::contract().expect("contract composes");
+    let served = contract.idempotent_operations();
+    let document = serde_json::to_value(contract.into_openapi().expect("valid contract"))
+        .expect("document serializes");
     let declared = operations(&document)
         .iter()
         .filter(|(_, _, operation)| declares_idempotency_key(operation))
         .count();
-    let served = match composer.finish() {
-        Activation::Inactive => 0,
-        Activation::Active {
-            operations: count, ..
-        }
-        | Activation::Unconfigured { operations: count } => count.get(),
-    };
     assert_eq!(declared, served);
 }
 
@@ -343,6 +372,7 @@ fn declares_idempotency_key(operation: &Value) -> bool {
 #[case::scoped_bearer(&json!({"security": [{"bearerAuth": ["admin"]}]}), false, true)]
 #[case::non_string_scope(&json!({"security": [{"bearerAuth": [1]}]}), false, false)]
 #[case::unknown_scheme(&json!({"security": [{"missingAuth": []}]}), false, false)]
+#[case::differently_named_bearer(&json!({"security": [{"otherBearer": []}]}), false, false)]
 #[case::unsupported_alternative(&json!({"security": [{"apiKeyAuth": []}]}), false, false)]
 #[case::unsupported_and_requirement(
     &json!({"security": [{"bearerAuth": [], "apiKeyAuth": []}]}),
@@ -357,6 +387,7 @@ fn bearer_security_alternatives_fail_closed(
     let document = json!({
         "components": {"securitySchemes": {
             "bearerAuth": {"type": "http", "scheme": "bearer"},
+            "otherBearer": {"type": "http", "scheme": "bearer"},
             "apiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
         }},
         "security": [{"bearerAuth": []}]

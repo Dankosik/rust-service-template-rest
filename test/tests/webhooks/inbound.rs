@@ -66,7 +66,10 @@ async fn unfinished_webhook_upload_returns_the_declared_timeout() {
         .expect("problem body");
     let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
     assert_eq!(problem["code"], "request_timeout");
-    let document = serde_json::to_value(router::<WebhookState>().into_openapi()).expect("document");
+    let document = infra_http::HttpContract::new(router::<WebhookState>())
+        .into_openapi()
+        .expect("valid webhook contract");
+    let document = serde_json::to_value(document).expect("document");
     assert_eq!(
         document["paths"]["/webhooks/{endpoint_id}"]["post"]["responses"]["408"]["$ref"],
         "#/components/responses/RequestTimeout"

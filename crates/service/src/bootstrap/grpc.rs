@@ -12,7 +12,6 @@ use super::background::{Background, BackgroundRegistration};
 use super::service_auth::PreparedServiceAuth;
 // template:end service-auth:bootstrap-grpc-service-auth-import
 use super::BootstrapError;
-use infra_http::Authentication;
 
 pub type GrpcRegistration = fn(
     &mut infra_grpc::Services,
@@ -31,26 +30,26 @@ pub(super) fn prepare(
     grpc: &GrpcConfig,
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
-    auth: &Authentication,
+    // template:begin grpc-authn:bootstrap-grpc-bearer-parameter
+    bearer: Option<&infra_bearerauthn::Verifier>,
+    // template:end grpc-authn:bootstrap-grpc-bearer-parameter
     // template:begin service-auth:bootstrap-grpc-service-auth-parameter
     service_auth: &PreparedServiceAuth,
     // template:end service-auth:bootstrap-grpc-service-auth-parameter
     background: &mut Background,
 ) -> Result<Prepared, BootstrapError> {
-    let authentication = match (
-        auth,
-        // template:begin service-auth:bootstrap-grpc-service-verifier
-        service_auth.verifier.as_ref(),
-        // template:end service-auth:bootstrap-grpc-service-verifier
-    ) {
-        // template:begin service-auth:bootstrap-grpc-service-tokens
-        (_, Some(verifier)) => GrpcAuthentication::ServiceTokens(verifier.clone()),
-        // template:end service-auth:bootstrap-grpc-service-tokens
-        // template:begin grpc-authn:bootstrap-grpc-bearer
-        (Authentication::Bearer(verifier), ..) => GrpcAuthentication::Bearer((**verifier).clone()),
-        // template:end grpc-authn:bootstrap-grpc-bearer
-        (Authentication::Public, ..) => GrpcAuthentication::None,
-    };
+    let authentication = GrpcAuthentication::None;
+    // template:begin grpc-authn:bootstrap-grpc-bearer
+    let authentication = bearer
+        .cloned()
+        .map_or(authentication, GrpcAuthentication::Bearer);
+    // template:end grpc-authn:bootstrap-grpc-bearer
+    // template:begin service-auth:bootstrap-grpc-service-tokens
+    let authentication = service_auth
+        .verifier
+        .clone()
+        .map_or(authentication, GrpcAuthentication::ServiceTokens);
+    // template:end service-auth:bootstrap-grpc-service-tokens
     // template:begin grpc-authn:bootstrap-grpc-verifier
     if matches!(authentication, GrpcAuthentication::None) {
         return Err(ValidationError::new(
