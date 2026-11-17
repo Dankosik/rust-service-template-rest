@@ -190,7 +190,7 @@ async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool
     let id = in_tx(&pool, async |tx| -> Result<_, Step> {
         std::assert_matches!(
             configured
-                .enqueue(tx, "parnter", body.to_vec(), "application/webhook+json")
+                .enqueue(tx, "partners", body.to_vec(), "application/webhook+json")
                 .await,
             Err(OutboundError::UnknownEndpoint)
         );
