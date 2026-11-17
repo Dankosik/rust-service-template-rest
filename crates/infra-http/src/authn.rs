@@ -10,7 +10,6 @@ use infra_bearerauthn::{
 };
 use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
-use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use utoipa::{IntoResponses, ToResponse};
 
 use crate::contract::{Access, Policy, layer_routes};
@@ -177,7 +176,6 @@ fn authorize(
         .iter()
         .any(|scopes| principal.has_scopes(scopes))
     {
-        tracing::Span::current().set_attribute("authz.reason", "insufficient_scope");
         return Err(insufficient_scope_response());
     }
     if let Some(stopped) = operation.stopped() {
@@ -196,10 +194,14 @@ fn stopped_response(stopped: Stopped) -> Response {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct InsufficientScope;
+
 fn insufficient_scope_response() -> Response {
     let mut response = Problem::new(Code::Forbidden)
         .detail(INSUFFICIENT_SCOPE_DETAIL)
         .into_response();
+    response.extensions_mut().insert(InsufficientScope);
     response.headers_mut().insert(
         WWW_AUTHENTICATE,
         axum::http::HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
