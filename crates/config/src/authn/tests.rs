@@ -42,12 +42,15 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
         audience,
         algorithms,
         ..
-    } = loaded.authn
+    } = &loaded.authn
     else {
         panic!("expected OIDC JWT configuration");
     };
     assert_eq!(audience.as_slice(), ["api-a", " api-b "]);
-    assert_eq!(algorithms, [JwtAlgorithm::Es256, JwtAlgorithm::EdDsa]);
+    assert_eq!(
+        algorithms.as_slice(),
+        [JwtAlgorithm::Es256, JwtAlgorithm::EdDsa]
+    );
 
     write(&dir, "APP__AUTHN__AUDIENCE", "conflicting");
     let conflict = load_from(&options, BUILD, environment).unwrap_err();
@@ -158,7 +161,7 @@ fn jwt_load_accepts_a_quoted_date_or_list_from_a_later_file() {
             ..LoadOptions::default()
         };
         let cfg = load_from(&options, BUILD, env(&[])).unwrap();
-        let AuthnConfig::OidcJwt { audience, .. } = cfg.authn else {
+        let AuthnConfig::OidcJwt { audience, .. } = &cfg.authn else {
             panic!("expected OIDC JWT configuration");
         };
         assert_eq!(audience.as_slice(), expected);
@@ -496,7 +499,7 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
         .unwrap();
     single.1 = literal.to_owned();
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
-    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn else {
+    let AuthnConfig::OidcIntrospection { audience, .. } = &config.authn else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(audience.as_slice(), [literal]);
@@ -511,7 +514,7 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
 
     environment.retain(|(name, _)| name != "APP__AUTHN__AUDIENCE");
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
-    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn else {
+    let AuthnConfig::OidcIntrospection { audience, .. } = &config.authn else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(audience.as_slice(), ["api-a", "api-b"]);
@@ -530,7 +533,7 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
 }
 
 #[test]
-fn introspection_environment_rejects_out_of_range_cache_settings() {
+fn introspection_environment_rejects_out_of_range_cache_settings_even_when_disabled() {
     for (variable, value, expected_key) in [
         ("APP__AUTHN__CACHE_CAPACITY", "0", "authn.cache_capacity"),
         ("APP__AUTHN__CACHE_CAPACITY", "1025", "authn.cache_capacity"),
@@ -540,7 +543,7 @@ fn introspection_environment_rejects_out_of_range_cache_settings() {
         let error = load_from(
             &LoadOptions::default(),
             BUILD,
-            introspection_environment(&[(variable, value)]),
+            introspection_environment(&[("APP__AUTHN__CACHE_ENABLED", "false"), (variable, value)]),
         )
         .unwrap_err();
         assert_matches!(
@@ -630,11 +633,11 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
         token_profile,
         jwks_uri,
         ..
-    } = jwt.authn
+    } = &jwt.authn
     else {
         panic!("expected OIDC JWT configuration");
     };
-    assert_eq!(token_profile, TokenProfile::Rfc9068);
+    assert_eq!(*token_profile, TokenProfile::Rfc9068);
     assert_eq!(jwks_uri.as_deref(), Some("https://issuer.example/keys"));
     assert!(load_from(&LoadOptions::default(), BUILD, jwt_environment(" ")).is_err());
 }
@@ -668,9 +671,9 @@ fn jwt_token_profile_in_a_file_is_public() {
         env(&[]),
     )
     .unwrap();
-    let AuthnConfig::OidcJwt { token_profile, .. } = cfg.authn else {
+    let AuthnConfig::OidcJwt { token_profile, .. } = &cfg.authn else {
         panic!("expected OIDC JWT configuration");
     };
-    assert_eq!(token_profile, TokenProfile::Rfc9068);
+    assert_eq!(*token_profile, TokenProfile::Rfc9068);
 }
 // template:end oidc-jwt:load-jwt-token-profile-file

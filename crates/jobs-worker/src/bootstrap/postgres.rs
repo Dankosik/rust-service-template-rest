@@ -5,46 +5,42 @@ use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionSettingsSou
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
-use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, RetainedCapabilities, WorkerError};
+use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
 use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
+pub(super) fn pool_config(
+    config: &WorkerConfig,
+    ordinary_jobs: bool,
+) -> Result<Option<&PostgresConfig>, WorkerError> {
+    #[allow(unused_variables, reason = "retained outbox needs a publisher")]
+    let publisher = false;
+    // template:begin outbox:worker-bootstrap-outbox-pool
+    let publisher = true;
+    // template:end outbox:worker-bootstrap-outbox-pool
+    if !ordinary_jobs && !publisher {
+        return Ok(None);
+    }
+    let postgres = config
+        .postgres
+        .as_ref()
+        .ok_or(WorkerError::PostgresDisabled)?;
+    super::jobs::validate_pool_capacity(
+        ordinary_jobs.then_some(config.jobs.max_workers),
+        publisher,
+        postgres.max_connections,
+    )?;
+    Ok(Some(postgres))
+}
+
 pub(super) async fn admit_pool(
     config: &WorkerConfig,
-    capabilities: &RetainedCapabilities,
+    postgres: &PostgresConfig,
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    #[allow(
-        unused_variables,
-        reason = "retained outbox also requires the shared pool"
-    )]
-    let needs_pool = capabilities.jobs.is_some();
-    // template:begin outbox:worker-bootstrap-outbox-pool
-    let needs_pool = true;
-    // template:end outbox:worker-bootstrap-outbox-pool
-    if !needs_pool {
-        return Ok(());
-    }
-    let Some(postgres) = &config.postgres else {
-        return Err(WorkerError::PostgresDisabled);
-    };
-    #[allow(
-        unused_variables,
-        reason = "retained outbox supplies the combined admission"
-    )]
-    let admit_inputs = || {
-        config
-            .jobs
-            .validate_pool_capacity(postgres.max_connections)
-            .map_err(WorkerError::from)
-    };
-    // template:begin outbox:worker-bootstrap-outbox-pool-inputs
-    let admit_inputs = || super::outbox::admit_pool_inputs(config, postgres, capabilities);
-    // template:end outbox:worker-bootstrap-outbox-pool-inputs
-    admit_inputs()?;
     let pool = open_pool(config, postgres, background, resources).await?;
     migrate::verify_history(&pool).await?;
     resources.pool = Some(PoolResource::Admitted(pool));
@@ -62,7 +58,11 @@ async fn open_pool(
         postgres.password_file.as_deref(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
-    let options = pool_options(postgres, postgres.max_connections, &application_name);
+    let options = pool_options(
+        postgres.session_budgets,
+        postgres.max_connections,
+        &application_name,
+    );
     let pool = infra_postgres::prepare_pool(&dsn, &options);
     resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
@@ -91,16 +91,16 @@ async fn open_pool(
     Ok(pool)
 }
 
-pub(crate) fn pool_options<'a>(
-    config: &PostgresConfig,
+pub(crate) fn pool_options(
+    session_budgets: PostgresSessionBudgets,
     max_connections: NonZeroU32,
-    application_name: &'a str,
-) -> PoolOptions<'a> {
+    application_name: &str,
+) -> PoolOptions<'_> {
     PoolOptions {
         max_connections,
         application_name,
         default_isolation: infra_postgres::Isolation::ReadCommitted,
-        session_settings_source: match config.session_budgets {
+        session_settings_source: match session_budgets {
             PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
             PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },

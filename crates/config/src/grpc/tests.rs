@@ -201,11 +201,12 @@ fn admitted_debug_names_the_mode_but_not_the_material() {
 #[test]
 fn grpc_environment_enables_an_explicit_plaintext_listener() {
     let cfg = load_env(&[
+        ("APP__APP__ENV", "local"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
     ]);
-    let grpc = cfg.grpc.unwrap();
+    let grpc = cfg.grpc.as_ref().unwrap();
     assert_eq!(grpc.addr.port(), 0);
     assert_matches!(grpc.security, GrpcListenerSecurity::Plaintext);
 }
@@ -213,6 +214,7 @@ fn grpc_environment_enables_an_explicit_plaintext_listener() {
 #[test]
 fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     let listener = [
+        ("APP__APP__ENV", "local"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
@@ -230,7 +232,7 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
         env(&[listener.as_slice(), limits.as_slice()].concat()),
     )
     .unwrap();
-    let grpc = cfg.grpc.unwrap();
+    let grpc = cfg.grpc.as_ref().unwrap();
     assert_eq!(grpc.request_timeout, Duration::from_secs(3));
     assert_eq!(grpc.in_flight_cap().map(NonZeroU32::get), Some(32));
     assert_eq!(grpc.admission_wait, Duration::from_secs(2));
@@ -280,7 +282,10 @@ fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
             ..LoadOptions::default()
         },
         BUILD,
-        env(&[("APP__GRPC__PRIVATE_KEY", "private-key-material")]),
+        env(&[
+            ("APP__APP__ENV", "local"),
+            ("APP__GRPC__PRIVATE_KEY", "private-key-material"),
+        ]),
     )
     .unwrap();
     assert!(!format!("{cfg:?}").contains("private-key-material"));

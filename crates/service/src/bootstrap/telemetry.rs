@@ -79,23 +79,22 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
 
 #[cfg(test)]
 mod tests {
-    use service_config::OtelConfig;
+    use crate::bootstrap::test_config;
 
     use super::*;
 
     #[test]
     fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {
-        let mut config = Config::default();
-        config.observability.otel = OtelConfig {
-            traces_sampler: TracesSampler::AlwaysOn,
-            traces_sampler_arg: 0.5,
-            ..OtelConfig::default()
+        let for_sampler = |sampler| {
+            test_config(&[
+                ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", sampler),
+                ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
+            ])
         };
-        let options = tracing_options(&config);
+        let options = tracing_options(&for_sampler("always_on"));
         std::assert_matches!(options.sampler, ResolvedSampler::AlwaysOn);
 
-        config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
-        let options = tracing_options(&config);
+        let options = tracing_options(&for_sampler("traceidratio"));
         std::assert_matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON
         );
     }

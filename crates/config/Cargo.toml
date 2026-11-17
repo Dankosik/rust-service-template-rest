@@ -12,6 +12,9 @@ build = "build.rs"
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 bytesize = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }

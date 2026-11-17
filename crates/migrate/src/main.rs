@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -7,7 +8,7 @@ use infra_telemetry::{
 };
 use migrate::{MIGRATOR, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, LoadOptions, MigrationConfig, process_failure};
+use service_config::{BuildInfo, LoadOptions, MigrationConfig};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -59,15 +60,15 @@ impl Failure {
 fn main() -> ExitCode {
     let started = Instant::now();
     let target = MIGRATOR.iter().map(|migration| migration.version).max();
-    let options = LoadOptions::parse_from(std::env::args_os());
+    let options = LoadOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
     let config = match service_config::load_migration(&options, BUILD_INFO) {
         Ok(config) => config,
         Err(err) => return finish_config_failure(err.to_string(), target, started),
     };
-    let level = format!("{},migrate_record=info", config.log.level);
+    let level = format!("{},migrate_record=info", config.log().level);
     let logger = match install_subscriber(&LoggingOptions {
         level: &level,
-        format: match config.log.format {
+        format: match config.log().format {
             service_config::LogFormat::Json => LoggingFormat::Json,
             service_config::LogFormat::Text => LoggingFormat::Text,
         },
@@ -100,6 +101,15 @@ fn main() -> ExitCode {
 
     let outcome = runtime.block_on(apply(&config, target));
     finish_run(Some(runtime), logger, outcome, target, started)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "terminal diagnostic when fallback logging is unavailable"
+)]
+fn process_failure(message: &dyn std::fmt::Display) -> ExitCode {
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+    ExitCode::FAILURE
 }
 
 fn finish_config_failure(message: String, target: Option<i64>, started: Instant) -> ExitCode {
@@ -168,7 +178,7 @@ fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instan
 }
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
-    let Some(postgres) = &config.postgres else {
+    let Some(postgres) = config.postgres() else {
         return Err(Failure::PostgresDisabled);
     };
     let dsn = Dsn::admit_with(
@@ -178,9 +188,9 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
     tracing::event!(
         target: "migrate_record",
         tracing::Level::INFO,
-        app.env = %config.app.env,
-        app.version = %config.app.version,
-        app.commit = %config.app.commit,
+        app.env = %config.app().env,
+        app.version = %config.app().version,
+        app.commit = %config.app().commit,
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
@@ -190,7 +200,7 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
             u64::try_from(postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
     );
-    let options = RunOptions::defaults(&dsn, &config.service_name, postgres.migration_deadline);
+    let options = RunOptions::defaults(&dsn, config.service_name(), postgres.migration_deadline);
     run_until_stop(&options).await
 }
 

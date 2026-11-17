@@ -2,26 +2,10 @@ use std::num::NonZeroU32;
 
 use infra_jobs::Engine;
 use infra_messaging::MessagingError;
-use service_config::{PostgresConfig, WorkerConfig};
 
+use super::WorkerError;
 use super::messaging::RetainedMessages;
-use super::{RetainedCapabilities, WorkerError};
 use crate::resources::Resources;
-
-pub(super) fn admit_pool_inputs(
-    config: &WorkerConfig,
-    postgres: &PostgresConfig,
-    capabilities: &RetainedCapabilities,
-) -> Result<(), WorkerError> {
-    config.jobs.validate_pool_capacity_with_outbox(
-        postgres.max_connections,
-        capabilities.jobs.is_some(),
-    )?;
-    if capabilities.messages.is_none() {
-        config.messaging.validate_producer()?;
-    }
-    Ok(())
-}
 
 pub(super) async fn publisher(
     resources: &Resources,
@@ -66,7 +50,6 @@ impl RetainedMessages {
 
 #[cfg(test)]
 mod tests {
-    use service_config::WorkerConfig;
 
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
@@ -75,7 +58,9 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
-        let config = WorkerConfig::default();
+        let config =
+            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+                .unwrap();
         let background = Background::new();
         let result = crate::bootstrap::register_capabilities(
             &config,
@@ -91,7 +76,9 @@ mod tests {
     async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
         use infra_messaging::Registry;
 
-        let config = WorkerConfig::default();
+        let config =
+            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+                .unwrap();
         let background = Background::new();
         let mut registration = crate::Registration {
             jobs: infra_jobs::KindsBuilder::new(),

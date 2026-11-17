@@ -196,12 +196,13 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         env(&[listener.as_slice(), development.as_slice()].concat()),
     )
     .unwrap();
-    let production = [("APP__APP__ENV", "production")];
-    let err = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[listener.as_slice(), production.as_slice()].concat()),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");
+    for environment in [None, Some(("APP__APP__ENV", "production"))] {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            listener.into_iter().chain(environment),
+        )
+        .unwrap_err();
+        assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");
+    }
 }

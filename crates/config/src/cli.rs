@@ -21,13 +21,12 @@ pub struct LoadOptions {
 }
 
 impl LoadOptions {
-    #[must_use]
-    pub fn parse_from<I, T>(args: I) -> Self
+    pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        <Self as Parser>::parse_from(args)
+        <Self as Parser>::try_parse_from(args)
     }
 
     pub(crate) fn files(&self) -> impl Iterator<Item = &Path> {

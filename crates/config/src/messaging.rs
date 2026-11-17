@@ -221,7 +221,7 @@ impl MessagingConfig {
         self.allow_plaintext || self.trusted_network
     }
 
-    pub fn validate_producer(&self) -> Result<(), ValidationError> {
+    pub fn producer_source_stream(&self) -> Result<&str, ValidationError> {
         if !self.is_active() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
@@ -231,11 +231,6 @@ impl MessagingConfig {
                 "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
             ));
         }
-        self.required_source_stream()?;
-        Ok(())
-    }
-
-    pub fn required_source_stream(&self) -> Result<&str, ValidationError> {
         required(
             "messaging.source_stream",
             self.source_stream.as_deref(),
@@ -243,14 +238,9 @@ impl MessagingConfig {
         )
     }
 
-    pub fn validate_consumer(&self) -> Result<(), ValidationError> {
-        self.validate_producer()?;
-        self.required_consumer_keys()?;
-        Ok(())
-    }
-
-    pub fn required_consumer_keys(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
+    pub fn consumer_keys(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
         Ok(ConsumerKeys {
+            source_stream: self.producer_source_stream()?,
             durable: required(
                 "messaging.consumer_durable",
                 self.consumer_durable.as_deref(),
@@ -354,6 +344,7 @@ pub enum MessagingCredentials {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConsumerKeys<'a> {
+    pub source_stream: &'a str,
     pub durable: &'a str,
     pub filter_subject: &'a str,
     pub dlq_subject: &'a str,
