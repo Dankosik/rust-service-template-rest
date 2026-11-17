@@ -13,11 +13,6 @@ use crate::Failure;
 use crate::call::server_stopped;
 use crate::router::reject_with_budget;
 
-pub const REFLECTION_PATHS: [&str; 2] = [
-    "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
-    "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-];
-
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
 
 pub(crate) fn strip_caller(extensions: &mut http::Extensions) {

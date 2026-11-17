@@ -13,6 +13,11 @@ use crate::protocol::{method_path, split_method_path};
 
 const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
 
+pub const REFLECTION_PATHS: [&str; 2] = [
+    "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+    "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+];
+
 #[derive(Debug, Default)]
 pub struct Services {
     pub(crate) routes: tonic::service::RoutesBuilder,
@@ -150,6 +155,9 @@ impl Services {
         reason = "only the scope and caller rules read it; the initializer removes both without bearer or service authentication"
     )]
     fn is_registered_method(&self, path: &str) -> bool {
+        if self.reflection && REFLECTION_PATHS.contains(&path) {
+            return true;
+        }
         split_method_path(path).is_some_and(|(service, method)| {
             self.names.contains(service)
                 && self
@@ -189,8 +197,7 @@ impl Services {
 
     // template:begin service-auth:grpc-services-allow-callers
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
-        let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
-        if !(self.is_registered_method(path) || reflection) {
+        if !self.is_registered_method(path) {
             return Err(Error::UnregisteredCallerRule(path.to_owned()));
         }
         if self.caller_rules.contains_key(path) {
@@ -255,4 +262,30 @@ mod tests {
         assert!(echo.contains(&("ServerStream".to_owned(), CallType::ServerStream)));
         assert!(echo.contains(&("BidiStream".to_owned(), CallType::BidiStream)));
     }
+
+    // template:begin authn:grpc-services-test-reflection-scopes
+    #[test]
+    fn reflection_scope_rules_require_registration_and_an_exact_rpc_path() {
+        let mut services = Services::new();
+        let paths = [
+            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+            "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+        ];
+        for path in paths {
+            assert_eq!(
+                services.require_scopes(path, &["reflection.read"]),
+                Err(Error::UnregisteredMethodPath(path.to_owned()))
+            );
+        }
+        services.add_reflection().unwrap();
+        for path in paths {
+            services.require_scopes(path, &["reflection.read"]).unwrap();
+        }
+        let unknown = "/grpc.reflection.v1.ServerReflection/Unknown";
+        assert_eq!(
+            services.require_scopes(unknown, &["reflection.read"]),
+            Err(Error::UnregisteredMethodPath(unknown.to_owned()))
+        );
+    }
+    // template:end authn:grpc-services-test-reflection-scopes
 }

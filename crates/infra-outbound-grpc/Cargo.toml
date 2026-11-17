@@ -42,7 +42,10 @@ tracing-opentelemetry = { workspace = true }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+grpc-contracts = { workspace = true }
 http-body-util = { workspace = true }
+infra-http = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # template:begin service-auth:outbound-grpc-service-auth-test-dependency

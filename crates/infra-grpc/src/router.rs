@@ -214,14 +214,7 @@ async fn business_call(
     )
     .await;
 
-    finish_call(
-        outcome,
-        call,
-        fallback,
-        response_guard,
-        response_deadline,
-        is_streaming,
-    )
+    finish_call(outcome, call, fallback, response_guard, response_deadline)
 }
 
 async fn open_business(
@@ -337,10 +330,6 @@ async fn health_call(
 
     let call = observe::Call::start(&methods, &request);
     let fallback = observe::propagated_parent(call.span(), request.headers());
-    let is_streaming = matches!(
-        call.call_type(),
-        Some(CallType::ServerStream | CallType::BidiStream)
-    );
     let Some(budget) = grpc_timeout(request.headers()) else {
         let response = run_in_span(next.run(request), call.span(), fallback.as_ref(), || {
             internal_status().into_http()
@@ -384,14 +373,7 @@ async fn health_call(
     )
     .await;
 
-    finish_call(
-        outcome,
-        call,
-        fallback,
-        response_guard,
-        Some(deadline),
-        is_streaming,
-    )
+    finish_call(outcome, call, fallback, response_guard, Some(deadline))
 }
 
 fn sanitize_extensions(extensions: &mut http::Extensions) {
@@ -427,7 +409,6 @@ fn finish_call(
     fallback: Option<opentelemetry::Context>,
     response_guard: DropGuard,
     response_deadline: Option<Deadline>,
-    is_streaming: bool,
 ) -> Response {
     match outcome {
         OpeningOutcome::Admitted { response, permit } => {
@@ -435,7 +416,6 @@ fn finish_call(
                 permit,
                 cancel_on_drop: Some(response_guard),
                 deadline: response_deadline,
-                watch_deadline: is_streaming && response_deadline.is_some(),
             };
             attach_server(response, call, fallback, custody).map(axum::body::Body::new)
         }

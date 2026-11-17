@@ -22,7 +22,6 @@ pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
     pub(crate) deadline: Option<Deadline>,
-    pub(crate) watch_deadline: bool,
 }
 
 pub(crate) fn deadline_status() -> tonic::Status {
@@ -239,15 +238,13 @@ where
         initial: Option<ServerOutcome>,
     ) -> Self {
         let body_ended = body.is_end_stream();
-        let watch_deadline = custody.watch_deadline;
-        let deadline = custody.deadline;
         let mut state = ServerState {
             stage: StreamStage::Active(ActiveStream {
                 body,
                 call,
                 _permit: custody.permit,
                 _cancel_on_drop: custody.cancel_on_drop,
-                deadline,
+                deadline: custody.deadline,
                 fallback,
                 waker: None,
                 map_error,
@@ -265,10 +262,9 @@ where
         if let Some(finalizer) = finalizer {
             finalizer.emit();
         }
-        let armed_deadline = if watch_deadline && matches!(state.stage, StreamStage::Active(_)) {
-            deadline
-        } else {
-            None
+        let armed_deadline = match &state.stage {
+            StreamStage::Active(active) => active.deadline,
+            StreamStage::PendingTrailers(_) | StreamStage::Closed => None,
         };
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
@@ -495,34 +491,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unwatched_calls_skip_spawning_while_still_enforcing_deadlines_on_poll() {
-        let source = ProbeBody::pending();
-        let dropped = Arc::clone(&source.dropped);
-        let mut body = start_response(
-            source,
-            ServerCustody {
-                permit: None,
-                cancel_on_drop: None,
-                deadline: Some(budget_deadline()),
-                watch_deadline: false,
-            },
-        );
-        assert!(body.timer.is_none());
-        tokio::time::advance(BUDGET).await;
-        let trailers = body
-            .frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_trailers()
-            .unwrap();
-        let status = tonic::Status::from_header_map(&trailers).unwrap();
-        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
-        assert!(dropped.load(Ordering::SeqCst));
-        assert!(body.frame().await.is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn watched_deadline_releases_unpolled_resources_and_joins_its_timer() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -538,7 +506,6 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(token.clone().drop_guard()),
                 deadline: Some(budget_deadline()),
-                watch_deadline: true,
             },
         );
         let timer = body.timer.take().unwrap();
@@ -591,7 +558,6 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
                 deadline: Some(budget_deadline()),
-                watch_deadline: true,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -627,7 +593,6 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(cancellation.clone().drop_guard()),
                 deadline: Some(budget_deadline()),
-                watch_deadline: true,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -673,7 +638,6 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
                 deadline: Some(budget_deadline()),
-                watch_deadline: true,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -722,7 +686,6 @@ mod tests {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                     cancel_on_drop: None,
                     deadline: Some(budget_deadline()),
-                    watch_deadline: true,
                 },
             )
         };

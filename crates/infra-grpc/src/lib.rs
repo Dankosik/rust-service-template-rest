@@ -23,7 +23,8 @@ pub use error::{Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;
 pub use router::{Limits, ResponseContext, router, server_options};
 // template:begin service-auth:grpc-service-auth-exports
-pub use service_auth::{Caller, REFLECTION_PATHS};
+pub use service_auth::Caller;
+pub use services::REFLECTION_PATHS;
 // template:end service-auth:grpc-service-auth-exports
 pub use services::Services;
 pub use status::{ERROR_DOMAIN, Failure};

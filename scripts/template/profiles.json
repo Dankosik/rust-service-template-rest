@@ -298,9 +298,7 @@
     ]
   },
   "grpc-client-tests": {
-    "remove_when_unselected": [
-      "crates/infra-grpc/tests/client_status.rs"
-    ]
+    "remove_when_unselected": []
   },
   "postgres-grpc-consumers": {
     "remove_when_unselected": []
