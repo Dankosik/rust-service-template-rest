@@ -1,3 +1,4 @@
+use operation_context::OperationContext;
 use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
@@ -321,6 +322,7 @@ fn assert_exchange(
     reason = "one sequential authentication scenario keeps socket identity, pending-password transitions, and panic-safe fixture cleanup together"
 )]
 async fn replacement_password_is_authenticated_on_retained_and_new_connections() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let logs = CapturedLogs::default();
@@ -403,7 +405,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
             Outcome::Accepted,
         );
         namespace
-            .set(&key, b"kept", Duration::from_mins(1))
+            .set(&caller, &key, b"kept", Duration::from_mins(1))
             .await
             .expect("initial authenticated SET");
 
@@ -496,7 +498,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
         assert_ne!(reopened.connection, first.connection);
         assert_eq!(
             namespace
-                .get(&key)
+                .get(&caller, &key)
                 .await
                 .expect("GET on replacement connection"),
             Some(b"kept".to_vec())

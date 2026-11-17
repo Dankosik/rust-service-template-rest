@@ -7,6 +7,7 @@
 #[path = "support/valkey_auth.rs"]
 mod valkey_auth;
 
+use operation_context::OperationContext;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -284,38 +285,41 @@ impl ClientIdentity {
 
 #[tokio::test]
 async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
+    let caller = OperationContext::unbounded();
     let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let alpha = cache.namespace(namespace!("alpha"));
     let beta = cache.namespace(namespace!("beta"));
     for key in [unique_key(), format!("{}:\0\r\nюникод", unique_key())] {
-        assert_eq!(alpha.get(&key).await.unwrap(), None);
+        assert_eq!(alpha.get(&caller, &key).await.unwrap(), None);
         alpha
-            .set(&key, b"value", Duration::from_secs(30))
+            .set(&caller, &key, b"value", Duration::from_secs(30))
             .await
             .unwrap();
         assert_eq!(
-            alpha.get(&key).await.unwrap().as_deref(),
+            alpha.get(&caller, &key).await.unwrap().as_deref(),
             Some(&b"value"[..])
         );
-        assert_eq!(beta.get(&key).await.unwrap(), None);
-        alpha.delete(&key).await.unwrap();
-        assert_eq!(alpha.get(&key).await.unwrap(), None);
-        alpha.delete(&key).await.unwrap();
+        assert_eq!(beta.get(&caller, &key).await.unwrap(), None);
+        alpha.delete(&caller, &key).await.unwrap();
+        assert_eq!(alpha.get(&caller, &key).await.unwrap(), None);
+        alpha.delete(&caller, &key).await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn a_ttl_that_overflows_server_time_is_invalid_and_preserves_the_value() {
+    let caller = OperationContext::unbounded();
     let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let namespace = cache.namespace(namespace!("ttl"));
     let key = unique_key();
     namespace
-        .set(&key, b"original", Duration::from_secs(30))
+        .set(&caller, &key, b"original", Duration::from_secs(30))
         .await
         .unwrap();
     assert_eq!(
         namespace
             .set(
+                &caller,
                 &key,
                 b"replacement",
                 Duration::from_millis(i64::MAX.cast_unsigned())
@@ -324,27 +328,28 @@ async fn a_ttl_that_overflows_server_time_is_invalid_and_preserves_the_value() {
         Err(infra_cache::SetError::InvalidTtl)
     );
     assert_eq!(
-        namespace.get(&key).await.unwrap().as_deref(),
+        namespace.get(&caller, &key).await.unwrap().as_deref(),
         Some(&b"original"[..])
     );
 }
 
 #[tokio::test]
 async fn a_short_ttl_expires() {
+    let caller = OperationContext::unbounded();
     let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let namespace = cache.namespace(namespace!("ttl"));
     let key = unique_key();
     namespace
-        .set(&key, b"soon", Duration::from_millis(200))
+        .set(&caller, &key, b"soon", Duration::from_millis(200))
         .await
         .unwrap();
     assert_eq!(
-        namespace.get(&key).await.unwrap().as_deref(),
+        namespace.get(&caller, &key).await.unwrap().as_deref(),
         Some(&b"soon"[..])
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        if namespace.get(&key).await.unwrap().is_none() {
+        if namespace.get(&caller, &key).await.unwrap().is_none() {
             break;
         }
         assert!(Instant::now() < deadline, "ttl did not expire");
@@ -354,6 +359,7 @@ async fn a_short_ttl_expires() {
 
 #[tokio::test]
 async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     #[expect(
@@ -367,7 +373,7 @@ async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT).await;
     let namespace = cache.namespace(namespace!("down"));
     let started = Instant::now();
-    let err = namespace.get(&unique_key()).await.unwrap_err();
+    let err = namespace.get(&caller, &unique_key()).await.unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
     assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
@@ -379,6 +385,7 @@ async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
 
 #[tokio::test]
 async fn a_silent_server_times_out_within_the_command_bound() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("silent bind");
@@ -397,7 +404,7 @@ async fn a_silent_server_times_out_within_the_command_bound() {
     let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT).await;
     let namespace = cache.namespace(namespace!("silent"));
     let started = Instant::now();
-    let err = namespace.get(&unique_key()).await.unwrap_err();
+    let err = namespace.get(&caller, &unique_key()).await.unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
     assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
@@ -406,6 +413,7 @@ async fn a_silent_server_times_out_within_the_command_bound() {
 
 #[tokio::test]
 async fn a_proxy_outage_degrades_and_recovery_hits_again() {
+    let caller = OperationContext::unbounded();
     let upstream = upstream_addr(&cache_url());
     let mut proxy = Proxy::plain(upstream).await;
     let cache = connect_url(
@@ -416,20 +424,26 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
     let namespace = cache.namespace(namespace!("proxy"));
     let key = unique_key();
     namespace
-        .set(&key, b"kept", Duration::from_secs(30))
+        .set(&caller, &key, b"kept", Duration::from_secs(30))
         .await
         .unwrap();
     assert_eq!(
-        namespace.get(&key).await.unwrap().as_deref(),
+        namespace.get(&caller, &key).await.unwrap().as_deref(),
         Some(&b"kept"[..])
     );
     proxy.stop().await;
-    let err = namespace.get(&key).await.unwrap_err();
+    let err = namespace.get(&caller, &key).await.unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
     proxy.restart_plain(upstream).await;
     let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
-        if namespace.get(&key).await.unwrap_or(None).as_deref() == Some(&b"kept"[..]) {
+        if namespace
+            .get(&caller, &key)
+            .await
+            .unwrap_or(None)
+            .as_deref()
+            == Some(&b"kept"[..])
+        {
             break;
         }
         assert!(Instant::now() < deadline, "cache did not recover");
@@ -439,6 +453,7 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
 
 #[tokio::test]
 async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
+    let caller = OperationContext::unbounded();
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
@@ -453,17 +468,18 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
     let namespace = cache.namespace(namespace!("tls"));
     let key = unique_key();
     namespace
-        .set(&key, b"sealed", Duration::from_secs(30))
+        .set(&caller, &key, b"sealed", Duration::from_secs(30))
         .await
         .unwrap();
     assert_eq!(
-        namespace.get(&key).await.unwrap().as_deref(),
+        namespace.get(&caller, &key).await.unwrap().as_deref(),
         Some(&b"sealed"[..])
     );
 }
 
 #[tokio::test]
 async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
+    let caller = OperationContext::unbounded();
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
@@ -478,7 +494,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     let namespace = cache.namespace(namespace!("tls_endpoint"));
     let key = unique_key();
     namespace
-        .set(&key, b"kept", Duration::from_secs(30))
+        .set(&caller, &key, b"kept", Duration::from_secs(30))
         .await
         .expect("initial TLS write");
 
@@ -493,7 +509,13 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
 
     let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
-        if namespace.get(&key).await.unwrap_or(None).as_deref() == Some(&b"kept"[..]) {
+        if namespace
+            .get(&caller, &key)
+            .await
+            .unwrap_or(None)
+            .as_deref()
+            == Some(&b"kept"[..])
+        {
             break;
         }
         assert!(
@@ -511,6 +533,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     reason = "test-owned CA rotation replaces an existing fixture file before rebuilding the cache"
 )]
 async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
+    let caller = OperationContext::unbounded();
     let first = TlsMaterial::new("localhost");
     let ca = write_pem(&first.root);
     let upstream = upstream_addr(&cache_url());
@@ -525,7 +548,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
     let namespace = cache.namespace(namespace!("tls_rebuild"));
     let key = unique_key();
     namespace
-        .set(&key, b"kept", Duration::from_secs(30))
+        .set(&caller, &key, b"kept", Duration::from_secs(30))
         .await
         .expect("initial TLS write");
 
@@ -538,7 +561,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         .await;
 
     std::assert_matches!(
-        namespace.get(&key).await,
+        namespace.get(&caller, &key).await,
         Err(OperationError::Unavailable),
         "the constructed client must retain its original CA"
     );
@@ -552,7 +575,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
     assert_eq!(
         rebuilt
             .namespace(namespace!("tls_rebuild"))
-            .get(&key)
+            .get(&caller, &key)
             .await
             .unwrap()
             .as_deref(),
@@ -563,6 +586,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
 
 #[tokio::test]
 async fn an_untrusted_ca_is_unavailable() {
+    let caller = OperationContext::unbounded();
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(new_issuer().der());
     let upstream = upstream_addr(&cache_url());
@@ -576,7 +600,7 @@ async fn an_untrusted_ca_is_unavailable() {
     .expect("admit untrusted CA file");
     let err = cache
         .namespace(namespace!("tls"))
-        .get(&unique_key())
+        .get(&caller, &unique_key())
         .await
         .unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
@@ -584,6 +608,7 @@ async fn an_untrusted_ca_is_unavailable() {
 
 #[tokio::test]
 async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
+    let caller = OperationContext::unbounded();
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
@@ -602,17 +627,18 @@ async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
     let namespace = cache.namespace(namespace!("mtls"));
     let key = unique_key();
     namespace
-        .set(&key, b"mutual", Duration::from_secs(30))
+        .set(&caller, &key, b"mutual", Duration::from_secs(30))
         .await
         .unwrap();
     assert_eq!(
-        namespace.get(&key).await.unwrap().as_deref(),
+        namespace.get(&caller, &key).await.unwrap().as_deref(),
         Some(&b"mutual"[..])
     );
 }
 
 #[tokio::test]
 async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one() {
+    let caller = OperationContext::unbounded();
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
@@ -627,7 +653,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
     .expect("admit TLS without a client certificate");
     let err = cache
         .namespace(namespace!("mtls"))
-        .get(&unique_key())
+        .get(&caller, &unique_key())
         .await
         .unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
