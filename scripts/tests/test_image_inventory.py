@@ -292,7 +292,14 @@ class Inventory(unittest.TestCase):
         self.run_check()
         for old, new, refusal in (
             ('"$@"', '"$*"', "unsupported auditable build wrapper"),
+            ('"$@"', "'$@'", "unsupported auditable build wrapper"),
+            ('"$@"', "$@", "unsupported auditable build wrapper"),
             ("esac && build &&", "esac && true &&", "unsupported auditable build wrapper"),
+            (
+                "train) build --target-dir /pgo/target ;;",
+                "train) true;case x in x) true ;; esac && build && true ;;",
+                "unsupported auditable build wrapper",
+            ),
             ('--bin "${SERVICE_BIN}"', "--bin wrong-binary", "does not select an admitted auditable binary output"),
         ):
             with self.subTest(mutation=new):

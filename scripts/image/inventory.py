@@ -114,10 +114,15 @@ def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None
             if parts[1:4] == ["cargo", "auditable", "build"]:
                 command = parts[4 : parts.index("&&")] if "&&" in parts else parts[4:]
             elif parts[1:6] == ["build()", "{", "cargo", "auditable", "build"]:
+                quoted = shlex.split(line, posix=False)
+                lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+                lexer.whitespace_split = True
+                shell = list(lexer)
                 if (
-                    parts[12:18] != ["$@;", "}", "&&", "case", "${PGO}", "in"]
-                    or "esac" not in parts
-                    or parts[parts.index("esac") + 1 : parts.index("esac") + 4] != ["&&", "build", "&&"]
+                    quoted[12:19] != ['"$@"', ";", "}", "&&", "case", '"${PGO}"', "in"]
+                    or shell.count("case") != 1
+                    or shell.count("esac") != 1
+                    or shell[shell.index("esac") + 1 : shell.index("esac") + 4] != ["&&", "build", "&&"]
                 ):
                     raise Refusal(f"{path}: unsupported auditable build wrapper in {stage}")
                 command = parts[6:12]
