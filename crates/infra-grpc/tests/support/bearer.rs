@@ -56,6 +56,7 @@ fn jwt_token(scoped: bool) -> &'static str {
 }
 // template:end oidc-jwt:grpc-transport-test-jwt-token
 
+#[derive(Default)]
 pub(super) struct BearerFixture {
     // template:begin oidc-introspection:grpc-transport-test-provider-field
     pub(super) provider: Option<ProviderFixture>,
@@ -81,17 +82,8 @@ impl BearerFixture {
             }
             // template:end oidc-introspection:grpc-transport-test-bearer-fixture-introspection
             // template:begin oidc-jwt:grpc-transport-test-bearer-fixture-jwt-arm
-            BearerMode::Jwt => (
-                JwtFixture::shared().verifier(),
-                Self {
-                    // template:end oidc-jwt:grpc-transport-test-bearer-fixture-jwt-arm
-                    // template:begin oidc-introspection:grpc-transport-test-bearer-fixture-no-provider
-                    provider: None,
-                    // template:end oidc-introspection:grpc-transport-test-bearer-fixture-no-provider
-                    // template:begin oidc-jwt:grpc-transport-test-bearer-fixture-jwt-arm-close
-                },
-            ),
-            // template:end oidc-jwt:grpc-transport-test-bearer-fixture-jwt-arm-close
+            BearerMode::Jwt => (JwtFixture::shared().verifier(), Self::default()),
+            // template:end oidc-jwt:grpc-transport-test-bearer-fixture-jwt-arm
         }
     }
 
