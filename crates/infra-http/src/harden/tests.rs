@@ -51,7 +51,11 @@ fn app(options: &HardenOptions) -> Router {
         .route("/ok", get(handler_1))
         .route("/slow", get(handler_2))
         .route("/panic", get(handler_3))
-        .route("/echo", post(handler_4));
+        .route("/echo", post(handler_4))
+        .route(
+            "/small-echo",
+            post(handler_4).layer(DefaultBodyLimit::max(4)),
+        );
     harden(routes, options)
 }
 
@@ -404,14 +408,25 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
         body_json(response).await["code"],
         "request_entity_too_large"
     );
+}
 
-    let small = HttpRequest::builder()
-        .method(Method::POST)
-        .uri("/echo")
-        .body(Body::from("hello"))
-        .unwrap();
-    let response = app(&options()).oneshot(small).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+#[tokio::test]
+async fn extractors_accept_the_configured_ceiling_and_honor_a_lower_route_limit() {
+    let options = HardenOptions {
+        max_body_bytes: 2 * 1024 * 1024 + 1,
+        ..options()
+    };
+    let app = app(&options);
+    for (path, size, status) in [
+        ("/echo", options.max_body_bytes, StatusCode::OK),
+        ("/small-echo", 5, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let request = HttpRequest::post(path)
+            .body(Body::from("x".repeat(size)))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -436,7 +451,7 @@ async fn handler_413_preserves_its_body_and_headers() {
     )]
     let routes = Router::new().route("/upload", post(handler));
     let response = harden(routes, &options())
-        .oneshot(request(Method::POST, "/upload"))
+        .oneshot(HttpRequest::post("/upload").body(Body::from("ok")).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
