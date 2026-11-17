@@ -11,7 +11,7 @@ use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::Mutex;
 use redis::aio::MultiplexedConnection;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -132,6 +132,10 @@ struct Generation {
 }
 
 impl Generation {
+    fn cooldown_error(&self) -> Option<ErrorType> {
+        (Instant::now() < self.cooldown_until).then_some(ErrorType::Io)
+    }
+
     async fn reserve(&self) -> Result<OwnedSemaphorePermit, ErrorType> {
         self.caller_capacity
             .clone()
@@ -150,24 +154,6 @@ impl AbandonedReply {
     async fn wait(self) {
         let _reservation = self.reservation;
         self.reply.await;
-    }
-}
-
-pub(crate) struct CommandScope {
-    pub(crate) context: OperationContext,
-}
-
-impl CommandScope {
-    pub(crate) fn under(parent: &OperationContext, command_timeout: Duration) -> Self {
-        Self {
-            context: parent.child(command_timeout),
-        }
-    }
-
-    pub(crate) fn standalone(command_timeout: Duration) -> Self {
-        Self {
-            context: OperationContext::with_timeout(command_timeout),
-        }
     }
 }
 
@@ -311,11 +297,9 @@ impl Shared {
         generation.retired.cancel();
         if matches!(&**self.state.load(), State::Connected(current) if Arc::ptr_eq(current, generation))
         {
-            let next = if Instant::now() < generation.cooldown_until {
-                State::SetupFailed(ErrorType::Io)
-            } else {
-                State::Connecting
-            };
+            let next = generation
+                .cooldown_error()
+                .map_or(State::Connecting, State::SetupFailed);
             self.state.store(Arc::new(next));
             self.retirements.increment(1);
         }
@@ -362,7 +346,7 @@ impl Shared {
             State::Closed => Some(Err(ErrorType::Io)),
             State::Connected(current) => {
                 if current.retired.is_cancelled() {
-                    (Instant::now() < current.cooldown_until).then_some(Err(ErrorType::Io))
+                    current.cooldown_error().map(Err)
                 } else {
                     Some(Ok(current.clone()))
                 }
@@ -418,9 +402,8 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
         &self,
         command: redis::Cmd,
-        scope: &CommandScope,
+        context: &OperationContext,
     ) -> Result<T, CommandError> {
-        let context = &scope.context;
         context.check().map_err(CommandError::Stopped)?;
         let _slot = self.claim_slot()?;
         let generation = tokio::select! {
@@ -465,27 +448,15 @@ impl Link {
         self.shared.acquire().await.map(drop)
     }
 
-    fn claim_slot(&self) -> Result<SlotGuard<'_>, ErrorType> {
+    fn claim_slot(&self) -> Result<impl Drop + '_, ErrorType> {
         let permit = self.application_slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
         })?;
         self.commands_in_flight.increment(1.0);
-        Ok(SlotGuard {
-            permit,
-            gauge: self.commands_in_flight.clone(),
-        })
-    }
-}
-
-struct SlotGuard<'a> {
-    permit: SemaphorePermit<'a>,
-    gauge: Gauge,
-}
-
-impl Drop for SlotGuard<'_> {
-    fn drop(&mut self) {
-        self.gauge.decrement(1.0);
+        Ok(std::mem::DropGuard::new(permit, |_permit| {
+            self.commands_in_flight.decrement(1.0);
+        }))
     }
 }
 
