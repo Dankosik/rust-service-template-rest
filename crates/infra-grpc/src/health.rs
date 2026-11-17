@@ -38,11 +38,7 @@ impl Health for Adapter {
         if !self.known(service) {
             return Err(Status::not_found("service not registered"));
         }
-        let status = if self.readiness.is_ready() {
-            ServingStatus::Serving
-        } else {
-            ServingStatus::NotServing
-        };
+        let status = serving(self.readiness.is_ready());
         Ok(Response::new(response(status)))
     }
 
@@ -65,17 +61,13 @@ fn watch(
     async_stream::stream! {
         if !known {
             yield Ok(response(ServingStatus::ServiceUnknown));
-            reader.wait_for_drain().await;
+            reader.wait_for_drain_or_owner_drop().await;
             return;
         }
         let mut sent = None;
         loop {
             let draining = reader.is_draining();
-            let status = if !draining && reader.is_ready() {
-                ServingStatus::Serving
-            } else {
-                ServingStatus::NotServing
-            };
+            let status = serving(reader.is_ready());
             if sent != Some(status) {
                 sent = Some(status);
                 yield Ok(response(status));
@@ -84,6 +76,14 @@ fn watch(
                 break;
             }
         }
+    }
+}
+
+fn serving(ready: bool) -> ServingStatus {
+    if ready {
+        ServingStatus::Serving
+    } else {
+        ServingStatus::NotServing
     }
 }
 

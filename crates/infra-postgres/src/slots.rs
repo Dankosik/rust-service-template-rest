@@ -23,14 +23,14 @@ struct State {
     free: usize,
     next_waiter: u64,
     probes: BTreeMap<u64, oneshot::Sender<()>>,
-    waiters: BTreeMap<u64, oneshot::Sender<()>>,
-    waiters_since: Option<Instant>,
+    regular_waiters: BTreeMap<u64, oneshot::Sender<()>>,
+    regular_waiters_since: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Queue {
-    Probes,
-    Waiters,
+pub(super) enum Queue {
+    Probe,
+    Regular,
 }
 
 #[derive(Debug)]
@@ -44,8 +44,8 @@ impl Slots {
                 free: capacity,
                 next_waiter: 0,
                 probes: BTreeMap::new(),
-                waiters: BTreeMap::new(),
-                waiters_since: None,
+                regular_waiters: BTreeMap::new(),
+                regular_waiters_since: None,
             }),
         })
     }
@@ -56,15 +56,7 @@ impl Slots {
         Some(Slot(Arc::clone(self)))
     }
 
-    pub(crate) async fn take(self: &Arc<Self>) -> Slot {
-        self.wait(Queue::Waiters).await
-    }
-
-    pub(crate) async fn take_probe(self: &Arc<Self>) -> Slot {
-        self.wait(Queue::Probes).await
-    }
-
-    async fn wait(self: &Arc<Self>, queue: Queue) -> Slot {
+    pub(super) async fn take(self: &Arc<Self>, queue: Queue) -> Slot {
         let (id, granted) = {
             let mut state = self.state.lock();
             if let Some(free) = state.free.checked_sub(1) {
@@ -75,14 +67,14 @@ impl Slots {
             state.next_waiter += 1;
             let (grant, granted) = oneshot::channel();
             match queue {
-                Queue::Probes => {
+                Queue::Probe => {
                     state.probes.insert(id, grant);
                 }
-                Queue::Waiters => {
-                    if state.waiters.is_empty() {
-                        state.waiters_since = Some(Instant::now());
+                Queue::Regular => {
+                    if state.regular_waiters.is_empty() {
+                        state.regular_waiters_since = Some(Instant::now());
                     }
-                    state.waiters.insert(id, grant);
+                    state.regular_waiters.insert(id, grant);
                 }
             }
             (id, granted)
@@ -109,15 +101,15 @@ impl Slots {
         let now = Instant::now();
         loop {
             let newest_first = state
-                .waiters_since
+                .regular_waiters_since
                 .is_some_and(|since| now.saturating_duration_since(since) > STANDING_AFTER);
             let next = if newest_first {
-                state.waiters.pop_last()
+                state.regular_waiters.pop_last()
             } else {
-                state.waiters.pop_first()
+                state.regular_waiters.pop_first()
             };
-            if state.waiters.is_empty() {
-                state.waiters_since = None;
+            if state.regular_waiters.is_empty() {
+                state.regular_waiters_since = None;
             }
             let Some((_, grant)) = next else {
                 state.free += 1;
@@ -146,11 +138,11 @@ impl Drop for Wait<'_> {
         let queued = {
             let mut state = self.slots.state.lock();
             match self.queue {
-                Queue::Probes => state.probes.remove(&self.id).is_some(),
-                Queue::Waiters => {
-                    let queued = state.waiters.remove(&self.id).is_some();
-                    if state.waiters.is_empty() {
-                        state.waiters_since = None;
+                Queue::Probe => state.probes.remove(&self.id).is_some(),
+                Queue::Regular => {
+                    let queued = state.regular_waiters.remove(&self.id).is_some();
+                    if state.regular_waiters.is_empty() {
+                        state.regular_waiters_since = None;
                     }
                     queued
                 }
@@ -183,7 +175,7 @@ mod tests {
     async fn a_free_slot_is_taken_without_waiting() {
         let slots = Slots::new(2);
         let first = slots.try_take();
-        let second = poll(pin!(slots.take()));
+        let second = poll(pin!(slots.take(Queue::Regular)));
         assert!(first.is_some());
         assert!(second.is_ready());
         assert!(slots.try_take().is_none());
@@ -193,8 +185,8 @@ mod tests {
     async fn a_young_queue_is_served_in_arrival_order() {
         let slots = Slots::new(1);
         let held = slots.try_take();
-        let mut older = pin!(slots.take());
-        let mut newer = pin!(slots.take());
+        let mut older = pin!(slots.take(Queue::Regular));
+        let mut newer = pin!(slots.take(Queue::Regular));
         assert!(poll(older.as_mut()).is_pending());
         assert!(poll(newer.as_mut()).is_pending());
 
@@ -208,10 +200,10 @@ mod tests {
     async fn a_standing_queue_serves_the_newest_waiter_first() {
         let slots = Slots::new(1);
         let held = slots.try_take();
-        let mut older = pin!(slots.take());
+        let mut older = pin!(slots.take(Queue::Regular));
         assert!(poll(older.as_mut()).is_pending());
         tokio::time::advance(STANDING_AFTER + Duration::from_millis(1)).await;
-        let mut newer = pin!(slots.take());
+        let mut newer = pin!(slots.take(Queue::Regular));
         assert!(poll(newer.as_mut()).is_pending());
 
         drop(held);
@@ -229,12 +221,12 @@ mod tests {
         let slots = Slots::new(1);
         let held = slots.try_take();
         {
-            let mut gone = pin!(slots.take());
+            let mut gone = pin!(slots.take(Queue::Regular));
             assert!(poll(gone.as_mut()).is_pending());
             tokio::time::advance(STANDING_AFTER * 2).await;
         }
-        let mut older = pin!(slots.take());
-        let mut newer = pin!(slots.take());
+        let mut older = pin!(slots.take(Queue::Regular));
+        let mut newer = pin!(slots.take(Queue::Regular));
         assert!(poll(older.as_mut()).is_pending());
         assert!(poll(newer.as_mut()).is_pending());
 
@@ -248,7 +240,7 @@ mod tests {
         let slots = Slots::new(1);
         let held = slots.try_take();
         {
-            let mut abandoned = pin!(slots.take());
+            let mut abandoned = pin!(slots.take(Queue::Regular));
             assert!(poll(abandoned.as_mut()).is_pending());
         }
 
@@ -261,9 +253,9 @@ mod tests {
     async fn a_slot_granted_to_a_wait_dropped_unpolled_is_passed_on() {
         let slots = Slots::new(1);
         let held = slots.try_take();
-        let mut next = pin!(slots.take());
+        let mut next = pin!(slots.take(Queue::Regular));
         {
-            let mut granted_then_dropped = pin!(slots.take());
+            let mut granted_then_dropped = pin!(slots.take(Queue::Regular));
             assert!(poll(granted_then_dropped.as_mut()).is_pending());
             assert!(poll(next.as_mut()).is_pending());
             drop(held);
@@ -276,13 +268,13 @@ mod tests {
     async fn probe_waiters_precede_standing_newest_first_waiters_and_never_strand_slots() {
         let slots = Slots::new(1);
         let held = slots.try_take();
-        let mut oldest = pin!(slots.take());
+        let mut oldest = pin!(slots.take(Queue::Regular));
         assert!(poll(oldest.as_mut()).is_pending());
         tokio::time::advance(STANDING_AFTER + Duration::from_millis(1)).await;
-        let mut probe = pin!(slots.take_probe());
+        let mut probe = pin!(slots.take(Queue::Probe));
         assert!(poll(probe.as_mut()).is_pending());
-        let mut newer = pin!(slots.take());
-        let mut newest = pin!(slots.take());
+        let mut newer = pin!(slots.take(Queue::Regular));
+        let mut newest = pin!(slots.take(Queue::Regular));
         assert!(poll(newer.as_mut()).is_pending());
         assert!(poll(newest.as_mut()).is_pending());
 
@@ -296,11 +288,11 @@ mod tests {
         };
 
         {
-            let mut abandoned_probe = pin!(slots.take_probe());
+            let mut abandoned_probe = pin!(slots.take(Queue::Probe));
             assert!(poll(abandoned_probe.as_mut()).is_pending());
         }
         {
-            let mut granted_then_dropped_probe = pin!(slots.take_probe());
+            let mut granted_then_dropped_probe = pin!(slots.take(Queue::Probe));
             assert!(poll(granted_then_dropped_probe.as_mut()).is_pending());
             drop(probe_slot);
         }

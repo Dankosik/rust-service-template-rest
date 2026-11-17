@@ -98,9 +98,9 @@ const READY_METRIC: &str = "readiness_ready";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
-    #[error("refresh interval must be between 1ms and 1h, got {0:?}")]
+    #[error("refresh interval must be between {min:?} and {max:?}, got {0:?}", min = RefreshPolicy::MIN_DURATION, max = RefreshPolicy::MAX_DURATION)]
     Interval(Duration),
-    #[error("probe budget must be between 1ms and 1h, got {0:?}")]
+    #[error("probe budget must be between {min:?} and {max:?}, got {0:?}", min = RefreshPolicy::MIN_DURATION, max = RefreshPolicy::MAX_DURATION)]
     ProbeBudget(Duration),
 }
 
@@ -112,8 +112,8 @@ pub struct RefreshPolicy {
 }
 
 impl RefreshPolicy {
-    pub const MIN_DURATION: Duration = Duration::from_millis(1);
-    pub const MAX_DURATION: Duration = Duration::from_hours(1);
+    const MIN_DURATION: Duration = Duration::from_millis(1);
+    const MAX_DURATION: Duration = Duration::from_hours(1);
 
     pub const fn try_new(
         interval: Duration,
@@ -133,21 +133,6 @@ impl RefreshPolicy {
             probe_budget,
             failure_threshold,
         })
-    }
-
-    #[must_use]
-    pub const fn interval(&self) -> Duration {
-        self.interval
-    }
-
-    #[must_use]
-    pub const fn probe_budget(&self) -> Duration {
-        self.probe_budget
-    }
-
-    #[must_use]
-    pub const fn failure_threshold(&self) -> NonZeroU32 {
-        self.failure_threshold
     }
 
     #[must_use]
@@ -193,6 +178,10 @@ struct Check {
 }
 
 impl Check {
+    fn is_ready_at(&self, now: Instant, stale_after: Duration) -> bool {
+        self.verdict.is_ok() && self.is_fresh_at(now, stale_after)
+    }
+
     fn is_fresh_at(&self, now: Instant, stale_after: Duration) -> bool {
         now.duration_since(self.at) <= stale_after
     }
@@ -304,8 +293,8 @@ impl Readiness {
         self.tx.send_if_modified(|state| {
             let at = Instant::now();
             let previous = state.last_check.as_ref();
-            let was_ready = !state.draining
-                && previous.is_some_and(|p| p.verdict.is_ok() && p.is_fresh_at(at, stale_after));
+            let was_ready =
+                !state.draining && previous.is_some_and(|check| check.is_ready_at(at, stale_after));
             let (next, absorbed) =
                 apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
             if !state.draining {
@@ -418,7 +407,7 @@ fn apply_failure_threshold(
                 .map_or(0, |p| p.consecutive_failures)
                 .saturating_add(1);
             let was_published_ready =
-                previous.is_some_and(|p| p.verdict.is_ok() && p.is_fresh_at(at, stale_after));
+                previous.is_some_and(|check| check.is_ready_at(at, stale_after));
             let (verdict, absorbed) =
                 if was_published_ready && consecutive_failures < failure_threshold.get() {
                     (Ok(()), Some(reason))
@@ -458,9 +447,10 @@ impl ReadinessReader {
         }
         let state = self.rx.borrow();
         !state.draining
-            && state.last_check.as_ref().is_some_and(|check| {
-                check.verdict.is_ok() && check.is_fresh_at(Instant::now(), self.stale_after)
-            })
+            && state
+                .last_check
+                .as_ref()
+                .is_some_and(|check| check.is_ready_at(Instant::now(), self.stale_after))
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
@@ -471,7 +461,7 @@ impl ReadinessReader {
     }
 
     // template:begin grpc:health-changed-verdict
-    pub async fn wait_for_drain(&mut self) {
+    pub async fn wait_for_drain_or_owner_drop(&mut self) {
         if self.is_draining() {
             return;
         }

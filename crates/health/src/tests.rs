@@ -124,14 +124,14 @@ fn refresh_policy_enforces_duration_bounds() {
 
     for boundary in [Duration::from_millis(1), Duration::from_hours(1)] {
         let by_interval = RefreshPolicy::try_new(boundary, valid, threshold).unwrap();
-        assert_eq!(by_interval.interval(), boundary);
-        assert_eq!(by_interval.probe_budget(), valid);
-        assert_eq!(by_interval.failure_threshold(), threshold);
+        assert_eq!(by_interval.interval, boundary);
+        assert_eq!(by_interval.probe_budget, valid);
+        assert_eq!(by_interval.failure_threshold, threshold);
 
         let by_budget = RefreshPolicy::try_new(valid, boundary, threshold).unwrap();
-        assert_eq!(by_budget.interval(), valid);
-        assert_eq!(by_budget.probe_budget(), boundary);
-        assert_eq!(by_budget.failure_threshold(), threshold);
+        assert_eq!(by_budget.interval, valid);
+        assert_eq!(by_budget.probe_budget, boundary);
+        assert_eq!(by_budget.failure_threshold, threshold);
     }
 
     assert_eq!(policy().stale_after(), Duration::from_millis(170));
@@ -294,7 +294,7 @@ async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
             probe,
             Box::new(Slow {
                 name: "slow",
-                delay: policy().probe_budget() / 2,
+                delay: policy().probe_budget / 2,
             }),
         ],
         policy(),
@@ -375,7 +375,7 @@ async fn refreshes_on_the_interval_and_stops_on_cancel() {
     let reader = readiness.reader();
 
     for _ in 0..10 {
-        tokio::time::advance(policy().interval()).await;
+        tokio::time::advance(policy().interval).await;
         tokio::task::yield_now().await;
     }
     assert_eq!(
@@ -386,7 +386,7 @@ async fn refreshes_on_the_interval_and_stops_on_cancel() {
 
     flag.store(false, Ordering::Relaxed);
     for _ in 0..3 {
-        tokio::time::advance(policy().interval()).await;
+        tokio::time::advance(policy().interval).await;
         tokio::task::yield_now().await;
     }
     std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
@@ -433,9 +433,9 @@ async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_n
     let readiness = Readiness::new(
         vec![Box::new(Hanging), healthy, failing],
         RefreshPolicy::try_new(
-            policy().interval(),
+            policy().interval,
             Duration::from_millis(1),
-            policy().failure_threshold(),
+            policy().failure_threshold,
         )
         .unwrap(),
     );
@@ -478,7 +478,7 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
 
 #[tokio::test(start_paused = true)]
 async fn a_slow_probe_does_not_spend_another_probes_budget() {
-    let delay = policy().probe_budget() * 3 / 4;
+    let delay = policy().probe_budget * 3 / 4;
     let readiness = Readiness::new(
         vec![
             Box::new(Slow {
@@ -728,7 +728,7 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
     tokio::task::yield_now().await;
 
     for _ in 0..6 {
-        tokio::time::advance(policy().interval()).await;
+        tokio::time::advance(policy().interval).await;
         readiness.refresh().await;
         tokio::task::yield_now().await;
         assert!(
@@ -739,7 +739,7 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
 
     flag.store(false, Ordering::Relaxed);
     for _ in 0..2 {
-        tokio::time::advance(policy().interval()).await;
+        tokio::time::advance(policy().interval).await;
         readiness.refresh().await;
         tokio::task::yield_now().await;
         assert!(
@@ -748,7 +748,7 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
         );
     }
 
-    tokio::time::advance(policy().interval()).await;
+    tokio::time::advance(policy().interval).await;
     readiness.refresh().await;
     let (mut reader, result) = tokio::time::timeout(Duration::from_millis(1), waiter)
         .await
@@ -769,7 +769,7 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
     tokio::task::yield_now().await;
 
     for _ in 0..6 {
-        tokio::time::advance(policy().interval()).await;
+        tokio::time::advance(policy().interval).await;
         readiness.refresh().await;
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished());
@@ -787,12 +787,12 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
 }
 
 #[tokio::test(start_paused = true)]
-async fn wait_for_drain_resolves_on_start_drain_and_owner_drop() {
+async fn wait_for_drain_or_owner_drop_resolves_on_both_events() {
     let (readiness, flag, _) = flaky(true);
     readiness.refresh().await;
     let mut reader = readiness.reader();
     let waiter = tokio::spawn(async move {
-        reader.wait_for_drain().await;
+        reader.wait_for_drain_or_owner_drop().await;
         reader
     });
     tokio::task::yield_now().await;
@@ -805,21 +805,21 @@ async fn wait_for_drain_resolves_on_start_drain_and_owner_drop() {
     tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
-        "probe failure must not resolve wait_for_drain"
+        "probe failure must not resolve wait_for_drain_or_owner_drop"
     );
 
     readiness.start_drain();
     let mut reader = tokio::time::timeout(Duration::from_millis(1), waiter)
         .await
-        .expect("start_drain must resolve wait_for_drain")
+        .expect("start_drain must resolve wait_for_drain_or_owner_drop")
         .unwrap();
     assert!(reader.is_draining());
-    assert!(futures_util::FutureExt::now_or_never(reader.wait_for_drain()).is_some());
+    assert!(futures_util::FutureExt::now_or_never(reader.wait_for_drain_or_owner_drop()).is_some());
 
     let readiness = Readiness::new(Vec::new(), policy());
     let mut reader = readiness.reader();
     let waiter = tokio::spawn(async move {
-        reader.wait_for_drain().await;
+        reader.wait_for_drain_or_owner_drop().await;
         reader
     });
     tokio::task::yield_now().await;
@@ -827,7 +827,7 @@ async fn wait_for_drain_resolves_on_start_drain_and_owner_drop() {
     drop(readiness);
     let reader = tokio::time::timeout(Duration::from_millis(1), waiter)
         .await
-        .expect("owner drop must resolve wait_for_drain")
+        .expect("owner drop must resolve wait_for_drain_or_owner_drop")
         .unwrap();
     assert!(!reader.is_draining());
 }
