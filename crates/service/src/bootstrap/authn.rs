@@ -25,6 +25,7 @@ pub(super) async fn prepare(
             token_profile,
             algorithms,
             jwks_uri,
+            jwks_max_age,
         } => {
             let issuer = issuer_url(mode, "authn.issuer", issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
@@ -39,6 +40,7 @@ pub(super) async fn prepare(
                     },
                     algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
                     jwks_uri: jwks_endpoint(mode, jwks_uri.as_deref())?,
+                    jwks_max_age: *jwks_max_age,
                 },
                 background.child_token(),
             )

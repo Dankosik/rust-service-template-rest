@@ -25,6 +25,7 @@ pub struct JwtOptions {
     pub token_profile: TokenProfile,
     pub algorithms: Vec<JwtAlgorithm>,
     pub jwks_uri: Option<EndpointUrl>,
+    pub jwks_max_age: Duration,
 }
 
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -49,7 +50,9 @@ async fn prepare_with_provider(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
     );
-    let claim_policy = if options.algorithms.is_empty() {
+    let claim_policy = if options.algorithms.is_empty()
+        || options.jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE
+    {
         Err(PreparationError::invalid_options())
     } else {
         ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)
@@ -77,6 +80,7 @@ async fn prepare_with_provider(
         options.token_profile,
         options.algorithms.clone(),
         key_store.clone(),
+        options.jwks_max_age,
     ));
     let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
         key_store,
@@ -84,6 +88,7 @@ async fn prepare_with_provider(
         jwks_uri,
         options.algorithms,
         cancel,
+        options.jwks_max_age,
     ));
     complete_startup_stage(
         startup_deadline,
@@ -318,6 +323,7 @@ mod tests {
             audiences: vec!["api".to_owned()],
             token_profile: TokenProfile::ResourceServer,
             algorithms: vec![JwtAlgorithm::Rs256],
+            jwks_max_age: Duration::from_hours(1),
             jwks_uri: jwks_uri
                 .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
         };
@@ -397,6 +403,69 @@ mod tests {
             PreparationReason::Fetch(ProviderFailure::Status(404))
         );
         assert_eq!(requested.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn losing_the_refresh_future_releases_current_and_future_unknown_key_waiters() {
+        use crate::Failure;
+        use jsonwebtoken::{Header, encode};
+
+        ensure_crypto_provider();
+        let signing = rsa_signing();
+        let key = jwk(&signing, Algorithm::RS256, Some("old"), true);
+        let (address, root, _) = metadata_server(vec![(
+            "/keys",
+            StatusCode::OK,
+            serde_json::json!({ "keys": [key] }).to_string(),
+        )])
+        .await;
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("new".to_owned());
+        let claims = serde_json::json!({
+            "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
+            "aud": "api", "sub": "subject", "exp": u64::MAX,
+        });
+        let jwt = encode(&header, &claims, &signing).unwrap();
+        let authorization = format!("Bearer {jwt}");
+        let token = crate::parse_bearer([authorization.as_bytes()]).unwrap();
+        for abort_started_worker in [false, true] {
+            let (verifier, mut worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            tokio::time::pause();
+            if abort_started_worker {
+                assert!(futures_util::poll!(worker.as_mut()).is_pending());
+            }
+            tokio::time::advance(Duration::from_secs(31)).await;
+            let (waiting, registered) = tokio::sync::oneshot::channel();
+            let waiter = tokio::spawn({
+                let verifier = verifier.clone();
+                let authorization = authorization.clone();
+                async move {
+                    let token = crate::parse_bearer([authorization.as_bytes()]).unwrap();
+                    let mut verification = std::pin::pin!(verifier.verify(&token));
+                    assert!(futures_util::poll!(verification.as_mut()).is_pending());
+                    waiting.send(()).unwrap();
+                    verification.await
+                }
+            });
+            registered.await.unwrap();
+            if abort_started_worker {
+                let task = tokio::spawn(worker);
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                drop(worker);
+            }
+            let result = tokio::time::timeout(Duration::from_millis(1), waiter)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.unwrap_err(), Failure::Unavailable);
+            assert!(matches!(
+                futures_util::poll!(Box::pin(verifier.verify(&token))),
+                std::task::Poll::Ready(Err(Failure::Unavailable))
+            ));
+            tokio::time::resume();
+        }
     }
 
     #[tokio::test]

@@ -28,8 +28,8 @@ use infra_http::idempotency::{
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
-    Application, Authentication, Code, HardenOptions, HttpContract, Problem, REQUEST_ID_HEADER,
-    VerifiedPrincipal,
+    Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
+    REQUEST_ID_HEADER, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
@@ -896,6 +896,7 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
 )]
 async fn authorized_without_idempotency(
     principal: VerifiedPrincipal,
+    credential: Option<Extension<DelegationCredential>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     #[derive(Deserialize)]
@@ -913,10 +914,7 @@ async fn authorized_without_idempotency(
     assert_eq!(claims.scope, "widgets:write");
     assert_eq!(principal.scopes(), ["widgets:write"]);
     assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
-    assert_ne!(
-        secrecy::ExposeSecret::expose_secret(principal.access_token()),
-        ""
-    );
+    assert!(credential.is_none());
     assert!(principal.actor().is_none());
     (
         StatusCode::OK,
@@ -929,6 +927,7 @@ async fn authorized_without_idempotency(
     get,
     path = "/_test/scoped-alternatives",
     operation_id = "scopedAlternatives",
+    extensions(("x-bearer-delegation" = json!(true))),
     security(
         ("bearerAuth" = ["scope-a", "scope-b"]),
         ("bearerAuth" = ["scope-c"]),
@@ -938,8 +937,13 @@ async fn authorized_without_idempotency(
         infra_http::authn::ProtectedOperationProblemResponses,
     )
 )]
-async fn scoped_alternatives(Extension(calls): Extension<Arc<AtomicUsize>>) -> &'static str {
-    calls.fetch_add(1, Ordering::SeqCst);
+async fn scoped_alternatives(
+    Extension(calls): Extension<Arc<Mutex<Vec<DelegationCredential>>>>,
+    Extension(credential): Extension<DelegationCredential>,
+    headers: axum::http::HeaderMap,
+) -> &'static str {
+    assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+    calls.lock().unwrap().push(credential);
     "granted"
 }
 
@@ -955,7 +959,8 @@ fn bearer_document() -> utoipa::openapi::OpenApi {
 }
 
 #[utoipa::path(head, path = "/_test/authorization", security(), responses((status = 204, description = "public HEAD")))]
-async fn public_head() -> StatusCode {
+async fn public_head(credential: Option<Extension<DelegationCredential>>) -> StatusCode {
+    assert!(credential.is_none());
     StatusCode::NO_CONTENT
 }
 
@@ -1193,9 +1198,10 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
 #[tokio::test(flavor = "current_thread")]
 async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
     let provider = Provider::start().await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let contract =
-        OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
+    let calls = Arc::new(Mutex::new(Vec::<DelegationCredential>::new()));
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .routes(routes!(authorized_without_idempotency, public_head))
+        .routes(routes!(scoped_alternatives));
     let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
         .with_probes("/")
         .unwrap()
@@ -1205,7 +1211,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
             &options(BUDGET),
         )
         .unwrap();
-    let server = TestServer::new(app.into_make_service());
+    let server = TestServer::new(app.clone().into_make_service());
     let granted_by_and = server
         .get("/_test/scoped-alternatives")
         .authorization_bearer(SCOPE_A_AND_B)
@@ -1217,7 +1223,6 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         .authorization_bearer(SCOPE_C)
         .await;
     assert_eq!(granted_by_or.status_code(), StatusCode::OK);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let denied = server
         .get("/_test/scoped-alternatives")
@@ -1228,11 +1233,36 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         denied.header(WWW_AUTHENTICATE),
         HeaderValue::from_static("Bearer error=\"insufficient_scope\"")
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "the handler must not run when every alternative is denied"
-    );
+    let forged = {
+        let calls = calls.lock().unwrap();
+        let delegated: Vec<_> = calls
+            .iter()
+            .map(|c| secrecy::ExposeSecret::expose_secret(c.access_token()))
+            .collect();
+        assert_eq!(delegated, [SCOPE_A_AND_B, SCOPE_C]);
+        calls[0].clone()
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test injects a forged extension outside the finalized application"
+    )]
+    let injected = axum::Router::new()
+        .fallback_service(app)
+        .layer(Extension(forged));
+    let server = TestServer::new(injected.into_make_service());
+    for (method, expected) in [
+        (axum::http::Method::GET, StatusCode::OK),
+        (axum::http::Method::HEAD, StatusCode::NO_CONTENT),
+    ] {
+        assert_eq!(
+            server
+                .method(method, "/_test/authorization")
+                .authorization_bearer(ALICE)
+                .await
+                .status_code(),
+            expected
+        );
+    }
     provider.stop().await;
 }
 

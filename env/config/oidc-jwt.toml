@@ -1,0 +1,3 @@
+[authn]
+mode = "oidc-jwt"
+token_profile = "rfc9068"

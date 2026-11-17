@@ -3,27 +3,43 @@ use shared_rules::rfc6750::{self, NoBearer};
 use crate::Failure;
 
 #[derive(Eq, PartialEq, derive_more::Debug)]
-#[debug("BearerToken([REDACTED])")]
-pub(crate) struct BearerToken<'a> {
+#[debug("PresentedToken([REDACTED])")]
+pub struct PresentedToken<'a> {
     text: &'a str,
 }
 
-impl<'a> BearerToken<'a> {
+impl<'a> PresentedToken<'a> {
     pub(crate) fn as_bytes(&self) -> &'a [u8] {
         self.text.as_bytes()
     }
 
     pub(crate) fn to_secret(&self) -> secrecy::SecretString {
-        self.text.to_owned().into()
+        self.text.into()
+    }
+
+    #[must_use]
+    pub fn into_delegation_credential(self) -> DelegationCredential {
+        DelegationCredential(self.to_secret().into())
+    }
+}
+
+#[derive(Clone, derive_more::Debug)]
+#[debug("DelegationCredential([REDACTED])")]
+pub struct DelegationCredential(std::sync::Arc<secrecy::SecretString>);
+
+impl DelegationCredential {
+    #[must_use]
+    pub fn access_token(&self) -> &secrecy::SecretString {
+        &self.0
     }
 }
 
 /// RFC 6750 §2.1
 pub(crate) fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
-) -> Result<BearerToken<'a>, Failure> {
+) -> Result<PresentedToken<'a>, Failure> {
     match rfc6750::token(headers) {
-        Ok(text) => Ok(BearerToken { text }),
+        Ok(text) => Ok(PresentedToken { text }),
         Err(NoBearer::Missing) => Err(Failure::Missing),
         Err(NoBearer::Malformed) => Err(Failure::Malformed),
     }
@@ -39,7 +55,7 @@ mod tests {
         let token = parse_bearer([b"bEaReR   abc.DEF_~+/=".as_slice()]).unwrap();
 
         assert_eq!(token.as_bytes(), b"abc.DEF_~+/=");
-        assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
+        assert_eq!(format!("{token:?}"), "PresentedToken([REDACTED])");
     }
 
     #[test]

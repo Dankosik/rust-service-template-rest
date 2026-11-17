@@ -33,6 +33,7 @@ use infra_bearerauthn::{
 // template:end oidc-introspection:grpc-transport-test-auth-imports
 // template:begin authn:grpc-transport-test-verifier-import
 use infra_bearerauthn::Verifier;
+use infra_grpc::DelegationCredential;
 // template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
@@ -162,6 +163,10 @@ impl Hold {
 
 type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
 
+// template:begin authn:grpc-transport-test-admitted-identity
+type AdmittedIdentity = (infra_grpc::VerifiedPrincipal, Option<DelegationCredential>);
+// template:end authn:grpc-transport-test-admitted-identity
+
 #[derive(Clone)]
 struct Echo {
     calls: Arc<Mutex<Vec<SeenCall>>>,
@@ -170,7 +175,7 @@ struct Echo {
     upload_aborts: UploadAborts,
     upload_abort_recorded: Arc<Notify>,
     // template:begin authn:grpc-transport-test-principals-field
-    principals: Arc<Mutex<Vec<infra_grpc::VerifiedPrincipal>>>,
+    identities: Arc<Mutex<Vec<AdmittedIdentity>>>,
     // template:end authn:grpc-transport-test-principals-field
 }
 
@@ -183,7 +188,7 @@ impl Echo {
             upload_aborts: Arc::new(Mutex::new(Vec::new())),
             upload_abort_recorded: Arc::new(Notify::new()),
             // template:begin authn:grpc-transport-test-principals-init
-            principals: Arc::new(Mutex::new(Vec::new())),
+            identities: Arc::new(Mutex::new(Vec::new())),
             // template:end authn:grpc-transport-test-principals-init
         }
     }
@@ -215,7 +220,8 @@ impl Echo {
         );
         let had_identity = verified.is_some();
         if let Some(principal) = verified {
-            self.principals.lock().push(principal);
+            let delegation = request.extensions().get::<DelegationCredential>().cloned();
+            self.identities.lock().push((principal, delegation));
         }
         // template:end authn:grpc-transport-test-seen-principal
         self.calls.lock().push(SeenCall {
@@ -517,7 +523,7 @@ impl Fixture {
             .expect("echo registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
-            .require_scopes(UNARY_PATH, &["echo.read"])
+            .require_scopes_for_delegation(UNARY_PATH, &["echo.read"])
             .expect("unary scopes register once");
         // template:end authn:grpc-transport-test-scope-requirement
         let app = infra_grpc::router(services, control.reader(), authentication, limits)
@@ -914,6 +920,15 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
     assert_eq!(reason(&denied), "FORBIDDEN");
     assert!(fixture.echo.calls.lock().is_empty());
 
+    echo.unary(request(unary("delegated"))).await.unwrap();
+    let (_, credential) = fixture.echo.identities.lock().pop().unwrap();
+    let credential = credential.expect("the opted-in RPC receives the presented token");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(credential.access_token()),
+        BearerMode::SELECTED.token(true)
+    );
+    assert!(!fixture.echo.calls.lock()[0].had_authorization);
+
     let mut undeclared = timeout(
         WAIT,
         echo.server_stream(unscoped(ServerStreamRequest {
@@ -933,6 +948,7 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
             .message,
         "admitted"
     );
+    assert!(fixture.echo.identities.lock().pop().unwrap().1.is_none());
     drop(echo);
     fixture.stop().await;
 }
@@ -1649,10 +1665,20 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
 #[tokio::test]
 async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypass_auth() {
     let (verifier, bearer) = BearerFixture::start().await;
+    let header = format!("Bearer {}", BearerMode::SELECTED.token(false));
+    let (_, previously_verified) = verifier
+        .authenticate_presented_with_context(
+            [header.as_bytes()],
+            infra_bearerauthn::Transport::Grpc,
+            &operation_context::OperationContext::unbounded(),
+        )
+        .await
+        .unwrap();
+    let forged = previously_verified.into_delegation_credential();
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 4);
 
-    let request = opening_request(
+    let mut request = opening_request(
         UNARY_PATH,
         Some(BearerMode::SELECTED.token(true)),
         "genuine",
@@ -1664,17 +1690,19 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
         trailers.insert("x-checksum", "123".parse().unwrap());
         axum::body::Body::new(body.with_trailers(async move { Some(Ok(trailers)) }))
     });
+    request.extensions_mut().insert(forged.clone());
     let genuine = timeout(WAIT, app.clone().oneshot(request))
         .await
         .unwrap()
         .unwrap();
     assert!(grpc_status(&genuine).is_none());
 
-    let captured = echo
-        .principals
+    let (captured, credential) = echo
+        .identities
         .lock()
         .pop()
         .expect("handler observed VerifiedPrincipal");
+    assert!(credential.is_none());
     assert_eq!(captured.issuer(), "https://issuer.example");
     assert_eq!(captured.subject(), Some("subject"));
     assert_eq!(captured.scopes(), ["echo.read"]);
@@ -1685,11 +1713,12 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
 
     let mut spoofed = opening_request(UNARY_PATH, None, "spoofed");
     spoofed.extensions_mut().insert(captured);
+    spoofed.extensions_mut().insert(forged);
     let rejected = timeout(WAIT, app.oneshot(spoofed)).await.unwrap().unwrap();
     let status = grpc_status(&rejected).unwrap();
     assert_eq!(status.code(), Code::Unauthenticated);
     assert_eq!(reason(&status), "AUTHENTICATION_REQUIRED");
-    assert!(echo.principals.lock().is_empty());
+    assert!(echo.identities.lock().is_empty());
     assert_eq!(echo.calls.lock().len(), 1);
 
     bearer.stop().await;
@@ -2720,7 +2749,6 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
             .and_then(|answer| answer.message_response)
             .expect("reflection answers each request")
     };
-
     let MessageResponse::ListServicesResponse(listed) = next().await else {
         panic!("list services is answered with a service list");
     };

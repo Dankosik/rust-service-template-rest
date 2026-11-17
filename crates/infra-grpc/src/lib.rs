@@ -18,6 +18,7 @@ mod tls;
 
 // template:begin authn:grpc-authn-exports
 pub use authn::VerifiedPrincipal;
+pub use infra_bearerauthn::DelegationCredential;
 // template:end authn:grpc-authn-exports
 pub use error::{Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;

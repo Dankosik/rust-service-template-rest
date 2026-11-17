@@ -4,6 +4,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use shared_rules::oidc_jwt::REFRESH_COOLDOWN;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +18,6 @@ use crate::{
 
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
 const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_secs() / 10);
-const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
 
@@ -26,6 +26,7 @@ pub(crate) enum SignatureRefresh {
     #[debug("NewerSet(..)")]
     NewerSet(Arc<KeySet>),
     NoNewerSet,
+    WorkerLost,
 }
 
 struct State {
@@ -56,6 +57,7 @@ enum Admission {
 pub(crate) struct KeyStore {
     keys: ArcSwap<KeySet>,
     state: watch::Sender<State>,
+    worker_lost: CancellationToken,
     last_acquisition: metrics::Gauge,
 }
 
@@ -79,16 +81,13 @@ impl KeyStore {
         Arc::new(Self {
             keys,
             state,
+            worker_lost: CancellationToken::new(),
             last_acquisition,
         })
     }
 
     pub(crate) fn current(&self) -> Arc<KeySet> {
         self.keys.load_full()
-    }
-
-    pub(crate) fn generation(&self) -> u64 {
-        self.keys.load().generation()
     }
 
     fn newer_set(&self, checked: &Arc<KeySet>) -> Option<Arc<KeySet>> {
@@ -106,6 +105,8 @@ impl KeyStore {
                 Admission::Answer(SignatureRefresh::NoNewerSet)
             } else if let Some(keys) = self.newer_set(checked) {
                 Admission::Answer(SignatureRefresh::NewerSet(keys))
+            } else if self.worker_lost.is_cancelled() {
+                Admission::Answer(SignatureRefresh::WorkerLost)
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
@@ -120,14 +121,18 @@ impl KeyStore {
             Admission::Join(ticket) | Admission::Request(ticket) => ticket,
         };
         let mut state = self.state.subscribe();
-        match state
-            .wait_for(|state| state.stopped || state.finished_ticket >= ticket)
+        match self
+            .worker_lost
+            .run_until_cancelled(
+                state.wait_for(|state| state.stopped || state.finished_ticket >= ticket),
+            )
             .await
         {
-            Ok(state) if !state.stopped => self
+            Some(Ok(state)) if !state.stopped => self
                 .newer_set(checked)
                 .map_or(SignatureRefresh::NoNewerSet, SignatureRefresh::NewerSet),
-            _ => SignatureRefresh::NoNewerSet,
+            Some(_) => SignatureRefresh::NoNewerSet,
+            None => SignatureRefresh::WorkerLost,
         }
     }
 
@@ -188,39 +193,45 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
     }
 }
 
-pub(crate) async fn run_refresh_worker(
+pub(crate) fn run_refresh_worker(
     store: Arc<KeyStore>,
     provider: ProviderClient,
     jwks_uri: EndpointUrl,
     algorithms: Vec<JwtAlgorithm>,
     cancel: CancellationToken,
-) {
-    let mut next_refresh = Instant::now() + refresh_period();
-    let mut state_changes = store.state.subscribe();
-    'worker: loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => break,
-            result = state_changes.wait_for(|state| state.pending().is_some()) => {
-                if result.is_err() {
-                    break;
+    jwks_max_age: Duration,
+) -> impl Future<Output = ()> {
+    let lifetime = store.worker_lost.clone().drop_guard();
+    let next_period = move || refresh_period().min(jwks_max_age / 2);
+    let mut next_refresh = Instant::now() + next_period();
+    async move {
+        let mut state_changes = store.state.subscribe();
+        'worker: loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                result = state_changes.wait_for(|state| state.pending().is_some()) => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                () = tokio::time::sleep_until(next_refresh) => {
+                    store.request_periodic();
+                    next_refresh = Instant::now() + next_period();
                 }
             }
-            () = tokio::time::sleep_until(next_refresh) => {
-                store.request_periodic();
-                next_refresh = Instant::now() + refresh_period();
+            while let Some(ticket) = store.pending() {
+                let replacement = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => break 'worker,
+                    replacement = fetch_key_set(&provider, &jwks_uri, &algorithms, None) => replacement,
+                };
+                store.finish(ticket, replacement);
             }
         }
-        while let Some(ticket) = store.pending() {
-            let replacement = tokio::select! {
-                biased;
-                () = cancel.cancelled() => break 'worker,
-                replacement = fetch_key_set(&provider, &jwks_uri, &algorithms, None) => replacement,
-            };
-            store.finish(ticket, replacement);
-        }
+        store.stop();
+        lifetime.disarm();
     }
-    store.stop();
 }
 
 fn refresh_period() -> Duration {
@@ -342,6 +353,7 @@ mod tests {
             endpoint,
             vec![crate::JwtAlgorithm::Rs256],
             cancel.clone(),
+            Duration::from_hours(1),
         ));
         let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
@@ -373,6 +385,7 @@ mod tests {
             match store.refresh_for_signature_miss(&store.current()).await {
                 SignatureRefresh::NewerSet(keys) => Some(keys.has_kid("new")),
                 SignatureRefresh::NoNewerSet => None,
+                SignatureRefresh::WorkerLost => panic!("worker unexpectedly dropped"),
             }
         })
     }
@@ -391,6 +404,7 @@ mod tests {
     fn worker_with_unavailable_provider(
         store: &Arc<KeyStore>,
         cancel: &CancellationToken,
+        jwks_max_age: Duration,
     ) -> impl Future<Output = ()> + use<> {
         let host = "authn.fixture.test";
         let material = tls_test_support::TlsMaterial::new(host);
@@ -409,6 +423,7 @@ mod tests {
             crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
             vec![crate::JwtAlgorithm::Rs256],
             cancel.clone(),
+            jwks_max_age,
         )
     }
 
@@ -438,7 +453,11 @@ mod tests {
     async fn unknown_key_work_does_not_postpone_initial_or_subsequent_periods() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
+            &store,
+            &cancel,
+            Duration::from_hours(1)
+        ));
         poll_waiting_worker(worker.as_mut()).await;
         for period in 0..2 {
             let started = tokio::time::Instant::now();
@@ -465,7 +484,11 @@ mod tests {
     async fn an_overdue_period_rearms_from_observed_time_without_a_backlog() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(&store, &cancel));
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
+            &store,
+            &cancel,
+            Duration::from_hours(1)
+        ));
         poll_waiting_worker(worker.as_mut()).await;
         tokio::time::advance(Duration::from_secs(4_000)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
@@ -497,6 +520,22 @@ mod tests {
         assert_eq!(first.await.unwrap(), Some(true));
         assert_eq!(second.await.unwrap(), Some(true));
         assert!(store.current().has_kid("new"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_short_freshness_window_renews_before_the_normal_refresh_period() {
+        let store = KeyStore::new(key_set("old"));
+        let cancel = CancellationToken::new();
+        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
+            &store,
+            &cancel,
+            Duration::from_mins(1),
+        ));
+        poll_waiting_worker(worker.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        finish_worker_fetch(worker.as_mut(), &store, 1).await;
+        cancel.cancel();
+        worker.await;
     }
 
     #[tokio::test(start_paused = true)]
