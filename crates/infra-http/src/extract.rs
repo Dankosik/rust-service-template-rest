@@ -19,7 +19,8 @@ use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_p
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
-const BODY_MEDIA_TYPE_DETAIL: &str = "Content-Type must be application/json";
+const BODY_MEDIA_TYPE_DETAIL: &str =
+    "Content-Type must be application/json or an application/*+json type";
 const QUERY_DETAIL: &str = "query string does not match the operation parameters";
 const PATH_DETAIL: &str = "path does not match the operation parameters";
 const SCHEMA_REASON: &str = "is missing or does not match the declared schema";

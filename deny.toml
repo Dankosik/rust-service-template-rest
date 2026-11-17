@@ -29,7 +29,7 @@ ignore = [
 include-dev = true
 # Permissive licenses that the current graph uses; cargo-deny warns on an
 # allowance no crate matches, so a new license is added when a crate brings
-# it. CC0-1.0 covers axum-tracing-opentelemetry and
+# it. CC0-1.0 covers
 # tracing-opentelemetry-instrumentation-sdk; dual-licensed crates (r-efi, ryu,
 # memchr, zerocopy) are satisfied by MIT or Apache-2.0. The rustls stack
 # (sqlx + OTLP reqwest, both aws-lc-rs) adds ISC (rustls-webpki, untrusted,

@@ -29,7 +29,6 @@ serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }
 mime = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
-axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
 derive_more = { workspace = true, features = ["debug"] }
