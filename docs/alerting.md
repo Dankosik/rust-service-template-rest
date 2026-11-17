@@ -14,6 +14,13 @@ only with that profile.
 
 ## Install
 
+Before loading the PostgreSQL maintenance rules, replace the example
+`pg:expected` rows with the actual database, scrape job, instance and
+population for each expected writer. Add the matching `database` label to
+the scrape targets. Set each `pg:writer_set_changed_timestamp_seconds` to
+the Unix time in seconds of the last change to that database's writers for
+the population.
+
 1. Load the file through `rule_files` or a `PrometheusRule`, next to
    `env/monitoring/postgres-maintenance.rules.yml` when the PostgreSQL profile is kept.
 2. Replace the scrape-job selector `job=~"service|jobs-worker"`, and the
