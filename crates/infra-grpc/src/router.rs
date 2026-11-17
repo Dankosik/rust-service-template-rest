@@ -47,6 +47,12 @@ pub enum Authentication {
     // template:end service-auth:grpc-authentication-service-tokens
 }
 
+pub fn request_operation<T>(
+    request: &tonic::Request<T>,
+) -> Result<&OperationContext, tonic::Status> {
+    request.extensions().get().ok_or_else(internal_status)
+}
+
 #[derive(Clone, Debug)]
 pub struct ResponseContext(OperationContext);
 
@@ -552,6 +558,21 @@ mod ingress_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_request_operation_returns_a_sanitized_internal_status() {
+        let mut request = tonic::Request::new(());
+        request
+            .extensions_mut()
+            .insert(ResponseContext(OperationContext::unbounded()));
+        let status = request_operation(&request).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), service_failure::SANITIZED_DETAIL);
+        assert_eq!(
+            crate::status::catalog_code(&status),
+            Some(service_failure::Code::InternalServerError)
+        );
+    }
 
     #[tokio::test]
     async fn rejected_call_reads_at_most_one_frame_past_64_kib() {

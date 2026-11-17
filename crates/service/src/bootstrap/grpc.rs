@@ -52,7 +52,7 @@ pub(super) fn prepare(
     if matches!(authentication, GrpcAuthentication::None) {
         return Err(ValidationError::new(
             "grpc.enabled",
-            "requires authn.mode = oidc-jwt or oidc-introspection",
+            infra_grpc::Error::UnauthenticatedBusinessCalls.to_string(),
         )
         .into());
     }
