@@ -233,7 +233,8 @@ pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail_static("request body could not be read")
 }
 
-pub(crate) fn sanitized_problem() -> Problem {
+#[must_use]
+pub fn sanitized_problem() -> Problem {
     Problem::new(Code::InternalServerError).detail_static(SANITIZED_DETAIL)
 }
 

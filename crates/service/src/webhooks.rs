@@ -9,7 +9,7 @@ use foldhash::HashMap;
 use http_body_util::{BodyExt, Limited};
 use infra_http::extract::Path;
 use infra_http::problem::responses::{GatewayTimeout, InternalServerError, RequestEntityTooLarge};
-use infra_http::problem::{SANITIZED_DETAIL, body_too_large, caused_by_length_limit};
+use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
@@ -203,9 +203,7 @@ async fn receive(
             failure = "deadline_missing",
             "webhook_wiring_failed"
         );
-        return Problem::new(Code::InternalServerError)
-            .detail(SANITIZED_DETAIL)
-            .into_response();
+        return sanitized_problem().into_response();
     };
     let body = match context
         .read_body(Limited::new(body, MAX_BODY_BYTES).collect())
