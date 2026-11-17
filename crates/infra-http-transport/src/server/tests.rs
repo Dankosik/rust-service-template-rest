@@ -698,9 +698,7 @@ async fn an_http2_listener_negotiates_a_segmented_preface_and_advertises_the_hea
     assert_eq!(settings[3..], [4, 0, 0, 0, 0, 0]);
     let [a, b, c, d] = options.max_header_list_size.to_be_bytes();
     assert!(
-        payload
-            .chunks_exact(6)
-            .any(|setting| setting == [0, 6, a, b, c, d]),
+        payload.as_chunks::<6>().0.contains(&[0, 6, a, b, c, d]),
         "the advertised SETTINGS omitted the header list limit: {payload:?}"
     );
 
@@ -710,7 +708,7 @@ async fn an_http2_listener_negotiates_a_segmented_preface_and_advertises_the_hea
             let (header, payload) = read_http2_frame(&mut peer).await;
             if header[3] == 4 {
                 assert_eq!(header, [0, 0, 0, 4, 1, 0, 0, 0, 0]);
-                assert!(payload.is_empty());
+                assert_eq!(payload, [] as [u8; 0]);
                 break;
             }
         }
