@@ -43,6 +43,8 @@ mod fixtures {
     const KEY_ID: &str = "fixture";
     const ALGORITHMS: [JwtAlgorithm; 1] = [JwtAlgorithm::Rs256];
 
+    #[derive(derive_more::Debug)]
+    #[debug("JwtFixture([REDACTED])")]
     pub struct JwtFixture {
         keys: Arc<KeySet>,
         signing: EncodingKey,
