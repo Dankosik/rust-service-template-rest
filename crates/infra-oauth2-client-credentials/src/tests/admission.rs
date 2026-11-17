@@ -2,7 +2,6 @@ use std::time::UNIX_EPOCH;
 
 use super::*;
 use crate::assertion::Signer;
-use crate::{Registration, TokenTarget};
 
 fn valid_options() -> Options {
     Options {

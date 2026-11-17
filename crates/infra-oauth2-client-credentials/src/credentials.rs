@@ -192,7 +192,6 @@ impl Registration {
         })
     }
 
-    #[must_use]
     pub fn service_tokens(&self, target: TokenTarget) -> (ServiceTokens, RefreshDriver) {
         let inner = Arc::new(ServiceState {
             registration: self.shared.clone(),
