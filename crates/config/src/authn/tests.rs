@@ -1,7 +1,10 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, env};
+// template:begin oidc-jwt:authn-config-test-write-import
+use crate::test_support::write;
+// template:end oidc-jwt:authn-config-test-write-import
 use crate::validate::admit_with;
 use std::assert_matches;
 
