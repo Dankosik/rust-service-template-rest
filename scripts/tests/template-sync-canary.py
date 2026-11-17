@@ -98,10 +98,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_tls_fixture_output(source: Path, target: Path) -> None:
-    # The canonical tls-fixtures marker retains rcgen with its shared fixture.
-    # Read that projected owner rather than duplicating the profile predicate.
     manifest = tomllib.loads((target / "Cargo.toml").read_text(encoding="utf-8"))
-    shared_selected = "rcgen" in manifest["workspace"]["dependencies"]
+    shared_selected = "tls-test-support" in manifest["workspace"]["dependencies"]
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
 
 
