@@ -43,16 +43,24 @@ enum CredentialsKind {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ObjectStorageInput {
+    #[serde(deserialize_with = "crate::de::string_enum")]
     provider: ProviderKind,
     /// S3 bucket name. On Railway, the bucket's `BUCKET` variable.
+    #[serde(deserialize_with = "crate::de::string")]
     bucket: String,
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
+    #[serde(deserialize_with = "crate::de::string")]
     region: String,
+    #[serde(deserialize_with = "crate::de::string")]
     endpoint: String,
+    #[serde(deserialize_with = "crate::de::string")]
     expected_bucket_owner: String,
+    #[serde(deserialize_with = "crate::de::boolean")]
     path_style: bool,
+    #[serde(deserialize_with = "crate::de::string_enum")]
     credentials: CredentialsKind,
+    #[serde(deserialize_with = "crate::de::string")]
     access_key_id: String,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.

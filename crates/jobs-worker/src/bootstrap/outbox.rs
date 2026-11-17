@@ -2,14 +2,14 @@ use std::num::NonZeroU32;
 
 use infra_jobs::Engine;
 use infra_messaging::MessagingError;
-use service_config::{Config, PostgresConfig};
+use service_config::{PostgresConfig, WorkerConfig};
 
 use super::messaging::RetainedMessages;
 use super::{RetainedCapabilities, WorkerError};
 use crate::resources::Resources;
 
 pub(super) fn admit_pool_inputs(
-    config: &Config,
+    config: &WorkerConfig,
     postgres: &PostgresConfig,
     capabilities: &RetainedCapabilities,
 ) -> Result<(), WorkerError> {
@@ -66,7 +66,7 @@ impl RetainedMessages {
 
 #[cfg(test)]
 mod tests {
-    use service_config::Config;
+    use service_config::WorkerConfig;
 
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
@@ -75,7 +75,7 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
-        let config = Config::default();
+        let config = WorkerConfig::default();
         let background = Background::new();
         let result = crate::bootstrap::register_capabilities(
             &config,
@@ -91,7 +91,7 @@ mod tests {
     async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
         use infra_messaging::Registry;
 
-        let config = Config::default();
+        let config = WorkerConfig::default();
         let background = Background::new();
         let mut registration = crate::Registration {
             jobs: infra_jobs::KindsBuilder::new(),

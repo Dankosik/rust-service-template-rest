@@ -1,7 +1,7 @@
 # Outbound machine authentication decisions
 
 <!-- template:begin outbound-auth:docs-outbound-machine-authentication-decisions -->
-`crates/infra-oauth2-client-credentials`, `crates/config`, and `Cargo.toml` own
+`crates/infra-oauth2-client-credentials` and `Cargo.toml` own
 the grant forms, cache bounds, refresh driver, gRPC status mapping, and
 dependency pins. This record keeps only rejected alternatives, RFC/provider
 constraints, and reopen conditions.

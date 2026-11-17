@@ -1,11 +1,3 @@
-use crate::de::VALUE_FREE;
-
-const VALUE_FREE_SECTIONS: &[&str] = &[
-    // template:begin client-integrations:load-value-free-section
-    "integrations",
-    // template:end client-integrations:load-value-free-section
-];
-
 pub(super) fn describe_rejection(
     error: &config::ConfigError,
     variable_keys: &[String],
@@ -13,19 +5,13 @@ pub(super) fn describe_rejection(
 ) -> String {
     let (key, rejection) = classify(error);
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
-    let variable_may_set = value_key.is_none_or(|key| {
+    let hide_value = value_key.is_none_or(|key| {
         variable_keys
             .iter()
             .any(|variable_key| is_at_or_under(variable_key, key))
     });
-    let in_value_free_section = value_key.is_some_and(|key| {
-        VALUE_FREE_SECTIONS
-            .iter()
-            .any(|section| is_at_or_under(key, section))
-    });
-    let hide_value = variable_may_set || in_value_free_section;
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
-    let origin = if variable_may_set {
+    let origin = if hide_value {
         format!(" in {carrier}")
     } else {
         String::new()
@@ -35,9 +21,7 @@ pub(super) fn describe_rejection(
             format!("invalid value, expected {expected}{place}{origin}")
         }
         Rejection::Unexplained if hide_value => format!("invalid value{place}{origin}"),
-        Rejection::AsWritten | Rejection::Expected(_) | Rejection::Unexplained => {
-            error.to_string().replace(VALUE_FREE, "")
-        }
+        Rejection::AsWritten | Rejection::Expected(_) | Rejection::Unexplained => error.to_string(),
     }
 }
 
@@ -60,8 +44,7 @@ fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
         }
         config::ConfigError::NotFound(_) => (None, Rejection::AsWritten),
         config::ConfigError::Message(message)
-            if message.starts_with(VALUE_FREE)
-                || KEYS_ONLY.iter().any(|form| message.starts_with(form)) =>
+            if KEYS_ONLY.iter().any(|form| message.starts_with(form)) =>
         {
             (None, Rejection::AsWritten)
         }

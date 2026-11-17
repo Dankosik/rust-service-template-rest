@@ -168,13 +168,10 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let options = LoadOptions::parse_from(args);
-    let config = match service_config::load(&options, BUILD_INFO) {
+    let config = match service_config::load(&options, BUILD_INFO, shutdown::TAIL) {
         Ok(config) => config,
         Err(err) => return process_failure(&err),
     };
-    if let Err(err) = shutdown::validate_grace_budget(&config.http) {
-        return process_failure(&err);
-    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime.effective_worker_threads())
         .enable_all()

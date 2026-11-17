@@ -25,11 +25,13 @@ pub enum GrpcSecurity {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct GrpcInput {
+    #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::optional_listen_addr")]
     addr: Option<SocketAddr>,
+    #[serde(default, deserialize_with = "crate::de::optional_string_enum")]
     security: Option<GrpcSecurity>,
     #[serde(default, deserialize_with = "blank_as_none")]
     certificate: Option<String>,

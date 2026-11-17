@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use health::Readiness;
 use infra_telemetry::install_panic_hook;
-use service_config::Config;
+use service_config::WorkerConfig;
 
 use crate::background::Background;
 use crate::resources::{Listeners, Resources};
@@ -42,8 +42,6 @@ pub(crate) enum WorkerError {
     Load(#[from] service_config::Error),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
-    #[error(transparent)]
-    GraceBudget(#[from] service_config::GraceBudgetError),
     #[error("build tokio runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("install stop signal handlers: {0}")]
@@ -120,7 +118,7 @@ struct Prepared {
 }
 
 pub(crate) async fn serve(
-    config: Config,
+    config: WorkerConfig,
     register: Register<'_>,
     signals: &mut Signals,
     deadline: &mut Option<Instant>,
@@ -175,7 +173,7 @@ pub(crate) async fn serve(
 }
 
 async fn run_worker(
-    config: &Config,
+    config: &WorkerConfig,
     register: Register<'_>,
     signals: &mut Signals,
     background: &Background,
@@ -288,7 +286,7 @@ fn settle_end(resources: &Resources, background: &Background, ended: Ended) -> E
 }
 
 async fn prepare(
-    config: &Config,
+    config: &WorkerConfig,
     register: Register<'_>,
     background: &Background,
     resources: &mut Resources,
@@ -360,7 +358,7 @@ struct RetainedCapabilities {
 }
 
 fn register_capabilities(
-    config: &Config,
+    config: &WorkerConfig,
     register: Register<'_>,
     background: &Background,
 ) -> Result<RetainedCapabilities, WorkerError> {
@@ -447,8 +445,7 @@ fn worker_identity(service_name: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{Config, WorkerError};
-    use crate::shutdown::validate_grace_budget;
+    use super::{WorkerConfig, WorkerError};
 
     #[tokio::test(start_paused = true)]
     async fn progress_failure_prevents_admission_and_retains_tracker_custody() {
@@ -641,7 +638,7 @@ mod tests {
     async fn registration_unwind_cancels_and_joins_already_registered_work() {
         use futures_util::FutureExt;
 
-        let config = Config::default();
+        let config = WorkerConfig::default();
         let mut signals = super::Signals::install().unwrap();
         let mut deadline = None;
         let (finished, observed_finish) = tokio::sync::oneshot::channel();
@@ -678,11 +675,17 @@ mod tests {
             "no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
         );
 
-        let mut config = Config::default();
+        let mut config = WorkerConfig::default();
         config.http.grace_period = Duration::from_secs(30);
         assert_eq!(
-            WorkerError::from(validate_grace_budget(&config.http).unwrap_err()).to_string(),
-            "http.grace_period (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
+            WorkerError::from(
+                config
+                    .http
+                    .check_grace_budget(crate::shutdown::TAIL)
+                    .unwrap_err()
+            )
+            .to_string(),
+            "configuration is invalid: http.grace_period: (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
         );
     }
 }

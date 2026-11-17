@@ -49,16 +49,6 @@ pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> Result<(), Error> {
     let name_key = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
-    // template:begin authn:load-audience-list-alias
-    let (name_key, key) = if key == AUDIENCE_LIST_ALIAS {
-        (
-            variable_name(AUDIENCE_KEY).to_ascii_lowercase(),
-            AUDIENCE_KEY.to_owned(),
-        )
-    } else {
-        (name_key, key)
-    };
-    // template:end authn:load-audience-list-alias
     let variable = Variable {
         original_name: name.to_owned(),
         key,
@@ -72,34 +62,6 @@ fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> 
         None => Ok(()),
     }
 }
-
-// template:begin authn:load-audience-list
-pub(super) const AUDIENCE_KEY: &str = "authn.audience";
-const AUDIENCE_LIST_ALIAS: &str = "authn.audiences";
-
-pub(super) fn audience_list(variables: &Variables) -> Result<Option<Vec<String>>, Error> {
-    use serde::Deserialize as _;
-
-    let name = variable_name(AUDIENCE_KEY).to_ascii_lowercase();
-    let Some(variable) = variables.get(&name).filter(|variable| {
-        variable
-            .original_name
-            .eq_ignore_ascii_case(&variable_name(AUDIENCE_LIST_ALIAS))
-    }) else {
-        return Ok(None);
-    };
-    let invalid = || {
-        Error::Deserialize(format!(
-            "{} must be a TOML array of strings",
-            variable.original_name
-        ))
-    };
-    let value = toml::de::ValueDeserializer::parse(&variable.value).map_err(|_| invalid())?;
-    Vec::<String>::deserialize(value)
-        .map(Some)
-        .map_err(|_| invalid())
-}
-// template:end authn:load-audience-list
 
 pub(super) fn collect_variables<I, K, V>(
     secrets_dir: Option<&Path>,

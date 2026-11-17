@@ -15,7 +15,7 @@ use infra_postgres::{CloseOutcome, PgPool};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
-use service_config::{GraceBudgetError, HttpConfig};
+use service_config::{HttpConfig, ShutdownTail};
 use tokio::time::Instant;
 
 use super::background::{Background, JoinOutcome};
@@ -25,19 +25,17 @@ const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
-pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
+const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
     .saturating_add(TELEMETRY_FLUSH)
     .saturating_add(SHUTDOWN_JOIN_SLACK)
     .saturating_add(super::RUNTIME_SHUTDOWN_TIMEOUT);
 
-pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    http.check_grace_budget(
-        SHUTDOWN_TAIL,
-        "teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)",
-    )
-}
+pub(crate) const TAIL: ShutdownTail = ShutdownTail::new(
+    SHUTDOWN_TAIL,
+    "teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)",
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -436,11 +434,11 @@ mod tests {
     #[test]
     fn grace_covers_the_whole_tail_including_equality() {
         let mut http = HttpConfig::default();
-        validate_grace_budget(&http).unwrap();
+        http.check_grace_budget(TAIL).unwrap();
         http.grace_period = Duration::from_millis(43_500);
-        validate_grace_budget(&http).unwrap();
+        http.check_grace_budget(TAIL).unwrap();
         http.grace_period -= Duration::from_nanos(1);
-        assert!(validate_grace_budget(&http).is_err());
+        assert!(http.check_grace_budget(TAIL).is_err());
     }
 
     #[tokio::test(start_paused = true)]

@@ -14,7 +14,7 @@ use infra_messaging::CloseOutcome;
 use infra_postgres::PgPool;
 // template:end jobs:worker-shutdown-postgres-imports
 use infra_telemetry::{LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK};
-use service_config::{GraceBudgetError, HttpConfig};
+use service_config::{ShutdownTail, WorkerHttpConfig};
 use tokio::time::Instant;
 
 use crate::background::Background;
@@ -40,12 +40,10 @@ const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
 
 pub(crate) const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    http.check_grace_budget(
-        SHUTDOWN_TAIL,
-        "jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)",
-    )
-}
+pub(crate) const TAIL: ShutdownTail = ShutdownTail::new(
+    SHUTDOWN_TAIL,
+    "jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)",
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Outcome {
@@ -83,7 +81,7 @@ impl Budget {
 }
 
 pub(crate) struct Plan<'a> {
-    pub(crate) http: &'a HttpConfig,
+    pub(crate) http: &'a WorkerHttpConfig,
     pub(crate) resources: Resources,
     pub(crate) background: Background,
     pub(crate) signals: &'a mut Signals,
@@ -193,7 +191,7 @@ async fn stage_or<T>(name: &'static str, operation: impl Future<Output = T>, on_
     }
 }
 
-fn stop_work(http: &HttpConfig, resources: &Resources) {
+fn stop_work(http: &WorkerHttpConfig, resources: &Resources) {
     tracing::info!(grace = ?http.grace_period, "shutdown_started");
     if let Some(readiness) = resources.readiness.as_ref() {
         readiness.start_drain();
@@ -566,8 +564,8 @@ mod tests {
 
     #[test]
     fn default_budgets_leave_one_and_a_half_seconds() {
-        let http = HttpConfig::default();
-        validate_grace_budget(&http).unwrap();
+        let http = WorkerHttpConfig::default();
+        http.check_grace_budget(TAIL).unwrap();
         assert_eq!(
             http.grace_period
                 .checked_sub(http.drain_timeout)
@@ -578,17 +576,17 @@ mod tests {
 
     #[test]
     fn grace_budget_boundary_is_drain_plus_tail() {
-        let pass = HttpConfig {
+        let pass = WorkerHttpConfig {
             drain_timeout: Duration::from_secs(25),
             grace_period: Duration::from_millis(43_500),
-            ..HttpConfig::default()
+            ..WorkerHttpConfig::default()
         };
-        validate_grace_budget(&pass).unwrap();
-        let fail = HttpConfig {
+        pass.check_grace_budget(TAIL).unwrap();
+        let fail = WorkerHttpConfig {
             grace_period: Duration::from_millis(43_500) - Duration::from_nanos(1),
             ..pass
         };
-        assert!(validate_grace_budget(&fail).is_err());
+        assert!(fail.check_grace_budget(TAIL).is_err());
     }
 
     #[tokio::test(start_paused = true)]
@@ -648,7 +646,7 @@ mod tests {
             cancel.cancelled().await;
             panic!("cleanup defect");
         });
-        let http = HttpConfig::default();
+        let http = WorkerHttpConfig::default();
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
@@ -675,7 +673,7 @@ mod tests {
             let _held = ended;
             std::future::pending::<()>().await;
         });
-        let http = HttpConfig::default();
+        let http = WorkerHttpConfig::default();
         let mut signals = Signals::install().unwrap();
         let started = Instant::now();
         let outcome = tokio::time::timeout(
