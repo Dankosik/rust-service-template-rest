@@ -510,7 +510,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             during_build.cancel();
             command
         },
-        Some(&during_build),
+        &during_build,
         crate::namespace::Operation::Delete,
     );
     assert!(matches!(
@@ -785,10 +785,9 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(OperationError::Unavailable))
     );
-    let context = OperationContext::unbounded();
     let refused = cache.link.command::<()>(
         || panic!("a refused command must not be built"),
-        Some(&context),
+        &caller,
         crate::namespace::Operation::Delete,
     );
     assert!(matches!(

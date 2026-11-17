@@ -314,13 +314,12 @@ async fn query<T: redis::FromRedisValue>(
     operation: Operation,
 ) -> redis::RedisResult<T> {
     let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
-    let value = match (operation, reply_data(reply)?) {
+    match (operation, reply_data(reply)?) {
         (Operation::Get, value @ (redis::Value::Nil | redis::Value::BulkString(_)))
         | (Operation::Set, value @ redis::Value::Okay)
-        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => value,
-        _ => return Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
-    };
-    Ok(T::from_redis_value(value)?)
+        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => Ok(T::from_redis_value(value)?),
+        _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
+    }
 }
 
 fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::Value> {
