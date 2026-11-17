@@ -353,6 +353,8 @@ async fn a_cache_window_must_leave_room_for_maintenance() {
 
 #[tokio::test]
 async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stops() {
+    use std::task::Poll;
+
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(30),

@@ -47,15 +47,11 @@ mod tests {
             .as_ref()
             .map(|cache| cache.namespace(namespace!("items")));
         let cache = CacheLookup::new(namespace, Duration::from_millis(100));
-        let _: axum::Router = axum::Router::new()
-            .route(
-                "/items",
-                axum::routing::get(
-                    async |State(cache): State<CacheLookup>, request: RequestContext| {
-                        let _lookup = cache.lookup(request.operation(), "key").await;
-                    },
-                ),
-            )
-            .with_state(cache);
+        let _: axum::routing::MethodRouter = axum::routing::get(
+            async |State(cache): State<CacheLookup>, request: RequestContext| {
+                let _lookup = cache.lookup(request.operation(), "key").await;
+            },
+        )
+        .with_state(cache);
     }
 }
