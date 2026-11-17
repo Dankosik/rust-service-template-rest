@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 // template:end outbox:test-jobs-process-nats-imports
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 // template:begin outbox:test-jobs-process-nats-imports-2
 use async_nats::jetstream::{self, stream};
@@ -725,7 +725,33 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     wait_completed(&pool, &id).await;
-    await_completed_probe_metrics(&format!("http://{diagnostics}/metrics")).await;
+    let metrics_url = format!("http://{diagnostics}/metrics");
+    await_completed_probe_metrics(&metrics_url).await;
+    let (status, body) = get(&metrics_url).await.expect("GET /metrics after success");
+    assert_eq!(status, 200);
+    let terminal_timestamp = r#"jobs_last_terminal_attempt_timestamp_seconds{kind="test.probe"} "#;
+    assert!(
+        !body
+            .lines()
+            .any(|line| line.starts_with(terminal_timestamp))
+    );
+
+    let before = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
+    let failed = enqueue_committed(&pool, ProbeAction::FailPermanent).await;
+    worker.await_record("job_failed").await;
+    assert_eq!(job_state(&pool, &failed).await, "failed");
+    let (status, body) = get(&metrics_url)
+        .await
+        .expect("GET /metrics after terminal failure");
+    assert_eq!(status, 200);
+    let observed = body
+        .lines()
+        .find_map(|line| line.strip_prefix(terminal_timestamp))
+        .expect("an acknowledged terminal job failure publishes its timestamp")
+        .parse::<f64>()
+        .expect("terminal failure timestamp is a number");
+    let after = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
+    assert!((before.as_secs_f64()..=after.as_secs_f64()).contains(&observed));
 
     worker.terminate();
     let (code, stderr, stdout) = worker.wait().await;

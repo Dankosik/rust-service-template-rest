@@ -1,6 +1,6 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::HeaderMap;
 use async_nats::jetstream::message::Info;
@@ -32,6 +32,7 @@ const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
 const HANDLER_TOTAL: &str = "messaging_handler_total";
 const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
 const DEAD_LETTER_TOTAL: &str = "messaging_dead_letter_total";
+const LAST_DEAD_LETTER_TIMESTAMP_SECONDS: &str = "messaging_last_dead_letter_timestamp_seconds";
 const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
 
 #[derive(Debug)]
@@ -331,6 +332,15 @@ impl DeliveryHandler {
             "outcome" => outcome
         )
         .increment(1);
+        if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            metrics::gauge!(
+                LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
+                "event_type" => event_type,
+                "reason" => reason,
+                "outcome" => outcome
+            )
+            .set(timestamp.as_secs_f64());
+        }
         let Err(failure) = result else {
             acknowledge(&self.shared.connection.client, source).await;
             return Ok(());
@@ -432,7 +442,7 @@ pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
 }
 
 pub(super) fn describe_metrics() {
-    use metrics::{Unit, describe_counter, describe_histogram};
+    use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 
     describe_counter!(
         HANDLER_TOTAL,
@@ -446,6 +456,11 @@ pub(super) fn describe_metrics() {
     describe_counter!(
         DEAD_LETTER_TOTAL,
         "Dead-letter transfers by event type, reason and transfer outcome"
+    );
+    describe_gauge!(
+        LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
+        Unit::Seconds,
+        "Unix timestamp of the last dead-letter transfer by event type, reason and transfer outcome"
     );
     describe_counter!(
         SETTLEMENT_FAILURES_TOTAL,

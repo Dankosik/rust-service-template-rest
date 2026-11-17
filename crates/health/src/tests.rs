@@ -1058,8 +1058,9 @@ proptest! {
                 Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::from_millis(1) })
             };
             let threshold = NonZeroU32::new(failure_threshold).unwrap();
+            let was_ready = previous.as_ref().is_some_and(|check| check.is_ready_at(at, stale_after));
             let (check, _) =
-                apply_failure_threshold(previous.as_ref(), observed, threshold, at, stale_after);
+                apply_failure_threshold(previous.as_ref(), observed, threshold, at, was_ready);
 
             streak = if succeeds { 0 } else { streak + 1 };
             let fresh_ready = published.is_some_and(|(ready, at_ms)| {

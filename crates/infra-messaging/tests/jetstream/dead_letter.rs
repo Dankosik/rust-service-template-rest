@@ -1,7 +1,26 @@
+use std::time::UNIX_EPOCH;
+
 use super::*;
 
-#[tokio::test]
+fn permanent_transfer_timestamp(scrape: &str) -> Option<f64> {
+    let sample = scrape.lines().find(|line| {
+        line.starts_with("messaging_last_dead_letter_timestamp_seconds{")
+            && line.contains(r#"event_type="test.example.created""#)
+            && line.contains(r#"reason="permanent""#)
+            && line.contains(r#"outcome="accepted""#)
+    })?;
+    let (_, value) = sample.rsplit_once(' ').expect("Prometheus sample value");
+    Some(
+        value
+            .parse()
+            .expect("DLQ publication timestamp is a number"),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_identity() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local_recorder = metrics::set_default_local_recorder(&recorder);
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -35,6 +54,9 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .publication
         .prepare(&event("event-permanent"))
         .expect("fixture event is prepared");
+    let metrics = recorder.handle();
+    assert_eq!(permanent_transfer_timestamp(&metrics.render()), None);
+    let before = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -64,6 +86,11 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .finish(deadline())
         .await
         .expect("terminal transfer worker can drain after source settlement");
+
+    let observed = permanent_transfer_timestamp(&metrics.render())
+        .expect("an acknowledged DLQ publication publishes its timestamp");
+    let after = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
+    assert!((before.as_secs_f64()..=after.as_secs_f64()).contains(&observed));
 
     fixture
         .jetstream
