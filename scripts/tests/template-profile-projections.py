@@ -553,7 +553,7 @@ def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
     return declared
 
 
-_USE_STATEMENT = re.compile(rb"\buse\s+(?:::)?(\w+)[^;]*;")
+_USE_STATEMENT = re.compile(rb"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(?:::)?(\w+)[^;]*;")
 
 
 def _assert_dropped_crates_unnamed(
