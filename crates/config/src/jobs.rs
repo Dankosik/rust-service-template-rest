@@ -2,8 +2,9 @@ use std::num::NonZeroU32;
 
 use serde::Deserialize;
 
+use crate::load::{Error, JobsOperatorLoadError};
 use crate::postgres::{OperatorPostgresConfig, OperatorPostgresInput};
-use crate::validate::{ValidationErrors, Violations, int_range};
+use crate::validate::{Violations, int_range};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -47,22 +48,25 @@ pub(crate) struct JobsOperatorInput {
 
 #[derive(Clone, Debug)]
 pub struct JobsOperatorConfig {
-    postgres: Option<OperatorPostgresConfig>,
+    postgres: OperatorPostgresConfig,
 }
 
 impl JobsOperatorConfig {
     #[must_use]
-    pub const fn postgres(&self) -> Option<&OperatorPostgresConfig> {
-        self.postgres.as_ref()
+    pub const fn postgres(&self) -> &OperatorPostgresConfig {
+        &self.postgres
     }
 }
 
 impl JobsOperatorInput {
-    pub(crate) fn admit(self) -> Result<JobsOperatorConfig, ValidationErrors> {
+    pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let mut violations = Violations::default();
         let postgres = self.postgres.admit(&mut violations);
-        let admitted = postgres.map(|postgres| JobsOperatorConfig { postgres });
-        violations.finish(admitted)
+        let postgres = violations
+            .finish(postgres)
+            .map_err(Error::from)?
+            .ok_or(JobsOperatorLoadError::PostgresDisabled)?;
+        Ok(JobsOperatorConfig { postgres })
     }
 }
 

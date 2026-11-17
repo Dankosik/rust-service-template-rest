@@ -1,5 +1,5 @@
 use super::*;
-use crate::load::{Error, load_from, load_migration_from};
+use crate::load::{load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
 use crate::validate::admit_with;
 use crate::{LoadOptions, LogFormat};
@@ -106,7 +106,7 @@ fn only_migration_loading_decodes_and_validates_the_deadline() {
     )
     .unwrap();
     assert_eq!(
-        defaults.postgres().unwrap().migration_deadline,
+        defaults.postgres().migration_deadline,
         Duration::from_mins(5)
     );
     for deadline in ["0s", "25h", "invalid"] {
@@ -117,9 +117,13 @@ fn only_migration_loading_decodes_and_validates_the_deadline() {
         // template:end jobs:pooled-worker-ignores-migration-deadline
         let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
         if deadline == "invalid" {
-            assert_matches!(err, Error::Deserialize(_));
+            assert_matches!(err, MigrationLoadError::Config(Error::Deserialize(_)));
         } else {
-            assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"));
+            assert_matches!(
+                err,
+                MigrationLoadError::Config(Error::Validate(errors))
+                    if errors.names("postgres.migration_deadline")
+            );
         }
     }
 }
@@ -198,7 +202,7 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     assert!(load_from(&options, BUILD, env(&variables)).is_err());
 
     let cfg = load_migration_from(&options, BUILD, env(&variables)).unwrap();
-    let postgres = cfg.postgres().unwrap();
+    let postgres = cfg.postgres();
     assert_eq!(
         postgres.password_file.as_deref(),
         Some(std::path::Path::new("/run/secrets/postgres-password"))
@@ -207,18 +211,26 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
         postgres.migration_deadline,
         std::time::Duration::from_hours(2)
     );
-    assert_eq!(cfg.log.format, LogFormat::Text);
-    assert_eq!(cfg.app.version, "1.2.3");
-    assert_eq!(cfg.service_name, "orders");
+    assert_eq!(cfg.log().format, LogFormat::Text);
+    assert_eq!(cfg.app().version, "1.2.3");
+    assert_eq!(cfg.service_name(), "orders");
 }
 
 #[test]
 fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
     let options = LoadOptions::default();
-    let migration = load_migration_from(&options, BUILD, env(&[])).unwrap();
+    let migration = load_migration_from(
+        &options,
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]),
+    )
+    .unwrap();
     let service = load_from(&options, BUILD, env(&[])).unwrap();
     assert_eq!(
-        migration.service_name,
+        migration.service_name(),
         service.observability.otel.service_name
     );
 
@@ -228,7 +240,11 @@ fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
         env(&[("APP__OBSERVABILITY__OTEL__SERVICE_NAME", "  ")]),
     )
     .unwrap_err();
-    assert_matches!(blank, Error::Validate(errors) if errors.names("observability.otel.service_name"));
+    assert_matches!(
+        blank,
+        MigrationLoadError::Config(Error::Validate(errors))
+            if errors.names("observability.otel.service_name")
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let file = write(
@@ -245,7 +261,50 @@ fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(non_string, Error::Deserialize(_), "{non_string}");
+    assert_matches!(
+        non_string,
+        MigrationLoadError::Config(Error::Deserialize(_)),
+        "{non_string}"
+    );
+}
+
+#[test]
+fn migration_ignores_only_the_replica_identity_within_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let enabled = [
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+    ];
+    let options = LoadOptions {
+        config: Some(write(
+            &dir,
+            "replica.toml",
+            "[app]\nenv = 'production'\ninstance_id = 27\n",
+        )),
+        ..LoadOptions::default()
+    };
+    let migration = load_migration_from(&options, BUILD, env(&enabled)).unwrap();
+    assert_eq!(migration.app().env, "production");
+    assert!(migration.app().instance_id.is_none());
+    let service = load_from(&options, BUILD, env(&enabled)).unwrap_err();
+    assert_matches!(service, Error::Deserialize(_), "{service}");
+
+    for key in ["env", "version", "commit", "instance_id_typo"] {
+        let options = LoadOptions {
+            config: Some(write(
+                &dir,
+                "invalid-app.toml",
+                &format!("[app]\n{key} = 27\n"),
+            )),
+            ..LoadOptions::default()
+        };
+        let error = load_migration_from(&options, BUILD, env(&enabled)).unwrap_err();
+        assert_matches!(
+            error,
+            MigrationLoadError::Config(Error::Deserialize(_)),
+            "{key}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -257,7 +316,11 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     ] {
         let unknown =
             load_migration_from(&LoadOptions::default(), BUILD, env(&[(key, "1")])).unwrap_err();
-        assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
+        assert_matches!(
+            unknown,
+            MigrationLoadError::Config(Error::Deserialize(_)),
+            "{unknown}"
+        );
     }
 
     let typo_section = load_migration_from(
@@ -266,7 +329,11 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
     )
     .unwrap_err();
-    assert_matches!(&typo_section, Error::Deserialize(_), "{typo_section}");
+    assert_matches!(
+        &typo_section,
+        MigrationLoadError::Config(Error::Deserialize(_)),
+        "{typo_section}"
+    );
     assert!(!typo_section.to_string().contains("secret-pw"));
     assert!(!format!("{typo_section:?}").contains("secret-pw"));
 
@@ -276,7 +343,11 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__ENABLED", "true")]),
     )
     .unwrap_err();
-    assert_matches!(&missing_dsn, Error::Validate(errors) if errors.names("postgres.dsn"), "{missing_dsn}");
+    assert_matches!(
+        &missing_dsn,
+        MigrationLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        "{missing_dsn}"
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let unknown_table = write(&dir, "unknown.toml", "[unrelated]\nvalue = 1\n");
@@ -289,7 +360,11 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(unknown_err, Error::Deserialize(_), "{unknown_err}");
+    assert_matches!(
+        unknown_err,
+        MigrationLoadError::Config(Error::Deserialize(_)),
+        "{unknown_err}"
+    );
 
     let leaked = write(
         &dir,
@@ -305,5 +380,9 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(err, Error::SecretInFile { .. }, "{err}");
+    assert_matches!(
+        err,
+        MigrationLoadError::Config(Error::SecretInFile { .. }),
+        "{err}"
+    );
 }

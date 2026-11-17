@@ -71,11 +71,9 @@ fn rejects_empty_signing_secrets() {
 fn webhooks_environment_builds_endpoint_local_signing_keys() {
     use secrecy::ExposeSecret as _;
 
+    let destination = "https://partner.example/fixture-private-path?token=fixture-private-query";
     let cfg = load_worker_env(&[
-        (
-            "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
-            "https://partner.example/events",
-        ),
+        ("APP__WEBHOOKS__ENDPOINTS__PARTNER__URL", destination),
         (
             "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
             "fixture-current-secret",
@@ -93,14 +91,21 @@ fn webhooks_environment_builds_endpoint_local_signing_keys() {
         Some(4)
     );
     let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
-    assert_eq!(endpoint.url, "https://partner.example/events");
+    assert_eq!(endpoint.url, destination);
     assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
     assert_eq!(
         endpoint.previous_secret.as_ref().unwrap().expose_secret(),
         "fixture-previous-secret"
     );
-    assert!(!format!("{cfg:?}").contains("fixture-current-secret"));
-    assert!(!format!("{cfg:?}").contains("fixture-previous-secret"));
+    let debug = format!("{cfg:?}");
+    for sensitive in [
+        "fixture-private-path",
+        "fixture-private-query",
+        "fixture-current-secret",
+        "fixture-previous-secret",
+    ] {
+        assert!(!debug.contains(sensitive));
+    }
 }
 
 #[test]

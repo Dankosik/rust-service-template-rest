@@ -256,7 +256,7 @@ fn terminal_fixture() {
         None
     };
     let outcome = match scenario.as_str() {
-        "error" => Err(Failure::PostgresDisabled),
+        "error" => Err(Failure::Setup("bad config".to_owned())),
         "no_change" => Ok(Report {
             before: Some(7),
             applied: vec![],

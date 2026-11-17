@@ -7,10 +7,9 @@ use serde::Deserialize;
 use serde::de::IgnoredAny as IgnoredSection;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::load::{Error, MigrationLoadError};
 use crate::observability::validate_service_name;
-use crate::validate::{
-    Rejected, ValidationErrors, Violations, duration_range, int_range, required,
-};
+use crate::validate::{Rejected, Violations, duration_range, int_range, required};
 use crate::{AppConfig, LogConfig, OtelConfig};
 
 /// Where a pooled session's `statement_timeout` and
@@ -184,6 +183,7 @@ impl MigrationPostgresInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct MigrationInput {
+    #[serde(deserialize_with = "crate::app::deserialize_migration_app")]
     pub(crate) app: AppConfig,
     // template:begin authn:migration-input-authn
     authn: IgnoredSection,
@@ -245,7 +245,7 @@ pub struct MigrationConfig {
     app: AppConfig,
     log: LogConfig,
     service_name: String,
-    postgres: Option<MigrationPostgresConfig>,
+    postgres: MigrationPostgresConfig,
 }
 
 impl MigrationConfig {
@@ -265,13 +265,13 @@ impl MigrationConfig {
     }
 
     #[must_use]
-    pub const fn postgres(&self) -> Option<&MigrationPostgresConfig> {
-        self.postgres.as_ref()
+    pub const fn postgres(&self) -> &MigrationPostgresConfig {
+        &self.postgres
     }
 }
 
 impl MigrationInput {
-    pub(crate) fn admit(self) -> Result<MigrationConfig, ValidationErrors> {
+    pub(crate) fn admit(self) -> Result<MigrationConfig, MigrationLoadError> {
         let mut violations = Violations::default();
         let v = &mut violations;
         self.app.validate(v);
@@ -283,13 +283,15 @@ impl MigrationInput {
             .unwrap_or_else(|| OtelConfig::default().service_name);
         v.check(validate_service_name(&service_name));
         let postgres = self.postgres.admit(v);
-        let admitted = postgres.map(|postgres| MigrationConfig {
+        let Some(postgres) = violations.finish(postgres).map_err(Error::from)? else {
+            return Err(MigrationLoadError::PostgresDisabled { log: self.log });
+        };
+        Ok(MigrationConfig {
             app: self.app,
             log: self.log,
             service_name,
             postgres,
-        });
-        violations.finish(admitted)
+        })
     }
 }
 

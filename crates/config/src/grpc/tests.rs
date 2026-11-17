@@ -2,7 +2,7 @@ use super::*;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::admit_with;
-use crate::{HttpConfig, LoadOptions, ValidationErrors};
+use crate::{LoadOptions, ValidationErrors};
 use std::assert_matches;
 
 fn input(toml: &str) -> GrpcInput {
@@ -10,7 +10,7 @@ fn input(toml: &str) -> GrpcInput {
 }
 
 fn default_drain_budget() -> Duration {
-    HttpConfig::default().effective_drain_budget()
+    load_env(&[]).http.effective_drain_budget()
 }
 
 fn admit(input: GrpcInput) -> Result<Option<GrpcConfig>, ValidationErrors> {
@@ -137,11 +137,9 @@ fn a_call_budget_must_fit_inside_the_shared_drain() {
     };
     assert_eq!(refused_keys(over()), ["grpc.request_timeout"]);
 
-    let http = HttpConfig {
-        drain_timeout: Duration::from_secs(40),
-        ..HttpConfig::default()
-    };
-    admit_with(|violations| over().admit(Some(http.effective_drain_budget()), violations)).unwrap();
+    let config = load_env(&[("APP__HTTP__DRAIN_TIMEOUT", "40s")]);
+    admit_with(|violations| over().admit(Some(config.http.effective_drain_budget()), violations))
+        .unwrap();
     admit_with(|violations| over().admit(None, violations)).unwrap();
 }
 
