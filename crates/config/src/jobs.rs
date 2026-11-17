@@ -51,7 +51,8 @@ pub struct JobsOperatorConfig {
 }
 
 impl JobsOperatorConfig {
-    pub fn postgres(&self) -> Option<&OperatorPostgresConfig> {
+    #[must_use]
+    pub const fn postgres(&self) -> Option<&OperatorPostgresConfig> {
         self.postgres.as_ref()
     }
 }

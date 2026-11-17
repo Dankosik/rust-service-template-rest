@@ -249,19 +249,23 @@ pub struct MigrationConfig {
 }
 
 impl MigrationConfig {
-    pub fn app(&self) -> &AppConfig {
+    #[must_use]
+    pub const fn app(&self) -> &AppConfig {
         &self.app
     }
 
-    pub fn log(&self) -> &LogConfig {
+    #[must_use]
+    pub const fn log(&self) -> &LogConfig {
         &self.log
     }
 
-    pub fn service_name(&self) -> &str {
-        &self.service_name
+    #[must_use]
+    pub const fn service_name(&self) -> &str {
+        self.service_name.as_str()
     }
 
-    pub fn postgres(&self) -> Option<&MigrationPostgresConfig> {
+    #[must_use]
+    pub const fn postgres(&self) -> Option<&MigrationPostgresConfig> {
         self.postgres.as_ref()
     }
 }

@@ -96,6 +96,19 @@ fn pool_size_rejects_fractional_toml() {
 #[test]
 fn only_migration_loading_decodes_and_validates_the_deadline() {
     let options = LoadOptions::default();
+    let defaults = load_migration_from(
+        &options,
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        defaults.postgres().unwrap().migration_deadline,
+        Duration::from_mins(5)
+    );
     for deadline in ["0s", "25h", "invalid"] {
         let variables = [("APP__POSTGRES__MIGRATION_DEADLINE", deadline)];
         load_from(&options, BUILD, env(&variables)).unwrap();
@@ -103,11 +116,10 @@ fn only_migration_loading_decodes_and_validates_the_deadline() {
         crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
         // template:end jobs:pooled-worker-ignores-migration-deadline
         let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
-        match deadline {
-            "invalid" => assert_matches!(err, Error::Deserialize(_)),
-            _ => {
-                assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"))
-            }
+        if deadline == "invalid" {
+            assert_matches!(err, Error::Deserialize(_));
+        } else {
+            assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"));
         }
     }
 }
