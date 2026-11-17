@@ -19,7 +19,6 @@ test-support = []
 derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
-indexmap = { workspace = true }
 operation-context = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
 arc-swap = { workspace = true }
