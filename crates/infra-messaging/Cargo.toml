@@ -83,6 +83,7 @@ nats-test-support = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }
+serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 time = { workspace = true, features = ["macros", "parsing"] }
