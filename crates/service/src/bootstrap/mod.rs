@@ -142,7 +142,7 @@ pub(crate) enum BootstrapError {
 
 #[allow(
     dead_code,
-    reason = "the postgres and cache profiles are optional; a dependency-free service retains no blocking startup call"
+    reason = "the postgres profile is optional; a dependency-free service retains no blocking startup call"
 )]
 async fn blocking_startup<T, E>(
     stage: &'static str,
