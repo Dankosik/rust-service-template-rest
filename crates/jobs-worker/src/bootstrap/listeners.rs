@@ -1,4 +1,4 @@
-use health::{Probe, Readiness, RefreshPolicy};
+use health::{Probe, ReadinessReader, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions, HttpContract};
 use infra_http_transport::{BoundListener, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
@@ -23,15 +23,15 @@ pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
 pub(super) fn bind_listeners(
     config: &WorkerConfig,
     metrics: &Metrics,
-    readiness: &Readiness,
+    readiness: ReadinessReader,
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
     let options = server_options(config);
     let app = HttpContract::default().with_probes("/").build(
-        readiness.reader(),
+        readiness.clone(),
         Authentication::Public,
-        &harden_options(config, readiness),
+        &harden_options(config, readiness.clone()),
     )?;
     let health = resources
         .listeners
@@ -40,8 +40,7 @@ pub(super) fn bind_listeners(
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
-        let reader = readiness.reader();
-        let routes = diagnostics_router(metrics.clone(), move || reader.is_ready())
+        let routes = diagnostics_router(metrics.clone(), move || readiness.is_ready())
             .merge(infra_http::liveness_router());
         let diagnostics = resources
             .listeners
@@ -51,13 +50,6 @@ pub(super) fn bind_listeners(
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
     }
     Ok(())
-}
-
-pub(super) fn start_refresher(readiness: &Readiness, background: &Background) {
-    let readiness = readiness.clone();
-    background.spawn("readiness_refresher", |cancel| async move {
-        readiness.refresh_until(cancel).await;
-    });
 }
 
 fn watch_listener(name: &'static str, server: &Server, background: &Background) {
@@ -81,14 +73,14 @@ fn server_options(config: &WorkerConfig) -> ServerOptions {
     }
 }
 
-fn harden_options(config: &WorkerConfig, readiness: &Readiness) -> HardenOptions {
+fn harden_options(config: &WorkerConfig, readiness: ReadinessReader) -> HardenOptions {
     HardenOptions {
         max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: config.http.request_timeout,
         max_in_flight: config.http.in_flight_cap(),
         admission_wait: config.http.admission_wait_cap(),
         log_health_probes: config.http.access_log_health_probes,
-        draining: Some(readiness.reader()),
+        draining: Some(readiness),
     }
 }
 

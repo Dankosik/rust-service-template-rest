@@ -1020,8 +1020,8 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     .unwrap();
     let readiness =
         health::Readiness::new(vec![Box::new(PostgresProbe::new(ours.clone()))], policy);
-    readiness.refresh().await;
-    let reader = readiness.reader();
+    let reader = readiness.control().reader();
+    let refresher = readiness.prepare().await.unwrap().activate().unwrap();
     assert!(reader.verdict().is_ok());
     let mut held = ours.acquire().await.unwrap();
     let events = PoolEvents::default();
@@ -1090,7 +1090,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
         cancel.cancel();
     };
     async {
-        tokio::join!(readiness.refresh_until(cancel.clone()), observe);
+        tokio::join!(refresher.refresh_until(cancel.clone()), observe);
     }
     .with_subscriber(events.subscriber())
     .await;

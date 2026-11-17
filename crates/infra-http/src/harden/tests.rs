@@ -605,7 +605,7 @@ async fn a_request_is_shed_after_the_admission_wait_while_its_budget_is_still_op
     assert_eq!(served.await.unwrap().status(), StatusCode::OK);
 }
 
-fn draining_reader() -> (health::Readiness, health::ReadinessReader) {
+async fn ready_control() -> health::ReadinessControl {
     let readiness = health::Readiness::new(
         Vec::new(),
         health::RefreshPolicy::try_new(
@@ -615,16 +615,16 @@ fn draining_reader() -> (health::Readiness, health::ReadinessReader) {
         )
         .unwrap(),
     );
-    let reader = readiness.reader();
-    (readiness, reader)
+    let control = readiness.control();
+    readiness.prepare().await.unwrap().activate().unwrap();
+    control
 }
 
 #[tokio::test]
 async fn http1_responses_ask_the_client_to_reconnect_only_while_draining() {
-    let (readiness, reader) = draining_reader();
-    readiness.refresh().await;
+    let readiness = ready_control().await;
     let app = app(&HardenOptions {
-        draining: Some(reader),
+        draining: Some(readiness.reader()),
         ..options()
     });
 
@@ -764,16 +764,7 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     async fn explicit_head() -> StatusCode {
         StatusCode::NO_CONTENT
     }
-    let readiness = health::Readiness::new(
-        Vec::new(),
-        health::RefreshPolicy::try_new(
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-            std::num::NonZeroU32::MIN,
-        )
-        .unwrap(),
-    );
-    readiness.refresh().await;
+    let readiness = ready_control().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
     let routes = utoipa_axum::router::OpenApiRouter::new()

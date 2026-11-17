@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
-use health::{Readiness, RefreshPolicy};
+use health::{Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{Drained, Server, ServerOptions};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
@@ -51,7 +51,7 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
     }
 }
 
-fn http_router(pool: PgPool, readiness: &Readiness) -> infra_http::Application {
+fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
     let work = utoipa_axum::router::OpenApiRouter::new()
         .routes(utoipa_axum::routes!(http_value))
         .with_state(pool);
@@ -74,7 +74,7 @@ fn http_router(pool: PgPool, readiness: &Readiness) -> infra_http::Application {
 
 struct Instance {
     pool: PgPool,
-    readiness: Readiness,
+    readiness: ReadinessControl,
     cancel: CancellationToken,
     refresh: JoinHandle<()>,
     server: Server,
@@ -88,15 +88,16 @@ struct Instance {
 
 impl Instance {
     async fn start(pool: PgPool) -> Self {
-        let readiness = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
-        readiness.refresh().await;
+        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+        let readiness = probes.control();
+        let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());
         let cancel = CancellationToken::new();
         let events = PoolEvents::default();
         let refresh = tokio::spawn({
-            let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.refresh_until(cancel).await }
+            refresher
+                .refresh_until(cancel)
                 .with_subscriber(events.subscriber())
         });
         let server = http_router(pool.clone(), &readiness).serve(

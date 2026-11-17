@@ -142,7 +142,7 @@ fn limits() -> Limits {
     }
 }
 
-fn readiness() -> Readiness {
+fn readiness() -> health::ReadinessControl {
     Readiness::new(
         Vec::new(),
         RefreshPolicy::try_new(
@@ -152,6 +152,7 @@ fn readiness() -> Readiness {
         )
         .unwrap(),
     )
+    .control()
 }
 
 fn echo_services(echo: &Echo) -> Services {

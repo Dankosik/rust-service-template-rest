@@ -1,4 +1,4 @@
-use health::Readiness;
+use health::ReadinessControl;
 use infra_http_transport::Server;
 // template:begin jobs:worker-resources-jobs-import
 use infra_jobs::Started;
@@ -37,7 +37,7 @@ pub(crate) struct Resources {
     pub(crate) pool: Option<PoolResource>,
     // template:end jobs:worker-shutdown-resources-pool
     pub(crate) listeners: Listeners,
-    pub(crate) readiness: Option<Readiness>,
+    pub(crate) readiness: Option<ReadinessControl>,
 }
 
 // template:begin jobs:worker-resources-postgres-pool

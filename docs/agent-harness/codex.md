@@ -39,14 +39,15 @@ role authority.
 
 ## Models
 
-Preserve the root session settings and honor explicit user choices within their
-requested scope. When asked to recommend a root model, use the same criteria as
-for a subagent. Select for the work's judgment, risk, and proof requirements.
+Preserve the root session settings. For each subagent, choose a model and
+reasoning effort based on the judgment, risk, and proof its assignment requires.
+Honor explicit user choices within their requested scope. Use the same criteria
+when recommending a root model.
 
 | Work | Starting model and effort |
 | --- | --- |
-| Routine coordination, implementation within an accepted contract, local diagnosis, or routine review | `gpt-6.2-sol` at `medium`. Use `high` for multiple execution paths or substantial edge-case analysis. |
-| Architecture decisions, material risks to authorization, money, or data integrity, disputed acceptance, or independent review of a high-risk change | `gpt-6.2-astra` at `high` when available, otherwise `gpt-6-astra` at `high`. Use `xhigh` for interacting invariants, conflicting evidence, or a failed attempt that exposed a material gap. |
+| Implementation within an accepted contract, routine coordination, local diagnosis, or routine review | `gpt-6.2-sol` at `medium`. Use `high` for multiple execution paths or substantial edge-case analysis. |
+| Open architecture decisions, decisions with material risks to authorization, money, or data integrity, disputed acceptance, or independent review of a high-risk change | `gpt-6.2-astra` at `high` when available, otherwise `gpt-6-astra` at `high`. Use `xhigh` for interacting invariants, conflicting evidence, or a failed attempt that exposed a material gap. |
 | Bounded fact collection or mechanical checks | Work locally when short. For a useful parallel subtask, use `gpt-6-luna` at `high` when supported, or `gpt-6.2-sol` at `low` for simple retrieval. |
 
 Use `max` when a reasoning gap remains after `xhigh` and more depth justifies
@@ -65,12 +66,13 @@ for model-specific starting points.
 
 ## Dispatch And Coordination
 
-Check the chosen model and effort against the callable schema. For an explicit
-override, pass both `model` and `reasoning_effort` on the initial
-`collaboration.spawn_agent` call with `fork_turns: "none"`. Use fresh history for
-execution lanes, evidence lanes, and independent review. Full-history forks
-inherit parent settings. Verify the effective pair natively before relying on
-it for dependent work.
+Check the chosen pair against the callable schema. On every
+`collaboration.spawn_agent` call, pass both `model` and `reasoning_effort` with
+`fork_turns: "none"` when native controls allow explicit selection. If native
+controls require inheritance, use it only when the parent pair matches the
+chosen pair and the assignment's history requirements are met. Otherwise apply
+the unavailable-model guidance above. Verify the effective pair natively before
+relying on it for dependent work.
 
 Use `collaboration.list_agents` to inspect the tree and `collaboration.wait_agent`
 only on lanes with returned identities. `collaboration.send_message` steers an

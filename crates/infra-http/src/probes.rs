@@ -138,8 +138,9 @@ mod tests {
 
     async fn ready_reader() -> ReadinessReader {
         let readiness = readiness();
-        readiness.refresh().await;
-        readiness.reader()
+        let reader = readiness.control().reader();
+        readiness.prepare().await.unwrap().activate().unwrap();
+        reader
     }
 
     fn app(reader: ReadinessReader) -> (Application, serde_json::Value) {
@@ -203,7 +204,9 @@ mod tests {
 
     #[tokio::test]
     async fn not_ready_is_the_declared_503() {
-        let (app, document) = app(readiness().reader());
+        let readiness = readiness();
+        let (app, document) = app(readiness.control().reader());
+        let _prepared = readiness.prepare().await.unwrap();
         let response = app
             .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
             .await
