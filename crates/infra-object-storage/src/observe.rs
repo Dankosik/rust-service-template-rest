@@ -26,7 +26,6 @@ pub(crate) enum Operation {
     Head,
     Delete,
     PresignGet,
-    Probe,
 }
 
 impl Operation {
@@ -37,7 +36,6 @@ impl Operation {
             Self::Head => "head",
             Self::Delete => "delete",
             Self::PresignGet => "presign_get",
-            Self::Probe => "probe",
         }
     }
 
@@ -48,7 +46,6 @@ impl Operation {
             Self::Head => ("S3.HeadObject", "HeadObject"),
             Self::Delete => ("S3.DeleteObject", "DeleteObject"),
             Self::PresignGet => ("S3.PresignGetObject", "PresignGetObject"),
-            Self::Probe => ("S3.HeadBucket", "HeadBucket"),
         }
     }
 }

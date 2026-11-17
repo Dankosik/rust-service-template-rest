@@ -12,11 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-arc-swap = { workspace = true }
 async-stream = { workspace = true }
-atomic-take = { workspace = true }
-derive-where = { workspace = true }
-derive_more = { workspace = true, features = ["debug"] }
 foldhash = { workspace = true, features = ["std"] }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -28,10 +24,10 @@ health = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 infra-http = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
 infra-bearerauthn = { workspace = true }
+serde = { workspace = true, features = ["std"] }
 # template:end authn:grpc-bearer-dependency
 # template:begin service-auth:grpc-service-auth-dependency
 infra-serviceauth = { workspace = true }
@@ -46,7 +42,7 @@ service-failure = { workspace = true }
 shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
-tonic = { workspace = true, features = ["router", "channel", "server", "codegen", "tls-aws-lc", "tls-native-roots"] }
+tonic = { workspace = true, features = ["router", "server", "codegen"] }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true, features = ["server"] }
 tonic-types = { workspace = true }
@@ -58,8 +54,12 @@ tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 [dev-dependencies]
 grpc-contracts = { workspace = true }
 rustls = { workspace = true, features = ["tls12"] }
+# template:begin grpc-client-tests:grpc-client-test-dependencies
+infra-outbound-grpc = { workspace = true }
+# template:end grpc-client-tests:grpc-client-test-dependencies
 # template:begin grpc-transport-tests:grpc-transport-test-dependencies
 hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 # template:end grpc-transport-tests:grpc-transport-test-dependencies

@@ -26,6 +26,9 @@ workspace = true
 hotpath = [
     "dep:hotpath", "hotpath/hotpath", "hotpath/threads", "hotpath/tokio",
     "hotpath/axum-0-8", "infra-http/hotpath", "infra-telemetry/hotpath",
+    # template:begin inbound-webhooks:service-hotpath-webhooks-feature
+    "infra-webhooks/hotpath",
+    # template:end inbound-webhooks:service-hotpath-webhooks-feature
     # template:begin postgres:service-hotpath-postgres-feature
     "infra-postgres/hotpath",
     # template:end postgres:service-hotpath-postgres-feature
@@ -45,6 +48,7 @@ tikv-jemallocator = { workspace = true }
 rlimit = { workspace = true }
 # template:begin grpc:service-grpc-dependencies
 infra-grpc = { workspace = true }
+infra-outbound-grpc = { workspace = true }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 # template:end grpc:service-grpc-dependencies
 # template:begin cache:service-cache-dependency

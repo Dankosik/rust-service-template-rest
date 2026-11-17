@@ -1,6 +1,7 @@
 use crate::{
-    Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
-    principal::Identity,
+    Actor, BearerToken, JsonObject, PreparationError, Principal, VerificationError,
+    VerificationReason,
+    principal::{Identity, VerifiedIdentity},
 };
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
@@ -177,14 +178,18 @@ struct ActiveClaims<'a> {
 // template:begin oidc-jwt:authn-claims-jwt-validation
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedJwt {
-    pub(crate) principal: Principal,
+    pub(crate) identity: VerifiedIdentity,
     not_before: Option<u64>,
 }
 
 impl VerifiedJwt {
-    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
-        check_lifetime(self.principal.expires_at(), self.not_before, now)?;
-        Ok(self.principal.clone())
+    pub(crate) fn deliver(
+        &self,
+        now: u64,
+        token: &BearerToken<'_>,
+    ) -> Result<Principal, VerificationError> {
+        check_lifetime(self.identity.expires_at(), self.not_before, now)?;
+        Ok(self.identity.presented_as(token))
     }
 }
 
@@ -193,7 +198,6 @@ pub(crate) fn validate_jwt_claims(
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: u64,
-    access_token: secrecy::SecretString,
 ) -> Result<VerifiedJwt, VerificationError> {
     let invalid = VerificationError::invalid;
     let payload =
@@ -236,14 +240,13 @@ pub(crate) fn validate_jwt_claims(
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(VerifiedJwt {
         not_before: claims.nbf,
-        principal: Principal::new(
+        identity: VerifiedIdentity::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 subject,
                 client_id,
                 scopes,
                 payload,
-                access_token,
                 actor,
             },
             expiry,
@@ -285,18 +288,22 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 // template:begin oidc-introspection:authn-claims-introspection-validation
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedIntrospection {
-    pub(crate) principal: Principal,
+    pub(crate) identity: VerifiedIdentity,
     not_before: Option<u64>,
 }
 
 impl VerifiedIntrospection {
     pub(crate) fn reusable_at(&self, now: u64) -> bool {
-        now < self.principal.expires_at() && !not_yet_valid(self.not_before, now)
+        now < self.identity.expires_at() && !not_yet_valid(self.not_before, now)
     }
 
-    pub(crate) fn deliver(self, now: u64) -> Result<Principal, VerificationError> {
-        check_lifetime(self.principal.expires_at(), self.not_before, now)?;
-        Ok(self.principal)
+    pub(crate) fn deliver(
+        &self,
+        now: u64,
+        token: &BearerToken<'_>,
+    ) -> Result<Principal, VerificationError> {
+        check_lifetime(self.identity.expires_at(), self.not_before, now)?;
+        Ok(self.identity.presented_as(token))
     }
 }
 
@@ -305,7 +312,6 @@ pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
     now: u64,
-    access_token: secrecy::SecretString,
 ) -> Result<VerifiedIntrospection, VerificationError> {
     let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
@@ -335,14 +341,13 @@ pub(crate) fn validate_introspection_claims(
         .map_err(|()| malformed())?;
     Ok(VerifiedIntrospection {
         not_before: claims.nbf,
-        principal: Principal::new(
+        identity: VerifiedIdentity::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 subject,
                 client_id,
                 scopes,
                 payload: payload.to_owned(),
-                access_token,
                 actor,
             },
             expiry,
@@ -444,8 +449,8 @@ mod tests {
         ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap()
     }
 
-    fn access_token() -> secrecy::SecretString {
-        secrecy::SecretString::from("presented-token")
+    fn presented() -> crate::BearerToken<'static> {
+        crate::parse_bearer([b"Bearer presented-token".as_slice()]).unwrap()
     }
 
     fn assert_actor_evidence(
@@ -500,9 +505,8 @@ mod tests {
                 &policy(),
                 TokenProfile::ResourceServer,
                 100,
-                access_token(),
             )
-            .map(|verified| verified.principal)
+            .map(|verified| verified.identity.presented_as(&presented()))
         };
         let principal = verify(serde_json::json!({
             "exp": 130, "sub": null, "client_id": "", "azp": "client", "cid": "other",
@@ -533,9 +537,8 @@ mod tests {
                 &policy(),
                 TokenProfile::ResourceServer,
                 1000,
-                access_token(),
             )
-            .map(|verified| verified.principal.expires_at())
+            .map(|verified| verified.identity.expires_at())
             .map_err(|error| error.reason)
         };
         for (extra, expected) in [
@@ -624,9 +627,8 @@ mod tests {
                 &policy(),
                 TokenProfile::Rfc9068,
                 100,
-                access_token(),
             )
-            .map(|verified| verified.principal)
+            .map(|verified| verified.identity.presented_as(&presented()))
             .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
@@ -655,9 +657,8 @@ mod tests {
                 &policy(),
                 TokenProfile::ResourceServer,
                 100,
-                access_token(),
             )
-            .map(|verified| verified.principal)
+            .map(|verified| verified.identity.presented_as(&presented()))
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
@@ -672,8 +673,7 @@ mod tests {
             br#"{"active":false,"sub":"one","sub":"two"}"#,
         ] {
             assert_eq!(
-                validate_introspection_claims(response, &policy(), 100, access_token())
-                    .unwrap_err(),
+                validate_introspection_claims(response, &policy(), 100).unwrap_err(),
                 crate::VerificationError::invalid(VerificationReason::Inactive)
             );
         }
@@ -694,14 +694,14 @@ mod tests {
             br#"{"active":true,"iss":"https://issuer.example","aud":false,"exp":130,"sub":"subject"}"#,
         ] {
             let error =
-                validate_introspection_claims(response, &policy(), 100, access_token())
+                validate_introspection_claims(response, &policy(), 100)
                     .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable, "{response:?}");
         }
     }
 
     #[test]
-    fn typed_claim_access_preserves_evidence_and_custom_last_member_semantics() {
+    fn typed_claim_access_reads_wide_integers_and_refuses_a_repeated_requested_member() {
         #[derive(serde::Deserialize)]
         struct ApplicationClaims {
             tenant: String,
@@ -719,10 +719,15 @@ mod tests {
             #[serde(rename = "tenant")]
             _tenant: u64,
         }
+        #[derive(Debug, serde::Deserialize)]
+        struct RepeatedMember {
+            #[serde(rename = "region")]
+            _region: String,
+        }
         let principal = validate_introspection_claims(
-            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value","accounts":[{"id":"old","id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
-            &policy(), 100, access_token(),
-        ).unwrap().principal;
+            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"private-value","region":"first","region":"second","accounts":[{"id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
+            &policy(), 100,
+        ).unwrap().identity.presented_as(&presented());
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, ["write", "read", "read"]);
@@ -734,6 +739,10 @@ mod tests {
         let error = principal.claims::<WrongShape>().unwrap_err();
         assert_eq!(error, crate::ClaimAccessError::InvalidShape);
         assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
+        assert_eq!(
+            principal.claims::<RepeatedMember>().unwrap_err(),
+            crate::ClaimAccessError::InvalidShape
+        );
     }
 
     #[test]
@@ -743,13 +752,8 @@ mod tests {
                 serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),
                 &extra,
             );
-            validate_introspection_claims(
-                response.to_string().as_bytes(),
-                &policy(),
-                100,
-                access_token(),
-            )
-            .map(|verified| verified.principal)
+            validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
+                .map(|verified| verified.identity.presented_as(&presented()))
         };
         assert_actor_evidence(verify, Failure::Unavailable);
     }
@@ -760,14 +764,9 @@ mod tests {
     fn active_claims_are_required_and_null_means_absent() {
         let complete = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
         let reason = |response: &serde_json::Value| {
-            validate_introspection_claims(
-                response.to_string().as_bytes(),
-                &policy(),
-                100,
-                access_token(),
-            )
-            .map(|_| ())
-            .map_err(|error| (error.failure, error.reason))
+            validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
+                .map(|_| ())
+                .map_err(|error| (error.failure, error.reason))
         };
         for claim in ["iss", "aud", "exp", "sub"] {
             for absent in [None, Some(serde_json::Value::Null)] {
@@ -840,10 +839,12 @@ mod tests {
                     &serde_json::to_vec(&response).unwrap(),
                     &policy(),
                     100,
-                    access_token(),
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().principal.scopes(), expected.as_slice());
+                    assert_eq!(
+                        result.unwrap().identity.presented_as(&presented()).scopes(),
+                        expected.as_slice()
+                    );
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Unavailable, "{extra}");
                 }
@@ -856,10 +857,12 @@ mod tests {
                     &policy(),
                     TokenProfile::ResourceServer,
                     100,
-                    access_token(),
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().principal.scopes(), expected.as_slice());
+                    assert_eq!(
+                        result.unwrap().identity.presented_as(&presented()).scopes(),
+                        expected.as_slice()
+                    );
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Invalid, "{extra}");
                 }

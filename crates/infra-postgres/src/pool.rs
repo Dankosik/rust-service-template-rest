@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use crate::slots::{Slot, Slots};
+use crate::slots::{Queue, Slot, Slots};
 
 use parking_lot::Mutex;
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
@@ -188,40 +188,56 @@ struct PoolSlots {
 /// prepared at an address forgets whatever was recorded there before it.
 static POOL_SLOTS: Mutex<Vec<PoolSlots>> = Mutex::new(Vec::new());
 
-async fn take_slot(
-    pool: &PgPool,
-    deadline: tokio::time::Instant,
-) -> Result<Option<Slot>, sqlx::Error> {
+fn pool_slots(pool: &PgPool) -> Option<Arc<Slots>> {
     let options_addr = std::ptr::from_ref(pool.options()).addr();
-    let slots = POOL_SLOTS
+    POOL_SLOTS
         .lock()
         .iter()
         .find(|entry| entry.options_addr == options_addr && entry.alive.strong_count() > 0)
-        .map(|entry| Arc::clone(&entry.slots));
-    let Some(slots) = slots else {
+        .map(|entry| Arc::clone(&entry.slots))
+}
+
+async fn take_slot(
+    pool: &PgPool,
+    deadline: tokio::time::Instant,
+    queue: Queue,
+) -> Result<Option<Slot>, sqlx::Error> {
+    let Some(slots) = pool_slots(pool) else {
         return Ok(None);
     };
     if let Some(slot) = slots.try_take() {
         return Ok(Some(slot));
     }
-    tokio::time::timeout_at(deadline, slots.take())
+    tokio::time::timeout_at(deadline, slots.take(queue))
         .await
         .map(Some)
         .map_err(|_elapsed| sqlx::Error::PoolTimedOut)
+}
+
+pub async fn acquire(
+    pool: &PgPool,
+    operation: &'static str,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquire_with_queue(pool, operation, Queue::Regular).await
+}
+
+pub(crate) async fn acquire_probe(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquire_with_queue(pool, "readiness", Queue::Probe).await
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "the pool adapter owns the native checkout"
 )]
-pub async fn acquire(
+async fn acquire_with_queue(
     pool: &PgPool,
     operation: &'static str,
+    queue: Queue,
 ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
     let budget = pool.options().get_acquire_timeout();
     let deadline = tokio::time::Instant::now() + budget;
     acquisition(operation, budget, async {
-        let _slot = take_slot(pool, deadline).await?;
+        let _slot = take_slot(pool, deadline, queue).await?;
         tokio::time::timeout_at(deadline, pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
@@ -242,7 +258,7 @@ pub async fn acquire_until(
         operation,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         async {
-            let _slot = take_slot(pool, deadline).await?;
+            let _slot = take_slot(pool, deadline, Queue::Regular).await?;
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout_at(deadline, pool.acquire()).await {
                     Err(_elapsed) => break,
@@ -542,22 +558,39 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let in_arrival_order = unreachable_pool(WaitOrder::Arrival);
         assert!(
-            take_slot(&in_arrival_order, deadline)
+            take_slot(&in_arrival_order, deadline, Queue::Regular)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            take_slot(&in_arrival_order, deadline, Queue::Probe)
                 .await
                 .unwrap()
                 .is_none()
         );
 
         let newest_first = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let held = take_slot(&newest_first, deadline).await.unwrap();
+        let held = take_slot(&newest_first, deadline, Queue::Regular)
+            .await
+            .unwrap();
         assert!(held.is_some());
-        let beyond_the_pool = take_slot(&newest_first, deadline).await;
+        let beyond_the_pool = take_slot(&newest_first, deadline, Queue::Regular).await;
         std::assert_matches!(beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
         assert!(tokio::time::Instant::now() >= deadline);
+        let probe_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let probe_beyond_the_pool = take_slot(&newest_first, probe_deadline, Queue::Probe).await;
+        std::assert_matches!(probe_beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
+        assert!(tokio::time::Instant::now() >= probe_deadline);
 
         drop(held);
         let later = tokio::time::Instant::now() + Duration::from_secs(1);
-        assert!(take_slot(&newest_first, later).await.unwrap().is_some());
+        assert!(
+            take_slot(&newest_first, later, Queue::Probe)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -566,7 +599,12 @@ mod tests {
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
         let options_addr = std::ptr::from_ref(pool.options()).addr();
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
-        assert!(take_slot(&pool, deadline).await.unwrap().is_some());
+        assert!(
+            take_slot(&pool, deadline, Queue::Regular)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         drop(pool);
         let known = POOL_SLOTS.lock();

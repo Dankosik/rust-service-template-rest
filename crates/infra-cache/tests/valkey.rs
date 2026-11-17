@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable, namespace};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
@@ -82,8 +81,10 @@ fn options(
     }
 }
 
-fn connect_url(url: &str, command_timeout: Duration) -> Cache {
-    Cache::start(options(url, command_timeout, None)).expect("admit cache DSN")
+async fn connect_url(url: &str, command_timeout: Duration) -> Cache {
+    Cache::start(options(url, command_timeout, None))
+        .await
+        .expect("admit cache DSN")
 }
 
 struct Proxy {
@@ -283,7 +284,7 @@ impl ClientIdentity {
 
 #[tokio::test]
 async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
-    let cache = connect_url(&cache_url(), Duration::from_secs(1));
+    let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let alpha = cache.namespace(namespace!("alpha"));
     let beta = cache.namespace(namespace!("beta"));
     for key in [unique_key(), format!("{}:\0\r\nюникод", unique_key())] {
@@ -305,7 +306,7 @@ async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
 
 #[tokio::test]
 async fn a_short_ttl_expires() {
-    let cache = connect_url(&cache_url(), Duration::from_secs(1));
+    let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let namespace = cache.namespace(namespace!("ttl"));
     let key = unique_key();
     namespace
@@ -327,12 +328,6 @@ async fn a_short_ttl_expires() {
 }
 
 #[tokio::test]
-async fn probe_succeeds_against_valkey() {
-    let cache = connect_url(&cache_url(), Duration::from_secs(1));
-    cache.probe().check().await.expect("cache ping");
-}
-
-#[tokio::test]
 async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -344,7 +339,7 @@ async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
     let port = listener.local_addr().expect("port").port();
     drop(listener);
-    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
+    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT).await;
     let namespace = cache.namespace(namespace!("down"));
     let started = Instant::now();
     let err = namespace.get(&unique_key()).await.unwrap_err();
@@ -374,7 +369,7 @@ async fn a_silent_server_times_out_within_the_command_bound() {
             });
         }
     });
-    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
+    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT).await;
     let namespace = cache.namespace(namespace!("silent"));
     let started = Instant::now();
     let err = namespace.get(&unique_key()).await.unwrap_err();
@@ -391,7 +386,8 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
     let cache = connect_url(
         &format!("redis://127.0.0.1:{}", proxy.port),
         Duration::from_millis(500),
-    );
+    )
+    .await;
     let namespace = cache.namespace(namespace!("proxy"));
     let key = unique_key();
     namespace
@@ -427,6 +423,7 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit trusted TLS");
     let namespace = cache.namespace(namespace!("tls"));
     let key = unique_key();
@@ -451,6 +448,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit trusted TLS");
     let namespace = cache.namespace(namespace!("tls_endpoint"));
     let key = unique_key();
@@ -497,6 +495,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit initial CA");
     let namespace = cache.namespace(namespace!("tls_rebuild"));
     let key = unique_key();
@@ -523,6 +522,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         Duration::from_secs(1),
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit replacement CA");
     assert_eq!(
         rebuilt
@@ -547,6 +547,7 @@ async fn an_untrusted_ca_is_unavailable() {
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit untrusted CA file");
     let err = cache
         .namespace(namespace!("tls"))
@@ -571,6 +572,7 @@ async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
             Some(ca.path().to_path_buf()),
         )
     })
+    .await
     .expect("admit a client certificate");
     let namespace = cache.namespace(namespace!("mtls"));
     let key = unique_key();
@@ -596,6 +598,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
         COMMAND_TIMEOUT,
         Some(ca.path().to_path_buf()),
     ))
+    .await
     .expect("admit TLS without a client certificate");
     let err = cache
         .namespace(namespace!("mtls"))

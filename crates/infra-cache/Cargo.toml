@@ -22,12 +22,10 @@ workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 operation-context = { workspace = true }
-async-trait = { workspace = true }
 backon = { workspace = true, features = ["std"] }
 derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true, features = ["alloc"] }
-health = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 redis = { workspace = true, features = [

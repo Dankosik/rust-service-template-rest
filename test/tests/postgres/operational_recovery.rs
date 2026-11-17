@@ -26,10 +26,13 @@ use super::{PoolEvents, dsn_at, dsn_for, server_address, template_pool};
 const WAIT: Duration = Duration::from_secs(25);
 const CALL: Duration = Duration::from_secs(6);
 const HTTP_CONNECTIONS: u32 = 4;
-const POLICY: RefreshPolicy = RefreshPolicy {
-    interval: Duration::from_secs(2),
-    probe_budget: Duration::from_secs(4),
-    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
+const POLICY: RefreshPolicy = match RefreshPolicy::try_new(
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    std::num::NonZeroU32::new(3).unwrap(),
+) {
+    Ok(policy) => policy,
+    Err(_) => panic!("valid refresh policy"),
 };
 
 async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
@@ -463,7 +466,8 @@ mod grpc {
         echo_service_client::EchoServiceClient,
         echo_service_server::{EchoService, EchoServiceServer},
     };
-    use infra_grpc::{Client, ClientSecurity, ClientTimeout, Limits, Services};
+    use infra_grpc::{Limits, Services};
+    use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
     use std::pin::Pin;
     use tonic::{Request, Response, Status};
     use tonic_health::pb::{
@@ -575,12 +579,9 @@ mod grpc {
                 limits,
             )
             .unwrap();
-            let server = Server::bind(
-                "127.0.0.1:0".parse().unwrap(),
-                router,
-                infra_grpc::server_options(limits),
-            )
-            .unwrap();
+            let server = infra_http::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+                .unwrap()
+                .serve_h2(router, infra_grpc::server_options(limits), None);
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),

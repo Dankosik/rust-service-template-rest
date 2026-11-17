@@ -17,8 +17,9 @@ use grpc_contracts::example::v1::{
     echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
-use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
-use infra_http::{Drained, Server};
+use infra_grpc::{Caller, Error, Limits, Services, server_options};
+use infra_http::{BoundListener, Drained, Server};
+use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, now_secs, registry},
@@ -144,11 +145,12 @@ fn limits() -> Limits {
 fn readiness() -> Readiness {
     Readiness::new(
         Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_mins(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        RefreshPolicy::try_new(
+            Duration::from_mins(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     )
 }
 
@@ -179,19 +181,16 @@ fn serve(services: Services) -> (Server, SocketAddr) {
         limits(),
     )
     .unwrap();
-    let server = Server::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        app,
-        server_options(limits()),
-    )
-    .unwrap();
+    let server = BoundListener::bind("127.0.0.1:0".parse().unwrap())
+        .unwrap()
+        .serve_h2(app, server_options(limits()), None);
     let address = server.local_addr();
     (server, address)
 }
 
-fn client(address: SocketAddr) -> EchoServiceClient<infra_grpc::Client> {
+fn client(address: SocketAddr) -> EchoServiceClient<Client> {
     EchoServiceClient::new(
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),
@@ -230,7 +229,7 @@ async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
             frame.freeze(),
         )))
         .unwrap();
-    let client = infra_grpc::Client::try_new(
+    let client = Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
@@ -329,7 +328,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     })
     .unwrap();
     let resource = || {
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),

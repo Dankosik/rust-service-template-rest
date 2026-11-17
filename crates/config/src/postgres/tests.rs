@@ -177,7 +177,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     let typo_section = load_migration_from(
         &LoadOptions::default(),
         BUILD,
-        env(&[("APP__POSTGRESS__DSN", "postgres://u:secret-pw@localhost/db")]),
+        env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
     )
     .unwrap_err();
     assert_matches!(&typo_section, Error::Deserialize(_), "{typo_section}");

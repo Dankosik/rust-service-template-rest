@@ -112,18 +112,8 @@ impl PostgresInput {
     }
 }
 
-/// What the migration binary decoded, from the same files and environment as
-/// [`crate::Config`].
-///
-/// Known sibling sections are ignored during decoding while unknown top-level
-/// sections fail. The shared input rules still apply to all files and
-/// variables passed to [`crate::load_migration`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-#[expect(
-    dead_code,
-    reason = "serde decodes and discards sibling sections so unknown keys fail"
-)]
 pub(crate) struct MigrationInput {
     pub(crate) app: AppConfig,
     // template:begin authn:migration-input-authn

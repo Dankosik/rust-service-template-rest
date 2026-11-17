@@ -217,16 +217,24 @@ fn retry_after_value(after: Duration) -> HeaderValue {
     }
 }
 
-pub(crate) fn body_too_large() -> Problem {
+#[must_use]
+pub fn body_too_large() -> Problem {
     Problem::new(Code::RequestEntityTooLarge)
         .detail_static("request body exceeds the configured limit")
+}
+
+#[must_use]
+pub fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
+    shared_rules::error_chain::causes(error)
+        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
 }
 
 pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail_static("request body could not be read")
 }
 
-pub(crate) fn sanitized_problem() -> Problem {
+#[must_use]
+pub fn sanitized_problem() -> Problem {
     Problem::new(Code::InternalServerError).detail_static(SANITIZED_DETAIL)
 }
 

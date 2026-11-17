@@ -3,9 +3,6 @@ mod body;
 mod contract;
 pub mod extract;
 pub mod problem;
-// template:begin inbound-webhooks:http-webhooks-module
-pub mod webhooks;
-// template:end inbound-webhooks:http-webhooks-module
 // template:begin authn:infra-http-authn-module
 pub mod authn;
 // template:end authn:infra-http-authn-module
@@ -37,6 +34,6 @@ pub use probes::{liveness_router, router};
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
 pub use server::{
-    AcceptFailure, BoundListener, Drained, HTTP2_CONNECTION_WINDOW, HTTP2_STREAM_WINDOW, Server,
-    ServerError, ServerOptions,
+    AcceptFailure, BoundListener, Drained, Server, ServerError, ServerOptions,
+    take_listener_drain_token,
 };

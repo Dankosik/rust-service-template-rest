@@ -10,7 +10,7 @@ use futures_util::{
     future::{BoxFuture, Shared, WeakShared},
 };
 use moka::{Expiry, future::Cache};
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
@@ -19,7 +19,8 @@ use tokio::sync::Semaphore;
 use crate::{
     BearerToken, PreparationError, Principal, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::ProviderClient,
+    principal::VerifiedIdentity,
+    provider::{CallerStop, ProviderClient},
 };
 
 const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -77,32 +78,55 @@ pub(crate) struct IntrospectionVerifier {
 
 struct PositiveCache {
     retained: Cache<TokenDigest, VerifiedIntrospection, foldhash::quality::RandomState>,
-    fills: Mutex<HashMap<TokenDigest, WeakShared<FillFuture>>>,
+    fills: Mutex<HashMap<TokenDigest, RunningFill>>,
 }
+
+struct RunningFill {
+    shared: WeakShared<FillFuture>,
+    last_waiter_stop: LastWaiterStop,
+}
+
+type LastWaiterStop = Arc<Mutex<Option<Stopped>>>;
 
 type TokenDigest = [u8; 32];
 type FillResult = Result<Fill, VerificationError>;
 type FillFuture = BoxFuture<'static, FillResult>;
 
 impl PositiveCache {
-    fn join_fill<F>(&self, key: TokenDigest, start: impl FnOnce() -> F) -> FillWaiter<'_>
+    fn join_fill<'a, F>(
+        &'a self,
+        key: TokenDigest,
+        context: &'a OperationContext,
+        start: impl FnOnce(LastWaiterStop) -> F,
+    ) -> FillWaiter<'a>
     where
         F: Future<Output = FillResult> + Send + 'static,
     {
         let mut fills = self.fills.lock();
-        let shared = fills
-            .get(&key)
-            .and_then(WeakShared::upgrade)
-            .unwrap_or_else(|| {
-                let shared = start().boxed().shared();
-                if let Some(weak) = shared.downgrade() {
-                    fills.insert(key, weak);
-                }
-                shared
-            });
+        let running = fills.get(&key).and_then(|fill| {
+            fill.shared
+                .upgrade()
+                .map(|shared| (shared, Arc::clone(&fill.last_waiter_stop)))
+        });
+        let (shared, last_waiter_stop) = running.unwrap_or_else(|| {
+            let last_waiter_stop = LastWaiterStop::default();
+            let shared = start(Arc::clone(&last_waiter_stop)).boxed().shared();
+            if let Some(weak) = shared.downgrade() {
+                fills.insert(
+                    key,
+                    RunningFill {
+                        shared: weak,
+                        last_waiter_stop: Arc::clone(&last_waiter_stop),
+                    },
+                );
+            }
+            (shared, last_waiter_stop)
+        });
         FillWaiter {
             shared,
             registration: FillRegistration { cache: self, key },
+            context,
+            last_waiter_stop,
         }
     }
 }
@@ -110,6 +134,14 @@ impl PositiveCache {
 struct FillWaiter<'a> {
     shared: Shared<FillFuture>,
     registration: FillRegistration<'a>,
+    context: &'a OperationContext,
+    last_waiter_stop: LastWaiterStop,
+}
+
+impl Drop for FillWaiter<'_> {
+    fn drop(&mut self) {
+        *self.last_waiter_stop.lock() = self.context.stopped();
+    }
 }
 
 impl FillWaiter<'_> {
@@ -128,7 +160,7 @@ struct FillRegistration<'a> {
 impl FillRegistration<'_> {
     fn retire(&self, completed: &Shared<FillFuture>) {
         let mut fills = self.cache.fills.lock();
-        if let Some(current) = fills.get(&self.key).and_then(WeakShared::upgrade)
+        if let Some(current) = fills.get(&self.key).and_then(|fill| fill.shared.upgrade())
             && current.ptr_eq(completed)
         {
             fills.remove(&self.key);
@@ -141,7 +173,7 @@ impl Drop for FillRegistration<'_> {
         let mut fills = self.cache.fills.lock();
         if fills
             .get(&self.key)
-            .is_some_and(|fill| fill.upgrade().is_none())
+            .is_some_and(|fill| fill.shared.upgrade().is_none())
         {
             fills.remove(&self.key);
         }
@@ -211,19 +243,19 @@ impl IntrospectionVerifier {
         })?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token.to_secret(), context, &now)
+                .introspect(token.to_secret(), &|| context.stopped(), &now)
                 .await?
-                .deliver(now()?);
+                .deliver(now()?, token);
         };
         let key = token_digest(token);
         loop {
             if let Some(value) = cache.retained.get(&key).await
                 && value.reusable_at(now()?)
             {
-                return Ok(value.principal);
+                return Ok(value.identity.presented_as(token));
             }
             let filled = cache
-                .join_fill(key, || {
+                .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
                     let now = now.clone();
@@ -235,7 +267,7 @@ impl IntrospectionVerifier {
                             return Ok(Fill::RecheckCache);
                         }
                         let value = verifier
-                            .introspect(token, &OperationContext::unbounded(), &now)
+                            .introspect(token, &|| *last_waiter_stop.lock(), &now)
                             .await?;
                         retained.insert(key, value.clone()).await;
                         Ok(Fill::Fresh(value))
@@ -244,7 +276,7 @@ impl IntrospectionVerifier {
                 .wait()
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.deliver(now()?);
+                return value.deliver(now()?, token);
             }
         }
     }
@@ -252,7 +284,7 @@ impl IntrospectionVerifier {
     async fn introspect(
         &self,
         token: SecretString,
-        context: &OperationContext,
+        caller_stop: CallerStop<'_>,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
         now()?;
@@ -270,13 +302,13 @@ impl IntrospectionVerifier {
                     ("token", token.expose_secret()),
                     ("token_type_hint", "access_token"),
                 ],
-                context,
+                caller_stop,
             )
             .await
             .map_err(|failure| {
                 VerificationError::unavailable(VerificationReason::Provider(failure.reason()))
             })?;
-        validate_introspection_claims(&response, &self.policy, now()?, token)
+        validate_introspection_claims(&response, &self.policy, now()?)
     }
 }
 
@@ -291,7 +323,7 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
         value: &VerifiedIntrospection,
         _: std::time::Instant,
     ) -> Option<Duration> {
-        Some(retention(&value.principal, self.ttl, SystemTime::now()))
+        Some(retention(&value.identity, self.ttl, SystemTime::now()))
     }
 
     fn expire_after_update(
@@ -301,14 +333,14 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
         _: std::time::Instant,
         _: Option<Duration>,
     ) -> Option<Duration> {
-        Some(retention(&value.principal, self.ttl, SystemTime::now()))
+        Some(retention(&value.identity, self.ttl, SystemTime::now()))
     }
 }
 
-fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
+fn retention(identity: &VerifiedIdentity, ttl: Duration, now: SystemTime) -> Duration {
     match now.duration_since(UNIX_EPOCH) {
-        Ok(now) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
-            Duration::from_secs(principal.expires_at())
+        Ok(now) if identity.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
+            Duration::from_secs(identity.expires_at())
                 .saturating_sub(now)
                 .min(ttl)
         }
@@ -352,6 +384,10 @@ mod tests {
     use operation_context::{OperationContext, Stopped};
 
     const FIXTURE_HOST: &str = "provider.test";
+
+    fn unix_seconds() -> u64 {
+        crate::unix_now().unwrap().as_secs()
+    }
 
     #[derive(Clone, Debug)]
     struct RecordedRequest {
@@ -462,10 +498,7 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 response: Arc::new(Mutex::new((
                     StatusCode::OK,
-                    Bytes::from(active_response(
-                        "subject",
-                        jsonwebtoken::get_current_timestamp() + 600,
-                    )),
+                    Bytes::from(active_response("subject", unix_seconds() + 600)),
                 ))),
                 gate: Arc::clone(&gate),
             };
@@ -767,7 +800,7 @@ mod tests {
         let independent = fixture.verifier(Some(cache_options(2)));
         fixture.respond(
             StatusCode::OK,
-            &active_response("new-subject", jsonwebtoken::get_current_timestamp() + 600),
+            &active_response("new-subject", unix_seconds() + 600),
         );
         assert_eq!(
             verify(&independent, b"Bearer first")
@@ -822,10 +855,7 @@ mod tests {
             (br#"{"active":false}"#.to_vec(), Some(Failure::Invalid)),
             (br#"{"active":true}"#.to_vec(), Some(Failure::Invalid)),
             (b"{".to_vec(), Some(Failure::Unavailable)),
-            (
-                active_response("subject", jsonwebtoken::get_current_timestamp() - 1),
-                None,
-            ),
+            (active_response("subject", unix_seconds() - 1), None),
         ] {
             fixture.respond(StatusCode::OK, &response);
             let before = fixture.calls();
@@ -840,18 +870,18 @@ mod tests {
     #[tokio::test]
     async fn concurrent_misses_share_provider_capacity_including_nonretained_success_and_errors() {
         let fixture = Fixture::new().await;
-        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":jsonwebtoken::get_current_timestamp()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
+        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":unix_seconds()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
         for (status, response, expected, retained) in [
             (
                 StatusCode::OK,
-                active_response("subject", jsonwebtoken::get_current_timestamp() + 600),
+                active_response("subject", unix_seconds() + 600),
                 None,
                 true,
             ),
             (StatusCode::OK, oversized, None, false),
             (
                 StatusCode::OK,
-                active_response("subject", jsonwebtoken::get_current_timestamp() - 1),
+                active_response("subject", unix_seconds() - 1),
                 None,
                 false,
             ),
@@ -901,7 +931,7 @@ mod tests {
             if expected.is_some() {
                 fixture.respond(
                     StatusCode::OK,
-                    &active_response("recovered", jsonwebtoken::get_current_timestamp() + 600),
+                    &active_response("recovered", unix_seconds() + 600),
                 );
                 assert_eq!(
                     verify(&verifier, b"Bearer shared").await.unwrap().subject(),
@@ -944,14 +974,28 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(diagnostics.recorder());
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _dispatch = tracing::dispatcher::set_default(&diagnostics.dispatch());
-        for (drop_on_stop, stopped, inbound, provider) in [
-            (false, Stopped::Deadline, "timeout", "caller_deadline"),
-            (false, Stopped::Cancelled, "cancelled", "cancelled"),
-            (true, Stopped::Deadline, "timeout", "caller_deadline"),
-            (true, Stopped::Cancelled, "cancelled", "cancelled"),
+        for (cache, drop_on_stop, stopped, inbound, provider) in [
+            (None, false, Stopped::Deadline, "timeout", "caller_deadline"),
+            (None, false, Stopped::Cancelled, "cancelled", "cancelled"),
+            (None, true, Stopped::Deadline, "timeout", "caller_deadline"),
+            (None, true, Stopped::Cancelled, "cancelled", "cancelled"),
+            (
+                Some(cache_options(1)),
+                false,
+                Stopped::Deadline,
+                "timeout",
+                "caller_deadline",
+            ),
+            (
+                Some(cache_options(1)),
+                true,
+                Stopped::Deadline,
+                "timeout",
+                "caller_deadline",
+            ),
         ] {
             let fixture = Fixture::new().await;
-            let verifier = fixture.prepared(None);
+            let verifier = fixture.prepared(cache);
             let _gate = fixture.block_responses();
             let budget = Duration::from_secs(2);
             let context = OperationContext::with_timeout(budget);
@@ -1117,7 +1161,7 @@ mod tests {
     async fn retained_evidence_checks_forward_expiry_and_backward_not_before() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = jsonwebtoken::get_current_timestamp();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer calendar".as_slice()]).unwrap();
         for (expiry, not_before, changed) in [
             (base + 60, None, base + 60),
@@ -1175,7 +1219,7 @@ mod tests {
     async fn joined_cache_hit_rechecks_the_current_entry() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = jsonwebtoken::get_current_timestamp();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
         let key = super::token_digest(&token);
         for (elapsed_seconds, replacement) in [(0, false), (60, false), (60, true)] {
@@ -1189,7 +1233,7 @@ mod tests {
             let before = fixture.calls();
             let gate = Arc::new(Semaphore::new(0));
             let publication_gate = gate.clone();
-            let publication = cache.join_fill(key, || async move {
+            let publication = cache.join_fill(key, &context, |_| async move {
                 publication_gate.acquire().await.unwrap().forget();
                 Ok(super::Fill::RecheckCache)
             });
@@ -1207,7 +1251,6 @@ mod tests {
                     &active_response("new", base + 600),
                     &verifier.policy,
                     base,
-                    token.to_secret(),
                 )
                 .unwrap();
                 cache.retained.insert(key, newer).await;
@@ -1278,7 +1321,7 @@ mod tests {
     async fn joined_fresh_delivery_uses_each_callers_current_lifetime() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = jsonwebtoken::get_current_timestamp();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer delayed".as_slice()]).unwrap();
         for (expiry, not_before, delivery, expected) in [
             (base + 30, None, Some(base + 59), None),
@@ -1350,7 +1393,7 @@ mod tests {
     async fn replacement_starts_its_own_fixed_retention() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = jsonwebtoken::get_current_timestamp();
+        let base = unix_seconds();
         fixture.respond(StatusCode::OK, &active_response("old", base + 60));
         let verifier = fixture.verifier(Some(
             IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap(),
@@ -1407,18 +1450,13 @@ mod tests {
         let policy =
             ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
                 .unwrap();
-        let principal = |custom: &str| {
+        let identity = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
-            validate_introspection_claims(
-                response.to_string().as_bytes(),
-                &policy,
-                100,
-                secrecy::SecretString::from("presented-token"),
-            )
-            .unwrap()
-            .principal
+            validate_introspection_claims(response.to_string().as_bytes(), &policy, 100)
+                .unwrap()
+                .identity
         };
-        let small = principal("");
+        let small = identity("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
         let ttl = Duration::from_mins(1);
         assert_eq!(
@@ -1439,9 +1477,8 @@ mod tests {
             format!(r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{},"sub":"subject"}}"#, u64::MAX).as_bytes(),
             &policy,
             100,
-            secrecy::SecretString::from("presented-token"),
         )
-        .unwrap().principal;
+        .unwrap().identity;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
         for (length, expected) in [
             (MAX_RETAINED_PAYLOAD_BYTES, Duration::from_millis(30_500)),
@@ -1450,16 +1487,11 @@ mod tests {
             let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
             let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));
             let padded = format!(" \t\r\n{response}\n\r\t ");
-            let principal = validate_introspection_claims(
-                padded.as_bytes(),
-                &policy,
-                100,
-                secrecy::SecretString::from("presented-token"),
-            )
-            .unwrap()
-            .principal;
-            assert_eq!(principal.payload_len(), length);
-            assert_eq!(retention(&principal, ttl, at(100_500)), expected);
+            let identity = validate_introspection_claims(padded.as_bytes(), &policy, 100)
+                .unwrap()
+                .identity;
+            assert_eq!(identity.payload_len(), length);
+            assert_eq!(retention(&identity, ttl, at(100_500)), expected);
         }
     }
 }

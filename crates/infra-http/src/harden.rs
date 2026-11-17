@@ -14,7 +14,7 @@ use axum::http::header::{
 use axum::http::{HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use health::{NotReady, ReadinessReader};
+use health::ReadinessReader;
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use tokio::sync::Semaphore;
@@ -108,7 +108,7 @@ async fn close_while_draining(
 ) -> Response {
     let http1 = request.version() <= Version::HTTP_11;
     let mut response = next.run(request).await;
-    if http1 && matches!(readiness.verdict(), Err(NotReady::Draining)) {
+    if http1 && readiness.is_draining() {
         response
             .headers_mut()
             .insert(CONNECTION, HeaderValue::from_static("close"));

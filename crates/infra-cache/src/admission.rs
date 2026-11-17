@@ -68,12 +68,6 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     })
 }
 
-pub(crate) fn check_runtime() -> Result<(), CacheError> {
-    tokio::runtime::Handle::try_current()
-        .map(drop)
-        .map_err(|_| CacheError::NoRuntime)
-}
-
 fn admit_address(
     info: &redis::ConnectionInfo,
     allow_plaintext: bool,

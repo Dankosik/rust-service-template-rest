@@ -403,8 +403,9 @@ def classify_report(
         if outbound_auth == "oauth2-client-credentials" and _matches(
             file,
             "Cargo.toml", "Cargo.lock", "crates/infra-oauth2-client-credentials/*",
-            "crates/infra-outbound-http/*", "scripts/profiles/integration.sh",
-            "scripts/profiles/compose.sh", "make/template.mk", ".github/workflows/ci.yml",
+            "crates/infra-outbound-grpc/*", "crates/infra-outbound-http/*",
+            "scripts/profiles/integration.sh", "scripts/profiles/compose.sh",
+            "make/template.mk", ".github/workflows/ci.yml",
         ):
             mark("oauth_integration")
 
@@ -423,7 +424,7 @@ def classify_report(
 
         if _matches(
             file,
-            ".redocly.yaml", "api/openapi/*", "crates/infra-http/src/webhooks.rs",
+            ".redocly.yaml", "api/openapi/*", "crates/infra-webhooks/src/inbound/route.rs",
             "crates/service/src/api.rs", "scripts/image/cargo_artifact.py", "scripts/checks/npx.py",
         ):
             mark("openapi")
@@ -546,7 +547,7 @@ def classify_report(
                 "crates/infra-http/src/context.rs", "crates/infra-http/src/idempotency/*",
                 "crates/infra-http/src/harden.rs", "crates/infra-http/src/harden/*",
                 "crates/infra-http/src/lib.rs", "crates/infra-http/src/problem.rs",
-                "crates/infra-http/src/webhooks.rs", "crates/infra-postgres/*", "crates/migrate/*",
+                "crates/infra-postgres/*", "crates/migrate/*",
                 "crates/infra-jobs/*", "crates/jobs-worker/*", "crates/domain-events/*",
                 "crates/infra-messaging/*", "crates/nats-test-support/*", "crates/infra-cache/*",
                 "crates/infra-object-storage/*",
@@ -562,7 +563,8 @@ def classify_report(
             # template:begin grpc:classifier-grpc-initializer
             if _matches(
                 file,
-                "api/proto/*", "crates/infra-grpc/*", "crates/grpc-contracts/*",
+                "api/proto/*", "crates/infra-grpc/*", "crates/infra-outbound-grpc/*",
+                "crates/grpc-contracts/*", "crates/shared-rules/src/grpc.rs",
                 "crates/service/examples/grpc.rs", "tools/grpc-codegen/*", "buf.yaml",
                 "scripts/profiles/grpc_generate.sh", "scripts/profiles/grpc_check.sh",
             ):

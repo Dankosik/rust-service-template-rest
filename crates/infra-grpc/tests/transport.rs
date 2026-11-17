@@ -29,10 +29,13 @@ use infra_bearerauthn::{
 };
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
-    ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
-    Limits, ServerTlsMaterial, Services, TlsMaterialError, server_options, server_tls_config,
+    ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
+    TlsMaterialError, server_options, server_tls_config,
 };
 use infra_http::{BoundListener, Drained, Server};
+use infra_outbound_grpc::{
+    Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
+};
 use parking_lot::Mutex;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -142,11 +145,18 @@ impl Hold {
     }
 }
 
+type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
+
 #[derive(Clone)]
 struct Echo {
     calls: Arc<Mutex<Vec<SeenCall>>>,
     hold: Arc<Hold>,
     stream_dropped: Arc<Notify>,
+    upload_aborts: UploadAborts,
+    upload_abort_recorded: Arc<Notify>,
+    // template:begin authn:grpc-transport-test-principals-field
+    principals: Arc<Mutex<Vec<infra_grpc::VerifiedPrincipal>>>,
+    // template:end authn:grpc-transport-test-principals-field
 }
 
 impl Echo {
@@ -155,6 +165,11 @@ impl Echo {
             calls: Arc::new(Mutex::new(Vec::new())),
             hold: Arc::new(Hold::new()),
             stream_dropped: Arc::new(Notify::new()),
+            upload_aborts: Arc::new(Mutex::new(Vec::new())),
+            upload_abort_recorded: Arc::new(Notify::new()),
+            // template:begin authn:grpc-transport-test-principals-init
+            principals: Arc::new(Mutex::new(Vec::new())),
+            // template:end authn:grpc-transport-test-principals-init
         }
     }
 
@@ -166,17 +181,33 @@ impl Echo {
         assert!(opening.deadline().is_some());
         let response = request
             .extensions()
-            .get::<infra_grpc::ResponseContext>()
+            .get::<ResponseContext>()
             .expect("response work has its own lifetime carrier");
         assert!(!response.operation().cancellation().is_cancelled());
-        self.calls.lock().push(SeenCall {
-            cardinality: seen,
-            // template:begin authn:grpc-transport-test-seen-principal
-            had_identity: request
+        // template:begin authn:grpc-transport-test-seen-principal
+        let verified =
+            infra_grpc::VerifiedPrincipal::from_extensions(request.extensions()).cloned();
+        assert_eq!(
+            infra_grpc::VerifiedPrincipal::from_request(request)
+                .map(infra_grpc::VerifiedPrincipal::issuer),
+            verified.as_ref().map(infra_grpc::VerifiedPrincipal::issuer),
+        );
+        assert!(
+            request
                 .extensions()
                 .get::<infra_bearerauthn::Principal>()
-                .is_some(),
-            // template:end authn:grpc-transport-test-seen-principal
+                .is_none()
+        );
+        let had_identity = verified.is_some();
+        if let Some(principal) = verified {
+            self.principals.lock().push(principal);
+        }
+        // template:end authn:grpc-transport-test-seen-principal
+        self.calls.lock().push(SeenCall {
+            cardinality: seen,
+            // template:begin authn:grpc-transport-test-seen-principal-value
+            had_identity,
+            // template:end authn:grpc-transport-test-seen-principal-value
             had_authorization: request.metadata().get("authorization").is_some(),
         });
     }
@@ -243,6 +274,11 @@ impl EchoService for Echo {
         request: Request<ServerStreamRequest>,
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         self.observe(&request, Seen::ServerStream);
+        let response_context = request.extensions().get::<ResponseContext>().cloned();
+        let request_context = request
+            .extensions()
+            .get::<operation_context::OperationContext>()
+            .cloned();
         let message = request.into_inner().message;
         let first = futures_util::stream::iter([Ok(ServerStreamResponse {
             message: message.clone(),
@@ -258,10 +294,30 @@ impl EchoService for Echo {
                 Box::pin(first.chain(futures_util::stream::once(async move {
                     let _dropped = dropped;
                     hold.wait().await;
+                    let request_cancelled = request_context
+                        .is_some_and(|context| context.cancellation().is_cancelled());
                     Ok(ServerStreamResponse {
-                        message: "released".to_owned(),
+                        message: if request_cancelled {
+                            "request context cancelled while the stream was open".to_owned()
+                        } else {
+                            "released".to_owned()
+                        },
                     })
                 })))
+            }
+            "drain-aware" => {
+                let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
+                let context = response_context.expect("response context is present");
+                Box::pin(
+                    first.chain(
+                        futures_util::stream::once(async move {
+                            let _dropped = dropped;
+                            let reason = context.operation().wait_stopped().await;
+                            assert_eq!(reason, operation_context::Stopped::Cancelled);
+                        })
+                        .filter_map(|()| std::future::ready(None)),
+                    ),
+                )
             }
             "flood" => {
                 let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
@@ -291,8 +347,36 @@ impl EchoService for Echo {
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         self.observe(&request, Seen::BidiStream);
+        let observe_abort = request.metadata().contains_key("x-observe-upload-abort");
         let input = request.into_inner();
         let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
+        if observe_abort {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            let aborts = Arc::clone(&self.upload_aborts);
+            let recorded = Arc::clone(&self.upload_abort_recorded);
+            tokio::spawn(async move {
+                let _dropped = dropped;
+                let mut input = input;
+                if let Ok(Some(first)) = input.message().await {
+                    let _ = tx
+                        .send(Ok(BidiStreamResponse {
+                            message: first.message,
+                        }))
+                        .await;
+                    let next = input
+                        .message()
+                        .await
+                        .map(|opt| opt.map(|msg| msg.message))
+                        .map_err(|status| status.code());
+                    aborts.lock().push(next);
+                    recorded.notify_one();
+                }
+            });
+            let stream = futures_util::stream::unfold(rx, |mut rx| async {
+                rx.recv().await.map(|v| (v, rx))
+            });
+            return Ok(Response::new(Box::pin(stream)));
+        }
         Ok(Response::new(Box::pin(async_stream::stream! {
             let _dropped = dropped;
             let mut input = input;
@@ -382,11 +466,12 @@ impl Fixture {
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(
             Vec::new(),
-            RefreshPolicy {
-                interval: Duration::from_mins(1),
-                probe_budget: Duration::from_secs(1),
-                failure_threshold: std::num::NonZeroU32::MIN,
-            },
+            RefreshPolicy::try_new(
+                Duration::from_mins(1),
+                Duration::from_secs(1),
+                NonZeroU32::MIN,
+            )
+            .unwrap(),
         );
         if seed {
             seed_ready(&readiness).await;
@@ -442,11 +527,11 @@ impl Fixture {
         }
     }
 
-    fn echo_client(&self) -> EchoServiceClient<infra_grpc::Client> {
+    fn echo_client(&self) -> EchoServiceClient<Client> {
         EchoServiceClient::new(plaintext_client(self.address))
     }
 
-    fn health(&self) -> HealthClient<infra_grpc::Client> {
+    fn health(&self) -> HealthClient<Client> {
         HealthClient::new(plaintext_client(self.address))
     }
 
@@ -491,8 +576,8 @@ fn loopback() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()
 }
 
-fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
-    infra_grpc::Client::try_new(
+fn plaintext_client(address: SocketAddr) -> Client {
+    Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         CLIENT_TIMEOUT,
@@ -524,7 +609,7 @@ fn request<T>(message: T) -> Request<T> {
 
 #[tokio::test(start_paused = true)]
 async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
-    let client = infra_grpc::Client::try_new(
+    let client = Client::try_new(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
         Duration::from_secs(2),
@@ -948,11 +1033,12 @@ fn opening_app_waiting(
 ) -> axum::Router {
     let readiness = Readiness::new(
         Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_mins(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        RefreshPolicy::try_new(
+            Duration::from_mins(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     );
     let mut services = described();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
@@ -1457,6 +1543,46 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
 
 // template:end authn:grpc-transport-test-authentication-deadline
 
+// template:begin authn:grpc-transport-test-verified-principal
+#[tokio::test]
+async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypass_auth() {
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 4);
+
+    let genuine = timeout(
+        WAIT,
+        app.clone()
+            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "genuine")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(grpc_status(&genuine).is_none());
+
+    let captured = echo
+        .principals
+        .lock()
+        .pop()
+        .expect("handler observed VerifiedPrincipal");
+    assert_eq!(captured.issuer(), "https://issuer.example");
+    assert_eq!(captured.subject(), Some("subject"));
+    assert_eq!(captured.scopes(), ["echo.read"]);
+    assert_eq!(echo.calls.lock().len(), 1);
+
+    let mut spoofed = opening_request(UNARY_PATH, None, "spoofed");
+    spoofed.extensions_mut().insert(captured);
+    let rejected = timeout(WAIT, app.oneshot(spoofed)).await.unwrap().unwrap();
+    let status = grpc_status(&rejected).unwrap();
+    assert_eq!(status.code(), Code::Unauthenticated);
+    assert_eq!(reason(&status), "AUTHENTICATION_REQUIRED");
+    assert!(echo.principals.lock().is_empty());
+    assert_eq!(echo.calls.lock().len(), 1);
+
+    provider.stop().await;
+}
+// template:end authn:grpc-transport-test-verified-principal
+
 #[tokio::test]
 async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     let fixture = Fixture::limited(2).await;
@@ -1641,7 +1767,7 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
         },
     )
     .await;
-    let adapter = infra_grpc::Client::with_timeout_policy(
+    let adapter = Client::with_timeout_policy(
         &format!("http://{}", fixture.address),
         ClientSecurity::Plaintext,
         ClientTimeout::OpeningOnly(Duration::from_millis(100)),
@@ -1707,7 +1833,10 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
         reason = "the loopback peer echoes the timeout it received over HTTP/2"
     )]
     let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
-    let server = Server::bind(loopback(), app, server_options(limits())).unwrap();
+    let server =
+        BoundListener::bind(loopback())
+            .unwrap()
+            .serve_h2(app, server_options(limits()), None);
     let client = plaintext_client(server.local_addr());
     for original in [None, Some("30S")] {
         let mut request = http::Request::builder()
@@ -1728,7 +1857,7 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
         let response = timeout(WAIT, prepared.send()).await.unwrap().unwrap();
         assert_eq!(response.headers()["grpc-status"], "0");
         if original.is_some() {
-            let forwarded = infra_grpc::grpc_timeout(response.headers()).unwrap();
+            let forwarded = infra_outbound_grpc::grpc_timeout(response.headers()).unwrap();
             assert!((Duration::from_secs(20)..=Duration::from_secs(30)).contains(&forwarded));
         } else {
             assert!(!response.headers().contains_key("grpc-timeout"));
@@ -1744,7 +1873,7 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
 #[tokio::test]
 async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
     let fixture = Fixture::limited(1).await;
-    let adapter = infra_grpc::Client::with_timeout_policy(
+    let adapter = Client::with_timeout_policy(
         &format!("http://{}", fixture.address),
         ClientSecurity::Plaintext,
         ClientTimeout::OpeningOnly(Duration::from_secs(1)),
@@ -2094,6 +2223,157 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
 }
 
 #[tokio::test]
+async fn cooperative_stream_closes_on_listener_drain_while_inflight_unary_completes() {
+    let mut fixture = Fixture::plaintext().await;
+    let mut stream_client = fixture.echo_client();
+    let mut stream = timeout(
+        WAIT,
+        stream_client.server_stream(request(ServerStreamRequest {
+            message: "drain-aware".to_owned(),
+        })),
+    )
+    .await
+    .expect("stream opens")
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        timeout(WAIT, stream.message())
+            .await
+            .expect("initial message")
+            .unwrap()
+            .unwrap()
+            .message,
+        "drain-aware"
+    );
+
+    let mut unary_client = stream_client.clone();
+    let inflight_unary =
+        tokio::spawn(async move { unary_client.unary(request(unary("hold"))).await });
+    fixture.echo.hold.wait_for(1).await;
+
+    let server = fixture.take_server();
+    let drain_started = tokio::time::Instant::now();
+    let drain = tokio::spawn(async move { server.drain(Duration::from_secs(5)).await });
+
+    assert!(
+        timeout(Duration::from_secs(1), stream.message())
+            .await
+            .expect("open stream closes promptly when listener drain starts")
+            .unwrap()
+            .is_none()
+    );
+    drop(stream);
+    drop(stream_client);
+
+    fixture.echo.hold.release();
+    let unary_reply = timeout(WAIT, inflight_unary)
+        .await
+        .expect("in-flight unary finishes during drain")
+        .expect("unary task joins")
+        .expect("in-flight unary succeeds");
+    assert_eq!(unary_reply.into_inner().message, "released");
+
+    let drained = timeout(Duration::from_secs(2), drain)
+        .await
+        .expect("listener drain completes well within 5s budget")
+        .expect("drain task joins")
+        .expect("drain succeeds");
+    assert_eq!(drained, Drained::Complete);
+    assert!(drain_started.elapsed() < Duration::from_secs(2));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn client_bidi_abort_mid_upload_surfaces_stream_error_not_eof() {
+    for use_timeout in [false, true] {
+        let fixture = Fixture::plaintext().await;
+        let client_budget = if use_timeout {
+            Duration::from_millis(150)
+        } else {
+            CLIENT_TIMEOUT
+        };
+        let adapter = Client::try_new(
+            &format!("http://{}", fixture.address),
+            ClientSecurity::Plaintext,
+            client_budget,
+        )
+        .unwrap();
+        let mut client = EchoServiceClient::new(adapter);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let upload =
+            futures_util::stream::unfold(rx, |mut rx| async { rx.recv().await.map(|v| (v, rx)) });
+        let mut outgoing = request(upload);
+        outgoing
+            .metadata_mut()
+            .insert("x-observe-upload-abort", "1".parse().unwrap());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if !use_timeout {
+            outgoing
+                .extensions_mut()
+                .insert(operation_context::OperationContext::new(
+                    None,
+                    cancel.clone(),
+                ));
+        }
+        let mut response = timeout(WAIT, client.bidi_stream(outgoing))
+            .await
+            .expect("bidi stream opens")
+            .unwrap()
+            .into_inner();
+        timeout(
+            WAIT,
+            tx.send(BidiStreamRequest {
+                message: "hello".to_owned(),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            timeout(WAIT, response.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .message,
+            "hello"
+        );
+        if !use_timeout {
+            cancel.cancel();
+        }
+        let err = timeout(WAIT, response.message())
+            .await
+            .expect("client stream aborts")
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            if use_timeout {
+                Code::DeadlineExceeded
+            } else {
+                Code::Cancelled
+            }
+        );
+        drop(response);
+        timeout(WAIT, fixture.echo.upload_abort_recorded.notified())
+            .await
+            .expect("server handler observes upload termination");
+        let observed = fixture
+            .echo
+            .upload_aborts
+            .lock()
+            .pop()
+            .expect("upload outcome recorded");
+        assert!(
+            observed.is_err(),
+            "mid-upload abort must surface Err from RST_STREAM, got {observed:?} (use_timeout={use_timeout})"
+        );
+        drop(tx);
+        drop(client);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
     let pki = Pki::new(&["127.0.0.1", "localhost"]);
     let fixture = Fixture::tls(&pki, false).await;
@@ -2119,7 +2399,7 @@ async fn a_new_dial_uses_the_replaced_localhost_address_without_changing_tls_ide
     let pki = Pki::new(&["localhost"]);
     let first = Fixture::tls_at(&pki, "127.0.0.1:0".parse().unwrap()).await;
     let port = first.address.port();
-    let client = infra_grpc::Client::try_new(
+    let client = Client::try_new(
         &format!("https://localhost:{port}"),
         ClientSecurity::Tls(ClientTlsMaterial {
             ca_certificate_pem: Some(pem(&pki.ca_certificate)),
@@ -2155,7 +2435,7 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
     let fixture = Fixture::tls_at(&replacement, "127.0.0.1:0".parse().unwrap()).await;
     let destination = format!("https://localhost:{}", fixture.address.port());
     let mut stale_client = EchoServiceClient::new(
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
                 ca_certificate_pem: Some(pem(&stale.ca_certificate)),
@@ -2172,7 +2452,7 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
     assert_eq!(status.code(), Code::Unavailable);
 
     let mut rebuilt_client = EchoServiceClient::new(
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
                 ca_certificate_pem: Some(pem(&replacement.ca_certificate)),
@@ -2249,17 +2529,17 @@ fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
 fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
     assert_eq!(
-        infra_grpc::Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
-        infra_grpc::ClientError::DestinationSecurityMismatch
+        Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
+        ClientError::DestinationSecurityMismatch
     );
     assert_eq!(
-        infra_grpc::Client::try_new(
+        Client::try_new(
             "https://127.0.0.1:1",
             ClientSecurity::Plaintext,
             CLIENT_TIMEOUT
         )
         .unwrap_err(),
-        infra_grpc::ClientError::DestinationSecurityMismatch
+        ClientError::DestinationSecurityMismatch
     );
 }
 
@@ -2642,8 +2922,11 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
         let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
-        let server = Server::bind(loopback(), app, server_options(limits())).unwrap();
-        let adapter = infra_grpc::Client::try_new(
+        let server =
+            BoundListener::bind(loopback())
+                .unwrap()
+                .serve_h2(app, server_options(limits()), None);
+        let adapter = Client::try_new(
             &format!("http://{}", server.local_addr()),
             ClientSecurity::Plaintext,
             Duration::from_millis(200),
@@ -2696,7 +2979,7 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert_eq!(status.code(), Code::DeadlineExceeded);
     assert_eq!(status.message(), "request deadline exceeded");
 
-    let bounded = infra_grpc::Client::try_new(
+    let bounded = Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_millis(100),
@@ -2807,8 +3090,8 @@ fn pem(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("rcgen emits ASCII PEM")
 }
 
-fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::Client {
-    infra_grpc::Client::try_new(
+fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> Client {
+    Client::try_new(
         &format!("https://127.0.0.1:{}", address.port()),
         ClientSecurity::Tls(material),
         CLIENT_TIMEOUT,

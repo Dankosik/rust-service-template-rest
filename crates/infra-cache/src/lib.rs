@@ -19,8 +19,6 @@ use self::connection::Link;
 pub use self::observe::HISTOGRAMS;
 use self::observe::NamespaceHistograms;
 
-pub const STARTUP_TIMEOUT: Duration = connection::SETUP_TIMEOUT;
-
 #[derive(Debug)]
 pub struct CacheOptions {
     pub dsn: SecretString,
@@ -72,8 +70,6 @@ pub enum CacheError {
     ClientKeyFile { kind: std::io::ErrorKind },
     #[error("cache client key is invalid or does not match the client certificate")]
     InvalidClientKey,
-    #[error("cache requires a Tokio runtime")]
-    NoRuntime,
     #[error("cache client could not be built")]
     ClientBuild,
 }
@@ -91,10 +87,10 @@ pub enum SetError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServerEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub tls: bool,
+pub(crate) struct ServerEndpoint {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) tls: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,15 +99,16 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn start(options: CacheOptions) -> Result<Self, CacheError> {
+    pub async fn start(options: CacheOptions) -> Result<Self, CacheError> {
         let command_timeout = options.command_timeout;
         let Admitted {
             server,
             dial,
             settings,
             password_file,
-        } = admission::admit(options)?;
-        admission::check_runtime()?;
+        } = tokio::task::spawn_blocking(move || admission::admit(options))
+            .await
+            .map_err(|_| CacheError::ClientBuild)??;
         observe::describe();
         Ok(Self {
             link: Arc::new(Link::start(
@@ -121,36 +118,6 @@ impl Cache {
                 password_file,
                 command_timeout,
             )),
-        })
-    }
-
-    #[must_use]
-    pub fn probe(&self) -> CacheProbe {
-        CacheProbe {
-            cache: self.clone(),
-        }
-    }
-
-    #[must_use]
-    pub fn server(&self) -> &ServerEndpoint {
-        &self.link.server
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CacheProbe {
-    cache: Cache,
-}
-
-#[async_trait::async_trait]
-impl health::Probe for CacheProbe {
-    fn name(&self) -> &'static str {
-        "cache"
-    }
-
-    async fn check(&self) -> Result<(), health::ProbeError> {
-        self.cache.link.probe().await.map_err(|error| {
-            health::ProbeError::format(format_args!("cache ping failed: {}", error.label()))
         })
     }
 }

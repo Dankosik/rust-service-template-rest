@@ -7,8 +7,6 @@ use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 use parking_lot::Mutex;
 
-use crate::budget::BROKER_OPERATION_BUDGET;
-use crate::error::MessagingError;
 use crate::messaging::Shared;
 use crate::topology::{classify_topology, validate_server};
 
@@ -109,22 +107,21 @@ impl Probe for MessagingProbe {
     async fn check(&self) -> Result<(), ProbeError> {
         self.shared.publish_work.observe(&self.shared.jetstream);
         self.check_local_state()?;
-        let stream = tokio::time::timeout(
-            BROKER_OPERATION_BUDGET,
-            self.shared.jetstream.get_stream(&self.shared.source_stream),
-        )
-        .await;
-        let failure = match stream {
-            Ok(Ok(_)) => return self.check_local_state(),
-            Ok(Err(error)) => classify_topology(&error),
-            Err(_) => MessagingError::TimedOut {
-                budget: BROKER_OPERATION_BUDGET,
-            },
-        };
-        tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
-        Err(ProbeError::from_static(
-            "messaging source stream is unavailable",
-        ))
+        match self
+            .shared
+            .jetstream
+            .get_stream(&self.shared.source_stream)
+            .await
+        {
+            Ok(_) => self.check_local_state(),
+            Err(error) => {
+                let failure = classify_topology(&error);
+                tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
+                Err(ProbeError::from_static(
+                    "messaging source stream is unavailable",
+                ))
+            }
+        }
     }
 }
 

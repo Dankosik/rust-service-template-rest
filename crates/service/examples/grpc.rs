@@ -7,7 +7,7 @@ use grpc_contracts::example::v1::{
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::{Failure, Services};
+use infra_grpc::{Failure, ResponseContext, Services};
 use service_failure::Code;
 use tonic::{Request, Response, Status};
 
@@ -62,12 +62,23 @@ impl EchoService for Echo {
         &self,
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
-        let responses = request.into_inner().map(|item| {
-            item.and_then(|request| {
-                let message = accepted(request.message)?;
-                Ok(BidiStreamResponse { message })
+        let context = request.extensions().get::<ResponseContext>().cloned();
+        let responses = request
+            .into_inner()
+            .map(|item| {
+                item.and_then(|request| {
+                    let message = accepted(request.message)?;
+                    Ok(BidiStreamResponse { message })
+                })
             })
-        });
+            .take_until(async move {
+                match context {
+                    Some(ctx) => {
+                        ctx.operation().wait_stopped().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            });
         Ok(Response::new(Box::pin(responses)))
     }
 }

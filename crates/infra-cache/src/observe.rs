@@ -185,12 +185,12 @@ pub(crate) fn describe() {
     metrics::describe_counter!(
         ADMISSION_REFUSED_METRIC,
         Unit::Count,
-        "Cache application or probe commands refused because their admission slots are full"
+        "Cache commands refused because their admission slots are full"
     );
     metrics::describe_gauge!(
         COMMANDS_IN_FLIGHT_METRIC,
         Unit::Count,
-        "Admitted cache application and probe commands, including connection waits, until their futures complete or are dropped"
+        "Admitted cache commands, including connection waits, until their futures complete or are dropped"
     );
     metrics::describe_counter!(
         RETIREMENTS_METRIC,

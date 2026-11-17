@@ -3,102 +3,36 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use atomic_take::AtomicTake;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
-use opentelemetry::trace::SpanKind;
+use operation_context::{Deadline, Stopped};
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio_util::sync::DropGuard;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{
-    GRPC_MESSAGE, GRPC_STATUS, GRPC_STATUS_DETAILS, header_status_code, http_status_code,
-};
+use crate::protocol::{GRPC_MESSAGE, GRPC_STATUS, GRPC_STATUS_DETAILS, header_status_code};
 use crate::status::internal_status;
 
-use operation_context::{OperationContext, Stopped};
-use tokio_util::sync::DropGuard;
-
-#[derive_where::derive_where(Clone)]
-pub(crate) struct Handoff<T>(Arc<AtomicTake<T>>);
-
-impl<T> Handoff<T> {
-    pub(crate) fn new(value: T) -> Self {
-        Self(Arc::new(AtomicTake::new(value)))
-    }
-
-    pub(crate) fn take(self) -> Option<T> {
-        self.0.take()
-    }
-}
-
 #[derive(Default)]
-pub(crate) struct ResponseCustody {
-    pub(crate) context: Option<OperationContext>,
-    pub(crate) held: Held,
-    pub(crate) on_status: Option<ResponseStatusObserver>,
-}
-
-pub(crate) type ResponseStatusObserver = Box<dyn FnOnce(tonic::Code) + Send>;
-
-#[derive(Default)]
-#[expect(dead_code, reason = "each guard acts only when dropped")]
-pub(crate) struct Held {
+pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
-    pub(crate) upload: Option<UploadGuard>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
+    pub(crate) deadline: Option<Deadline>,
+    pub(crate) watch_deadline: bool,
 }
 
-impl ResponseCustody {
-    pub(crate) fn take_from_server_response<B>(response: &mut http::Response<B>) -> Self {
-        let extensions = response.extensions_mut();
-        Self {
-            on_status: None,
-            context: extensions
-                .remove::<crate::ResponseContext>()
-                .map(crate::ResponseContext::into_operation),
-            held: Held {
-                permit: extensions
-                    .remove::<Handoff<OwnedSemaphorePermit>>()
-                    .and_then(Handoff::take),
-                upload: None,
-                cancel_on_drop: extensions
-                    .remove::<Handoff<DropGuard>>()
-                    .and_then(Handoff::take),
-            },
-        }
-    }
+pub(crate) fn deadline_status() -> tonic::Status {
+    crate::Failure::new(service_failure::Code::GatewayTimeout).into()
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Side {
-    Server,
-    Client,
-}
-
-impl Side {
-    pub(crate) fn deadline(self) -> tonic::Status {
-        match self {
-            Self::Server => crate::Failure::new(service_failure::Code::GatewayTimeout).into(),
-            Self::Client => tonic::Status::deadline_exceeded("request deadline exceeded"),
-        }
-    }
-
-    pub(crate) fn stopped(self, reason: Stopped) -> tonic::Status {
-        match reason {
-            Stopped::Deadline => self.deadline(),
-            Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
-        }
-    }
-
-    pub(crate) const fn span_kind(self) -> SpanKind {
-        match self {
-            Self::Server => SpanKind::Server,
-            Self::Client => SpanKind::Client,
-        }
+pub(crate) fn server_stopped(reason: Stopped) -> tonic::Status {
+    match reason {
+        Stopped::Deadline => deadline_status(),
+        Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
     }
 }
 
@@ -110,210 +44,144 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
 }
 
 #[derive(Clone, Copy)]
-struct Outcome {
+struct ServerOutcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
-    response_code: Option<tonic::Code>,
 }
 
-impl Outcome {
-    const fn bare(code: tonic::Code) -> Self {
+impl ServerOutcome {
+    const fn unknown() -> Self {
         Self {
-            code,
+            code: tonic::Code::Unknown,
             failure: None,
-            response_code: None,
         }
     }
 
-    fn of_status(side: Side, status: &tonic::Status) -> Self {
+    fn from_status(status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
-            response_code: None,
-            failure: match side {
-                Side::Server => crate::status::catalog_code(status),
-                Side::Client => None,
-            },
+            failure: crate::status::catalog_code(status),
         }
     }
 
-    fn from_response<B>(observation: &Observation, response: &http::Response<B>) -> Option<Self> {
-        let side = observation.side();
-        match (side, response.extensions().get::<tonic::Status>()) {
-            (Side::Server, Some(status)) => Some(Self {
-                response_code: Some(status.code()),
-                ..Self::of_status(side, status)
-            }),
-            _ => Self::from_status_headers(observation, response.headers()),
-        }
-    }
-
-    fn from_status_headers(observation: &Observation, headers: &HeaderMap) -> Option<Self> {
-        let response_code = header_status_code(headers)?;
+    fn from_headers(headers: &HeaderMap) -> Option<Self> {
         Some(Self {
-            code: match observation {
-                Observation::Transport(call) if matches!(call.side(), Side::Client) => {
-                    crate::protocol::decoded_header_status_code(headers).unwrap_or(response_code)
-                }
-                _ => response_code,
-            },
-            response_code: Some(response_code),
-            failure: match observation.side() {
-                Side::Server => header_catalog_code(headers),
-                Side::Client => None,
-            },
+            code: header_status_code(headers)?,
+            failure: header_catalog_code(headers),
         })
     }
-}
 
-type ResponseFramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
-
-fn store_waker(slot: &mut Option<Waker>, waker: &Waker) {
-    match slot {
-        Some(stored) => stored.clone_from(waker),
-        None => *slot = Some(waker.clone()),
+    fn from_response<B>(response: &http::Response<B>) -> Option<Self> {
+        response
+            .extensions()
+            .get::<tonic::Status>()
+            .map(Self::from_status)
+            .or_else(|| Self::from_headers(response.headers()))
     }
 }
 
-pub(crate) enum Observation {
-    Transport(Call),
-    Decoded {
-        span: tracing::Span,
-        observer: tonic::client::ResponseStatusObserver,
-    },
-}
+type FramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
 
-impl Observation {
-    fn side(&self) -> Side {
-        match self {
-            Self::Transport(call) => call.side(),
-            Self::Decoded { .. } => Side::Client,
-        }
-    }
-
-    fn span(&self) -> &tracing::Span {
-        match self {
-            Self::Transport(call) => call.span(),
-            Self::Decoded { span, .. } => span,
-        }
-    }
-
-    fn record_local_stop(&self, status: &tonic::Status) {
-        if let Self::Decoded { observer, .. } = self {
-            observer.stop(status);
-        }
-    }
-}
-
-struct Resources<B> {
+struct ActiveStream<B: Body> {
     body: B,
-    observation: Observation,
-    _held: Held,
-}
-
-struct OpenCall<B: Body> {
-    resources: Resources<B>,
-    context: Option<OperationContext>,
+    call: Call,
+    _permit: Option<OwnedSemaphorePermit>,
+    _cancel_on_drop: Option<DropGuard>,
+    deadline: Option<Deadline>,
     fallback: Option<opentelemetry::Context>,
     waker: Option<Waker>,
-    error_code: fn(&B::Error) -> tonic::Code,
-    on_status: Option<ResponseStatusObserver>,
+    map_error: fn(&B::Error) -> tonic::Code,
 }
 
-enum Phase<B: Body> {
-    Open(OpenCall<B>),
-    Trailers(HeaderMap),
-    Done,
+enum StreamStage<B: Body> {
+    Active(ActiveStream<B>),
+    PendingTrailers(HeaderMap),
+    Closed,
 }
 
-struct Completion<B: Body> {
-    open: OpenCall<B>,
-    outcome: Outcome,
+struct StreamFinalizer<B: Body> {
+    active: ActiveStream<B>,
+    outcome: ServerOutcome,
 }
 
-impl<B: Body> Completion<B> {
-    fn finish(self) {
-        match self.open.resources.observation {
-            Observation::Transport(call) => {
-                if let Some(failure) = self.outcome.failure {
-                    call.failed(failure);
-                }
-                call.finish(self.outcome.code);
-            }
-            Observation::Decoded { observer, .. } => observer.finish_stop(),
+impl<B: Body> StreamFinalizer<B> {
+    fn emit(self) {
+        if let Some(failure) = self.outcome.failure {
+            self.active.call.record_failure(failure);
         }
-        if let (Some(code), Some(on_status)) = (self.outcome.response_code, self.open.on_status) {
-            on_status(code);
-        }
+        self.active.call.finish(self.outcome.code);
     }
 }
 
-struct State<B: Body> {
-    phase: Phase<B>,
-    side: Side,
-    missing_status: Outcome,
+struct ServerState<B: Body> {
+    stage: StreamStage<B>,
 }
 
-impl<B: Body> State<B> {
-    fn stopped_status(&self) -> Option<tonic::Status> {
-        let Phase::Open(open) = &self.phase else {
-            return None;
+impl<B: Body> ServerState<B> {
+    fn is_expired(&self) -> bool {
+        let StreamStage::Active(active) = &self.stage else {
+            return false;
         };
-        let reason = open.context.as_ref()?.stopped()?;
-        Some(self.side.stopped(reason))
+        active.deadline.is_some_and(Deadline::expired)
     }
 
-    fn close(&mut self, next: Phase<B>, outcome: Outcome) -> Option<Completion<B>> {
-        match std::mem::replace(&mut self.phase, next) {
-            Phase::Open(open) => Some(Completion { open, outcome }),
-            ended => {
-                self.phase = ended;
+    fn transition(
+        &mut self,
+        next: StreamStage<B>,
+        outcome: ServerOutcome,
+    ) -> Option<StreamFinalizer<B>> {
+        match std::mem::replace(&mut self.stage, next) {
+            StreamStage::Active(active) => Some(StreamFinalizer { active, outcome }),
+            other => {
+                self.stage = other;
                 None
             }
         }
     }
 
-    fn complete_with(&mut self, status: &tonic::Status) -> Option<Completion<B>> {
-        if let Phase::Open(open) = &self.phase {
-            open.resources.observation.record_local_stop(status);
-        }
+    fn stage_status_trailers(&mut self, status: &tonic::Status) -> Option<StreamFinalizer<B>> {
         let mut trailers = HeaderMap::new();
         let _ = status.add_header(&mut trailers);
-        self.close(
-            Phase::Trailers(trailers),
-            Outcome::of_status(self.side, status),
+        self.transition(
+            StreamStage::PendingTrailers(trailers),
+            ServerOutcome::from_status(status),
         )
     }
 
-    fn end_with(
+    fn cut_off(
         &mut self,
         status: &tonic::Status,
-    ) -> (ResponseFramePoll<B::Error>, Option<Completion<B>>) {
-        let completion = self.complete_with(status);
-        (self.take_terminal(), completion)
+    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
+        let finalizer = self.stage_status_trailers(status);
+        (self.pop_terminal(), finalizer)
     }
 
-    fn complete_from(&mut self, polled: &ResponseFramePoll<B::Error>) -> Option<Completion<B>> {
-        let Phase::Open(open) = &self.phase else {
+    fn inspect_frame(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
+        let StreamStage::Active(active) = &self.stage else {
             return None;
         };
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                Outcome::from_status_headers(&open.resources.observation, trailers)
-                    .unwrap_or(self.missing_status)
+                ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown)
             }
-            Poll::Ready(Some(Err(error))) => Outcome::bare((open.error_code)(error)),
-            Poll::Ready(None) => self.missing_status,
+            Poll::Ready(Some(Err(error))) => ServerOutcome {
+                code: (active.map_error)(error),
+                failure: None,
+            },
+            Poll::Ready(None) => ServerOutcome::unknown(),
             Poll::Pending => return None,
         };
-        self.close(Phase::Done, outcome)
+        self.transition(StreamStage::Closed, outcome)
     }
 
-    fn take_terminal(&mut self) -> ResponseFramePoll<B::Error> {
-        match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            phase => {
-                self.phase = phase;
+    fn pop_terminal(&mut self) -> FramePoll<B::Error> {
+        match std::mem::replace(&mut self.stage, StreamStage::Closed) {
+            StreamStage::PendingTrailers(trailers) => {
+                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+            }
+            stage => {
+                self.stage = stage;
                 Poll::Ready(None)
             }
         }
@@ -321,63 +189,39 @@ impl<B: Body> State<B> {
 }
 
 struct ResponseBody<B: Body> {
-    state: Arc<Mutex<State<B>>>,
-    watcher: Option<AbortOnDropHandle<()>>,
+    state: Arc<Mutex<ServerState<B>>>,
+    timer: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
-    watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
+    timer_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
-pub(crate) fn attach<B>(
+pub(crate) fn attach_server<B>(
     mut response: http::Response<B>,
-    observation: Observation,
+    call: Call,
     fallback: Option<opentelemetry::Context>,
-    custody: ResponseCustody,
-    error_code: fn(&B::Error) -> tonic::Code,
+    custody: ServerCustody,
 ) -> http::Response<impl Body<Data = Bytes, Error = B::Error> + Send + 'static>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
-    let side = observation.side();
-    let stopped = custody
-        .context
-        .as_ref()
-        .and_then(OperationContext::stopped)
-        .map(|reason| side.stopped(reason));
-    let initial = if let Some(status) = stopped {
-        observation.record_local_stop(&status);
-        for name in [GRPC_STATUS, GRPC_MESSAGE, GRPC_STATUS_DETAILS] {
-            response.headers_mut().remove(name);
+    let initial = if custody.deadline.is_some_and(Deadline::expired) {
+        let status = deadline_status();
+        for header in [GRPC_STATUS, GRPC_MESSAGE, GRPC_STATUS_DETAILS] {
+            response.headers_mut().remove(header);
         }
         let _ = status.add_header(response.headers_mut());
-        Some(Outcome::of_status(side, &status))
+        Some(ServerOutcome::from_status(&status))
     } else {
-        Outcome::from_response(&observation, &response)
+        ServerOutcome::from_response(&response)
     };
-    if response
-        .extensions_mut()
-        .remove::<crate::router::Shed>()
-        .is_some()
-        && initial.is_some_and(|outcome| outcome.code == tonic::Code::ResourceExhausted)
-    {
-        crate::observe::record_shed();
-    }
-    let missing_status = match side {
-        Side::Client => http_status_code(response.status()),
-        Side::Server => None,
-    }
-    .map_or(Outcome::bare(tonic::Code::Unknown), |code| Outcome {
-        response_code: Some(code),
-        ..Outcome::bare(code)
-    });
     response.map(|body| {
         ResponseBody::start(
             body,
-            observation,
+            call,
             fallback,
             custody,
-            error_code,
+            |_error| tonic::Code::Unknown,
             initial,
-            missing_status,
         )
     })
 }
@@ -388,74 +232,71 @@ where
 {
     fn start(
         body: B,
-        observation: Observation,
+        call: Call,
         fallback: Option<opentelemetry::Context>,
-        custody: ResponseCustody,
-        error_code: fn(&B::Error) -> tonic::Code,
-        initial: Option<Outcome>,
-        missing_status: Outcome,
+        custody: ServerCustody,
+        map_error: fn(&B::Error) -> tonic::Code,
+        initial: Option<ServerOutcome>,
     ) -> Self {
-        let ended = body.is_end_stream();
-        let side = observation.side();
-        let mut state = State {
-            phase: Phase::Open(OpenCall {
-                resources: Resources {
-                    body,
-                    observation,
-                    _held: custody.held,
-                },
-                context: custody.context,
+        let body_ended = body.is_end_stream();
+        let watch_deadline = custody.watch_deadline;
+        let deadline = custody.deadline;
+        let mut state = ServerState {
+            stage: StreamStage::Active(ActiveStream {
+                body,
+                call,
+                _permit: custody.permit,
+                _cancel_on_drop: custody.cancel_on_drop,
+                deadline,
                 fallback,
                 waker: None,
-                error_code,
-                on_status: custody.on_status,
+                map_error,
             }),
-            side,
-            missing_status,
         };
-        let completion = if let Some(outcome) = initial {
-            state.close(Phase::Done, outcome)
-        } else if let Some(status) = state.stopped_status() {
-            state.complete_with(&status)
-        } else if ended {
-            state.close(Phase::Done, missing_status)
+        let finalizer = if let Some(outcome) = initial {
+            state.transition(StreamStage::Closed, outcome)
+        } else if state.is_expired() {
+            state.stage_status_trailers(&deadline_status())
+        } else if body_ended {
+            state.transition(StreamStage::Closed, ServerOutcome::unknown())
         } else {
             None
         };
-        if let Some(completion) = completion {
-            completion.finish();
+        if let Some(finalizer) = finalizer {
+            finalizer.emit();
         }
-        let watched = match &state.phase {
-            Phase::Open(open) => open.context.clone(),
-            Phase::Trailers(_) | Phase::Done => None,
+        let armed_deadline = if watch_deadline && matches!(state.stage, StreamStage::Active(_)) {
+            deadline
+        } else {
+            None
         };
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
-            watcher: None,
+            timer: None,
             #[cfg(test)]
-            watcher_done: None,
+            timer_done: None,
         };
-        if let Some(context) = watched {
-            this.watch(context, side);
+        if let Some(deadline) = armed_deadline {
+            this.arm_timer(deadline);
         }
         this
     }
 
-    fn watch(&mut self, context: OperationContext, side: Side) {
+    fn arm_timer(&mut self, deadline: Deadline) {
         let weak = Arc::downgrade(&self.state);
         #[cfg(test)]
-        let (done, receiver) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         #[cfg(test)]
         {
-            self.watcher_done = Some(receiver);
+            self.timer_done = Some(done_rx);
         }
-        self.watcher = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        self.timer = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             #[cfg(test)]
-            let _done = done;
+            let _done_tx = done_tx;
             let result = AssertUnwindSafe(async {
-                let reason = context.wait_stopped().await;
+                deadline.wait().await;
                 if let Some(state) = weak.upgrade() {
-                    terminate(&state, &side.stopped(reason));
+                    terminate_from_timer(&state, &deadline_status());
                 }
             })
             .catch_unwind()
@@ -463,30 +304,37 @@ where
             if result.is_err()
                 && let Some(state) = weak.upgrade()
             {
-                terminate(&state, &internal_status());
+                terminate_from_timer(&state, &internal_status());
             }
         })));
     }
 
-    fn reap_watcher(&mut self, context: &mut Context<'_>) {
-        if let Some(watcher) = &mut self.watcher
-            && let Poll::Ready(result) = std::future::Future::poll(Pin::new(watcher), context)
+    fn poll_timer(&mut self, cx: &mut Context<'_>) {
+        if let Some(timer) = &mut self.timer
+            && let Poll::Ready(joined) = std::future::Future::poll(Pin::new(timer), cx)
         {
-            self.watcher = None;
-            if result.is_err() {
-                terminate(&self.state, &internal_status());
+            self.timer = None;
+            if joined.is_err() {
+                terminate_from_timer(&self.state, &internal_status());
             }
         }
     }
 }
 
-fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
-    let completion = state.lock().complete_with(status);
-    if let Some(mut completion) = completion {
-        if let Some(waker) = completion.open.waker.take() {
+fn terminate_from_timer<B: Body>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
+    let finalizer = state.lock().stage_status_trailers(status);
+    if let Some(mut finalizer) = finalizer {
+        if let Some(waker) = finalizer.active.waker.take() {
             waker.wake();
         }
-        completion.finish();
+        finalizer.emit();
+    }
+}
+
+fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
+    match slot {
+        Some(existing) => existing.clone_from(waker),
+        None => *slot = Some(waker.clone()),
     }
 }
 
@@ -497,143 +345,66 @@ where
     type Data = Bytes;
     type Error = B::Error;
 
-    fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> ResponseFramePoll<B::Error> {
+    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
         let this = self.get_mut();
-        this.reap_watcher(context);
+        this.poll_timer(cx);
         let mut state = this.state.lock();
-        let mut panic = None;
-        let (polled, completion) = if let Some(status) = state.stopped_status() {
-            state.end_with(&status)
+        let (polled, finalizer) = if state.is_expired() {
+            state.cut_off(&deadline_status())
         } else {
-            let side = state.side;
-            let Phase::Open(open) = &mut state.phase else {
-                return state.take_terminal();
+            let StreamStage::Active(active) = &mut state.stage else {
+                return state.pop_terminal();
             };
-            store_waker(&mut open.waker, context.waker());
-            let polled = {
-                let resources = &mut open.resources;
-                let _span = resources.observation.span().enter();
-                let _fallback = open.fallback.clone().map(opentelemetry::Context::attach);
+            register_waker(&mut active.waker, cx.waker());
+            let inner = {
+                let _entered = active.call.span().enter();
+                let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Pin::new(&mut resources.body).poll_frame(context)
+                    Pin::new(&mut active.body).poll_frame(cx)
                 }))
             };
-            match polled {
+            match inner {
                 Ok(polled) => {
-                    if let Some(status) = state.stopped_status() {
-                        state.end_with(&status)
+                    if state.is_expired() {
+                        state.cut_off(&deadline_status())
                     } else {
-                        let completion = state.complete_from(&polled);
-                        (polled, completion)
+                        let finalizer = state.inspect_frame(&polled);
+                        (polled, finalizer)
                     }
                 }
-                Err(caught) if matches!(side, Side::Client) => {
-                    panic = Some(caught);
-                    let completion =
-                        state.close(Phase::Done, Outcome::bare(tonic::Code::Cancelled));
-                    (Poll::Ready(None), completion)
-                }
-                Err(_panic) => state.end_with(&internal_status()),
+                Err(_panic) => state.cut_off(&internal_status()),
             }
         };
         drop(state);
-        if let Some(completion) = completion {
-            this.watcher = None;
-            completion.finish();
-        }
-        if let Some(panic) = panic {
-            std::panic::resume_unwind(panic);
+        if let Some(finalizer) = finalizer {
+            this.timer = None;
+            finalizer.emit();
         }
         polled
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(self.state.lock().phase, Phase::Done)
+        let guard = self.state.lock();
+        matches!(guard.stage, StreamStage::Closed)
     }
 
     fn size_hint(&self) -> SizeHint {
-        match &self.state.lock().phase {
-            Phase::Open(open) => open.resources.body.size_hint(),
-            Phase::Trailers(_) | Phase::Done => SizeHint::with_exact(0),
+        let guard = self.state.lock();
+        match &guard.stage {
+            StreamStage::Active(active) => active.body.size_hint(),
+            StreamStage::PendingTrailers(_) | StreamStage::Closed => SizeHint::with_exact(0),
         }
     }
 }
 
 impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
-        let phase = std::mem::replace(&mut self.state.lock().phase, Phase::Done);
-        drop(self.watcher.take());
-        drop(phase);
-    }
-}
-
-struct UploadState {
-    body: Option<tonic::body::Body>,
-    waker: Option<Waker>,
-}
-
-pub(crate) struct UploadGuard(Arc<Mutex<UploadState>>);
-struct Upload(Arc<Mutex<UploadState>>);
-
-pub(crate) fn upload(body: tonic::body::Body) -> (tonic::body::Body, UploadGuard) {
-    let state = Arc::new(Mutex::new(UploadState {
-        body: Some(body),
-        waker: None,
-    }));
-    (
-        tonic::body::Body::new(Upload(Arc::clone(&state))),
-        UploadGuard(state),
-    )
-}
-
-impl Drop for UploadGuard {
-    fn drop(&mut self) {
-        let (body, waker) = {
-            let mut state = self.0.lock();
-            (state.body.take(), state.waker.take())
+        let stage = {
+            let mut guard = self.state.lock();
+            std::mem::replace(&mut guard.stage, StreamStage::Closed)
         };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-        drop(body);
-    }
-}
-
-impl Body for Upload {
-    type Data = Bytes;
-    type Error = tonic::Status;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut state = self.0.lock();
-        store_waker(&mut state.waker, context.waker());
-        let Some(body) = state.body.as_mut() else {
-            return Poll::Ready(None);
-        };
-        let polled =
-            std::panic::catch_unwind(AssertUnwindSafe(|| Pin::new(body).poll_frame(context)));
-        let ended = matches!(polled, Ok(Poll::Ready(None | Some(Err(_)))) | Err(_));
-        let body = if ended { state.body.take() } else { None };
-        drop(state);
-        drop(body);
-        match polled {
-            Ok(polled) => polled,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.0.lock().body.as_ref().is_none_or(Body::is_end_stream)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.0
-            .lock()
-            .body
-            .as_ref()
-            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
+        drop(self.timer.take());
+        drop(stage);
     }
 }
 
@@ -644,7 +415,6 @@ mod tests {
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
-    use operation_context::Deadline;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
@@ -654,11 +424,8 @@ mod tests {
 
     const BUDGET: Duration = Duration::from_secs(1);
 
-    fn deadline_context() -> OperationContext {
-        OperationContext::new(
-            Some(Deadline::new(Instant::now(), BUDGET)),
-            CancellationToken::new(),
-        )
+    fn budget_deadline() -> Deadline {
+        Deadline::new(Instant::now(), BUDGET)
     }
 
     struct ProbeBody {
@@ -698,68 +465,50 @@ mod tests {
         }
     }
 
-    fn call() -> Call {
+    fn server_call() -> Call {
         let request = http::Request::builder()
             .uri("/test.Service/Stream")
             .body(())
             .unwrap();
-        Call::start(
-            &crate::observe::Series::server(
-                std::iter::once((
-                    "/test.Service/Stream".into(),
-                    crate::observe::CallType::BidiStream,
-                ))
-                .collect(),
-            ),
-            &request,
-            None,
-        )
+        let methods = crate::observe::Methods::new(
+            std::iter::once((
+                "/test.Service/Stream".into(),
+                crate::observe::CallType::BidiStream,
+            ))
+            .collect(),
+        );
+        Call::start(&methods, &request)
     }
 
-    fn response<B>(body: B, custody: ResponseCustody) -> ResponseBody<B>
+    fn start_response<B>(body: B, custody: ServerCustody) -> ResponseBody<B>
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
         ResponseBody::start(
             body,
-            Observation::Transport(call()),
+            server_call(),
             None,
             custody,
             tonic::Status::code,
             None,
-            Outcome::bare(tonic::Code::Unknown),
         )
     }
 
-    #[tokio::test]
-    async fn parent_cancellation_releases_an_unbounded_unpolled_response() {
-        let parent = CancellationToken::new();
-        let child = parent.child_token();
+    #[tokio::test(start_paused = true)]
+    async fn unwatched_calls_skip_spawning_while_still_enforcing_deadlines_on_poll() {
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
-        let polls = Arc::clone(&source.polls);
-        let permits = Arc::new(Semaphore::new(1));
-        let mut body = response(
+        let mut body = start_response(
             source,
-            ResponseCustody {
-                on_status: None,
-                context: Some(OperationContext::new(None, child.clone())),
-                held: Held {
-                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                    cancel_on_drop: Some(child.drop_guard()),
-                    ..Held::default()
-                },
+            ServerCustody {
+                permit: None,
+                cancel_on_drop: None,
+                deadline: Some(budget_deadline()),
+                watch_deadline: false,
             },
         );
-        let watcher = body.watcher.take().unwrap();
-        parent.cancel();
-        tokio::time::timeout(BUDGET, watcher)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(dropped.load(Ordering::SeqCst));
-        assert_eq!(polls.load(Ordering::SeqCst), 0);
-        assert_eq!(permits.available_permits(), 1);
+        assert!(body.timer.is_none());
+        tokio::time::advance(BUDGET).await;
         let trailers = body
             .frame()
             .await
@@ -767,53 +516,39 @@ mod tests {
             .unwrap()
             .into_trailers()
             .unwrap();
-        assert_eq!(
-            tonic::Status::from_header_map(&trailers).unwrap().code(),
-            tonic::Code::Cancelled
-        );
+        let status = tonic::Status::from_header_map(&trailers).unwrap();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert!(dropped.load(Ordering::SeqCst));
         assert!(body.frame().await.is_none());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn deadline_releases_unpolled_resources_and_joins_its_watcher() {
+    async fn watched_deadline_releases_unpolled_resources_and_joins_its_timer() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
+        let token = CancellationToken::new();
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
-        let upload_source = ProbeBody::pending();
-        let upload_dropped = Arc::clone(&upload_source.dropped);
-        let (mut outgoing, upload) = upload(tonic::body::Body::new(upload_source));
-        let mut body = response(
+        let mut body = start_response(
             source,
-            ResponseCustody {
-                on_status: None,
-                context: Some(deadline_context()),
-                held: Held {
-                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                    upload: Some(upload),
-                    ..Held::default()
-                },
+            ServerCustody {
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                cancel_on_drop: Some(token.clone().drop_guard()),
+                deadline: Some(budget_deadline()),
+                watch_deadline: true,
             },
         );
-        let watcher = body.watcher.take().unwrap();
+        let timer = body.timer.take().unwrap();
         tokio::time::advance(BUDGET).await;
-        tokio::time::timeout(BUDGET, watcher)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(BUDGET, timer).await.unwrap().unwrap();
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(upload_dropped.load(Ordering::SeqCst));
+        assert!(token.is_cancelled());
         assert_eq!(permits.available_permits(), 1);
-        assert_eq!(
-            polls.load(Ordering::SeqCst),
-            0,
-            "expiry must not poll feature work"
-        );
-        assert!(outgoing.frame().await.is_none());
-        assert!(!body.is_end_stream(), "deadline trailers remain readable");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert!(!body.is_end_stream());
         let trailers = body
             .frame()
             .await
@@ -838,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn terminal_status_releases_capacity_once_and_cancels_the_watcher() {
+    async fn terminal_status_releases_capacity_once_and_aborts_the_timer() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -850,25 +585,23 @@ mod tests {
             .add_header(&mut trailers)
             .unwrap();
         source.frames.push_back(Frame::trailers(trailers));
-        let mut body = response(
+        let mut body = start_response(
             source,
-            ResponseCustody {
-                on_status: None,
-                context: Some(deadline_context()),
-                held: Held {
-                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
-                    ..Held::default()
-                },
+            ServerCustody {
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                cancel_on_drop: None,
+                deadline: Some(budget_deadline()),
+                watch_deadline: true,
             },
         );
-        let done = body.watcher_done.take().unwrap();
+        let done = body.timer_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(tonic::Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(body.watcher.is_none(), "completion releases the watcher");
+        assert!(body.timer.is_none());
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
@@ -883,43 +616,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn response_drop_cancels_unpolled_upload_and_completes_watcher_abort() {
+    async fn response_drop_cancels_propagated_work_and_aborts_timer() {
         let cancellation = CancellationToken::new();
+        let permits = Arc::new(Semaphore::new(1));
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
-        let upload_source = ProbeBody::pending();
-        let upload_dropped = Arc::clone(&upload_source.dropped);
-        let (mut outgoing, upload) = upload(tonic::body::Body::new(upload_source));
-        let mut body = response(
+        let mut body = start_response(
             source,
-            ResponseCustody {
-                on_status: None,
-                context: Some(OperationContext::new(
-                    Some(Deadline::new(Instant::now(), BUDGET)),
-                    cancellation.clone(),
-                )),
-                held: Held {
-                    permit: None,
-                    upload: Some(upload),
-                    cancel_on_drop: Some(cancellation.clone().drop_guard()),
-                },
+            ServerCustody {
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                cancel_on_drop: Some(cancellation.clone().drop_guard()),
+                deadline: Some(budget_deadline()),
+                watch_deadline: true,
             },
         );
-        let done = body.watcher_done.take().unwrap();
+        let done = body.timer_done.take().unwrap();
         drop(body);
-        assert!(
-            cancellation.is_cancelled(),
-            "response drop cancels propagated work"
-        );
+        assert!(cancellation.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(upload_dropped.load(Ordering::SeqCst));
-        assert!(outgoing.frame().await.is_none());
+        assert_eq!(permits.available_permits(), 1);
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
     }
 
     struct PanicBody(Arc<AtomicBool>);
 
-    const PANIC: &str = "source panic";
+    const PANIC_MESSAGE: &str = "source panic";
 
     impl Drop for PanicBody {
         fn drop(&mut self) {
@@ -935,33 +656,27 @@ mod tests {
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
         ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-            std::panic::resume_unwind(Box::new(PANIC))
-        }
-    }
-
-    fn held_permit(permits: &Arc<Semaphore>) -> Held {
-        Held {
-            permit: Some(Arc::clone(permits).try_acquire_owned().unwrap()),
-            ..Held::default()
+            std::panic::resume_unwind(Box::new(PANIC_MESSAGE))
         }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_server_body_panic_answers_internal_and_releases_the_call() {
+    async fn server_body_panic_answers_internal_and_releases_capacity() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
         let dropped = Arc::new(AtomicBool::new(false));
-        let mut body = response(
+        let mut body = start_response(
             PanicBody(Arc::clone(&dropped)),
-            ResponseCustody {
-                on_status: None,
-                context: Some(deadline_context()),
-                held: held_permit(&permits),
+            ServerCustody {
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                cancel_on_drop: None,
+                deadline: Some(budget_deadline()),
+                watch_deadline: true,
             },
         );
-        let done = body.watcher_done.take().unwrap();
+        let done = body.timer_done.take().unwrap();
         let trailers = body
             .frame()
             .await
@@ -986,76 +701,8 @@ mod tests {
         assert!(!rendered.contains("grpc_code=\"Canceled\""), "{rendered}");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_client_body_panic_reaches_the_caller_after_ending_the_call_cancelled() {
-        let decoded = Arc::new(Mutex::new(Vec::new()));
-        let observer = tonic::client::ResponseStatusObserver::new({
-            let decoded = Arc::clone(&decoded);
-            move |code| decoded.lock().push(code)
-        });
-        let responded = Arc::new(Mutex::new(Vec::new()));
-        let on_status: ResponseStatusObserver = Box::new({
-            let responded = Arc::clone(&responded);
-            move |code| responded.lock().push(code)
-        });
-        let permits = Arc::new(Semaphore::new(1));
-        let dropped = Arc::new(AtomicBool::new(false));
-        let mut body = ResponseBody::start(
-            PanicBody(Arc::clone(&dropped)),
-            Observation::Decoded {
-                span: tracing::Span::none(),
-                observer,
-            },
-            None,
-            ResponseCustody {
-                on_status: Some(on_status),
-                context: Some(deadline_context()),
-                held: held_permit(&permits),
-            },
-            tonic::Status::code,
-            None,
-            Outcome::bare(tonic::Code::Unknown),
-        );
-        let done = body.watcher_done.take().unwrap();
-        let mut context = Context::from_waker(Waker::noop());
-        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            Pin::new(&mut body).poll_frame(&mut context)
-        }))
-        .unwrap_err();
-        assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
-        assert_eq!(*decoded.lock(), [tonic::Code::Cancelled]);
-        assert!(
-            responded.lock().is_empty(),
-            "a panic carries no response code"
-        );
-        assert!(dropped.load(Ordering::SeqCst));
-        assert_eq!(permits.available_permits(), 1);
-        assert!(body.is_end_stream());
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
-        assert!(body.frame().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn an_upload_source_panic_reaches_the_sender_and_ends_the_upload() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let (mut outgoing, guard) = upload(tonic::body::Body::new(PanicBody(Arc::clone(&dropped))));
-        let mut context = Context::from_waker(Waker::noop());
-        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            Pin::new(&mut outgoing).poll_frame(&mut context)
-        }))
-        .unwrap_err();
-        assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "the source is released while its guard is still held"
-        );
-        assert!(outgoing.is_end_stream());
-        assert!(outgoing.frame().await.is_none());
-        drop(guard);
-    }
-
     #[test]
-    fn a_watcher_lost_with_its_runtime_ends_the_call_internal() {
+    fn lost_timer_runtime_ends_the_call_internal() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -1069,19 +716,20 @@ mod tests {
             .unwrap();
         let mut body = {
             let _entered = runtime.enter();
-            response(
+            start_response(
                 source,
-                ResponseCustody {
-                    on_status: None,
-                    context: Some(deadline_context()),
-                    held: held_permit(&permits),
+                ServerCustody {
+                    permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                    cancel_on_drop: None,
+                    deadline: Some(budget_deadline()),
+                    watch_deadline: true,
                 },
             )
         };
         drop(runtime);
-        let mut context = Context::from_waker(Waker::noop());
-        let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut context) else {
-            unreachable!("a lost watcher ends the call with trailers");
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut cx) else {
+            unreachable!("lost timer runtime produces terminal internal trailers");
         };
         let status = tonic::Status::from_header_map(&frame.into_trailers().unwrap()).unwrap();
         assert_eq!(status.code(), tonic::Code::Internal);
@@ -1093,7 +741,7 @@ mod tests {
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
         assert!(matches!(
-            Pin::new(&mut body).poll_frame(&mut context),
+            Pin::new(&mut body).poll_frame(&mut cx),
             Poll::Ready(None)
         ));
         drop(body);
@@ -1102,22 +750,16 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_answers_by_side() {
-        let server = Side::Server.stopped(Stopped::Deadline);
-        assert_eq!(server.code(), tonic::Code::DeadlineExceeded);
+    fn server_stopped_maps_deadline_and_cancellation() {
+        let deadline = server_stopped(Stopped::Deadline);
+        assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
-            crate::status::catalog_code(&server),
+            crate::status::catalog_code(&deadline),
             Some(service_failure::Code::GatewayTimeout)
         );
-        let client = Side::Client.stopped(Stopped::Deadline);
-        assert_eq!(client.code(), tonic::Code::DeadlineExceeded);
-        assert_eq!(crate::status::catalog_code(&client), None);
-        for side in [Side::Server, Side::Client] {
-            assert_eq!(
-                side.stopped(Stopped::Cancelled).code(),
-                tonic::Code::Cancelled
-            );
-        }
+        let cancelled = server_stopped(Stopped::Cancelled);
+        assert_eq!(cancelled.code(), tonic::Code::Cancelled);
+        assert_eq!(crate::status::catalog_code(&cancelled), None);
     }
 
     #[tokio::test]
@@ -1148,17 +790,18 @@ mod tests {
             TraceState::default(),
         ));
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let call =
-            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), call);
+        let call = tracing::subscriber::with_default(
+            tracing::subscriber::NoSubscriber::default(),
+            server_call,
+        );
         assert!(call.span().is_disabled());
         let mut body = ResponseBody::start(
             ContextBody(Arc::clone(&seen)),
-            Observation::Transport(call),
+            call,
             Some(fallback),
-            ResponseCustody::default(),
+            ServerCustody::default(),
             tonic::Status::code,
             None,
-            Outcome::bare(tonic::Code::Unknown),
         );
         let ambient = opentelemetry::Context::current()
             .span()

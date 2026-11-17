@@ -1,9 +1,9 @@
-use health::{ArmError, Probe, Readiness, RefreshPolicy};
+use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
 use service_config::WorkerConfig;
 
-use super::{READINESS_PROGRESS, WorkerError};
+use super::WorkerError;
 use crate::background::Background;
 use crate::resources::{Listeners, Resources};
 
@@ -28,7 +28,7 @@ pub(super) fn bind_listeners(
 ) -> Result<(), WorkerError> {
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
-    let app = infra_http::harden(routes, &harden_options(config));
+    let app = infra_http::harden(routes, &harden_options(config, readiness));
     let health = resources
         .listeners
         .health
@@ -47,26 +47,11 @@ pub(super) fn bind_listeners(
     Ok(())
 }
 
-pub(super) fn start_progress(
-    readiness: &Readiness,
-    background: &Background,
-) -> Result<(), WorkerError> {
-    readiness.arm_progress().map_err(|error| match error {
-        ArmError::ProgressLost => WorkerError::BackgroundStopped(READINESS_PROGRESS),
-        ArmError::Refused(reason) => WorkerError::Admission(reason),
-    })?;
-    let observed = readiness.clone();
-    let reporter = background.clone();
-    background.spawn(READINESS_PROGRESS, |cancel| async move {
-        observed
-            .observe_progress(cancel, || reporter.record_failure(READINESS_PROGRESS))
-            .await;
-    });
+pub(super) fn start_refresher(readiness: &Readiness, background: &Background) {
     let readiness = readiness.clone();
     background.spawn("readiness_refresher", |cancel| async move {
         readiness.refresh_until(cancel).await;
     });
-    Ok(())
 }
 
 fn watch_listener(name: &'static str, server: &Server, background: &Background) {
@@ -90,21 +75,22 @@ fn server_options(config: &WorkerConfig) -> ServerOptions {
     }
 }
 
-fn harden_options(config: &WorkerConfig) -> HardenOptions {
+fn harden_options(config: &WorkerConfig, readiness: &Readiness) -> HardenOptions {
     HardenOptions {
         max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: config.http.request_timeout,
         max_in_flight: config.http.in_flight_cap(),
         admission_wait: config.http.admission_wait_cap(),
         log_health_probes: config.http.access_log_health_probes,
-        draining: None,
+        draining: Some(readiness.reader()),
     }
 }
 
-pub(super) fn refresh_policy(config: &WorkerConfig) -> RefreshPolicy {
-    RefreshPolicy {
-        interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
-        failure_threshold: config.health.failure_threshold,
-    }
+pub(super) fn refresh_policy(config: &WorkerConfig) -> Result<RefreshPolicy, WorkerError> {
+    RefreshPolicy::try_new(
+        config.health.refresh_interval,
+        config.health.probe_budget,
+        config.health.failure_threshold,
+    )
+    .map_err(|err| service_config::ValidationError::new("health", err.to_string()).into())
 }

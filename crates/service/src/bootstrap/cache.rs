@@ -1,4 +1,3 @@
-use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate};
 use service_config::Config;
 
@@ -29,38 +28,6 @@ pub(super) async fn open(
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,
     };
-    let handle = tokio::runtime::Handle::current();
-    let cache = super::blocking_startup("cache", move || {
-        let _entered = handle.enter();
-        Cache::start(options)
-    })
-    .await?;
-    let cache = retained.insert(cache);
-    let server = cache.server();
-    let unavailable = match tokio::time::timeout(
-        infra_cache::STARTUP_TIMEOUT + config.cache.command_timeout,
-        cache.probe().check(),
-    )
-    .await
-    {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error.to_string()),
-        Err(_) => Some("startup check timed out".to_owned()),
-    };
-    match unavailable {
-        None => tracing::info!(
-            server.address = %server.host,
-            server.port = server.port,
-            cache.tls = server.tls,
-            "cache_connected"
-        ),
-        Some(reason) => tracing::warn!(
-            server.address = %server.host,
-            server.port = server.port,
-            cache.tls = server.tls,
-            reason = %reason,
-            "cache_unavailable_at_startup"
-        ),
-    }
+    *retained = Some(Cache::start(options).await?);
     Ok(())
 }

@@ -207,12 +207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-take"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,7 +681,6 @@ checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
 dependencies = [
  "axum-core",
  "bytes",
- "form_urlencoded",
  "futures-core",
  "futures-util",
  "headers",
@@ -696,9 +689,6 @@ dependencies = [
  "http-body-util",
  "mime",
  "pin-project-lite",
- "serde_core",
- "serde_html_form",
- "serde_path_to_error",
  "tower-layer",
  "tower-service",
 ]
@@ -2156,7 +2146,6 @@ name = "health"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "compact_str",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2554,7 +2543,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "indexmap 2.14.2",
  "jsonwebtoken",
  "metrics",
  "metrics-util",
@@ -2583,13 +2571,11 @@ name = "infra-cache"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "backon",
  "base64 0.23.1",
  "derive_more",
  "enum-map",
  "futures-util",
- "health",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
@@ -2619,13 +2605,9 @@ dependencies = [
 name = "infra-grpc"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "async-stream",
- "atomic-take",
  "axum",
  "bytes",
- "derive-where",
- "derive_more",
  "foldhash",
  "futures-util",
  "grpc-contracts",
@@ -2637,6 +2619,7 @@ dependencies = [
  "hyper-util",
  "infra-bearerauthn",
  "infra-http",
+ "infra-outbound-grpc",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2649,6 +2632,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "secrecy",
+ "serde",
  "serde_json",
  "service-failure",
  "shared-rules",
@@ -2677,7 +2661,6 @@ dependencies = [
  "axum-test",
  "compact_str",
  "const-hex",
- "derive_more",
  "enum-map",
  "foldhash",
  "futures-util",
@@ -2691,7 +2674,6 @@ dependencies = [
  "infra-bearerauthn",
  "infra-idempotency-store",
  "infra-postgres",
- "infra-webhooks",
  "itertools 0.15.0",
  "metrics",
  "metrics-util",
@@ -2706,6 +2688,7 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
+ "serde_html_form",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
@@ -2836,7 +2819,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "infra-grpc",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "jsonwebtoken",
  "metrics",
@@ -2866,7 +2849,6 @@ name = "infra-object-storage"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
@@ -2881,7 +2863,6 @@ dependencies = [
  "derive_more",
  "enum-map",
  "futures-util",
- "health",
  "http-body",
  "http-body-util",
  "metrics",
@@ -2899,6 +2880,43 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "infra-outbound-grpc"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "derive_more",
+ "foldhash",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper-util",
+ "infra-serviceauth",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "operation-context",
+ "parking_lot",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
+ "secrecy",
+ "shared-rules",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3033,6 +3051,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
+ "axum",
  "base64 0.23.1",
  "bytes",
  "derive_more",
@@ -3040,12 +3059,15 @@ dependencies = [
  "foldhash",
  "hotpath",
  "http",
+ "http-body-util",
  "httpdate",
+ "infra-http",
  "infra-jobs",
  "infra-outbound-http",
  "infra-postgres",
  "metrics",
  "metrics-util",
+ "parking_lot",
  "proptest",
  "serde",
  "serde_json",
@@ -3055,8 +3077,11 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "url",
+ "utoipa",
+ "utoipa-axum",
  "zeroize",
 ]
 
@@ -3106,6 +3131,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-jobs",
  "infra-messaging",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "infra-postgres",
  "infra-webhooks",
@@ -5018,7 +5044,6 @@ dependencies = [
  "form_urlencoded",
  "indexmap 2.14.2",
  "itoa",
- "ryu",
  "serde_core",
 ]
 
@@ -5138,6 +5163,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-messaging",
  "infra-object-storage",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "infra-postgres",
  "infra-serviceauth",
@@ -5988,7 +6014,6 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",

@@ -71,11 +71,7 @@ impl InboundWebhooksConfig {
 #[serde(deny_unknown_fields, default)]
 struct WorkerInboundWebhooksInput {
     endpoints: BTreeMap<String, InboundWebhookEndpointConfig>,
-    #[expect(
-        dead_code,
-        reason = "shared environments set inbound_webhooks.secrets for the service receiver"
-    )]
-    secrets: BTreeMap<String, serde::de::IgnoredAny>,
+    secrets: serde::de::IgnoredAny,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

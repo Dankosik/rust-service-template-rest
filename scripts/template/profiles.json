@@ -267,9 +267,11 @@
       "crates/config/src/grpc/",
       "crates/grpc-contracts/",
       "crates/infra-grpc/",
+      "crates/infra-outbound-grpc/",
       "crates/infra-telemetry/src/traces/tests/delivery/",
       "crates/service/examples/grpc.rs",
       "crates/service/src/bootstrap/grpc.rs",
+      "crates/shared-rules/src/grpc.rs",
       "docs/decisions/grpc-decisions.md",
       "scripts/profiles/grpc_check.sh",
       "scripts/profiles/grpc_generate.sh",
@@ -293,6 +295,11 @@
   "grpc-transport-tests": {
     "remove_when_unselected": [
       "crates/infra-grpc/tests/transport.rs"
+    ]
+  },
+  "grpc-client-tests": {
+    "remove_when_unselected": [
+      "crates/infra-grpc/tests/client_status.rs"
     ]
   },
   "postgres-grpc-consumers": {
@@ -381,6 +388,9 @@
   "test-metrics": {
     "remove_when_unselected": []
   },
+  "test-metrics-util": {
+    "remove_when_unselected": []
+  },
   "jobs-reference": {
     "remove_when_unselected": [
       "test/src/reading_counter.rs",
@@ -457,7 +467,6 @@
     "remove_when_unselected": [
       "crates/config/src/inbound_webhooks.rs",
       "crates/config/src/inbound_webhooks/",
-      "crates/infra-http/src/webhooks.rs",
       "crates/service/src/bootstrap/inbound_webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
       "crates/infra-webhooks/src/inbound/",
@@ -498,6 +507,7 @@
       "crates/config/src/service_auth/",
       "crates/infra-grpc/src/service_auth.rs",
       "crates/infra-grpc/tests/service_auth.rs",
+      "crates/infra-outbound-grpc/src/service_auth.rs",
       "crates/service/src/bootstrap/service_auth.rs",
       "docs/decisions/service-authentication-decisions.md"
     ]

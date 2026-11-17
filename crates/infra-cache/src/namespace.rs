@@ -4,7 +4,7 @@ use std::time::Duration;
 use operation_context::OperationContext;
 use redis::{SetExpiry, SetOptions};
 
-use crate::connection::{CommandError, CommandScope};
+use crate::connection::CommandError;
 use crate::observe::{OperationGuard, Outcome};
 use crate::{Cache, CacheNamespace, Namespace, SetError, Unavailable};
 
@@ -60,7 +60,7 @@ impl CacheNamespace {
     async fn get_bounded(
         &self,
         key: &str,
-        scope: &CommandScope,
+        scope: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let operation = Operation::Get;
         let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
@@ -95,7 +95,7 @@ impl CacheNamespace {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        scope: &CommandScope,
+        scope: &OperationContext,
     ) -> Result<(), SetError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
@@ -131,24 +131,24 @@ impl CacheNamespace {
         self.delete_bounded(key, &self.command_scope(context)).await
     }
 
-    async fn delete_bounded(&self, key: &str, scope: &CommandScope) -> Result<(), Unavailable> {
+    async fn delete_bounded(&self, key: &str, scope: &OperationContext) -> Result<(), Unavailable> {
         let operation = Operation::Delete;
         let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
         self.run(scope, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
-    fn command_scope(&self, context: &OperationContext) -> CommandScope {
-        CommandScope::under(context, self.cache.link.command_timeout)
+    fn command_scope(&self, context: &OperationContext) -> OperationContext {
+        context.child(self.cache.link.command_timeout)
     }
 
-    fn standalone_command_scope(&self) -> CommandScope {
-        CommandScope::standalone(self.cache.link.command_timeout)
+    fn standalone_command_scope(&self) -> OperationContext {
+        OperationContext::with_timeout(self.cache.link.command_timeout)
     }
 
     async fn run<T: redis::FromRedisValue + Send + 'static>(
         &self,
-        scope: &CommandScope,
+        scope: &OperationContext,
         operation: Operation,
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
@@ -162,7 +162,7 @@ impl CacheNamespace {
         match self.cache.link.command(command, scope).await {
             Ok(value) => {
                 if operation.is_read()
-                    && let Some(stopped) = scope.context.stopped()
+                    && let Some(stopped) = scope.stopped()
                 {
                     return Err(guard.stop(stopped));
                 }

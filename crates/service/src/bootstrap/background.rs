@@ -197,45 +197,7 @@ pub(crate) async fn background_failure(
 mod tests {
     use std::time::Duration;
 
-    use futures_util::FutureExt;
-
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_observer_reports_without_readers_and_keeps_join_custody() {
-        let policy = health::RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
-        };
-        let readiness = health::Readiness::new(Vec::new(), policy);
-        readiness.refresh().await;
-        let cancel = CancellationToken::new();
-        let mut background = Background::new(cancel.clone());
-        let mut observer = background.observer();
-        super::super::start_progress(&readiness, &mut background).unwrap();
-        tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
-        let failure =
-            tokio::time::timeout(Duration::from_secs(1), background_failure(&mut observer))
-                .await
-                .unwrap();
-        assert_eq!(failure.name, "readiness_progress");
-        assert!(!failure.panicked);
-        assert_eq!(background.tasks.len(), 2);
-        assert!(
-            background.tasks.join_next().now_or_never().is_none(),
-            "reporting a failure must not end either process-lifetime task"
-        );
-        readiness.stop_progress();
-        cancel.cancel();
-        assert_eq!(
-            background
-                .join_until(Instant::now() + Duration::from_secs(1))
-                .await,
-            JoinOutcome::Failed
-        );
-        assert!(background.is_empty());
-    }
 
     #[tokio::test]
     async fn task_failure_is_sticky_before_join() {

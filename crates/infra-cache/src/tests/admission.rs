@@ -1,24 +1,25 @@
 use super::*;
 
-#[test]
-fn plaintext_without_the_allow_flag_is_refused() {
+#[tokio::test]
+async fn plaintext_without_the_allow_flag_is_refused() {
     let err = Cache::start(options(
         "redis://:hunter2@127.0.0.1:6379",
         false,
         true,
         None,
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::PlaintextRefused);
     assert_no_leak(&err, &["hunter2"]);
 }
 
-#[test]
-fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
-    let cache = admitted("redis://127.0.0.1:6379", true, true);
-    assert_eq!(cache.server().host, "127.0.0.1");
-    assert_eq!(cache.server().port, 6379);
-    assert!(!cache.server().tls);
+#[tokio::test]
+async fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
+    let cache = admitted("redis://127.0.0.1:6379", true, true).await;
+    assert_eq!(cache.link.server.host, "127.0.0.1");
+    assert_eq!(cache.link.server.port, 6379);
+    assert!(!cache.link.server.tls);
     let debug = format!("{cache:?}");
     assert!(
         debug.contains("127.0.0.1") && !debug.contains("redis://"),
@@ -26,67 +27,81 @@ fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
     );
 }
 
-#[test]
-fn a_missing_password_is_refused_without_the_allow_flag() {
-    let err = Cache::start(options("rediss://127.0.0.1:6379", false, false, None)).unwrap_err();
+#[tokio::test]
+async fn a_missing_password_is_refused_without_the_allow_flag() {
+    let err = Cache::start(options("rediss://127.0.0.1:6379", false, false, None))
+        .await
+        .unwrap_err();
     assert_eq!(err, CacheError::UnauthenticatedRefused);
 }
 
-#[test]
-fn an_authenticated_tls_address_is_admitted_without_a_server() {
-    let cache = admitted("rediss://:hunter2@cache.example:6380", false, false);
-    assert!(cache.server().tls);
-    assert_eq!(cache.server().port, 6380);
-    let rendered = format!("{cache:?} {}", cache.server().host);
+#[tokio::test]
+async fn an_authenticated_tls_address_is_admitted_without_a_server() {
+    let cache = admitted("rediss://:hunter2@cache.example:6380", false, false).await;
+    assert!(cache.link.server.tls);
+    assert_eq!(cache.link.server.port, 6380);
+    let rendered = format!("{cache:?} {}", cache.link.server.host);
     assert!(
         !rendered.contains("hunter2"),
         "cache debug output disclosed a password"
     );
 }
 
-#[test]
-fn valkey_schemes_are_admitted_like_redis_schemes() {
-    assert!(!admitted("valkey://127.0.0.1:6379", true, true).server().tls);
+#[tokio::test]
+async fn valkey_schemes_are_admitted_like_redis_schemes() {
+    assert!(
+        !admitted("valkey://127.0.0.1:6379", true, true)
+            .await
+            .link
+            .server
+            .tls
+    );
     assert!(
         admitted("valkeys://:hunter2@cache.example:6380", false, false)
-            .server()
+            .await
+            .link
+            .server
             .tls
     );
 }
 
-#[test]
-fn insecure_tls_fragment_is_refused() {
+#[tokio::test]
+async fn insecure_tls_fragment_is_refused() {
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379#insecure",
         false,
         true,
         None,
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InsecureTlsRefused);
     assert_no_leak(&err, &["hunter2"]);
 }
 
-#[test]
-fn a_unix_socket_is_unsupported() {
-    let err = Cache::start(options("redis+unix:///tmp/cache.sock", true, true, None)).unwrap_err();
+#[tokio::test]
+async fn a_unix_socket_is_unsupported() {
+    let err = Cache::start(options("redis+unix:///tmp/cache.sock", true, true, None))
+        .await
+        .unwrap_err();
     assert_eq!(err, CacheError::UnsupportedAddress);
 }
 
-#[test]
-fn a_root_ca_on_plaintext_is_refused_before_the_file_is_read() {
+#[tokio::test]
+async fn a_root_ca_on_plaintext_is_refused_before_the_file_is_read() {
     let err = Cache::start(options(
         "redis://127.0.0.1:6379",
         true,
         true,
         Some(PathBuf::from("/no/such/cache-ca.pem")),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::CaRequiresTls);
 }
 
-#[test]
-fn a_missing_root_ca_file_reports_only_the_io_kind() {
+#[tokio::test]
+async fn a_missing_root_ca_file_reports_only_the_io_kind() {
     let missing = PathBuf::from("/no/such/cache-ca.pem");
     let err = Cache::start(options(
         "rediss://:secret@127.0.0.1:6379",
@@ -94,6 +109,7 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
         false,
         Some(missing),
     ))
+    .await
     .unwrap_err();
     std::assert_matches!(err, CacheError::CaFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
@@ -101,8 +117,8 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
     assert_no_leak(&err, &["secret"]);
 }
 
-#[test]
-fn a_root_ca_without_a_pem_certificate_is_invalid() {
+#[tokio::test]
+async fn a_root_ca_without_a_pem_certificate_is_invalid() {
     let file = temp_file(b"not a certificate");
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379",
@@ -110,13 +126,14 @@ fn a_root_ca_without_a_pem_certificate_is_invalid() {
         false,
         Some(file.path().to_path_buf()),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
     assert_no_leak(&err, &["hunter2"]);
 }
 
-#[test]
-fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
+#[tokio::test]
+async fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
     let file = temp_file(b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n");
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379",
@@ -124,6 +141,7 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
         false,
         Some(file.path().to_path_buf()),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
     assert_no_leak(&err, &["hunter2"]);
@@ -175,38 +193,39 @@ fn with_client_certificate(dsn: &str, cert_path: PathBuf, key_path: PathBuf) -> 
 
 const TLS_DSN: &str = "rediss://:hunter2@127.0.0.1:6379";
 
-#[test]
-fn a_client_certificate_with_its_key_is_admitted_without_dialing() {
+#[tokio::test]
+async fn a_client_certificate_with_its_key_is_admitted_without_dialing() {
     let (cert, key) = client_identity();
-    on_runtime(|| {
-        Cache::start(with_client_certificate(
-            TLS_DSN,
-            cert.path().to_path_buf(),
-            key.path().to_path_buf(),
-        ))
-        .expect("a matching pair is admitted")
-    });
+    Cache::start(with_client_certificate(
+        TLS_DSN,
+        cert.path().to_path_buf(),
+        key.path().to_path_buf(),
+    ))
+    .await
+    .expect("a matching pair is admitted");
 }
 
-#[test]
-fn a_client_certificate_on_plaintext_is_refused_before_the_files_are_read() {
+#[tokio::test]
+async fn a_client_certificate_on_plaintext_is_refused_before_the_files_are_read() {
     let err = Cache::start(with_client_certificate(
         "redis://:hunter2@127.0.0.1:6379",
         PathBuf::from("/no/such/client.crt"),
         PathBuf::from("/no/such/client.key"),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::ClientCertificateRequiresTls);
 }
 
-#[test]
-fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
+#[tokio::test]
+async fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     let (cert, key) = client_identity();
     let err = Cache::start(with_client_certificate(
         TLS_DSN,
         PathBuf::from("/no/such/client.crt"),
         key.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     std::assert_matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
@@ -218,6 +237,7 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
         cert.path().to_path_buf(),
         PathBuf::from("/no/such/client.key"),
     ))
+    .await
     .unwrap_err();
     std::assert_matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
@@ -225,8 +245,8 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     assert_no_leak(&err, &["/no/such"]);
 }
 
-#[test]
-fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
+#[tokio::test]
+async fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
     let (_, key) = client_identity();
     let file = temp_file(b"not a certificate");
     let err = Cache::start(with_client_certificate(
@@ -234,12 +254,13 @@ fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
         file.path().to_path_buf(),
         key.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientCertificate);
 }
 
-#[test]
-fn a_client_certificate_in_valid_pem_but_not_x509_blames_the_certificate() {
+#[tokio::test]
+async fn a_client_certificate_in_valid_pem_but_not_x509_blames_the_certificate() {
     let (_, key) = client_identity();
     let truncated = write_pem("CERTIFICATE", b"not a DER certificate");
     let err = Cache::start(with_client_certificate(
@@ -247,12 +268,13 @@ fn a_client_certificate_in_valid_pem_but_not_x509_blames_the_certificate() {
         truncated.path().to_path_buf(),
         key.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientCertificate);
 }
 
-#[test]
-fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
+#[tokio::test]
+async fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
     let truncated = write_pem("CERTIFICATE", b"not a DER certificate");
     let err = Cache::start(options(
         TLS_DSN,
@@ -260,12 +282,13 @@ fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
         false,
         Some(truncated.path().to_path_buf()),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
 }
 
-#[test]
-fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() {
+#[tokio::test]
+async fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() {
     let (cert, _) = client_identity();
     let (_, other_key) = client_identity();
     let err = Cache::start(with_client_certificate(
@@ -273,6 +296,7 @@ fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() 
         cert.path().to_path_buf(),
         other_key.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientKey);
 
@@ -282,22 +306,19 @@ fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() 
         cert.path().to_path_buf(),
         garbage.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientKey);
     assert_no_leak(&err, &["hunter2"]);
 }
 
-#[test]
-fn an_unparsable_dsn_does_not_echo_the_password() {
-    let err = Cache::start(options("not a url hunter2", true, true, None)).unwrap_err();
+#[tokio::test]
+async fn an_unparsable_dsn_does_not_echo_the_password() {
+    let err = Cache::start(options("not a url hunter2", true, true, None))
+        .await
+        .unwrap_err();
     assert_eq!(err, CacheError::InvalidDsn);
     assert_no_leak(&err, &["hunter2"]);
-}
-
-#[test]
-fn an_admitted_dsn_outside_a_runtime_is_refused() {
-    let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
-    assert_eq!(err, CacheError::NoRuntime);
 }
 
 #[test]
@@ -328,34 +349,36 @@ fn namespace_names_follow_the_grammar() {
     }
 }
 
-#[test]
-fn a_password_file_admits_a_dsn_without_a_password() {
+#[tokio::test]
+async fn a_password_file_admits_a_dsn_without_a_password() {
     let file = temp_file("hunter2\n");
-    on_runtime(|| {
-        Cache::start(with_password_file(
-            "redis://127.0.0.1:6379",
-            file.path().to_path_buf(),
-        ))
-        .expect("the file is the password source")
-    });
+    Cache::start(with_password_file(
+        "redis://127.0.0.1:6379",
+        file.path().to_path_buf(),
+    ))
+    .await
+    .expect("the file is the password source");
 }
 
-#[test]
-fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
+#[tokio::test]
+async fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
     let file = temp_file("from-file");
     let err = Cache::start(with_password_file(
         "redis://:hunter2@127.0.0.1:6379",
         file.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::PasswordInDsn);
     assert_no_leak(&err, &["hunter2"]);
 }
 
-#[test]
-fn an_unreadable_or_empty_password_file_fails_admission() {
+#[tokio::test]
+async fn an_unreadable_or_empty_password_file_fails_admission() {
     let missing = PathBuf::from("/no/such/cache-password");
-    let err = Cache::start(with_password_file("redis://127.0.0.1:6379", missing)).unwrap_err();
+    let err = Cache::start(with_password_file("redis://127.0.0.1:6379", missing))
+        .await
+        .unwrap_err();
     std::assert_matches!(err, CacheError::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
@@ -366,6 +389,7 @@ fn an_unreadable_or_empty_password_file_fails_admission() {
         "redis://127.0.0.1:6379",
         file.path().to_path_buf(),
     ))
+    .await
     .unwrap_err();
     assert_eq!(err, CacheError::PasswordFileEmpty);
 }

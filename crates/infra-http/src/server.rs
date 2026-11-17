@@ -97,12 +97,19 @@ impl ListenerScheme {
 pub(crate) struct ConnectionInfo {
     pub(crate) scheme: ListenerScheme,
     forced: Arc<AtomicBool>,
+    drain: CancellationToken,
 }
 
 impl ConnectionInfo {
     pub(crate) fn was_forced(&self) -> bool {
         self.forced.load(Ordering::Relaxed)
     }
+}
+
+pub fn take_listener_drain_token(
+    extensions: &mut axum::http::Extensions,
+) -> Option<CancellationToken> {
+    extensions.remove::<ConnectionInfo>().map(|info| info.drain)
 }
 
 #[derive(Debug)]
@@ -125,7 +132,7 @@ impl BoundListener {
 
     #[must_use]
     pub fn serve(self, app: Router, options: ServerOptions) -> Server {
-        let builder = connection_builder(options);
+        let builder = connection_builder(options).http1_only();
         serve_plaintext(self, app, options, builder)
     }
 
@@ -289,8 +296,8 @@ impl Drop for Server {
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
-pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
+const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
+const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 
@@ -476,11 +483,16 @@ where
             let Some((io, scheme)) = io else {
                 return;
             };
-            let io = SniffDeadline::new(io, options.header_read_timeout);
+            let io = if builder.is_http2_available() {
+                SniffDeadline::new(io, options.header_read_timeout)
+            } else {
+                SniffDeadline::decided(io)
+            };
             let service = ServiceBuilder::new()
                 .layer(Extension(ConnectionInfo {
                     scheme,
                     forced: connection_forced,
+                    drain: finish.clone(),
                 }))
                 .service(app);
             let connection =

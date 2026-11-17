@@ -128,7 +128,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sy
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
 axum-test = { workspace = true }
-axum-extra = { workspace = true, features = ["query", "typed-header"] }
+axum-extra = { workspace = true, features = ["typed-header"] }
 axum = { workspace = true, features = ["json", "query"] }
 derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
 serde_with = { workspace = true, features = ["std", "macros"] }
@@ -149,13 +149,16 @@ migrate = { workspace = true }
 # template:begin test-metrics:test-metrics-dependency
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-metrics-util = { workspace = true, features = ["debugging"] }
 # template:end test-metrics:test-metrics-dependency
+# template:begin test-metrics-util:test-metrics-util-dependency
+metrics-util = { workspace = true, features = ["debugging"] }
+# template:end test-metrics-util:test-metrics-util-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
 infra-grpc = { workspace = true }
+infra-outbound-grpc = { workspace = true }
 grpc-contracts = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }

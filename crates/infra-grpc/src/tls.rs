@@ -49,7 +49,7 @@ fn certificates(input: &str) -> Option<Vec<CertificateDer<'static>>> {
     (!certificates.is_empty()).then_some(certificates)
 }
 
-pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
+fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
     let certificates = certificates(input).ok_or(TlsMaterialError::InvalidCertificate)?;
     for certificate in &certificates {
         ParsedCertificate::try_from(certificate)
@@ -58,12 +58,12 @@ pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMate
     Ok(certificates)
 }
 
-pub(crate) fn private_key(pem: &SecretString) -> Result<PrivateKeyDer<'static>, TlsMaterialError> {
+fn private_key(pem: &SecretString) -> Result<PrivateKeyDer<'static>, TlsMaterialError> {
     PrivateKeyDer::from_pem_slice(pem.expose_secret().as_bytes())
         .map_err(|_| TlsMaterialError::InvalidPrivateKey)
 }
 
-pub(crate) fn roots(input: &str) -> Result<RootCertStore, TlsMaterialError> {
+fn roots(input: &str) -> Result<RootCertStore, TlsMaterialError> {
     let mut roots = RootCertStore::empty();
     for certificate in certificates(input).ok_or(TlsMaterialError::InvalidCaCertificate)? {
         roots

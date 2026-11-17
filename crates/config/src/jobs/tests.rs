@@ -316,7 +316,7 @@ fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
 
     let typo = load_jobs_operator_from(
         &LoadOptions::default(),
-        env(&[("APP__POSTGRESS__DSN", "postgres://u:secret-pw@localhost/db")]),
+        env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
     )
     .unwrap_err();
     assert_matches!(&typo, Error::Deserialize(_), "{typo}");

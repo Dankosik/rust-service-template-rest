@@ -257,12 +257,14 @@ _PROFILE_SECTION_ORDER = (
     "grpc",
     "grpc-authn",
     "grpc-transport-tests",
+    "grpc-client-tests",
     "grpc-jwt",
     "outbound-auth-grpc",
     "runtime-progress",
     "test-digest",
     "service-auth",
     "test-metrics",
+    "test-metrics-util",
     "jobs-reference",
     "config-url",
     "tls-fixtures",
@@ -441,6 +443,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-authn")
         if inputs.authn in {"none", "oidc-introspection"}:
             selected.add("grpc-transport-tests")
+        if inputs.authn in {"none", "oidc-introspection"} or inputs.service_auth == "jwt":
+            selected.add("grpc-client-tests")
         if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
             selected.add("postgres-grpc-consumers")
         if inputs.database == "postgres" and inputs.authn == "oidc-introspection":
@@ -487,10 +491,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or (inputs.database == "postgres" and inputs.grpc == "enabled")
     ):
         selected.add("test-introspection-fixtures")
-    if inputs.jobs == "postgres" or inputs.http_idempotency == "postgres":
-        selected.add("test-metrics")
+    if inputs.http_idempotency == "postgres" or inputs.inbound_webhooks == "standard-webhooks":
+        selected.update(("test-metrics", "test-metrics-util"))
     if inputs.jobs == "postgres":
-        selected.add("jobs")
+        selected.update(("jobs", "test-metrics"))
         if inputs.http_idempotency == "postgres":
             selected.add("jobs-http-idempotency")
     if inputs.messaging == "nats-jetstream":

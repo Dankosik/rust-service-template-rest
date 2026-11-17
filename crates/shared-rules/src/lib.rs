@@ -14,6 +14,9 @@
 //!   and maps the result into its own error.
 
 pub mod error_chain;
+// template:begin grpc:shared-rules-grpc
+pub mod grpc;
+// template:end grpc:shared-rules-grpc
 pub mod hyper {
     pub const HTTP1_MIN_READ_BUFFER_BYTES: u16 = 8 * 1024;
 }

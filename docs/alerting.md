@@ -206,8 +206,7 @@ kernel kills the process: the exit status is 137 and the last log line is an
 ordinary one, so this alert is the only warning. The limits multiply into memory: measured on
 the scaffold, an idle connection costs about 32 KiB (`http.max_connections`
 4096 is 128 MB), a 0.9 MiB JSON request about 1–1.8 MB while in flight (256
-connections peaked at 288 MB), and an HTTP/2 connection whose requests wait
-for a handler slot up to 12 MB. Lower `http.max_body_bytes`,
+connections peaked at 288 MB). Lower `http.max_body_bytes`,
 `http.max_in_flight` or `http.max_connections` to fit the limit, or raise the
 limit; steady growth at constant traffic is a leak.
 

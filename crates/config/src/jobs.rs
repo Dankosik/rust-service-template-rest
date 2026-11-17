@@ -7,15 +7,8 @@ use crate::validate::{ValidationError, ValidationErrors, Violations, int_range};
 
 const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
 
-/// What jobs operator commands decoded; `postgres` is the only section they
-/// read. Known sibling sections are ignored while unknown top-level sections
-/// fail, and the shared loader still enforces namespace and file rules.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-#[expect(
-    dead_code,
-    reason = "serde decodes and discards sibling sections so unknown keys fail"
-)]
 pub(crate) struct JobsOperatorInput {
     postgres: PostgresInput,
     jobs: serde::de::IgnoredAny,

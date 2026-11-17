@@ -90,9 +90,10 @@ async fn live() -> (StatusCode, &'static str) {
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn ready(State(readiness): State<ReadinessReader>) -> (StatusCode, &'static str) {
-    match readiness.verdict() {
-        Ok(()) => (StatusCode::OK, READY_BODY),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, NOT_READY_BODY),
+    if readiness.is_ready() {
+        (StatusCode::OK, READY_BODY)
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, NOT_READY_BODY)
     }
 }
 
@@ -125,11 +126,12 @@ mod tests {
     fn readiness() -> Readiness {
         Readiness::new(
             Vec::new(),
-            RefreshPolicy {
-                interval: Duration::from_secs(1),
-                probe_budget: Duration::from_secs(1),
-                failure_threshold: std::num::NonZeroU32::MIN,
-            },
+            RefreshPolicy::try_new(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                std::num::NonZeroU32::MIN,
+            )
+            .unwrap(),
         )
     }
 

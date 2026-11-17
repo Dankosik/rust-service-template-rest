@@ -9,7 +9,7 @@ use http_body_util::{BodyExt, Limited};
 use infra_idempotency_store::{HeaderPair, Record};
 use smallvec::SmallVec;
 
-use super::caused_by_length_limit;
+use crate::problem::caused_by_length_limit;
 
 const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;

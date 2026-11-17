@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-compact_str = { workspace = true }
 futures-util = { workspace = true, features = ["alloc"] }
 metrics = { workspace = true }
 thiserror = { workspace = true }
