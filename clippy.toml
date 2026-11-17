@@ -160,20 +160,14 @@ disallowed-methods = [
     { path = "ureq::agent", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     { path = "ureq::Agent::new_with_defaults", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     { path = "ureq::Agent::config_builder", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
-    # Operations are registered as annotated `utoipa_axum::routes!` tuples through
-    # `OpenApiRouter::routes`, so served routes and the OpenAPI document share one
-    # source. The final policy layer answers a sanitized 500 for any served method
-    # the document lacks, and HEAD follows GET unless HEAD is documented. These bans
-    # keep undocumented routes, fallbacks, routes added after finalization and
-    # separately registered HEAD handlers out of application code.
-    { path = "utoipa_axum::router::OpenApiRouter::route", reason = "register an annotated routes! tuple with OpenApiRouter::routes" },
-    { path = "utoipa_axum::router::OpenApiRouter::route_service", reason = "register an annotated routes! tuple with OpenApiRouter::routes" },
-    { path = "utoipa_axum::router::OpenApiRouter::nest_service", reason = "register an annotated routes! tuple with OpenApiRouter::routes" },
+    { path = "utoipa_axum::router::OpenApiRouter::route", reason = "register the operation with HttpContract" },
+    { path = "utoipa_axum::router::OpenApiRouter::route_service", reason = "register the operation with HttpContract" },
+    { path = "utoipa_axum::router::OpenApiRouter::nest_service", reason = "nest registered operations with HttpContract" },
     { path = "utoipa_axum::router::OpenApiRouter::fallback", reason = "the hardened chain owns the 404 fallback" },
     { path = "utoipa_axum::router::OpenApiRouter::fallback_service", reason = "the hardened chain owns the 404 fallback" },
-    { path = "axum::routing::Router::route", reason = "register an annotated routes! tuple with OpenApiRouter::routes before finalization" },
-    { path = "axum::routing::Router::route_service", reason = "register an annotated routes! tuple with OpenApiRouter::routes before finalization" },
-    { path = "axum::routing::Router::nest_service", reason = "register an annotated routes! tuple with OpenApiRouter::routes before finalization" },
+    { path = "axum::routing::Router::route", reason = "register the operation with HttpContract" },
+    { path = "axum::routing::Router::route_service", reason = "register the operation with HttpContract" },
+    { path = "axum::routing::Router::nest_service", reason = "nest registered operations with HttpContract" },
     { path = "axum::routing::Router::fallback", reason = "the hardened chain owns the 404 fallback" },
     { path = "axum::routing::Router::fallback_service", reason = "the hardened chain owns the 404 fallback" },
     { path = "axum::routing::method_routing::MethodRouter::head", reason = "HEAD follows GET unless the annotation documents HEAD" },

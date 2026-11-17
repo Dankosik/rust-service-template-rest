@@ -243,7 +243,7 @@ fn map_attempted(
     }
 }
 
-pub(super) fn refusal(mut response: Response) -> Response {
+fn refusal(mut response: Response) -> Response {
     if response.status().is_success() {
         tracing::error!(
             failure = "successful_refusal",

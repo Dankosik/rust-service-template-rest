@@ -47,7 +47,6 @@ http-body-util = { workspace = true }
 infra-http = { workspace = true }
 parking_lot = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
-utoipa-axum = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
