@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{Probe, Readiness, RefreshPolicy};
+use health::{PreparedReadiness, Probe, Readiness, RefreshPolicy};
 use infra_http::{BoundListener, HardenOptions, ServerOptions};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
@@ -239,8 +239,9 @@ async fn serve(
     let failure = AssertUnwindSafe(async {
         let race = {
             let startup = async {
-                let provider =
-                    tracer_provider.insert(install_tracer_provider(&telemetry::tracing_options(&config))?);
+                let provider = tracer_provider.insert(install_tracer_provider(
+                    &telemetry::tracing_options(&config),
+                )?);
                 logger = Some(install_subscriber(&LoggingOptions {
                     level: &config.log.level,
                     format: match config.log.format {
@@ -281,39 +282,22 @@ async fn serve(
             };
             tokio::select! {
                 biased;
-                stopped = signals.wait() => stopped.map(|()| StartupRace::Stopped).map_err(BootstrapError::from),
+                stopped = signals.wait() => stopped.map(|()| None).map_err(BootstrapError::from),
                 failed = background_failure(&mut observer) => Err(background_error(failed)),
-                started = startup => started.map(|()| StartupRace::Completed),
+                started = startup => started.map(Some),
             }
         };
-        let mut failure = pending_failure(&background, &serving);
-        let mut ready = false;
-        match race {
-            Err(error) => {
-                failure.get_or_insert(error);
-            }
-            Ok(StartupRace::Completed) if failure.is_none() => match signals.pending() {
-                Ok(false) => ready = true,
-                Ok(true) => {}
-                Err(error) => failure = Some(error.into()),
-            },
-            Ok(StartupRace::Completed | StartupRace::Stopped) => {}
+        if let Err(error) = finish_startup(race, signals, &mut background, &mut serving) {
+            return Some(error);
         }
-        if ready {
-            serving.admitted = true;
-            tracing::info!("service_ready");
-            failure = {
-                tokio::select! {
-                    biased;
-                    stopped = signals.wait() => stopped.err().map(BootstrapError::from),
-                    failed = background_failure(&mut observer) => Some(background_error(failed)),
-                }
-            };
-            if failure.is_none() {
-                failure = pending_failure(&background, &serving);
-            }
+        if !serving.admitted {
+            return None;
         }
-        failure
+        tokio::select! {
+            biased;
+            stopped = signals.wait() => stopped.err().map(BootstrapError::from),
+            failed = background_failure(&mut observer) => Some(background_error(failed)),
+        }
     })
     .catch_unwind()
     .await
@@ -361,9 +345,27 @@ fn raise_open_file_limit(config: &Config) {
     }
 }
 
-enum StartupRace {
-    Completed,
-    Stopped,
+fn finish_startup(
+    started: Result<Option<PreparedReadiness>, BootstrapError>,
+    signals: &mut Signals,
+    background: &mut Background,
+    serving: &mut Serving,
+) -> Result<(), BootstrapError> {
+    if let Some(error) = pending_failure(background, serving) {
+        return Err(error);
+    }
+    if let Some(prepared) = started?
+        && !signals.pending()?
+    {
+        let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
+        serving.admitted = true;
+        background.spawn(
+            "readiness",
+            refresher.refresh_until(background.child_token()),
+        );
+        tracing::info!("service_ready");
+    }
+    Ok(())
 }
 
 fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
@@ -410,7 +412,7 @@ async fn start(
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
     dependencies: &mut Dependencies,
     serving: &mut Serving,
-) -> Result<(), BootstrapError> {
+) -> Result<PreparedReadiness, BootstrapError> {
     #[allow(
         unused_mut,
         reason = "profiles without PostgreSQL or messaging have no probe"
@@ -447,7 +449,7 @@ async fn start(
     let webhook_state =
         inbound_webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
-    let readiness = serving.readiness.insert(Readiness::new(
+    let readiness = Readiness::new(
         probes,
         RefreshPolicy::try_new(
             config.health.refresh_interval,
@@ -455,10 +457,11 @@ async fn start(
             config.health.failure_threshold,
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
-    ));
+    );
+    let control = serving.readiness.insert(readiness.control());
 
     let state = crate::AppState {
-        readiness: readiness.reader(),
+        readiness: control.reader(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
@@ -473,7 +476,6 @@ async fn start(
             listener,
             grpc_registration,
             &state,
-            readiness,
             &auth,
             // template:end grpc:bootstrap-grpc-prepare-start
             // template:begin service-auth:bootstrap-grpc-service-auth-argument
@@ -511,12 +513,10 @@ async fn start(
         None => None,
     };
     // template:end grpc:bootstrap-grpc-bind-before-ready
-    readiness.admit().await.map_err(BootstrapError::Admission)?;
-    background.spawn("readiness", {
-        let readiness = readiness.clone();
-        let cancel = background.child_token();
-        async move { readiness.refresh_until(cancel).await }
-    });
+    let mut prepared = readiness
+        .prepare()
+        .await
+        .map_err(BootstrapError::Admission)?;
 
     let server_options = ServerOptions {
         header_read_timeout: config.http.header_read_timeout,
@@ -534,7 +534,7 @@ async fn start(
             max_in_flight: config.http.in_flight_cap(),
             admission_wait: config.http.admission_wait_cap(),
             log_health_probes: config.http.access_log_health_probes,
-            draining: Some(readiness.reader()),
+            draining: Some(control.reader()),
         },
     );
     #[cfg(feature = "hotpath")]
@@ -548,7 +548,7 @@ async fn start(
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
     if let Some(listener) = diagnostics_listener {
-        let reader = readiness.reader();
+        let reader = control.reader();
         let diagnostics = diagnostics_router(metrics.clone(), move || reader.is_ready())
             .merge(infra_http::liveness_router());
         let server = serving
@@ -567,7 +567,11 @@ async fn start(
     }
     // template:end grpc:bootstrap-grpc-bind
 
-    Ok(())
+    prepared
+        .ensure_fresh()
+        .await
+        .map_err(BootstrapError::Admission)?;
+    Ok(prepared)
 }
 
 enum PreparedAuth {
@@ -602,7 +606,8 @@ mod tests {
         )
         .unwrap();
         let readiness = Readiness::new(Vec::new(), policy);
-        let reader = readiness.reader();
+        let control = readiness.control();
+        let reader = control.reader();
         let diagnostics = diagnostics_router(metrics, move || reader.is_ready());
         let scrape = async |sample: &str| {
             let request = Request::get("/metrics").body(Body::empty()).unwrap();
@@ -619,15 +624,84 @@ mod tests {
         };
 
         scrape("readiness_ready 0").await;
-        readiness.refresh().await;
+        let prepared = readiness.prepare().await.unwrap();
+        scrape("readiness_ready 0").await;
+        let refresher = prepared.activate().unwrap();
         tokio::time::advance(policy.stale_after()).await;
         scrape("readiness_ready 1").await;
         tokio::time::advance(Duration::from_nanos(1)).await;
         scrape("readiness_ready 0").await;
-        readiness.refresh().await;
+        let cancel = CancellationToken::new();
+        let refreshing = tokio::spawn(refresher.refresh_until(cancel.clone()));
+        tokio::time::sleep(Duration::from_secs(1)).await;
         scrape("readiness_ready 1").await;
-        readiness.start_drain();
+        control.start_drain();
         scrape("readiness_ready 0").await;
+        cancel.cancel();
+        refreshing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pending_background_failure_keeps_the_serving_http_listener_unready() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let mut config = Config::default();
+        config.http.addr = "127.0.0.1:0".parse().unwrap();
+        config.observability.metrics.addr = None;
+        let mut background = Background::new(CancellationToken::new());
+        let mut serving = Serving::default();
+        let prepared = start(
+            &config,
+            // template:begin grpc:bootstrap-unready-test-grpc-registration
+            None,
+            // template:end grpc:bootstrap-unready-test-grpc-registration
+            &shared_metrics(),
+            &mut background,
+            &mut Dependencies::default(),
+            &mut serving,
+        )
+        .await
+        .unwrap();
+        let address = serving.app_listener.as_ref().unwrap().local_addr();
+        let status = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut status = String::new();
+            BufReader::new(stream).read_line(&mut status).await.unwrap();
+            status
+        })
+        .await
+        .unwrap();
+        assert!(status.starts_with("HTTP/1.1 503 "), "{status}");
+
+        background.spawn("startup_task", async {});
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            background_failure(&mut background.observer()),
+        )
+        .await
+        .unwrap();
+        std::assert_matches!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut Signals::install().unwrap(),
+                &mut background,
+                &mut serving
+            ),
+            Err(BootstrapError::Background {
+                name: "startup_task",
+                panicked: false
+            })
+        );
+        assert!(!serving.admitted);
+        std::assert_matches!(
+            serving.readiness.as_ref().unwrap().reader().verdict(),
+            Err(health::NotReady::NotEvaluated)
+        );
+        background.cancel();
     }
 
     #[tokio::test]
@@ -761,6 +835,7 @@ mod tests {
         let key = TestKey::new("orders/1");
         let mut config = Config::default();
         config.http.addr = "127.0.0.1:0".parse().unwrap();
+        config.http.readiness_propagation_delay = Duration::ZERO;
         config.grpc = Some(service_config::GrpcConfig {
             addr: "127.0.0.1:0".parse().unwrap(),
             security: service_config::GrpcListenerSecurity::Plaintext,
@@ -780,7 +855,7 @@ mod tests {
         let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();
         let mut serving = Serving::default();
-        start(
+        let prepared = start(
             &config,
             Some(service_auth_registration::register),
             &metrics,
@@ -789,6 +864,14 @@ mod tests {
             &mut serving,
         )
         .await
+        .unwrap();
+        let mut signals = Signals::install().unwrap();
+        finish_startup(
+            Ok(Some(prepared)),
+            &mut signals,
+            &mut background,
+            &mut serving,
+        )
         .unwrap();
         let address = serving.grpc_listener.as_ref().unwrap().local_addr();
         let resource = infra_outbound_grpc::Client::try_new(
@@ -816,7 +899,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(admitted.into_inner().message, "orders");
-        let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             shutdown::run(shutdown::Plan {
