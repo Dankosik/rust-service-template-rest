@@ -34,9 +34,9 @@ enum RegistrationError {
 fn register_outbound(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
-    let config = registration.config();
+    let webhooks = registration.outbound_webhooks();
     let mut endpoints = BTreeMap::new();
-    for (endpoint_id, endpoint) in &config.webhooks.endpoints {
+    for (endpoint_id, endpoint) in &webhooks.endpoints {
         let keys = KeyRing::from_encoded(
             endpoint.secret.expose_secret(),
             endpoint
@@ -56,7 +56,7 @@ fn register_outbound(
         })?;
         endpoints.insert(endpoint_id.clone(), built);
     }
-    let max_concurrent = config.webhooks.max_concurrent_deliveries;
+    let max_concurrent = webhooks.max_concurrent_deliveries;
     Dispatcher::new(endpoints).register(&mut registration.jobs, max_concurrent);
     Ok(())
 }
@@ -75,13 +75,7 @@ fn register(
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
     let consumers = Consumers::new();
-    consumers.require(
-        registration
-            .config()
-            .inbound_webhook_endpoints
-            .iter()
-            .map(String::as_str),
-    )?;
+    consumers.require(registration.inbound_webhook_endpoints())?;
     Processor::new(consumers).register(&mut registration.jobs);
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     Ok(())

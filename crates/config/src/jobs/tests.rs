@@ -284,25 +284,31 @@ fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
 #[test]
 fn jobs_operator_prescans_unrelated_sections() {
     let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
-        "[observability.otel.exporter]\notlp_headers = \"fixture-private-value\"\n",
-    );
-    let error = load_jobs_operator_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(
-        error,
-        JobsOperatorLoadError::Config(Error::SecretInFile { .. }),
-        "{error}"
-    );
-    assert!(!error.to_string().contains("fixture-private-value"));
+    for value in [
+        r#""fixture-private-value""#,
+        r#"{ token = "fixture-private-value" }"#,
+    ] {
+        let leaked = write(
+            &dir,
+            "leaked.toml",
+            &format!("[observability.otel.exporter]\notlp_headers = {value}\n"),
+        );
+        let error = load_jobs_operator_from(
+            &LoadOptions {
+                config: Some(leaked),
+                ..LoadOptions::default()
+            },
+            env(&[]),
+        )
+        .unwrap_err();
+        assert_matches!(
+            &error,
+            JobsOperatorLoadError::Config(Error::SecretInFile { key, .. })
+                if key == "observability.otel.exporter.otlp_headers",
+            "{error}"
+        );
+        assert!(!error.to_string().contains("fixture-private-value"));
+    }
 
     let unaddressable = write(&dir, "unaddressable.toml", "[Unrelated]\nvalue = 1\n");
     let error = load_jobs_operator_from(

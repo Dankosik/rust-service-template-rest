@@ -50,31 +50,22 @@ pub(crate) struct CacheInput {
 
 impl Default for CacheInput {
     fn default() -> Self {
-        let CacheConfig {
-            dsn,
-            password_file,
-            root_ca_path,
-            client_certificate: _,
-            allow_plaintext,
-            allow_unauthenticated,
-            command_timeout,
-        } = CacheConfig::default();
         Self {
-            dsn,
-            password_file,
-            root_ca_path,
+            dsn: None,
+            password_file: None,
+            root_ca_path: None,
             client_cert_path: None,
             client_key_path: None,
-            allow_plaintext,
-            allow_unauthenticated,
-            command_timeout,
+            allow_plaintext: false,
+            allow_unauthenticated: false,
+            command_timeout: Duration::from_secs(2),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
-    pub dsn: Option<SecretString>,
+    pub dsn: SecretString,
     pub password_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub client_certificate: Option<CacheClientCertificate>,
@@ -83,27 +74,13 @@ pub struct CacheConfig {
     pub command_timeout: Duration,
 }
 
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            dsn: None,
-            password_file: None,
-            root_ca_path: None,
-            client_certificate: None,
-            allow_plaintext: false,
-            allow_unauthenticated: false,
-            command_timeout: Duration::from_secs(2),
-        }
-    }
-}
-
 impl CacheInput {
     pub(crate) fn admit(
         self,
         app_env: &str,
         request_timeout: Option<Duration>,
         v: &mut Violations,
-    ) -> Result<CacheConfig, Rejected> {
+    ) -> Result<Option<CacheConfig>, Rejected> {
         v.check(local_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
@@ -150,15 +127,15 @@ impl CacheInput {
         };
         let client_certificate = client_certificate?;
         command_timeout?;
-        Ok(CacheConfig {
-            dsn: self.dsn,
+        Ok(self.dsn.map(|dsn| CacheConfig {
+            dsn,
             password_file: self.password_file,
             root_ca_path: self.root_ca_path,
             client_certificate,
             allow_plaintext: self.allow_plaintext,
             allow_unauthenticated: self.allow_unauthenticated,
             command_timeout: self.command_timeout,
-        })
+        }))
     }
 }
 

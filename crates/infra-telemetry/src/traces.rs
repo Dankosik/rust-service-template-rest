@@ -31,7 +31,6 @@ pub enum ResolvedSampler {
     ParentBasedTraceIdRatio(f64),
 }
 
-#[derive(Debug)]
 pub struct TracingOptions {
     pub service_name: String,
     pub service_version: String,
@@ -41,6 +40,15 @@ pub struct TracingOptions {
     pub sampler: ResolvedSampler,
     pub otlp_endpoint: Option<String>,
     pub otlp_headers: Option<SecretString>,
+}
+
+impl std::fmt::Debug for TracingOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TracingOptions")
+            .field("service_name", &self.service_name)
+            .field("sampler", &self.sampler)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

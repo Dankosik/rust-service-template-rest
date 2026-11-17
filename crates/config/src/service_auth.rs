@@ -87,9 +87,7 @@ impl ServiceAuthInput {
                 if grpc_enabled && !is_local_development(app_env) {
                     v.check(Err(ValidationError::new(
                         "service_auth.mode",
-                        format!(
-                            "must be jwt when grpc.enabled is true outside app.env local or development, but app.env is \"{app_env}\""
-                        ),
+                        "must be jwt when grpc.enabled is true outside app.env local or development",
                     )));
                 }
                 for (key, present) in [

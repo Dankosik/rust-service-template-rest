@@ -311,7 +311,9 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
     assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
     assert!(!cfg.messaging.trusted_network);
     assert!(cfg.messaging.tls_first);
-    assert!(!format!("{cfg:?}").contains("fixture-credentials"));
+    let rendered = format!("{cfg:?}");
+    assert!(!rendered.contains("fixture-credentials"));
+    assert!(!rendered.contains("nats-a.example"));
 }
 
 #[test]
