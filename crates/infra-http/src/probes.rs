@@ -2,11 +2,8 @@ use axum::extract::{FromRef, State};
 use axum::http::{Method, StatusCode};
 use health::ReadinessReader;
 use std::sync::Arc;
-use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
-
-use crate::problem::responses::{ProblemComponents, TransportProblemResponses};
 
 const LIVE_PATH: &str = "/health/live";
 const READY_PATH: &str = "/health/ready";
@@ -26,9 +23,12 @@ impl ProbeRoutes {
     }
 
     pub(crate) fn contains(&self, method: &Method, route: &str) -> bool {
+        self.contains_method(method.as_str(), route)
+    }
+
+    pub(crate) fn contains_method(&self, method: &str, route: &str) -> bool {
         self.0.iter().any(|(path, implicit_head)| {
-            path.as_ref() == route
-                && (method == Method::GET || (*implicit_head && method == Method::HEAD))
+            path.as_ref() == route && (method == "GET" || (*implicit_head && method == "HEAD"))
         })
     }
 }
@@ -38,7 +38,7 @@ where
     ReadinessReader: FromRef<S>,
     S: Clone + Send + Sync + 'static,
 {
-    OpenApiRouter::with_openapi(ProblemComponents::openapi())
+    OpenApiRouter::new()
         .routes(routes!(live))
         .routes(routes!(ready))
 }
@@ -65,7 +65,6 @@ pub fn liveness_router() -> axum::Router {
     }))),
     responses(
         (status = 200, description = "ok", content_type = "text/plain", body = String, example = json!(LIVE_BODY)),
-        TransportProblemResponses,
     )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -87,7 +86,6 @@ async fn live() -> (StatusCode, &'static str) {
     responses(
         (status = 200, description = "ready", content_type = "text/plain", body = String, example = json!(READY_BODY)),
         (status = 503, description = "not ready", content_type = "text/plain", body = String, example = json!(NOT_READY_BODY)),
-        TransportProblemResponses,
     )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -145,7 +143,7 @@ mod tests {
 
     fn app(reader: ReadinessReader) -> (Application, serde_json::Value) {
         let contract = HttpContract::default().with_probes("/");
-        let document = serde_json::to_value(contract.get_openapi()).unwrap();
+        let document = serde_json::to_value(contract.clone().into_openapi().unwrap()).unwrap();
         (
             contract
                 .build(reader, Authentication::Public, &options())

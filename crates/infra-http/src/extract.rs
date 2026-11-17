@@ -1,6 +1,5 @@
 use std::error::Error as StdError;
 
-use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::header::CONTENT_TYPE;
@@ -13,8 +12,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
-use crate::RequestContext;
-use crate::context::read_body;
+use crate::context::read_request_bytes;
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
@@ -41,7 +39,7 @@ where
         clippy::disallowed_types,
         reason = "the native JSON decoder retains the deserialization path"
     )]
-    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let json_content_type = request
             .headers()
             .get(CONTENT_TYPE)
@@ -56,8 +54,7 @@ where
                 Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL)
             );
         }
-        let context = request.extensions().get::<RequestContext>().cloned();
-        let bytes = read_body(context.as_ref(), Bytes::from_request(request, state))
+        let bytes = read_request_bytes(request)
             .await
             .map_err(|rejection| match rejection.status() {
                 StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),

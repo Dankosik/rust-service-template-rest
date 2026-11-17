@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use utoipa::openapi::header::{Header, HeaderBuilder};
-use utoipa::openapi::path::{Operation, Parameter, ParameterIn};
+use utoipa::openapi::path::{Parameter, ParameterIn};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{Ref, RefOr, Required};
@@ -46,20 +46,6 @@ pub(super) fn replay_header() -> RefOr<Header> {
         )))
         .build()
         .into()
-}
-
-pub(crate) fn declares_replay(operation: &Operation) -> bool {
-    operation
-        .responses
-        .responses
-        .iter()
-        .any(|(status, response)| {
-            status.starts_with('2')
-                && matches!(response, RefOr::T(response) if response
-                .headers
-                .keys()
-                .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER)))
-        })
 }
 
 pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
@@ -166,8 +152,6 @@ pub(super) struct IdempotencyKeyMismatch(pub Problem);
 )]
 pub(super) struct IdempotencyUnavailable(pub Problem);
 
-/// The family's components, seeded into a router by
-/// [`super::Composer::components`]: their only registration path.
 #[derive(OpenApi)]
 #[openapi(components(responses(
     responses::RequestTimeout,

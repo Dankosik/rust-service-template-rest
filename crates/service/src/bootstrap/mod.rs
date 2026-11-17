@@ -436,13 +436,8 @@ async fn start(
         reason = "profiles without PostgreSQL or messaging have no probe"
     )]
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-    #[allow(
-        unused_variables,
-        reason = "the no-auth projection uses this fallback; retained authentication shadows it"
-    )]
-    let auth = Authentication::Public;
     // template:begin authn:bootstrap-authn-prepare
-    let auth = authn::prepare(config, background).await?;
+    let bearer = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
     // template:begin service-auth:bootstrap-service-auth-prepare
     let service_auth = service_auth::prepare(config)?;
@@ -460,9 +455,6 @@ async fn start(
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = object_storage::open(config)?;
     // template:end object-storage:service-bootstrap-object-storage-startup
-    // template:begin http-idempotency:bootstrap-http-idempotency-composer
-    let mut composer = idempotency::prepare(config, dependencies.postgres.as_ref())?;
-    // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state =
         inbound_webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
@@ -494,8 +486,10 @@ async fn start(
             listener,
             grpc_registration,
             &state,
-            &auth,
             // template:end grpc:bootstrap-grpc-prepare-start
+            // template:begin grpc-authn:bootstrap-grpc-bearer-argument
+            bearer.as_ref(),
+            // template:end grpc-authn:bootstrap-grpc-bearer-argument
             // template:begin service-auth:bootstrap-grpc-service-auth-argument
             &service_auth,
             // template:end service-auth:bootstrap-grpc-service-auth-argument
@@ -506,27 +500,19 @@ async fn start(
         None
     };
     // template:end grpc:bootstrap-grpc-prepare-finish
-    let contract = crate::api::contract(
-        // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
-        &mut composer,
-        // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
-    )?;
-    let app = contract.build(
+    let auth = Authentication::Public;
+    // template:begin authn:bootstrap-http-bearer-authentication
+    let auth = bearer.map_or(auth, |verifier| Authentication::Bearer(Box::new(verifier)));
+    // template:end authn:bootstrap-http-bearer-authentication
+    let app = http_application(
         state,
         auth,
-        &HardenOptions {
-            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
-                .unwrap_or(usize::MAX),
-            request_timeout: config.http.request_timeout,
-            max_in_flight: config.http.in_flight_cap(),
-            admission_wait: config.http.admission_wait_cap(),
-            log_health_probes: config.http.access_log_health_probes,
-            draining: Some(control.reader()),
-        },
-    )?;
-    // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    idempotency::activate(composer, config, background).await?;
-    // template:end http-idempotency:bootstrap-http-idempotency-activation
+        config,
+        // template:begin http-idempotency:bootstrap-http-idempotency-resources
+        dependencies.postgres.as_ref(),
+        background,
+        // template:end http-idempotency:bootstrap-http-idempotency-resources
+    ).await?;
     let app_listener = BoundListener::bind(config.http.addr)?;
     let diagnostics_listener = match config.observability.metrics.addr {
         Some(addr) => Some(BoundListener::bind(addr)?),
@@ -583,6 +569,35 @@ async fn start(
         .await
         .map_err(BootstrapError::Admission)?;
     Ok(prepared)
+}
+
+#[allow(clippy::unused_async, reason = "only the idempotency profile checks the store before serving")]
+async fn http_application(
+    state: crate::AppState,
+    auth: Authentication,
+    config: &Config,
+    // template:begin http-idempotency:bootstrap-http-idempotency-inputs
+    pool: Option<&infra_postgres::PgPool>,
+    background: &mut Background,
+    // template:end http-idempotency:bootstrap-http-idempotency-inputs
+) -> Result<infra_http::Application, BootstrapError> {
+    let contract = crate::api::contract()?;
+    let options = HardenOptions {
+        max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
+        request_timeout: config.http.request_timeout,
+        max_in_flight: config.http.in_flight_cap(),
+        admission_wait: config.http.admission_wait_cap(),
+        log_health_probes: config.http.access_log_health_probes,
+        draining: Some(state.readiness.clone()),
+    };
+    // template:begin http-idempotency:bootstrap-http-idempotency-activation
+    if let Some(mounted) = idempotency::prepare(contract.idempotent_operations(), config, pool)? {
+        let app = contract.build_with_idempotency_store(state, auth, &options, mounted.store.clone())?;
+        mounted.activate(background).await?;
+        return Ok(app);
+    }
+    // template:end http-idempotency:bootstrap-http-idempotency-activation
+    Ok(contract.build(state, auth, &options)?)
 }
 
 #[cfg(test)]

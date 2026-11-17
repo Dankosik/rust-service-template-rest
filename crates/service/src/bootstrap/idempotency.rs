@@ -1,92 +1,63 @@
 use super::background::Background;
-use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
 
+#[derive(Debug)]
+pub(super) struct MountedStore {
+    pub(super) store: Store,
+    operations: std::num::NonZeroUsize,
+    retention: std::time::Duration,
+}
+
 pub(super) fn prepare(
+    mounted: usize,
     config: &Config,
     postgres_pool: Option<&PgPool>,
-) -> Result<Composer, ValidationError> {
-    let (Some(pool), Some(retention)) = (postgres_pool, config.http_idempotency.retention) else {
-        return Ok(Composer::inert());
+) -> Result<Option<MountedStore>, BootstrapError> {
+    let Some(operations) = std::num::NonZeroUsize::new(mounted) else {
+        return Ok(None);
     };
-    Store::new(pool.clone(), retention)
-        .map(Composer::new)
-        .map_err(|error| {
-            ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
-        })
+    let retention = config.http_idempotency.required_retention(config.postgres.is_some())?;
+    let pool = postgres_pool.ok_or(infra_idempotency_store::StartupError::Unavailable)?;
+    let store = Store::new(pool.clone(), retention).map_err(|error| {
+        ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
+    })?;
+    Ok(Some(MountedStore { store, operations, retention }))
 }
 
-pub(super) async fn activate(
-    composer: Composer,
-    config: &Config,
-    background: &mut Background,
-) -> Result<(), BootstrapError> {
-    match composer.finish() {
-        Activation::Inactive => Ok(()),
-        Activation::Unconfigured { .. } => Err(unconfigured(config)),
-        Activation::Active { store, operations } => {
-            start(store, operations, config, background).await
-        }
-    }
-}
-
-fn unconfigured(config: &Config) -> BootstrapError {
-    match config
-        .http_idempotency
-        .required_retention(config.postgres.is_some())
-    {
-        Err(invalid) => invalid.into(),
-        Ok(_) => infra_idempotency_store::StartupError::Unavailable.into(),
-    }
-}
-
-async fn start(
-    store: Store,
-    operations: std::num::NonZeroUsize,
-    config: &Config,
-    background: &mut Background,
-) -> Result<(), BootstrapError> {
-    let retention = config
-        .http_idempotency
-        .required_retention(config.postgres.is_some())?;
-    store.check_startup().await?;
+impl MountedStore {
+    pub(super) async fn activate(self, background: &mut Background) -> Result<(), BootstrapError> {
+    self.store.check_startup().await?;
     background.spawn(
         "idempotency_cleanup",
-        store.run_cleanup(background.child_token()),
+        self.store.run_cleanup(background.child_token()),
     );
     tracing::info!(
-        http_idempotency.operations = operations.get(),
-        http_idempotency.retention = ?retention,
+        http_idempotency.operations = self.operations.get(),
+        http_idempotency.retention = ?self.retention,
         "http_idempotency_active"
     );
     Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
-
     use super::*;
 
     use crate::bootstrap::test_config;
 
-    #[tokio::test]
-    async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
-        let composer = Composer::inert();
-        let mut background = Background::new(CancellationToken::new());
-        activate(composer, &test_config(&[]), &mut background)
-            .await
-            .expect("an inactive boundary requires no value");
-        assert!(background.is_empty());
+    #[test]
+    fn an_empty_mount_requires_no_store() {
+        assert!(prepare(0, &test_config(&[]), None).unwrap().is_none());
     }
 
     #[test]
     fn an_unconfigured_boundary_refuses_disabled_postgres_naming_the_key() {
-        let refused = unconfigured(&test_config(&[]));
+        let refused = prepare(1, &test_config(&[]), None).unwrap_err();
         std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "postgres.enabled",
             "{refused:?}"
         );
@@ -98,7 +69,7 @@ mod tests {
             ("APP__POSTGRES__ENABLED", "true"),
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
         ]);
-        let refused = unconfigured(&config);
+        let refused = prepare(1, &config, None).unwrap_err();
         std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention",
             "{refused:?}"
         );
@@ -111,7 +82,7 @@ mod tests {
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
             ("APP__HTTP_IDEMPOTENCY__RETENTION", "1h"),
         ]);
-        let refused = unconfigured(&config);
+        let refused = prepare(1, &config, None).unwrap_err();
         std::assert_matches!(
             &refused,
             BootstrapError::HttpIdempotencyStartup(
