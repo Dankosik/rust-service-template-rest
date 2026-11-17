@@ -239,14 +239,14 @@ async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
         readiness.arm_progress(),
         Err(ArmError::Refused(NotReady::ProbeFailed { .. }))
     );
-    assert!(readiness.progress_loss().is_none());
+    assert!(readiness.observe_progress_loss().is_none());
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
     tokio::time::advance(policy().stale_after()).await;
     assert_eq!(readiness.arm_progress(), Ok(()), "equality is fresh");
     tokio::time::advance(Duration::from_nanos(1)).await;
     assert!(
-        readiness.progress_loss().is_some(),
+        readiness.observe_progress_loss().is_some(),
         "arm must not reset age"
     );
 
@@ -270,15 +270,17 @@ async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
     readiness.arm_progress().unwrap();
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
     readiness.refresh().await;
-    let loss = readiness.progress_loss().expect("terminal completion gap");
+    let loss = readiness
+        .observe_progress_loss()
+        .expect("terminal completion gap");
     std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
     readiness.refresh().await;
-    assert_eq!(readiness.progress_loss(), Some(loss));
+    assert_eq!(readiness.observe_progress_loss(), Some(loss));
     readiness.stop_progress();
-    assert_eq!(readiness.progress_loss(), Some(loss));
+    assert_eq!(readiness.observe_progress_loss(), Some(loss));
     readiness.start_drain();
     readiness.refresh().await;
-    assert_eq!(readiness.progress_loss(), Some(loss));
+    assert_eq!(readiness.observe_progress_loss(), Some(loss));
     assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
 }
 
@@ -292,7 +294,7 @@ async fn progress_observer_needs_no_readers_or_new_completions() {
     assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
     tokio::time::advance(policy().stale_after()).await;
     assert!(
-        readiness.progress_loss().is_none(),
+        readiness.observe_progress_loss().is_none(),
         "strictly above the bound"
     );
     tokio::time::advance(Duration::from_millis(1)).await;
@@ -300,7 +302,7 @@ async fn progress_observer_needs_no_readers_or_new_completions() {
         .await
         .expect("observer wakes without a reader or publication")
         .expect("progress loss");
-    assert_eq!(readiness.progress_loss(), Some(loss));
+    assert_eq!(readiness.observe_progress_loss(), Some(loss));
 }
 
 #[tokio::test(start_paused = true)]
@@ -326,9 +328,9 @@ async fn stop_and_drain_close_obligations_but_preserve_an_already_expired_gap() 
                 assert_eq!(readiness.progress_lost(), expired);
             }
             tokio::time::advance(policy().stale_after() * 2).await;
-            assert_eq!(readiness.progress_loss().is_some(), expired);
+            assert_eq!(readiness.observe_progress_loss().is_some(), expired);
             readiness.refresh().await;
-            assert_eq!(readiness.progress_loss().is_some(), expired);
+            assert_eq!(readiness.observe_progress_loss().is_some(), expired);
             readiness.start_drain();
             assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
             if !expired {
@@ -367,13 +369,13 @@ async fn failed_and_timed_out_completed_rounds_keep_armed_progress_recoverable()
         for _ in 0..10 {
             tokio::time::advance(policy().interval).await;
             readiness.refresh().await;
-            assert!(readiness.progress_loss().is_none());
+            assert!(readiness.observe_progress_loss().is_none());
         }
         assert!(readiness.reader().verdict().is_err());
         control.store(0, Ordering::Relaxed);
         readiness.refresh().await;
         assert_eq!(readiness.reader().verdict(), Ok(()));
-        assert!(readiness.progress_loss().is_none());
+        assert!(readiness.observe_progress_loss().is_none());
     }
 }
 
@@ -393,7 +395,7 @@ async fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recov
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
-    assert!(readiness.progress_loss().is_some());
+    assert!(readiness.observe_progress_loss().is_some());
     readiness.stop_progress();
     readiness.start_drain();
     readiness.refresh().await;
@@ -500,7 +502,7 @@ async fn a_zero_interval_refreshes_at_the_timer_resolution() {
     }
     assert_eq!(readiness.reader().verdict(), Ok(()));
     assert!(
-        readiness.progress_loss().is_none(),
+        readiness.observe_progress_loss().is_none(),
         "a refresher on schedule is not a completion gap"
     );
     assert_eq!(
@@ -1031,7 +1033,7 @@ proptest! {
                 Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::ZERO })
             };
             let threshold = NonZeroU32::new(failure_threshold).unwrap();
-            let check =
+            let (check, _) =
                 apply_failure_threshold(previous.as_ref(), observed, threshold, at, stale_after);
 
             streak = if succeeds { 0 } else { streak + 1 };
