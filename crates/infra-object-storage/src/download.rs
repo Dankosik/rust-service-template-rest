@@ -5,29 +5,28 @@ use std::task::{Context, Poll, Waker};
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
-use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
+use crate::call::{CallContext, CallStop};
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
+#[debug("Download {{ size: {}, .. }}", metadata.size)]
 pub struct Download {
     metadata: ObjectMetadata,
     shared: Arc<Mutex<State>>,
     timer: JoinHandle<()>,
 }
 
-#[derive(Debug)]
 struct State {
     waker: Option<Waker>,
     status: Status,
 }
 
-#[derive(Debug)]
 #[expect(
     clippy::large_enum_variant,
     reason = "State already lives in one Arc allocation; inline custody avoids another allocation"
@@ -38,14 +37,23 @@ enum Status {
     Failed(ObjectStorageError),
 }
 
-#[derive(Debug)]
 struct Resources {
-    context: OperationContext,
+    context: CallContext,
     body: ByteStream,
     remaining: u64,
     final_chunk: Option<Bytes>,
     guard: OperationGuard,
     _permit: OwnedSemaphorePermit,
+}
+
+impl Resources {
+    fn unread_bytes(&self) -> u64 {
+        self.remaining
+            + self
+                .final_chunk
+                .as_ref()
+                .map_or(0, |chunk| chunk.len() as u64)
+    }
 }
 
 enum Outcome {
@@ -128,16 +136,35 @@ impl State {
 
     fn unread_bytes(&self) -> Option<u64> {
         match &self.status {
-            Status::Open(resources) => Some(
-                resources.remaining
-                    + resources
-                        .final_chunk
-                        .as_ref()
-                        .map_or(0, |chunk| chunk.len() as u64),
-            ),
+            Status::Open(resources) => Some(resources.unread_bytes()),
             Status::Succeeded => Some(0),
             Status::Failed(_) => None,
         }
+    }
+
+    fn collection_buffer(
+        &mut self,
+        limit: usize,
+    ) -> (Result<Vec<u8>, ObjectStorageError>, Option<Completion>) {
+        let resources = match &self.status {
+            Status::Open(resources) => resources,
+            Status::Succeeded => return (Ok(Vec::new()), None),
+            Status::Failed(error) => return (Err(*error), None),
+        };
+        let failure = if let Some(stopped) = resources.context.stopped() {
+            Failure::stopped(stopped)
+        } else if let Ok(unread) = usize::try_from(resources.unread_bytes())
+            && unread <= limit.min(isize::MAX as usize)
+        {
+            let mut buffer = Vec::new();
+            if buffer.try_reserve_exact(unread).is_ok() {
+                return (Ok(buffer), None);
+            }
+            LocalFailure::DownloadAllocation.into()
+        } else {
+            LocalFailure::TooLarge.into()
+        };
+        (Err(failure.error), self.close(Outcome::Failure(failure)))
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
@@ -201,7 +228,7 @@ impl State {
 }
 
 enum Termination {
-    Stopped(Stopped),
+    Stopped(CallStop),
     Fallback(Outcome),
 }
 
@@ -232,7 +259,7 @@ impl Download {
         body: ByteStream,
         guard: OperationGuard,
         permit: OwnedSemaphorePermit,
-        context: OperationContext,
+        context: CallContext,
     ) -> Self {
         let shared = Arc::new(Mutex::new(State {
             waker: None,
@@ -306,9 +333,13 @@ impl Download {
         }
     }
 
-    pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let unread_bytes = self.shared.lock().unread_bytes().unwrap_or(0);
-        let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));
+    pub async fn into_bytes(mut self, limit: usize) -> Result<Bytes, ObjectStorageError> {
+        let (buffer, completion) = self.shared.lock().collection_buffer(limit);
+        if let Some(completion) = completion {
+            completion.finish();
+            self.timer.abort();
+        }
+        let mut buffer = buffer?;
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
         }

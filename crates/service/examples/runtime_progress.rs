@@ -368,7 +368,7 @@ impl Echo {
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self
             .storage
-            .put(context, &key, body, PutOptions::default())
+            .put(context, &key, body, PutOptions::overwrite())
             .await;
         *work = true;
         if result == Ok(()) {

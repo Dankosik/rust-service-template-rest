@@ -15,8 +15,7 @@ mod tests;
 pub mod grpc;
 // template:end outbound-auth-grpc:oauth-grpc-module
 
-pub use credentials::{Credentials, OnBehalfOf, RefreshDriver};
+pub use credentials::{ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens};
 pub use error::{AcquisitionError, ConfigurationError, Error, Rejection};
 pub use http_client::AuthenticatedClient;
-pub use options::{Algorithm, Options};
-pub use request_admission::IdentityMode;
+pub use options::{Algorithm, Options, TokenTarget};

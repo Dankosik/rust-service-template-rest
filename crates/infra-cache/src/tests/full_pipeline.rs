@@ -8,6 +8,7 @@ use super::*;
 use crate::{Cache, CacheNamespace, namespace};
 
 const BUDGET: Duration = Duration::from_secs(30);
+const APPLICATION_SLOTS: usize = 2;
 const ABANDONED_COMMANDS: usize = APPLICATION_SLOTS - 1;
 
 struct FullPipeline {
@@ -24,7 +25,7 @@ impl FullPipeline {
         let info = redis::RedisConnectionInfo::default().set_skip_set_lib_name();
         let config = redis::AsyncConnectionConfig::new()
             .set_response_timeout(None)
-            .set_pipeline_buffer_size(PIPELINE_BUFFER_SIZE);
+            .set_pipeline_buffer_size(APPLICATION_SLOTS + 1);
         let (connection, driver) = timeout(
             BUDGET,
             MultiplexedConnection::new_with_config(&info, stream, config),
@@ -41,6 +42,7 @@ impl FullPipeline {
             cooldown_until: Instant::now(),
         });
         let shared = Arc::new(Shared {
+            max_concurrency: APPLICATION_SLOTS,
             state: ArcSwap::from_pointee(State::Connected(generation.clone())),
             write: Mutex::new(()),
             changed: Notify::new(),
@@ -58,6 +60,7 @@ impl FullPipeline {
                     host: "duplex".into(),
                     port: 0,
                     tls: false,
+                    database_index: 0,
                 },
                 command_timeout: BUDGET,
                 shared,

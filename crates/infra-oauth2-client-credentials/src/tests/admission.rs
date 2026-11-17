@@ -11,18 +11,11 @@ fn valid_options() -> Options {
         key_id: "key-1".to_owned(),
         algorithm: Algorithm::Rs256,
         assertion_audience: "https://issuer.example".to_owned(),
-        scopes: Vec::new(),
-        audience: None,
-        exchange_cache_capacity: 1024,
         provider_concurrency: 32,
     }
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one admission table retains the independent options contract"
-)]
 fn direct_construction_repeats_sensitive_option_admission() {
     for (options, key) in [
         (
@@ -55,24 +48,10 @@ fn direct_construction_repeats_sensitive_option_admission() {
         ),
         (
             Options {
-                scopes: vec!["bad scope".to_owned()],
-                ..valid_options()
-            },
-            "scopes",
-        ),
-        (
-            Options {
                 token_url: "https://user:secret@identity.example/token".to_owned(),
                 ..valid_options()
             },
             "token_url",
-        ),
-        (
-            Options {
-                audience: Some(String::new()),
-                ..valid_options()
-            },
-            "audience",
         ),
         (
             Options {
@@ -97,13 +76,6 @@ fn direct_construction_repeats_sensitive_option_admission() {
         ),
         (
             Options {
-                audience: Some(" ".to_owned()),
-                ..valid_options()
-            },
-            "audience",
-        ),
-        (
-            Options {
                 private_key: SecretString::from(" \n"),
                 ..valid_options()
             },
@@ -116,23 +88,9 @@ fn direct_construction_repeats_sensitive_option_admission() {
             },
             "provider_concurrency",
         ),
-        (
-            Options {
-                exchange_cache_capacity: 0,
-                ..valid_options()
-            },
-            "exchange_cache_capacity",
-        ),
-        (
-            Options {
-                exchange_cache_capacity: 65_537,
-                ..valid_options()
-            },
-            "exchange_cache_capacity",
-        ),
     ] {
         let mut options = options;
-        let error = Credentials::prepare(options.clone()).unwrap_err();
+        let error = Registration::prepare(options.clone()).unwrap_err();
         assert_eq!(error.key, key);
         options.private_key = SecretString::from("different-secret");
         assert!(!format!("{options:?} {error:?}").contains("different-secret"));
@@ -140,8 +98,59 @@ fn direct_construction_repeats_sensitive_option_admission() {
 }
 
 #[test]
+fn the_assertion_audience_must_be_an_issuer_distinct_from_the_token_endpoint() {
+    for audience in [
+        "billing-api",
+        "http://issuer.example",
+        "https://issuer.example/?tenant=x",
+        "https://issuer.example/#fragment",
+        "https://@issuer.example",
+        "https://issuer.example/\n",
+        "https://identity.example/token",
+    ] {
+        let error = Registration::prepare(Options {
+            assertion_audience: audience.to_owned(),
+            ..valid_options()
+        })
+        .unwrap_err();
+        assert_eq!(error.key, "assertion_audience", "{audience:?}");
+    }
+}
+
+#[tokio::test]
+async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
+    let fixture = Fixture::new().await;
+    let registration = fixture.build(fixture.options());
+    for capacity in [0, 65_537] {
+        let error = registration
+            .exchange_tokens(TokenTarget::default(), capacity)
+            .unwrap_err();
+        assert_eq!(error.key, "exchange_cache_capacity");
+    }
+    fixture.finish().await;
+}
+
+#[test]
+fn token_targets_require_valid_scope_tokens_and_a_nonempty_configured_audience() {
+    assert_eq!(
+        TokenTarget::try_new(&["bad scope".to_owned()], None)
+            .unwrap_err()
+            .key,
+        "scopes"
+    );
+    for audience in ["", " "] {
+        assert_eq!(
+            TokenTarget::try_new(&[], Some(audience.to_owned()))
+                .unwrap_err()
+                .key,
+            "audience"
+        );
+    }
+}
+
+#[test]
 fn a_token_url_with_whitespace_reports_the_character_rule() {
-    let error = Credentials::prepare(Options {
+    let error = Registration::prepare(Options {
         token_url: "https://identity.example/token\n".to_owned(),
         ..valid_options()
     })
@@ -164,7 +173,7 @@ fn a_token_url_with_an_at_sign_in_its_raw_authority_is_refused() {
         "https://@identity.example/token",
         r"https://identity.example\@other.example/token",
     ] {
-        let error = Credentials::prepare(Options {
+        let error = Registration::prepare(Options {
             token_url: token_url.to_owned(),
             ..valid_options()
         })
@@ -184,7 +193,7 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
             algorithm: Algorithm::Rs256,
             ..valid_options()
         };
-        let error = Credentials::prepare(options).unwrap_err();
+        let error = Registration::prepare(options).unwrap_err();
         assert_eq!(error.key, "private_key");
     }
 }
@@ -208,7 +217,7 @@ fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
 
 #[test]
 fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
-    let error = Credentials::prepare(Options {
+    let error = Registration::prepare(Options {
         token_url: format!("https://identity.example/{}", "a".repeat(70_000)),
         private_key: SecretString::from(
             KeyPair::generate_for(&PKCS_RSA_SHA256)

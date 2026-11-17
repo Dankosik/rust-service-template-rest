@@ -7,7 +7,7 @@ use operation_context::Stopped;
 use tracing::Span;
 
 use crate::ServerEndpoint;
-use crate::connection::{CommandFailure, ErrorType};
+use crate::connection::{CommandError, CommandFailure, ErrorType};
 use crate::namespace::Operation;
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
@@ -111,11 +111,14 @@ impl<'a> OperationGuard<'a> {
             otel.name = operation.redis_name(),
             otel.kind = "client",
             db.system.name = "redis",
+            db.namespace = %server.database_index,
             db.operation.name = operation.redis_name(),
+            db.operation.batch.size = matches!(operation, Operation::Get).then_some(2_i64),
             cache.name = namespace,
             server.address = server.host.as_str(),
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
+            cache.mutation.outcome = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
@@ -133,8 +136,15 @@ impl<'a> OperationGuard<'a> {
         self.finish(outcome);
     }
 
-    pub(crate) fn failed(mut self, failure: CommandFailure) {
-        match failure {
+    pub(crate) fn failed(mut self, error: CommandError) {
+        if matches!(self.operation, Operation::Set | Operation::Delete) {
+            let effect = match error {
+                CommandError::NotApplied(_) => "not_applied",
+                CommandError::OutcomeUnknown(_) => "outcome_unknown",
+            };
+            self.span.record("cache.mutation.outcome", effect);
+        }
+        match error.failure() {
             CommandFailure::Stopped(Stopped::Cancelled) => self.finish(Outcome::Cancelled),
             CommandFailure::Stopped(Stopped::Deadline) => self.fail(ErrorType::Timeout),
             CommandFailure::Failed(error) => self.fail(error),

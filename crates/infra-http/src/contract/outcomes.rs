@@ -21,13 +21,10 @@ pub(super) fn compose(
     policy: &Policy,
     // template:end authn:http-outcomes-policy-parameter
 ) -> Result<(), FinalizeError> {
-    let shared = responses::ProblemComponents::openapi();
-    if let (Some(existing), Some(shared)) = (&document.components, &shared.components) {
-        check_components("schemas", &existing.schemas, &shared.schemas)?;
-        check_components("responses", &existing.responses, &shared.responses)?;
-    }
-    document.merge(shared);
     let components = document.components.get_or_insert_default();
+    if let Some(shared) = responses::ProblemComponents::openapi().components {
+        super::components::merge(components, shared)?;
+    }
     for (path, item) in &mut document.paths.paths {
         let path = if path.is_empty() { "/" } else { path.as_str() };
         let fixed = fixed_path_operations!(item, as_mut)
@@ -60,24 +57,6 @@ pub(super) fn compose(
                 fault,
             })?;
         }
-    }
-    Ok(())
-}
-
-fn check_components<T: PartialEq>(
-    kind: &'static str,
-    existing: &BTreeMap<String, T>,
-    shared: &BTreeMap<String, T>,
-) -> Result<(), FinalizeError> {
-    if let Some((name, _)) = shared.iter().find(|(name, value)| {
-        existing
-            .get(*name)
-            .is_some_and(|existing| existing != *value)
-    }) {
-        return Err(FinalizeError::ConflictingComponent {
-            kind,
-            name: name.clone(),
-        });
     }
     Ok(())
 }

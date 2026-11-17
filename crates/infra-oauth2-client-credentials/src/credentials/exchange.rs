@@ -6,22 +6,34 @@ use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
-use super::{AcquisitionDeadline, Credentials, provider_timeout};
+use super::{AcquisitionDeadline, RegistrationState, provider_timeout};
 use crate::{
-    AcquisitionError,
-    token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TokenEndpoint},
+    AcquisitionError, ConfigurationError, TokenTarget, token::Token, token_endpoint::TokenEndpoint,
 };
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
+const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
 
-pub(crate) struct ExchangeState {
-    pub(crate) cache: moka::future::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>,
+#[derive(Clone, derive_more::Debug)]
+#[debug("ExchangeTokens([REDACTED])")]
+pub struct ExchangeTokens(Arc<ExchangeOwner>);
+
+struct ExchangeOwner {
+    registration: Arc<RegistrationState>,
+    target: TokenTarget,
+    state: ExchangeState,
+}
+
+type ExchangedTokenCache =
+    moka::future::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>;
+
+struct ExchangeState {
+    cache: ExchangedTokenCache,
     flights: ExchangeFlights,
 }
 
 impl ExchangeState {
-    pub(super) fn new(capacity: u32) -> Self {
+    fn new(capacity: u32) -> Self {
         let minimum_weight = EXCHANGE_CACHE_BYTES / capacity;
         Self {
             cache: moka::future::Cache::builder()
@@ -40,13 +52,14 @@ impl ExchangeState {
     async fn fetch(
         &self,
         endpoint: &TokenEndpoint,
+        target: &TokenTarget,
         key: SubjectKey,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
+        let (context, request_context) = deadline.fetch_contexts(Instant::now());
         let result = endpoint
-            .fetch_exchange(subject, fetch_deadline)
+            .fetch_exchange(subject, target, &context, request_context.as_ref())
             .await
             .map(Arc::new);
         if let Some(error) = deadline.stopped_error() {
@@ -156,15 +169,43 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
     }
 }
 
-impl Credentials {
+impl ExchangeTokens {
+    pub(super) fn try_new(
+        registration: Arc<RegistrationState>,
+        target: TokenTarget,
+        capacity: u32,
+    ) -> Result<Self, ConfigurationError> {
+        if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&capacity) {
+            return Err(ConfigurationError {
+                key: "exchange_cache_capacity",
+                reason: "must be from 1 to 65536",
+            });
+        }
+        Ok(Self(Arc::new(ExchangeOwner {
+            registration,
+            target,
+            state: ExchangeState::new(capacity),
+        })))
+    }
+
+    pub(super) fn registration(&self) -> &RegistrationState {
+        &self.0.registration
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache(&self) -> &ExchangedTokenCache {
+        &self.0.state.cache
+    }
+
     pub(crate) async fn exchange(
         &self,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let key = SubjectKey::of(subject);
-        self.check_admission(deadline)?;
-        let result = if let Some(token) = self.0.inner.exchange.reusable(key).await {
+        let registration = self.registration();
+        registration.check_admission(deadline)?;
+        let result = if let Some(token) = self.0.state.reusable(key).await {
             Ok(token)
         } else {
             tokio::time::timeout_at(
@@ -174,9 +215,7 @@ impl Credentials {
             .await
             .map_err(|_| deadline.expiry)?
         };
-        if let Some(error) = deadline.stopped_error() {
-            return Err(error);
-        }
+        registration.check_admission(deadline)?;
         result
     }
 
@@ -186,22 +225,26 @@ impl Credentials {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let inner = &self.0.inner;
+        let registration = self.registration();
+        let state = &self.0.state;
         loop {
-            self.check_admission(deadline)?;
-            match inner.exchange.join(key) {
+            registration.check_admission(deadline)?;
+            match state.join(key) {
                 ExchangeFlight::Leader(leader) => {
-                    let result = if let Some(token) = inner.exchange.reusable(key).await {
+                    let result = if let Some(token) = state.reusable(key).await {
                         Ok(token)
                     } else {
-                        inner
-                            .exchange
-                            .fetch(&inner.endpoint, key, subject, deadline)
+                        state
+                            .fetch(
+                                &registration.endpoint,
+                                &self.0.target,
+                                key,
+                                subject,
+                                deadline,
+                            )
                             .await
                     };
-                    if let Some(error) = deadline.stopped_error() {
-                        return Err(error);
-                    }
+                    registration.check_admission(deadline)?;
                     leader.publish(result.clone());
                     return result;
                 }

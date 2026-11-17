@@ -19,6 +19,11 @@ const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_DETAIL: &str = "idempotent request processing is unavailable";
 const KEY_MISMATCH_DETAIL: &str = "Idempotency-Key is bound to a different request";
 const IN_PROGRESS_DETAIL: &str = "a request with this Idempotency-Key is in progress";
+const ATTEMPT_TIMEOUT_DETAIL: &str = concat!(
+    "the idempotent request outcome is unknown. Retry the same request with the same ",
+    "Idempotency-Key within the published retry window. If the window has expired, ",
+    "reconcile the outcome before attempting the operation again",
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
@@ -75,7 +80,7 @@ pub trait FreshCommand: Send {
         tx: &mut Tx<'_>,
     ) -> impl Future<Output = Result<ReplayableResponse, Rollback>> + Send;
 
-    fn attempt_timeout(&self) -> Option<(Duration, Problem)> {
+    fn attempt_timeout(&self) -> Option<Duration> {
         None
     }
 }
@@ -85,9 +90,13 @@ impl Attempt {
         let timeout = command.attempt_timeout();
         let execution = self.execute(command);
         match timeout {
-            Some((budget, problem)) => tokio::time::timeout(budget, execution)
+            Some(budget) => tokio::time::timeout(budget, execution)
                 .await
-                .unwrap_or_else(|_| problem.into_response()),
+                .unwrap_or_else(|_| {
+                    Problem::new(Code::GatewayTimeout)
+                        .detail(ATTEMPT_TIMEOUT_DETAIL)
+                        .into_response()
+                }),
             None => execution.await,
         }
     }
@@ -134,6 +143,10 @@ pub enum Rollback {
     InvalidStatus,
     #[error("body_limit")]
     BodyLimit,
+    #[error("body_forbidden")]
+    BodyForbidden,
+    #[error("content_encoding")]
+    ContentEncoding,
     #[error("header_limit")]
     HeaderLimit,
     #[error("serialization")]
@@ -230,7 +243,7 @@ fn map_attempted(
     }
 }
 
-pub(super) fn refusal(mut response: Response) -> Response {
+fn refusal(mut response: Response) -> Response {
     if response.status().is_success() {
         tracing::error!(
             failure = "successful_refusal",

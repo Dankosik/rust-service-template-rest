@@ -306,8 +306,17 @@ async fn prepare(
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (metrics, exporter_state) = telemetry::install_observability(config, &identity, resources)?;
-    if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
-        tracing::warn!(error = %error, "open_file_limit_unchanged");
+    let connection_caps = config.finite_listener_connection_caps();
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
+        Ok(open_file_limit) if open_file_limit < connection_caps => {
+            tracing::warn!(
+                open_file_limit,
+                connection_caps,
+                "open_file_limit_below_connection_caps"
+            );
+        }
+        Ok(_) => {}
     }
     install_panic_hook();
     let mut capabilities = register_capabilities(config, register, background)?;

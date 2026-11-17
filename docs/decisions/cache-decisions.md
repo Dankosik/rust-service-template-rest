@@ -26,9 +26,11 @@ values and TTLs remain readable. A value above the new limit produces a size
 error so the feature can use its source of truth.
 
 Choose `cache.max_key_bytes` for the encoded namespace, separator and key.
-Choose `cache.max_value_bytes` against the service memory budget at full
-concurrency, allowing for protocol buffers, copies and values still held by
-callers. Budget source capacity for entries that now exceed the limit.
+Size `cache.max_concurrency` and `cache.max_value_bytes` together against
+each replica's memory budget, allowing for protocol buffers, copies and
+values still held by callers. Check peak RSS, lookup p99 and source load
+under bursts and cache loss before promotion. Budget source capacity for
+refused lookups and entries that exceed the value limit.
 
 For a cache-aside read, reserve the time the source needs from the parent
 operation's remaining budget. Skip the lookup when the reserve consumes that

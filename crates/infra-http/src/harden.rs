@@ -59,7 +59,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
         middleware::from_fn_with_state(
             Arc::new(Admission {
                 permits: Arc::new(Semaphore::new(limit.get() as usize)),
-                patience: options.admission_wait,
+                patience: options.admission_wait.min(options.request_timeout),
                 probes: probes.clone(),
             }),
             admit,
@@ -220,7 +220,7 @@ async fn not_found() -> Response {
         .into_response()
 }
 
-async fn method_not_allowed() -> Response {
+pub(crate) async fn method_not_allowed() -> Response {
     Problem::new(Code::MethodNotAllowed)
         .detail("method is not allowed for this resource")
         .into_response()

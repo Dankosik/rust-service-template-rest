@@ -80,6 +80,7 @@ fn options(
         allow_unauthenticated: true,
         command_timeout,
         max_key_bytes: 1024,
+        max_concurrency: 256,
         max_value_bytes: 64 * 1024,
     }
 }

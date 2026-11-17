@@ -347,18 +347,15 @@ async fn serve(
 }
 
 fn raise_open_file_limit(config: &Config) {
+    let connection_caps = config.finite_listener_connection_caps();
     match rlimit::increase_nofile_limit(u64::MAX) {
         Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
-        Ok(open_file_limit) if let Some(cap) = config.http.listener().max_connections => {
-            let listeners = 1 + u64::from(config.observability.metrics.addr.is_some());
-            let connection_caps = u64::from(cap.get()) * listeners;
-            if open_file_limit < connection_caps {
-                tracing::warn!(
-                    open_file_limit,
-                    connection_caps,
-                    "open_file_limit_below_connection_caps"
-                );
-            }
+        Ok(open_file_limit) if open_file_limit < connection_caps => {
+            tracing::warn!(
+                open_file_limit,
+                connection_caps,
+                "open_file_limit_below_connection_caps"
+            );
         }
         Ok(_) => {}
     }
@@ -618,6 +615,23 @@ fn test_config(environment: &[(&str, &str)]) -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_blocking_startup_operation_leaves_the_stop_waiter_runnable() {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let admission = blocking_startup("test", move || {
+            entered.send(()).unwrap();
+            held.recv_timeout(Duration::from_secs(5))
+                .expect("stop waiter releases startup");
+            Ok::<(), BootstrapError>(())
+        });
+        tokio::select! {
+            result = admission => panic!("startup finished before the stop waiter: {result:?}"),
+            result = started => result.unwrap(),
+        }
+        release.send(()).unwrap();
+    }
 
     fn shared_metrics() -> Metrics {
         static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();

@@ -49,6 +49,18 @@ unable to serve, and budget every downstream deadline inside
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
+<!-- template:begin http-idempotency:production-contract-retry-window -->
+- For mounted idempotent HTTP operations, publish the client retry window and
+  how to look up the original effect in the service's public API documentation.
+  Measure the window from the client's first send to the database check on
+  retry. Include transit, request processing and pool wait in the client's
+  budget. Set `http_idempotency.retention` on every writer replica to at least
+  the published window. The database sets expiry when it writes the success,
+  before commit and delivery. Publish a longer window only after every writer
+  supports it, with an effective time for new requests. Earlier requests keep
+  their original window. When shortening retention or rolling back, honor
+  requests first sent under the earlier promise until that window expires.
+<!-- template:end http-idempotency:production-contract-retry-window -->
 - RPO, RTO, backup/key custody, and restore-compatible versions: Unresolved.
 - Cache staleness, TTL, invalidation, and token/key revocation lag: N/A for the
   health-only scaffold; reopen when cached state or authentication is enabled.

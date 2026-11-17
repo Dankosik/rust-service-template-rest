@@ -6,16 +6,16 @@ use http::{
     header::{ACCEPT, CONTENT_TYPE},
 };
 use infra_outbound_http::{Client, Limits};
-use operation_context::{Deadline, OperationContext};
+use operation_context::OperationContext;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
-use tokio::{
-    sync::{Semaphore, SemaphorePermit},
-    time::Instant,
-};
+use tokio::{sync::Semaphore, time::Instant};
 use url::{Url, form_urlencoded::Serializer};
 
-use crate::{AcquisitionError, ConfigurationError, Rejection, assertion::Signer, token::Token};
+use crate::{
+    AcquisitionError, ConfigurationError, Rejection, TokenTarget, assertion::Signer,
+    credentials::acquisition_stopped, token::Token,
+};
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const TOKEN_LIMITS: Limits = Limits {
@@ -31,8 +31,6 @@ const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 pub(crate) struct TokenEndpoint {
     uri: Uri,
     http: Client,
-    scope: Option<String>,
-    audience: Option<String>,
     signer: Signer,
     permits: Semaphore,
 }
@@ -41,8 +39,6 @@ impl TokenEndpoint {
     pub(crate) fn new(
         url: Url,
         http: Client,
-        scopes: &[String],
-        audience: Option<String>,
         signer: Signer,
         permits: usize,
     ) -> Result<Self, ConfigurationError> {
@@ -57,8 +53,6 @@ impl TokenEndpoint {
         Ok(Self {
             uri,
             http,
-            scope: joined_scopes(scopes),
-            audience,
             signer,
             permits: Semaphore::new(permits),
         })
@@ -70,45 +64,56 @@ impl TokenEndpoint {
 
     pub(crate) async fn fetch_service_token(
         &self,
-        deadline: Instant,
+        target: &TokenTarget,
+        context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::ClientCredentials, deadline).await
+        self.fetch_token(Grant::ClientCredentials, target, context, request_context)
+            .await
     }
 
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
-        deadline: Instant,
+        target: &TokenTarget,
+        context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::TokenExchange { subject }, deadline)
-            .await
+        self.fetch_token(
+            Grant::TokenExchange { subject },
+            target,
+            context,
+            request_context,
+        )
+        .await
     }
 
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
-        deadline: Instant,
+        target: &TokenTarget,
+        context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
-            let outcome = if Instant::now() >= deadline {
-                AcquisitionError::Timeout.label()
-            } else {
-                AcquisitionError::Cancelled.label()
-            };
-            record_acquisition(grant, outcome);
-        });
-        let result = tokio::time::timeout_at(deadline, async {
-            let _permit = self.admit_attempt(deadline)?;
-            self.request_token(grant, started, deadline).await
-        })
-        .await
-        .unwrap_or(Err(AcquisitionError::Timeout));
-        let result = if Instant::now() >= deadline {
-            Err(AcquisitionError::Timeout)
-        } else {
-            result
+        let check = || {
+            context
+                .check()
+                .and_then(|()| request_context.map_or(Ok(()), OperationContext::check))
+                .map_err(acquisition_stopped)
         };
+        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
+            let error = check().err().unwrap_or(AcquisitionError::Cancelled);
+            record_acquisition(grant, error.label());
+        });
+        let result = match check() {
+            Ok(()) => {
+                self.request_token(grant, target, started, context, request_context)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let result = check().and(result);
         let grant = std::mem::DropGuard::dismiss(metric);
         record_acquisition(
             grant,
@@ -121,34 +126,35 @@ impl TokenEndpoint {
         result
     }
 
-    fn admit_attempt(&self, deadline: Instant) -> Result<SemaphorePermit<'_>, AcquisitionError> {
-        if Instant::now() >= deadline {
-            return Err(AcquisitionError::Timeout);
-        }
-        self.permits
-            .try_acquire()
-            .map_err(|_| AcquisitionError::AtCapacity)
-    }
-
     async fn request_token(
         &self,
         grant: Grant<'_>,
+        target: &TokenTarget,
         started: Instant,
-        deadline: Instant,
+        context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        let body = self.form_body(grant)?;
-        let response = self.post_form(body, deadline).await?;
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| AcquisitionError::AtCapacity)?;
+        let body = self.form_body(grant, target)?;
+        let response = self.post_form(body, context, request_context).await?;
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
-    fn form_body(&self, grant: Grant<'_>) -> Result<String, AcquisitionError> {
+    fn form_body(
+        &self,
+        grant: Grant<'_>,
+        target: &TokenTarget,
+    ) -> Result<String, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let mut form = Serializer::new(String::new());
         grant.append_fields(&mut form);
-        if let Some(scope) = self.scope.as_deref() {
+        if let Some(scope) = target.scope.as_deref() {
             form.append_pair("scope", scope);
         }
-        if let Some(audience) = self.audience.as_deref() {
+        if let Some(audience) = target.audience.as_deref() {
             form.append_pair("audience", audience);
         }
         Ok(form
@@ -159,18 +165,21 @@ impl TokenEndpoint {
     async fn post_form(
         &self,
         body: String,
-        deadline: Instant,
+        context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<TokenResponse, AcquisitionError> {
-        let request = Request::post(self.uri.clone())
+        let mut request = Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
+        if let Some(request_context) = request_context {
+            request.extensions_mut().insert(request_context.clone());
+        }
         let mut observed_status = None;
-        let context = OperationContext::from_deadline(Deadline::at(deadline));
         let response = self
             .http
-            .execute_with_response_status(request, &context, |status| {
+            .execute_with_response_status(request, context, |status| {
                 observed_status = Some(status);
             })
             .await;
@@ -272,14 +281,6 @@ fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
         infra_outbound_http::Error::InvalidTarget
         | infra_outbound_http::Error::DispatchRefused
         | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
-    }
-}
-
-fn joined_scopes(scopes: &[String]) -> Option<String> {
-    if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
     }
 }
 

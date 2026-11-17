@@ -11,7 +11,6 @@ use infra_bearerauthn::{
 use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
-use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, Policy, layer_routes};
 pub use crate::problem::responses::GatewayTimeout;
@@ -79,11 +78,7 @@ where
     }
 }
 
-pub(crate) fn finalize<S>(
-    contract: OpenApiRouter<S>,
-    policy: Policy,
-    verifier: Verifier,
-) -> Router<S>
+pub(crate) fn finalize<S>(contract: Router<S>, policy: Policy, verifier: Verifier) -> Router<S>
 where
     S: Send + Sync + Clone + 'static,
 {
@@ -113,15 +108,7 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => {
-            tracing::error!(
-                route = path,
-                method = %request.method(),
-                failure = "policy_missing",
-                "http_auth_wiring_failed"
-            );
-            sanitized_internal_error()
-        }
+        None => policy.unregistered(Some(path), request.method()).await,
         Some(Access::Protected(alternatives, delegate)) => {
             authenticate_protected(&verifier, alternatives, *delegate, request, next).await
         }

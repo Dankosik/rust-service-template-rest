@@ -2,11 +2,10 @@ use std::time::Duration;
 
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use operation_context::{OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext, Stopped};
+use tokio::time::Instant;
 
-use crate::ObjectStorageError;
-use crate::error::{Call, Failure};
-use crate::observe::OperationGuard;
+use crate::error::Call;
 
 const MAX_ATTEMPTS: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
@@ -38,7 +37,7 @@ pub(crate) fn call_policy(
 }
 
 pub(crate) async fn within<T>(
-    context: &OperationContext,
+    context: &CallContext,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, Interrupted> {
     use std::future::Future as _;
@@ -65,18 +64,65 @@ pub(crate) async fn within<T>(
     .await
 }
 
-pub(crate) struct Interrupted {
-    pub(crate) stopped: Stopped,
-    polled: bool,
+pub(crate) async fn within_mutation<T>(
+    context: &CallContext,
+    future: impl std::future::Future<Output = T>,
+) -> Result<(T, Option<CallStop>), Interrupted> {
+    let mut future = std::pin::pin!(future);
+    within(context, async {
+        let reply = future.as_mut().await;
+        (reply, context.stopped())
+    })
+    .await
 }
 
-impl Interrupted {
-    pub(crate) fn fail(self, guard: &mut OperationGuard, call: Call) -> ObjectStorageError {
-        let failure = if self.polled {
-            Failure::stopped_after_poll(call, self.stopped)
-        } else {
-            Failure::stopped(self.stopped)
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Interrupted {
+    pub(crate) stopped: CallStop,
+    pub(crate) polled: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CallStop {
+    Parent(Stopped),
+    Timeout,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CallContext {
+    context: OperationContext,
+    parent_deadline: bool,
+}
+
+impl CallContext {
+    pub(crate) fn new(parent: &OperationContext, timeout: Duration) -> Self {
+        let now = Instant::now();
+        let (deadline, parent_deadline) = match parent.deadline() {
+            Some(deadline) if deadline.remaining_at(now) <= timeout => (deadline, true),
+            _ => (Deadline::new(now, timeout), false),
         };
-        guard.fail(&failure)
+        Self {
+            context: OperationContext::new(Some(deadline), parent.cancellation().child_token()),
+            parent_deadline,
+        }
+    }
+
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        self.context.remaining()
+    }
+
+    pub(crate) fn stopped(&self) -> Option<CallStop> {
+        self.context.stopped().map(|stopped| self.classify(stopped))
+    }
+
+    pub(crate) async fn wait_stopped(&self) -> CallStop {
+        self.classify(self.context.wait_stopped().await)
+    }
+
+    fn classify(&self, stopped: Stopped) -> CallStop {
+        match stopped {
+            Stopped::Deadline if !self.parent_deadline => CallStop::Timeout,
+            _ => CallStop::Parent(stopped),
+        }
     }
 }

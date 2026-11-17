@@ -39,8 +39,8 @@ use tower::{Service as _, service_fn};
 
 use secrecy::SecretString;
 
-use super::{Credentials, Fixture, acquisition_deadline, token_context};
-use crate::{AcquisitionError, IdentityMode, OnBehalfOf, Rejection};
+use super::{Fixture, acquisition_deadline, token_context};
+use crate::{AcquisitionError, OnBehalfOf, Rejection, ServiceTokens, TokenTarget};
 
 #[derive(Clone)]
 struct Peer {
@@ -152,10 +152,10 @@ impl Resource {
 
     fn client(
         &self,
-        credentials: &Credentials,
+        credentials: &ServiceTokens,
     ) -> EchoServiceClient<crate::grpc::AuthenticatedClient> {
         let channel = self.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-        EchoServiceClient::new(credentials.grpc(channel, IdentityMode::Service).unwrap())
+        EchoServiceClient::new(credentials.grpc(channel).unwrap())
     }
 
     fn channel(&self, timeout: ClientTimeout) -> Client {
@@ -342,18 +342,18 @@ fn rpc<T>(message: T, after: Duration) -> Request<T> {
 async fn plaintext_cannot_be_bound_to_oauth_credentials() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let channel = Client::try_new(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
     )
     .unwrap();
-    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
-        assert_eq!(
-            credentials.grpc(channel.clone(), mode).unwrap_err().key,
-            "grpc_resource"
-        );
+    for binding in [
+        credentials.grpc(channel.clone()),
+        tokens.exchange_tokens(&[], None, 1).grpc(channel),
+    ] {
+        assert_eq!(binding.unwrap_err().key, "grpc_resource");
     }
     assert!(tokens.token_requests().is_empty());
     assert_eq!(resource.calls(), 0);
@@ -367,7 +367,7 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
     let mut resource = Resource::new().await;
     resource.root_pem = tls_test_support::new_issuer().pem();
     let error = resource
-        .client(&tokens.credentials(&[], None))
+        .client(&tokens.service_tokens(&[], None))
         .unary(rpc(UnaryRequest::default(), Duration::from_secs(10)))
         .await
         .unwrap_err();
@@ -382,21 +382,19 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
 async fn caller_authorization_is_internal_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let mut request = rpc(
-        UnaryRequest {
-            message: "conflict".to_owned(),
-        },
-        Duration::from_secs(10),
-    );
-    request
-        .metadata_mut()
-        .insert("authorization", "Bearer caller-token".parse().unwrap());
-    let error = resource
-        .client(&tokens.credentials(&[], None))
-        .unary(request)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Internal);
+    let mut client = resource.client(&tokens.service_tokens(&[], None));
+    for (cancelled, expected) in [(false, Code::Internal), (true, Code::Cancelled)] {
+        let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer caller-token".parse().unwrap());
+        if cancelled {
+            let parent = OperationContext::unbounded();
+            parent.cancel();
+            request.extensions_mut().insert(parent);
+        }
+        assert_eq!(client.unary(request).await.unwrap_err().code(), expected);
+    }
     assert!(tokens.token_requests().is_empty());
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
@@ -408,7 +406,7 @@ async fn token_acquisition_spends_grpc_timeout_without_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let gate = tokens.block_tokens();
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let mut client = resource.client(&credentials);
     let mut call = Box::pin(client.unary(rpc(
         UnaryRequest {
@@ -450,7 +448,7 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
     ] {
         tokens.token_json(status, &body);
         let error = resource
-            .client(&tokens.credentials(&[], None))
+            .client(&tokens.service_tokens(&[], None))
             .unary(rpc(
                 UnaryRequest {
                     message: "failure".to_owned(),
@@ -475,10 +473,10 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
 async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let gate = tokens.block_tokens();
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-    let mut client = credentials.grpc(channel, IdentityMode::Service).unwrap();
+    let mut client = credentials.grpc(channel).unwrap();
     let parent = OperationContext::unbounded();
     let mut request = http::Request::post("/cancelled")
         .header("content-type", "application/grpc")
@@ -507,11 +505,16 @@ async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
 async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.prepare(crate::Options {
+    let registration = tokens.build(crate::Options {
         provider_concurrency: 1,
-        ..tokens.options(&[], None)
+        ..tokens.options()
     });
-    let http = credentials.http(tokens.resource_client(), IdentityMode::OnBehalfOf);
+    let (credentials, driver) = registration.service_tokens(TokenTarget::default());
+    tokens.drive(driver);
+    let http = registration
+        .exchange_tokens(TokenTarget::default(), 1)
+        .unwrap()
+        .http(tokens.resource_client());
     let gate = tokens.block_tokens();
     let mut exchange = Box::pin(http.execute(
         tokens.on_behalf_of_request("active"),
@@ -546,7 +549,7 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
 async fn one_cached_bearer_is_sent_and_reused() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let mut client = resource.client(&credentials);
     let first = client
         .unary(rpc(
@@ -587,7 +590,8 @@ async fn one_cached_bearer_is_sent_and_reused() {
 async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let (credentials, driver) = tokens.build(tokens.options(&[], None));
+    let registration = tokens.build(tokens.options());
+    let (credentials, driver) = registration.service_tokens(TokenTarget::default());
     let mut client = resource.client(&credentials);
     client
         .unary(rpc(
@@ -634,7 +638,7 @@ async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
         &serde_json::json!({"access_token": "cached", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
-    let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut client = resource.client(&tokens.service_tokens(&[], None));
     for message in ["warm", "reused"] {
         client
             .unary(rpc(
@@ -670,7 +674,7 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let gate = tokens.block_tokens();
-    let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut client = resource.client(&tokens.service_tokens(&[], None));
     let mut call = Box::pin(client.unary(rpc(
         UnaryRequest {
             message: "budget".to_owned(),
@@ -702,7 +706,7 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
 async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let mut client = resource.client(&tokens.credentials(&[], None));
+    let mut client = resource.client(&tokens.service_tokens(&[], None));
     let mut elapsed = Vec::new();
     for _ in 0..4 {
         let started = Instant::now();
@@ -731,7 +735,7 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     tokens.finish().await;
 }
 
-async fn warm_and_age(credentials: &Credentials) {
+async fn warm_and_age(credentials: &ServiceTokens) {
     credentials
         .service_token(acquisition_deadline(&token_context()))
         .await
@@ -748,7 +752,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         ("unauthenticated", Code::Unauthenticated, 1),
         ("permission-denied", Code::PermissionDenied, 0),
     ] {
-        let credentials = tokens.credentials(&[], None);
+        let credentials = tokens.service_tokens(&[], None);
         let mut client = resource.client(&credentials);
         let before_tokens = tokens.token_requests().len();
         warm_and_age(&credentials).await;
@@ -788,10 +792,10 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
 async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     warm_and_age(&credentials).await;
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-    let mut client = credentials.grpc(channel, IdentityMode::Service).unwrap();
+    let mut client = credentials.grpc(channel).unwrap();
     let mut response = client
         .call(
             http::Request::post("/budget-stream")
@@ -843,7 +847,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let mut client = resource.client(&credentials);
     warm_and_age(&credentials).await;
     let mut delayed = Box::pin(client.unary(rpc(
@@ -906,7 +910,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
             0,
         ),
     ] {
-        let credentials = tokens.credentials(&[], None);
+        let credentials = tokens.service_tokens(&[], None);
         let before_tokens = tokens.token_requests().len();
         let before_calls = resource.calls();
         warm_and_age(&credentials).await;
@@ -951,7 +955,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let mut request = rpc(
         UnaryRequest {
             message: "one".to_owned(),
@@ -977,7 +981,7 @@ async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
 async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.credentials(&[], None);
+    let credentials = tokens.service_tokens(&[], None);
     let message = || UnaryRequest {
         message: "one".to_owned(),
     };
@@ -990,13 +994,22 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     assert_eq!(resource.calls(), 1);
 
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-    let mut client =
-        EchoServiceClient::new(credentials.grpc(channel, IdentityMode::OnBehalfOf).unwrap());
-    let error = client
-        .unary(rpc(message(), Duration::from_secs(10)))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Internal);
+    let registration = tokens.build(tokens.options());
+    let exchange = registration
+        .exchange_tokens(TokenTarget::default(), 1)
+        .unwrap();
+    let mut client = EchoServiceClient::new(exchange.grpc(channel).unwrap());
+    for subject in [None, Some("")] {
+        let mut request = rpc(message(), Duration::from_secs(10));
+        if let Some(subject) = subject {
+            request
+                .extensions_mut()
+                .insert(OnBehalfOf::new(SecretString::from(subject)));
+        }
+        let error = client.unary(request).await.unwrap_err();
+        assert_eq!(error.code(), Code::Internal);
+        assert_eq!(error.message(), "on-behalf-of subject is required");
+    }
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
 
@@ -1010,6 +1023,17 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
         resource.authorizations(),
         ["Bearer fixture-token", "Bearer exchanged-token"]
     );
+    drop(registration);
+    let mut request = rpc(message(), Duration::from_secs(10));
+    request
+        .extensions_mut()
+        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+    assert_eq!(
+        client.unary(request).await.unwrap_err().code(),
+        Code::Unavailable
+    );
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(resource.calls(), 2);
     resource.finish().await;
     tokens.finish().await;
 }
@@ -1025,7 +1049,7 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
         ] {
             let tokens = Fixture::new().await;
             let resource = Resource::new().await;
-            let credentials = tokens.credentials(&[], None);
+            let credentials = tokens.service_tokens(&[], None);
             if cached {
                 credentials
                     .service_token(acquisition_deadline(&token_context()))
@@ -1039,9 +1063,7 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
             } else {
                 ClientTimeout::FullRpc(local)
             };
-            let mut client = credentials
-                .grpc(resource.channel(policy), IdentityMode::Service)
-                .unwrap();
+            let mut client = credentials.grpc(resource.channel(policy)).unwrap();
             let mut request = http::Request::post("/budget-stream")
                 .header("content-type", "application/grpc")
                 .body(Body::empty())
@@ -1120,8 +1142,8 @@ async fn resource_opening_ceiling_starts_before_credentials_without_caller_metad
         let resource = Resource::new().await;
         let gate = tokens.block_tokens();
         let mut client = tokens
-            .credentials(&[], None)
-            .grpc(resource.channel(policy), IdentityMode::Service)
+            .service_tokens(&[], None)
+            .grpc(resource.channel(policy))
             .unwrap();
         let mut call = client.call(
             http::Request::post("/budget-stream")

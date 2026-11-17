@@ -11,10 +11,10 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS,
-    acquisition_deadline, token_context,
+    AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
+    token_context,
 };
-use crate::options::Admitted;
+use crate::{Registration, ServiceTokens, TokenTarget, options::Admitted};
 
 const KEY_ID: &str = "key-1";
 const TARGET: &str = "target";
@@ -158,13 +158,7 @@ impl Realm {
         .await;
     }
 
-    async fn caller(
-        &self,
-        algorithm: Algorithm,
-        key: &KeyPair,
-        scopes: &[&str],
-        audience: Option<&str>,
-    ) -> Credentials {
+    async fn caller(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
         let client_id = caller(algorithm);
         self.client(&serde_json::json!({
             "clientId": client_id,
@@ -180,16 +174,10 @@ impl Realm {
             "protocolMappers": [audience_mapper(TARGET)],
         }))
         .await;
-        self.credentials(algorithm, key, scopes, audience)
+        self.registration(algorithm, key)
     }
 
-    fn credentials(
-        &self,
-        algorithm: Algorithm,
-        key: &KeyPair,
-        scopes: &[&str],
-        audience: Option<&str>,
-    ) -> Credentials {
+    fn registration(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
         let endpoint = self.token_endpoint(&self.name);
         let options = Options {
             token_url: endpoint.to_string(),
@@ -198,17 +186,18 @@ impl Realm {
             key_id: KEY_ID.to_owned(),
             algorithm,
             assertion_audience: self.issuer(),
-            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
-            audience: audience.map(str::to_owned),
-            exchange_cache_capacity: 1024,
             provider_concurrency: 32,
         };
         let admitted = Admitted::try_new_for_test(options, endpoint).unwrap();
-        let (credentials, driver) = Credentials::build(
+        Registration::build(
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn service_tokens(&self, registration: &Registration, target: TokenTarget) -> ServiceTokens {
+        let (tokens, driver) = registration.service_tokens(target);
         let mut shutdown = self.driver_shutdown.subscribe();
         self.drivers
             .lock()
@@ -216,7 +205,7 @@ impl Realm {
             .push(tokio::spawn(driver.run(async move {
                 let _ = shutdown.changed().await;
             })));
-        credentials
+        tokens
     }
 
     async fn subject_token(&self) -> SecretString {
@@ -311,17 +300,18 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
     let realm = Realm::create().await;
     for algorithm in Algorithm::ALL {
         let key = key_pair(algorithm);
-        let credentials = realm.caller(algorithm, &key, &[], Some(TARGET)).await;
+        let registration = realm.caller(algorithm, &key).await;
+        let tokens = realm.service_tokens(&registration, super::token_target(&[], Some(TARGET)));
 
-        let service = credentials
+        let service = tokens
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
         let service = claims(&service);
         assert_eq!(service.iss, realm.issuer());
         assert_eq!(service.azp, caller(algorithm));
-        *credentials.cached() = super::Cached::default();
-        credentials
+        *tokens.cached() = super::Cached::default();
+        tokens
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
@@ -332,7 +322,9 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         )
         .unwrap()
         .claims;
-        let exchanged = credentials
+        let exchanged = registration
+            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap();
@@ -349,20 +341,21 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let realm = Realm::create().await;
     let algorithm = Algorithm::Es256;
     let key = key_pair(algorithm);
-    let registered = realm.caller(algorithm, &key, &[], Some(TARGET)).await;
+    let registered = realm.caller(algorithm, &key).await;
 
-    let stranger = realm.credentials(algorithm, &key_pair(algorithm), &[], None);
+    let stranger = realm.registration(algorithm, &key_pair(algorithm));
     assert_eq!(
-        stranger
+        realm
+            .service_tokens(&stranger, TokenTarget::default())
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidClient)
     );
 
-    let unknown_scope = realm.credentials(algorithm, &key, &["not-a-scope"], None);
     assert_eq!(
-        unknown_scope
+        realm
+            .service_tokens(&registered, super::token_target(&["not-a-scope"], None))
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
@@ -373,6 +366,8 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let subject = SecretString::from("not-a-token");
     assert_eq!(
         registered
+            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),

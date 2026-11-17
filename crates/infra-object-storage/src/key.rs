@@ -12,7 +12,7 @@ pub struct InvalidObjectKey;
 impl ObjectKey {
     pub fn try_new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
         let key = key.into();
-        if key.len() > MAX_KEY_BYTES {
+        if key.len() > MAX_KEY_BYTES || key == "soap" {
             return Err(InvalidObjectKey);
         }
         let valid = key.split('/').all(|segment| {
@@ -56,6 +56,7 @@ mod tests {
             "pricing-evidence/v1/2026/09/29/abc_def.json",
             "parse-results/op-1.json",
             "a.b~c-d_e",
+            "dir/soap",
             &"k".repeat(1024),
         ] {
             ObjectKey::try_new(key).unwrap_or_else(|_| panic!("{key:?} should be admitted"));
@@ -71,6 +72,7 @@ mod tests {
             "unicode-é",
             "query?x",
             "percent%20",
+            "soap",
             &"k".repeat(1025),
         ] {
             assert!(

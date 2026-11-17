@@ -18,7 +18,7 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Authentication, Caller, Error, Limits, Services, server_options};
-use infra_http_transport::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server};
 use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
@@ -137,8 +137,6 @@ fn limits() -> Limits {
         request_timeout: Duration::from_secs(8),
         max_in_flight: NonZeroU32::new(64),
         max_admission_wait: Duration::from_secs(1),
-        max_connections: NonZeroU32::new(64),
-        max_connection_age: None,
     }
 }
 
@@ -175,7 +173,11 @@ fn echo_services(echo: &Echo) -> Services {
 fn serve(services: Services, authentication: Authentication) -> (Server, SocketAddr) {
     let app = infra_grpc::router(services, readiness().reader(), authentication, limits()).unwrap();
     let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let server = app.serve(listener, server_options(limits()), None);
+    let options = server_options(ConnectionLimits {
+        max_connections: NonZeroU32::new(64),
+        max_connection_age: None,
+    });
+    let server = app.serve(listener, options, None);
     let address = server.local_addr();
     (server, address)
 }

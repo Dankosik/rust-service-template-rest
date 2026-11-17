@@ -35,3 +35,5 @@ pub use context::RequestDeadline;
 pub use probes::liveness_router;
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
+#[doc(hidden)]
+pub use utoipa_axum::routes as annotated_routes;

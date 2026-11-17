@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
 
-const CREDENTIALS_FILE_LIMIT: usize = 1024 * 1024;
+const CREDENTIALS_FILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
@@ -122,7 +122,7 @@ async fn read(
     clippy::disallowed_types,
     reason = "the blocking worker validates and reads the same open descriptor"
 )]
-fn read_file(path: &Path) -> std::io::Result<SecretString> {
+fn read_file(path: &Path) -> io::Result<SecretString> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -132,13 +132,13 @@ fn read_file(path: &Path) -> std::io::Result<SecretString> {
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(std::io::ErrorKind::InvalidInput.into());
+        return Err(io::ErrorKind::InvalidInput.into());
     }
-    let content = SecretString::from(std::io::read_to_string(
-        file.take(CREDENTIALS_FILE_LIMIT as u64 + 1),
+    let content = SecretString::from(io::read_to_string(
+        file.take(CREDENTIALS_FILE_BYTES as u64 + 1),
     )?);
-    if content.expose_secret().len() > CREDENTIALS_FILE_LIMIT {
-        return Err(std::io::ErrorKind::InvalidData.into());
+    if content.expose_secret().len() > CREDENTIALS_FILE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
     }
     Ok(content)
 }
@@ -222,12 +222,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let file = tempfile::NamedTempFile::new().unwrap();
         let first = nkeys::KeyPair::new_user();
-        let mut content = creds("first.jwt.value", &first);
-        content.extend(std::iter::repeat_n(
-            ' ',
-            CREDENTIALS_FILE_LIMIT - content.len(),
-        ));
-        std::fs::write(file.path(), &content).unwrap();
+        std::fs::write(file.path(), creds("first.jwt.value", &first)).unwrap();
         let credentials = CredentialsFile::admit(file.path().to_owned())
             .await
             .unwrap();
@@ -245,14 +240,6 @@ mod tests {
         credentials.answer(b"repeated-material").await.unwrap();
 
         let rotated = nkeys::KeyPair::new_user();
-        content.push(' ');
-        std::fs::write(file.path(), content).unwrap();
-        assert_eq!(
-            credentials.answer(b"oversize").await.err(),
-            Some(CredentialsFileError::Unreadable(
-                std::io::ErrorKind::InvalidData
-            ))
-        );
         std::fs::write(file.path(), creds("rotated.jwt.value", &rotated)).unwrap();
         let auth = credentials.answer(b"nonce-2").await.unwrap();
         assert_eq!(auth.jwt.as_deref(), Some("rotated.jwt.value"));
@@ -260,17 +247,13 @@ mod tests {
         rotated.verify(b"nonce-2", &signature).unwrap();
         assert!(first.verify(b"nonce-2", &signature).is_err());
         let scrape = recorder.handle().render();
-        let mut samples: Vec<_> = scrape
+        let samples: Vec<_> = scrape
             .lines()
             .filter(|line| line.starts_with("messaging_credentials_file_challenges_total{"))
             .collect();
-        samples.sort_unstable();
         assert_eq!(
             samples,
-            [
-                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 1",
-                "messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 3"
-            ]
+            ["messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 3"]
         );
         for secret in [
             "first.jwt.value",
@@ -306,7 +289,9 @@ mod tests {
         assert!(!error.to_string().contains("sentinel"), "{error}");
 
         let user = nkeys::KeyPair::new_user();
-        std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
+        let mut at_limit = creds("user.jwt.value", &user).into_bytes();
+        at_limit.resize(1024 * 1024, b'\n');
+        std::fs::write(&path, &at_limit).unwrap();
         let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
         assert!(
             !recorder
@@ -316,6 +301,12 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         assert!(credentials.answer(b"nonce").await.is_err());
+        at_limit.push(b'\n');
+        std::fs::write(&path, at_limit).unwrap();
+        assert_eq!(
+            credentials.answer(b"nonce").await.err(),
+            Some(CredentialsFileError::Unreadable(io::ErrorKind::InvalidData))
+        );
         for content in ["sentinel-content", "other-invalid-tuple"] {
             std::fs::write(&path, content).unwrap();
             assert_eq!(
@@ -335,7 +326,7 @@ mod tests {
             samples,
             [
                 "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"malformed\"} 2",
-                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 1",
+                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 2",
                 "messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 1",
             ]
         );

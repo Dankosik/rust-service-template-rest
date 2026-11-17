@@ -5,26 +5,34 @@ use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 
 use crate::{
-    AcquisitionError, Credentials, Error, IdentityMode,
-    credentials::acquisition_deadline,
-    request_admission::{AdmissionRefusal, admit_request_subject},
+    AcquisitionError, Error, ExchangeTokens, ServiceTokens,
+    credentials::{TokenSource, acquisition_deadline},
+    request_admission::{AdmissionRefusal, take_request_subject},
 };
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
-    credentials: Credentials,
+    tokens: TokenSource,
     resource: Client,
-    mode: IdentityMode,
 }
 
-impl Credentials {
+impl ServiceTokens {
     #[must_use]
-    pub fn http(&self, resource: Client, mode: IdentityMode) -> AuthenticatedClient {
+    pub fn http(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
-            credentials: self.clone(),
+            tokens: TokenSource::Service(self.clone()),
             resource,
-            mode,
+        }
+    }
+}
+
+impl ExchangeTokens {
+    #[must_use]
+    pub fn http(&self, resource: Client) -> AuthenticatedClient {
+        AuthenticatedClient {
+            tokens: TokenSource::Exchange(self.clone(), ()),
+            resource,
         }
     }
 }
@@ -47,7 +55,7 @@ impl AuthenticatedClient {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let subject = admit_request_subject(&mut request, self.mode);
+        let subject = take_request_subject(&mut request);
         let mut prepared =
             self.resource
                 .prepare(request, context)
@@ -61,16 +69,16 @@ impl AuthenticatedClient {
                     other => Error::Resource(other),
                 })?;
         let deadline = acquisition_deadline(&prepared);
-        self.credentials.check_lifecycle(deadline)?;
-        let subject = subject.map_err(|refusal| match refusal {
-            AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
-            AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
-            AdmissionRefusal::UnexpectedSubject => Error::UnexpectedSubject,
-        })?;
-        let acquired = self
-            .credentials
-            .acquire_for_request(subject, deadline)
-            .await?;
+        let grant = self
+            .tokens
+            .admit(subject, deadline)
+            .map_err(|refusal| match refusal {
+                AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
+                AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
+                AdmissionRefusal::UnexpectedSubject => Error::UnexpectedSubject,
+                AdmissionRefusal::Acquisition(error) => Error::Acquisition(error),
+            })?;
+        let acquired = grant.acquire_for_request(deadline).await?;
         prepared.set_authorization(acquired.header.clone());
         prepared
             .send(

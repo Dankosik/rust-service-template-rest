@@ -28,6 +28,7 @@ pub struct CacheOptions {
     pub allow_plaintext: bool,
     pub allow_unauthenticated: bool,
     pub command_timeout: Duration,
+    pub max_concurrency: usize,
     pub max_key_bytes: usize,
     pub max_value_bytes: usize,
 }
@@ -40,6 +41,8 @@ pub struct ClientCertificate {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
+    #[error("cache.max_concurrency must allow application commands and leave one maintenance slot")]
+    InvalidConcurrency,
     #[error("cache key or value size limit is outside the supported range")]
     InvalidSizeLimit,
     #[error("cache DSN is invalid")]
@@ -119,6 +122,7 @@ pub(crate) struct ServerEndpoint {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) tls: bool,
+    pub(crate) database_index: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +140,10 @@ impl Cache {
 
         let deadline = tokio::time::Instant::now() + ADMISSION_TIMEOUT;
         let command_timeout = options.command_timeout;
+        let max_concurrency = options.max_concurrency;
+        if !(1..tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency) {
+            return Err(CacheError::InvalidConcurrency);
+        }
         let max_key_bytes = options.max_key_bytes;
         let max_value_bytes = options.max_value_bytes;
         let supported = 1..=shared_rules::cache::MAX_ENTRY_BYTES;
@@ -164,6 +172,7 @@ impl Cache {
                 settings,
                 password_file,
                 command_timeout,
+                max_concurrency,
             )),
         })
     }

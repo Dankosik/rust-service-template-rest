@@ -35,25 +35,8 @@ where
 {
     type Rejection = Problem;
 
-    #[expect(
-        clippy::disallowed_types,
-        reason = "the native JSON decoder retains the deserialization path"
-    )]
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        let json_content_type = request
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()?.parse::<mime::Mime>().ok())
-            .is_some_and(|media_type| {
-                media_type.type_() == mime::APPLICATION
-                    && (media_type.subtype() == mime::JSON
-                        || media_type.suffix() == Some(mime::JSON))
-            });
-        if !json_content_type {
-            return Err(
-                Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL)
-            );
-        }
+        require_json_content_type(request.headers().get(CONTENT_TYPE)).map_err(|error| *error)?;
         let bytes =
             read_request_bytes(request)
                 .await
@@ -62,11 +45,36 @@ where
                     StatusCode::BAD_REQUEST => body_unreadable(),
                     _ => wiring_failure("json"),
                 })?;
-        match axum::Json::<T>::from_bytes(&bytes) {
-            Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_problem(&rejection, &bytes)),
-        }
+        decode_json(&bytes).map(Self).map_err(|error| *error)
     }
+}
+
+pub(crate) fn require_json_content_type(
+    content_type: Option<&HeaderValue>,
+) -> Result<(), Box<Problem>> {
+    let json = content_type
+        .and_then(|value| value.to_str().ok()?.parse::<mime::Mime>().ok())
+        .is_some_and(|media_type| {
+            media_type.type_() == mime::APPLICATION
+                && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
+        });
+    if json {
+        Ok(())
+    } else {
+        Err(Box::new(
+            Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL),
+        ))
+    }
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "the native JSON decoder retains the deserialization path"
+)]
+pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<Problem>> {
+    axum::Json::<T>::from_bytes(bytes)
+        .map(|axum::Json(value)| value)
+        .map_err(|rejection| Box::new(json_problem(&rejection, bytes)))
 }
 
 impl<T> IntoResponse for Json<T>

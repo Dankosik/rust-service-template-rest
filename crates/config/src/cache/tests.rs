@@ -40,6 +40,7 @@ fn only_a_nonblank_dsn_enables_the_cache() {
     assert_eq!(config.password_file, None);
     assert_eq!(config.root_ca_path, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
+    assert_eq!(config.max_concurrency, 256);
     assert!(config.client_certificate.is_none());
     assert!(!config.allow_plaintext && !config.allow_unauthenticated);
 }
@@ -119,6 +120,7 @@ fn every_violated_rule_is_reported_together() {
         allow_plaintext: true,
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         command_timeout: Duration::ZERO,
+        max_concurrency: 0,
         ..CacheInput::default()
     };
     assert_eq!(
@@ -126,7 +128,8 @@ fn every_violated_rule_is_reported_together() {
         [
             "cache.allow_plaintext",
             "cache.client_key_path",
-            "cache.command_timeout"
+            "cache.command_timeout",
+            "cache.max_concurrency"
         ]
     );
 }
@@ -168,6 +171,7 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
     let cfg = load_env(&[
         CACHE_DSN_ENV,
         ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
+        ("APP__CACHE__MAX_CONCURRENCY", "2"),
         ("APP__HTTP__REQUEST_TIMEOUT", "250ms"),
         ("APP__CACHE__MAX_KEY_BYTES", "3 KiB"),
         ("APP__CACHE__MAX_VALUE_BYTES", "17 KiB"),
@@ -178,6 +182,7 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
     let cache = cfg.cache.as_ref().unwrap();
     assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
     assert_eq!(cache.command_timeout, Duration::from_millis(200));
+    assert_eq!(cache.max_concurrency, 2);
     assert_eq!(cache.max_key_bytes, ByteSize::kib(3));
     assert_eq!(cache.max_value_bytes, ByteSize::kib(17));
     assert!(!format!("{cfg:?}").contains("hunter2"));

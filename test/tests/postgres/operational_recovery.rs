@@ -52,10 +52,9 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
 }
 
 fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
-    let work = utoipa_axum::router::OpenApiRouter::new()
-        .routes(utoipa_axum::routes!(http_value))
-        .with_state(pool);
-    infra_http::HttpContract::new(work)
+    infra_http::http_route!(http_value)
+        .unwrap()
+        .with_state(pool)
         .with_probes("/")
         .unwrap()
         .build(
@@ -569,13 +568,15 @@ mod grpc {
                 request_timeout: Duration::from_secs(8),
                 max_in_flight: NonZeroU32::new(256),
                 max_admission_wait: Duration::from_secs(1),
+            };
+            let options = infra_grpc::server_options(ConnectionLimits {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
-            };
+            });
             let app = infra_grpc::router(services, reader, authentication, limits).unwrap();
             let listener =
                 infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let server = app.serve(listener, infra_grpc::server_options(limits), None);
+            let server = app.serve(listener, options, None);
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
