@@ -279,6 +279,7 @@ _PROFILE_SECTION_ORDER = (
     "messaging",
     "worker",
     "service-secrets",
+    "service-test-tempfile",
     "integration",
     "container-integration",
     "outbox",
@@ -536,6 +537,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("webhooks")
     if inputs.inbound_webhooks == "standard-webhooks":
         selected.update(("inbound-webhooks", "request-budget"))
+    if selected & {"postgres", "cache", "grpc-jwt"}:
+        selected.add("service-test-tempfile")
     return selected
 
 
