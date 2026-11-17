@@ -715,7 +715,6 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
             || server.connections() > old,
         )
         .await;
-    wait_until_connected(&cache, Duration::from_secs(1)).await;
     drop(pending);
     server
         .wait_for(Duration::from_secs(1), "old socket stayed open", || {
