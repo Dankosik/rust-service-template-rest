@@ -1041,11 +1041,14 @@ async fn read_http_order(
     Path(id): Path<String>,
     principal: infra_http::VerifiedPrincipal,
     headers: http::HeaderMap,
-) -> Result<&'static str, Problem> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
     assert!(!headers.contains_key(AUTHORIZATION));
-    orders
-        .read_order(principal.subject(), &id)
-        .ok_or_else(|| Problem::new(FailureCode::Forbidden))
+    match orders.read_order(principal.subject(), &id) {
+        Some(order) => order.into_response(),
+        None => Problem::new(FailureCode::Forbidden).into_response(),
+    }
 }
 
 async fn verify_http_order_reads(fixture: &Fixture) {
