@@ -7,9 +7,6 @@ use crate::validate::{ValidationError, ValidationErrors, Violations, int_range};
 
 const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
 
-/// What jobs operator commands decoded; `postgres` is the only section they
-/// read. Known sibling sections are ignored while unknown top-level sections
-/// fail, and the shared loader still enforces namespace and file rules.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct JobsOperatorInput {

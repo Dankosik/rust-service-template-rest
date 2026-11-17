@@ -285,7 +285,6 @@ pub struct Config {
 
 #[allow(
     unused_macros,
-    unused_macro_rules,
     reason = "only the worker profile expands the worker configuration types"
 )]
 macro_rules! declare_worker_config {

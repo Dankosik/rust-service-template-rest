@@ -13,10 +13,10 @@ use crate::validate::{Rejected, ValidationError, Violations, required, required_
 
 /// Exact audiences accepted by an authentication profile.
 ///
-/// Configuration accepts either one string or a nonempty list on `authn.audience`,
-/// or a TOML array of strings on `authn.audiences` (`APP__AUTHN__AUDIENCES`);
-/// the two keys are mutually exclusive. Values retain their spelling; duplicate
-/// list entries collapse to their first occurrence.
+/// `authn.audience` takes one string or a nonempty list. `APP__AUTHN__AUDIENCES`
+/// takes a TOML array of strings written as one value. Setting both keys is
+/// rejected. Values retain their spelling; duplicate list entries collapse to
+/// their first occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Audiences(Vec<String>);
 
