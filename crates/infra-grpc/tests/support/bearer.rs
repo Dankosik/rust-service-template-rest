@@ -67,7 +67,8 @@ pub(super) struct BearerFixture {
 impl BearerFixture {
     #[allow(
         clippy::unused_async,
-        reason = "the introspection profile starts a local provider"
+        clippy::unused_async_trait_impl,
+        reason = "the fixture starts a local provider asynchronously when introspection is retained"
     )]
     pub(super) async fn start() -> (Verifier, Self) {
         match BearerMode::SELECTED {
