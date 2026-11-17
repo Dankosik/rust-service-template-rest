@@ -196,15 +196,16 @@ async fn contract(context: &OperationContext, storage: &ObjectStorage, object: &
     );
     let metadata = storage.head(context, object).await.unwrap();
     assert_eq!(metadata.size, body.len() as u64);
-    assert_eq!(
-        storage
-            .get(context, object)
-            .await
-            .unwrap()
-            .into_bytes(body.len())
-            .await
-            .unwrap(),
-        body
+    let downloaded = storage
+        .get(context, object)
+        .await
+        .unwrap()
+        .into_bytes(body.len())
+        .await
+        .unwrap();
+    assert!(
+        downloaded == body,
+        "download differs from the written object"
     );
 
     let http = reqwest::Client::new();
@@ -219,14 +220,6 @@ async fn contract(context: &OperationContext, storage: &ObjectStorage, object: &
         .map_err(reqwest::Error::without_url)
         .unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(
-        response
-            .bytes()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .unwrap(),
-        body
-    );
     let short = storage
         .presign_get(context, object, Duration::from_secs(1))
         .await

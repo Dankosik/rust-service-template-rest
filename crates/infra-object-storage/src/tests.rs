@@ -971,12 +971,8 @@ async fn presign_is_bounded_and_redacted() {
         .unwrap();
     assert!(url.expose().contains("X-Amz-Signature="), "presigned query");
     assert!(url.expose().contains("X-Amz-Expires=60"));
-    assert!(
-        url.expose().contains("X-Amz-SignedHeaders=host&"),
-        "{}",
-        url.expose()
-    );
-    assert_eq!(format!("{url:?}"), "PresignedUrl([REDACTED])");
+    assert!(url.expose().contains("X-Amz-SignedHeaders=host&"));
+    assert!(format!("{url:?}") == "PresignedUrl([REDACTED])");
     for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
         assert_eq!(
             storage.presign_get(&parent, &key(), expires_in).await.err(),
