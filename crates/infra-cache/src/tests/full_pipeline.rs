@@ -2,13 +2,13 @@ use std::pin::pin;
 use std::sync::atomic::Ordering;
 use std::task::Wake;
 
-use health::Probe;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use super::*;
 use crate::{Cache, CacheNamespace, namespace};
 
 const BUDGET: Duration = Duration::from_secs(30);
+const ABANDONED_COMMANDS: usize = APPLICATION_SLOTS - 1;
 
 struct FullPipeline {
     cache: Cache,
@@ -36,9 +36,10 @@ impl FullPipeline {
         let generation = Arc::new(Generation {
             connection,
             _driver: AbortOnDropHandle::new(tokio::spawn(async {})),
-            caller_capacity: Arc::new(Semaphore::new(CALLER_PIPELINE_CAPACITY)),
+            caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
             abandoned,
             retired: CancellationToken::new(),
+            cooldown_until: Instant::now(),
         });
         let shared = Arc::new(Shared {
             state: ArcSwap::from_pointee(State::Connected(generation.clone())),
@@ -59,7 +60,6 @@ impl FullPipeline {
                 command_timeout: BUDGET,
                 shared,
                 application_slots: Semaphore::new(APPLICATION_SLOTS),
-                probe_slots: Semaphore::new(PROBE_SLOTS),
                 admission_refused: Counter::noop(),
                 commands_in_flight: Gauge::noop(),
                 supervisor,
@@ -89,7 +89,7 @@ impl FullPipeline {
         let mut expected = expected.get_packed_command();
         let mut abandoned = redis::cmd("GET");
         abandoned.arg("test:abandoned");
-        expected.extend(abandoned.get_packed_command().repeat(APPLICATION_SLOTS));
+        expected.extend(abandoned.get_packed_command().repeat(ABANDONED_COMMANDS));
         expected.extend(redis::Cmd::ping().get_packed_command());
         let mut actual = vec![0; expected.len()];
         timeout(BUDGET, self.server.read_exact(&mut actual))
@@ -98,7 +98,7 @@ impl FullPipeline {
             .expect("read requests");
         assert_eq!(actual, expected);
         let mut replies = b"$4\r\nlive\r\n".to_vec();
-        replies.extend(b"$-1\r\n".repeat(APPLICATION_SLOTS));
+        replies.extend(b"$-1\r\n".repeat(ABANDONED_COMMANDS));
         replies.extend(b"+PONG\r\n");
         timeout(BUDGET, self.server.write_all(&replies))
             .await
@@ -110,7 +110,7 @@ impl FullPipeline {
 }
 
 async fn fill_with_cancelled_commands(namespace: &CacheNamespace) {
-    for _ in 0..APPLICATION_SLOTS {
+    for _ in 0..ABANDONED_COMMANDS {
         let mut abandoned = pin!(namespace.get("abandoned"));
         assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
     }
@@ -164,63 +164,4 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
         })
         .await;
     }
-}
-
-#[tokio::test]
-async fn dropping_a_probe_waiting_for_capacity_keeps_the_peer_command() {
-    tokio::task::unconstrained(async {
-        let mut pipeline = FullPipeline::new().await;
-        let namespace = pipeline.cache.namespace(namespace!("test"));
-        let generation = pipeline.generation.clone();
-        let mut peer = pin!(namespace.get("peer"));
-        assert!(futures_util::poll!(peer.as_mut()).is_pending());
-        fill_with_cancelled_commands(&namespace).await;
-        let mut maintenance = pin!(ping_until(&generation, BUDGET));
-        assert!(futures_util::poll!(maintenance.as_mut()).is_pending());
-
-        let probe = pipeline.cache.probe();
-        let mut check = probe.check();
-        assert!(futures_util::poll!(check.as_mut()).is_pending());
-        drop(check);
-        assert!(futures_util::poll!(peer.as_mut()).is_pending());
-
-        pipeline.poll_driver(Waker::noop());
-        pipeline.answer_gets_and_ping().await;
-        assert_eq!(peer.await, Ok(Some(b"live".to_vec())));
-        assert_eq!(maintenance.await, Ok(()));
-    })
-    .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
-    const EXPECTED_REQUESTS: &[u8] = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$9\r\ntest:peer\r\n";
-
-    let mut pipeline = FullPipeline::new().await;
-    let namespace = pipeline.cache.namespace(namespace!("test"));
-    let probe = pipeline.cache.probe();
-    let mut check = probe.check();
-    assert!(futures_util::poll!(check.as_mut()).is_pending());
-    let mut peer = pin!(namespace.get("peer"));
-    assert!(futures_util::poll!(peer.as_mut()).is_pending());
-
-    pipeline.poll_driver(Waker::noop());
-    let mut actual = [0; EXPECTED_REQUESTS.len()];
-    timeout(BUDGET, pipeline.server.read_exact(&mut actual))
-        .await
-        .expect("PING and GET reach the server before cancellation")
-        .expect("read requests");
-    assert_eq!(actual.as_slice(), EXPECTED_REQUESTS);
-
-    drop(check);
-    assert!(futures_util::poll!(peer.as_mut()).is_pending());
-    timeout(
-        BUDGET,
-        pipeline.server.write_all(b"+PONG\r\n$4\r\nlive\r\n"),
-    )
-    .await
-    .expect("bound reply writes")
-    .expect("answer PING and GET");
-    pipeline.poll_driver(Waker::noop());
-    assert_eq!(peer.await, Ok(Some(b"live".to_vec())));
 }

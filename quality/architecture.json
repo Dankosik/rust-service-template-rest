@@ -58,7 +58,7 @@
     },
     "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
-    "crates/infra-cache/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-cache/Cargo.toml": {"role": "cache"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
     "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
@@ -81,7 +81,7 @@
   "roles": {
     "root": {
       "rule": "composition-root-direction",
-      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-http", "telemetry", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
+      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-http", "telemetry", "cache", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
     },
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
@@ -91,6 +91,7 @@
     "service-auth": {"rule": "independent-service-token-provider"},
     "outbound-http": {"rule": "independent-outbound-http-provider"},
     "telemetry": {"rule": "independent-telemetry-provider"},
+    "cache": {"rule": "independent-cache-provider"},
     "migrator": {
       "rule": "migrator-dependencies",
       "allow_members": {

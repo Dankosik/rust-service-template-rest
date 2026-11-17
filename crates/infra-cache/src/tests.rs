@@ -28,23 +28,10 @@ fn options(
     }
 }
 
-fn admitted(dsn: &str, allow_plaintext: bool, allow_unauthenticated: bool) -> Cache {
-    on_runtime(|| {
-        Cache::start(options(dsn, allow_plaintext, allow_unauthenticated, None))
-            .expect("start connect admits without a server")
-    })
-}
-
-fn on_runtime<T>(body: impl FnOnce() -> T) -> T {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return body();
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    let _guard = runtime.enter();
-    body()
+async fn admitted(dsn: &str, allow_plaintext: bool, allow_unauthenticated: bool) -> Cache {
+    Cache::start(options(dsn, allow_plaintext, allow_unauthenticated, None))
+        .await
+        .expect("start connect admits without a server")
 }
 
 fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
@@ -304,6 +291,7 @@ struct SocketObservations {
     auth_rejections: std::sync::atomic::AtomicUsize,
     auth_error: std::sync::Mutex<String>,
     username: std::sync::Mutex<Option<String>>,
+    hello_reply_delay: std::sync::Mutex<Duration>,
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
     next_set_reply: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
@@ -325,6 +313,7 @@ impl SocketObservations {
 
     fn reply_delay(&self, arguments: &[String]) -> Duration {
         match arguments.first().map(String::as_str) {
+            Some("HELLO") => *self.hello_reply_delay.lock().expect("delay lock"),
             Some("AUTH") => *self.auth_reply_delay.lock().expect("delay lock"),
             Some("GET") if arguments.get(1).is_some_and(|key| key.ends_with(":slow")) => {
                 *self.slow_get_delay.lock().expect("delay lock")
