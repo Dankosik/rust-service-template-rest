@@ -663,7 +663,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     let app = routes
         .layer(middleware::from_fn_with_state(
             Arc::new(Admission {
-                permits: Semaphore::new(1),
+                permits: Arc::new(Semaphore::new(1)),
                 patience,
             }),
             admit,
