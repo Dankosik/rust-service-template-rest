@@ -293,6 +293,12 @@ tests:
         values: "_ 1x17 2x6"
       - series: 'jobs_attempts_total{job="jobs-worker",instance="w3",kind="invoice",outcome="permanent"}'
         values: "1x1 stale _x17 1x5"
+      - series: 'up{job="jobs-worker",instance="w4"}'
+        values: "1x15 0x8"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w4"}'
+        values: "0x12 780x2 stale"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w4",kind="reconcile",outcome="permanent"}'
+        values: "1x12 stale 1x1 stale"
     promql_expr_test:
       - expr: 'ALERTS{alertstate="firing"}'
         eval_time: 12m
@@ -310,6 +316,11 @@ tests:
         eval_time: 20m
         exp_samples:
           - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="cleanup",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="reconcile"}'
+        eval_time: 14m
+        exp_samples:
+          - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="reconcile",severity="ticket"}'
             value: 1
   # template:end jobs:monitoring-jobs-fixture
 
@@ -338,6 +349,12 @@ tests:
         values: "_ 1x17 2x6"
       - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w3",event_type="order.changed",reason="permanent",outcome="accepted"}'
         values: "1x1 stale _x17 1x5"
+      - series: 'up{job="jobs-worker",instance="w4"}'
+        values: "1x15 0x8"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w4"}'
+        values: "0x12 780x2 stale"
+      - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w4",event_type="order.reconciled",reason="permanent",outcome="accepted"}'
+        values: "1x12 stale 1x1 stale"
     promql_expr_test:
       - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
         eval_time: 2m
@@ -346,6 +363,11 @@ tests:
         eval_time: 20m
         exp_samples:
           - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="invoice.created",outcome="accepted",reason="permanent",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.reconciled",outcome="accepted",reason="permanent"}'
+        eval_time: 14m
+        exp_samples:
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.reconciled",outcome="accepted",reason="permanent",severity="ticket"}'
             value: 1
     alert_rule_test:
       - eval_time: 12m

@@ -498,6 +498,12 @@ groups:
               < ignoring(kind,outcome) group_left
               (count_over_time(process_start_time_seconds{job=~"service|jobs-worker"}[15m])
                 and (changes(process_start_time_seconds{job=~"service|jobs-worker"}[15m]) == 0))
+              or
+              (
+                jobs_attempts_total{job=~"service|jobs-worker",outcome=~"exhausted|permanent"}
+                and ignoring(kind,outcome)
+                (process_start_time_seconds{job=~"service|jobs-worker"} > min_over_time(process_start_time_seconds{job=~"service|jobs-worker"}[15m]))
+              )
             )
             and
             (
@@ -527,6 +533,12 @@ groups:
               < ignoring(event_type,reason,outcome) group_left
               (count_over_time(process_start_time_seconds{job=~"service|jobs-worker"}[15m])
                 and (changes(process_start_time_seconds{job=~"service|jobs-worker"}[15m]) == 0))
+              or
+              (
+                messaging_dead_letter_total{job=~"service|jobs-worker"}
+                and ignoring(event_type,reason,outcome)
+                (process_start_time_seconds{job=~"service|jobs-worker"} > min_over_time(process_start_time_seconds{job=~"service|jobs-worker"}[15m]))
+              )
             )
             and
             (

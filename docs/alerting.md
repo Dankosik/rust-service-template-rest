@@ -34,9 +34,10 @@ only with that profile.
    scrape targets the matching `database` label. Set each
    `pg:writer_set_changed_timestamp_seconds` to the Unix time in seconds of
    the last writer-set change.
-3. Point `runbook_url` at this page in your repository. Check the configured
-   rules with `make monitoring-rules`, then load them through `rule_files` or
-   a `PrometheusRule`.
+3. Point `runbook_url` at this page in your repository, both in the rules
+   and in the fixtures' expected annotations. Check the configured rules
+   with `make monitoring-rules`, then load them through `rule_files` or a
+   `PrometheusRule`.
 4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
    This Alertmanager example suppresses a ticket while the same SLO is paging
    for the same job. It also suppresses the slower of two active pages or two
