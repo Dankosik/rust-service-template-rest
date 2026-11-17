@@ -450,14 +450,12 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 
 #[cfg(unix)]
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the child must enter its blocking startup read before receiving the signal"
-)]
-fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {
+fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("password");
-    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let target = directory.path().join("target");
+    nix::unistd::mkfifo(&target, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    std::os::unix::fs::symlink(target, &path).unwrap();
     let service = Service::spawn(&[
         ("APP__POSTGRES__PASSWORD_FILE", path.to_str().unwrap()),
         ("APP__POSTGRES__ENABLED", "true"),
@@ -466,11 +464,13 @@ fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read()
             "postgres://service@127.0.0.1:1/service?sslmode=disable",
         ),
     ]);
-    service.await_record("service_starting");
-    std::thread::sleep(Duration::from_millis(100));
-    service.terminate();
-    let (code, stderr) = service.wait();
-    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(
+        stdout.contains("postgres password file could not be read"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("http listener bound"), "{stdout}");
 }
 // template:end postgres:service-postgres-lifecycle-admission
 

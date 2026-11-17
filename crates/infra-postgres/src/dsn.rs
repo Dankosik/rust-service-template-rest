@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
-use zeroize::Zeroizing;
+
+use crate::credentials::read_password;
 
 const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGOPTIONS"];
 
@@ -161,24 +162,6 @@ impl Dsn {
             PgSslMode::VerifyFull => "verify-full",
         }
     }
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"
-)]
-fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
-    let content =
-        std::fs::read_to_string(path).map_err(|err| DsnError::PasswordFile(err.kind()))?;
-    password_from(content)
-}
-
-pub(crate) fn password_from(content: String) -> Result<Zeroizing<String>, DsnError> {
-    let password = Zeroizing::new(shared_rules::secret_file::value(content));
-    if password.is_empty() {
-        return Err(DsnError::PasswordFileEmpty);
-    }
-    Ok(password)
 }
 
 fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnError> {
@@ -512,6 +495,13 @@ mod tests {
             admit(without_password).err(),
             Some(DsnError::PasswordFileEmpty)
         );
+        std::fs::write(&file, vec![b'x'; 16 * 1024]).unwrap();
+        assert!(admit(without_password).is_ok());
+        std::fs::write(&file, vec![b'x'; 16 * 1024 + 1]).unwrap();
+        assert_eq!(
+            admit(without_password).err(),
+            Some(DsnError::PasswordFile(std::io::ErrorKind::InvalidData))
+        );
         std::fs::write(&file, "s3cret\n").unwrap();
         assert_eq!(admit(VALID).err(), Some(DsnError::PasswordSources));
         let dsn = admit(without_password).unwrap();
@@ -525,6 +515,12 @@ mod tests {
 
         std::fs::write(&file, " p w \r\n").unwrap();
         assert_eq!(read_password(&file).unwrap().as_str(), " p w ");
+        #[cfg(unix)]
+        {
+            let mounted = dir.path().join("mounted");
+            std::os::unix::fs::symlink(&file, &mounted).unwrap();
+            assert_eq!(read_password(&mounted).unwrap().as_str(), " p w ");
+        }
         dir.close().unwrap();
     }
 

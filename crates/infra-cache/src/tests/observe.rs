@@ -35,6 +35,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
     let server = crate::ServerEndpoint {
         host: "cache.example".to_owned(),
         port: 6379,
+        database_index: 0,
         tls: true,
     };
     metrics::with_local_recorder(&recorder, || {
@@ -68,6 +69,94 @@ fn a_failed_command_names_its_cause_on_the_series() {
             assert!(scrape.contains(&series), "{series} missing from {scrape}");
         }
     }
+}
+
+#[tokio::test]
+async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
+    use futures_util::FutureExt;
+    use operation_context::Stopped;
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    use crate::{MutationError, OperationError, SetError};
+
+    let captured = super::connection::CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..options(&format!("redis://{}/7", server.address), true, true, None)
+    })
+    .await
+    .unwrap();
+    let namespace = cache.namespace(namespace!("items"));
+    let caller = OperationContext::unbounded();
+    assert_eq!(namespace.get(&caller, "secret-key").await, Ok(None));
+    let expired = OperationContext::with_timeout(Duration::ZERO);
+    assert_eq!(
+        namespace.delete(&expired, "secret-key").await,
+        Err(MutationError::NotApplied(OperationError::Stopped(
+            Stopped::Deadline
+        )))
+    );
+
+    server.stall_existing();
+    assert!(
+        namespace
+            .delete(&caller, "secret-key")
+            .now_or_never()
+            .is_none()
+    );
+    let write = namespace.set(
+        &caller,
+        "secret-key",
+        b"private-value",
+        Duration::from_secs(1),
+    );
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("write ended before disconnect: {result:?}"),
+        () = server.wait_for(Duration::from_secs(3), "write must reach Valkey", || {
+            server.command_count("SET", Some("items:secret-key")) == 1
+        }) => {}
+    }
+    server.hang_up();
+    assert_eq!(
+        write.await,
+        Err(SetError::Mutation(MutationError::OutcomeUnknown(
+            OperationError::Unavailable
+        )))
+    );
+
+    let traces = captured.rendered();
+    let span = |outcome| {
+        traces
+            .lines()
+            .find(|line| line.contains(outcome))
+            .expect(&traces)
+    };
+    let read = span("cache.outcome=\"miss\"");
+    assert!(read.contains("db.operation.name=\"MULTI\""), "{read}");
+    assert!(read.contains("db.operation.batch.size=2"), "{read}");
+    assert!(read.contains("db.namespace=7"), "{read}");
+    assert!(read.contains("cache.name=\"items\""), "{read}");
+    assert!(!read.contains("cache.mutation.outcome"), "{read}");
+    let refused = span("cache.mutation.outcome=\"not_applied\"");
+    assert!(refused.contains("db.operation.name=\"DEL\""), "{refused}");
+    let unknown = span("cache.mutation.outcome=\"outcome_unknown\"");
+    assert!(unknown.contains("db.operation.name=\"SET\""), "{unknown}");
+    let dropped = span("cache.outcome=\"cancelled\"");
+    assert!(!dropped.contains("cache.mutation.outcome"), "{dropped}");
+    assert!(
+        !traces.contains("secret-key") && !traces.contains("private-value"),
+        "{traces}"
+    );
 }
 
 #[tokio::test]

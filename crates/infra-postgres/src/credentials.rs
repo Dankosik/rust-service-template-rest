@@ -1,13 +1,15 @@
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::dsn::{DsnError, password_from};
+use crate::dsn::DsnError;
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
+const PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -66,10 +68,44 @@ impl Refresh {
 }
 
 async fn read(path: &Path) -> Result<Zeroizing<String>, DsnError> {
-    let content = tokio::fs::read_to_string(path)
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_password(&path))
         .await
-        .map_err(|err| DsnError::PasswordFile(err.kind()))?;
-    password_from(content)
+        .map_err(|_| DsnError::PasswordFile(io::ErrorKind::Other))?
+}
+
+pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
+    let content = read_file(path).map_err(|error| DsnError::PasswordFile(error.kind()))?;
+    let password = Zeroizing::new(shared_rules::secret_file::value(content));
+    if password.is_empty() {
+        return Err(DsnError::PasswordFileEmpty);
+    }
+    Ok(password)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the blocking reader validates and reads the same open descriptor"
+)]
+fn read_file(path: &Path) -> io::Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut content = io::read_to_string(file.take(PASSWORD_FILE_BYTES as u64 + 1))?;
+    if content.len() > PASSWORD_FILE_BYTES {
+        content.zeroize();
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(content)
 }
 
 #[cfg(test)]
@@ -130,7 +166,9 @@ mod tests {
         refresh.step(&pool, &file).await;
         assert!(refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("second"));
+        std::fs::write(&file, vec![b'x'; 16 * 1024 + 1]).unwrap();
         refresh.step(&pool, &file).await;
+        assert_eq!(password(&pool).as_deref(), Some("second"));
         std::fs::write(&file, "").unwrap();
         refresh.step(&pool, &file).await;
         assert_eq!(password(&pool).as_deref(), Some("second"));

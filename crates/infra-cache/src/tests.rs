@@ -26,6 +26,7 @@ fn options(
         allow_unauthenticated,
         command_timeout: Duration::from_millis(100),
         max_key_bytes: 1024,
+        max_concurrency: 256,
         max_value_bytes: 64 * 1024,
     }
 }
