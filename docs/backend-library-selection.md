@@ -91,6 +91,15 @@ Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, kernel 6.12, `net.co
 
 Docker (since Engine 25), containerd (since 1.8), and systemd (since 240) start containers with a soft `RLIMIT_NOFILE` of `1,024` under a higher hard limit for legacy `select(2)` compatibility; raising soft to hard at startup via `rlimit` prevents `EMFILE` accept failures around 1,000 connections while leaving the hard ceiling platform-owned.
 
+### Log writer
+
+The log writer thread hands the sink one write of up to 64 KiB for the records that arrived within 2 ms of its previous write; records further apart are written as they arrive. One write and one wake of the writer per record ran it on the request workers' CPUs once per request. Measured on a dedicated 4-vCPU Xeon 8358 DigitalOcean c-4 (service on two CPUs, load on the other two, interleaved rounds):
+- Closed loop, 64 connections, `/dev/null` sink: `49.4` → `41.7 µs` CPU/req (`−16%`), `39,963` → `47,866 req/s`, `p99` `2.89` → `2.04 ms`; with a 1 KiB JSON body `64.9` → `56.5 µs`. Into a pipe: `52.1` → `40.8 µs`, `37,914` → `48,892 req/s`.
+- Open loop at 24,500 req/s: `1.26` → `1.09` cores, `p99.9` `3.46` → `3.04 ms`, `p99.99` `5.57` → `3.42 ms`, involuntary context switches `0.82` → `0.02` per request. At 2,000 req/s `74.3` → `65.3 µs` CPU/req; at 20 and 200 req/s unchanged (`167` and `86 µs`).
+- Records lost to a full queue at saturation: up to `79` per 12 s run (`152` into a pipe) → `0`.
+
+The gathering ends as soon as the queue holds a quarter of its 512 records, so a burst is written at once. Rejected: an unconditional 2 ms pause (a burst above the queue's capacity inside the pause is lost where the per-record writer kept up) and writing from the request thread (a blocked sink would block requests). The cost is that a record written under load reaches the sink up to 2 ms later; reopen if a sink needs it sooner.
+
 ### Overload admission and rollout
 
 Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, service on two CPUs with two workers, loopback):

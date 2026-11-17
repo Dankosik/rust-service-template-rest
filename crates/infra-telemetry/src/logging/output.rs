@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
+const DEEP_QUEUE_RECORDS: usize = QUEUE_RECORDS / 4;
+const MAX_BATCH_BYTES: usize = 64 * 1024;
+const BATCH_WINDOW: Duration = Duration::from_millis(2);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(1);
 const DRAINING: u32 = 1 << 31;
@@ -172,6 +175,7 @@ impl Shared {
 pub(super) struct Output {
     sender: crossbeam_channel::Sender<Record>,
     shared: Arc<Shared>,
+    writer: thread::Thread,
 }
 
 impl Output {
@@ -181,7 +185,11 @@ impl Output {
             open.is_some().then(|| self.sender.try_send(record))
         };
         match sent {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                if self.sender.len() >= DEEP_QUEUE_RECORDS {
+                    self.writer.unpark();
+                }
+            }
             Some(Err(crossbeam_channel::TrySendError::Full(_))) => {
                 self.record_drop(DropReason::QueueFull);
             }
@@ -310,6 +318,7 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
         Output {
             sender,
             shared: Arc::clone(&shared),
+            writer: worker.thread().clone(),
         },
         LoggerGuard {
             shared,
@@ -326,9 +335,14 @@ fn write_records<W: Write>(
     shared: &Shared,
 ) {
     let mut dirty = false;
-    let mut torn = false;
+    let mut batch = Batch::default();
+    let mut carried: Option<Record> = None;
+    let mut last_write: Option<Instant> = None;
     loop {
-        let record = if let Ok(record) = records.try_recv() {
+        let carried_over = carried.is_some();
+        let first = if let Some(record) = carried.take() {
+            record
+        } else if let Ok(record) = records.try_recv() {
             record
         } else if dirty {
             crossbeam_channel::select_biased! {
@@ -360,22 +374,102 @@ fn write_records<W: Write>(
                 },
             }
         };
-        if torn && write_line(&mut writer, b"\n") != Written::Whole {
-            shared.record_sink_error(SinkOperation::Write);
-            dirty = true;
-            continue;
+        if !carried_over && last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
+            gather(&records, BATCH_WINDOW);
         }
-        let written = write_line(&mut writer, &record.bytes);
-        if written != Written::Whole {
-            shared.record_sink_error(SinkOperation::Write);
+        batch.clear();
+        batch.push(&first.bytes);
+        while let Ok(record) = records.try_recv() {
+            if !batch.fits(record.bytes.len()) {
+                carried = Some(record);
+                break;
+            }
+            batch.push(&record.bytes);
         }
-        torn = written == Written::Part;
+        batch.write(&mut writer, shared);
+        last_write = Some(Instant::now());
         dirty = true;
     }
     if writer.flush().is_err() {
         shared.record_sink_error(SinkOperation::Flush);
     }
     drop(records);
+}
+
+fn gather(records: &crossbeam_channel::Receiver<Record>, window: Duration) {
+    let until = Instant::now() + window;
+    while records.len() < DEEP_QUEUE_RECORDS {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        thread::park_timeout(left);
+    }
+}
+
+#[derive(Default)]
+struct Batch {
+    bytes: Vec<u8>,
+    ends: Vec<usize>,
+    torn: bool,
+}
+
+impl Batch {
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.ends.clear();
+    }
+
+    fn fits(&self, record_bytes: usize) -> bool {
+        self.bytes.len() + record_bytes <= MAX_BATCH_BYTES
+    }
+
+    fn push(&mut self, record: &[u8]) {
+        if self.ends.is_empty() && self.torn {
+            self.bytes.push(b'\n');
+        }
+        self.bytes.extend_from_slice(record);
+        self.ends.push(self.bytes.len());
+    }
+
+    fn write(&mut self, writer: &mut impl Write, shared: &Shared) {
+        let accepted = write_bytes(writer, &self.bytes);
+        if accepted == self.bytes.len() {
+            self.torn = false;
+            return;
+        }
+        shared.record_sink_error(SinkOperation::Write);
+        let prefix = usize::from(self.torn);
+        if accepted < prefix {
+            self.resume_after(1, writer, shared);
+            return;
+        }
+        let failed = self.ends.partition_point(|&end| end <= accepted);
+        let start = if failed == 0 {
+            prefix
+        } else {
+            self.ends[failed - 1]
+        };
+        self.torn = accepted > start;
+        self.resume_after(failed + 1, writer, shared);
+    }
+
+    fn resume_after(&mut self, next: usize, writer: &mut impl Write, shared: &Shared) {
+        let mut start = self.ends.get(next - 1).copied().unwrap_or(self.bytes.len());
+        for &end in self.ends.iter().skip(next) {
+            let line = &self.bytes[start..end];
+            start = end;
+            if self.torn && write_line(writer, b"\n") != Written::Whole {
+                shared.record_sink_error(SinkOperation::Write);
+                continue;
+            }
+            let written = write_line(writer, line);
+            if written != Written::Whole {
+                shared.record_sink_error(SinkOperation::Write);
+            }
+            self.torn = written == Written::Part;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -386,7 +480,18 @@ enum Written {
 }
 
 fn write_line(writer: &mut impl Write, line: &[u8]) -> Written {
-    let mut rest = line;
+    let accepted = write_bytes(writer, line);
+    if accepted == line.len() {
+        Written::Whole
+    } else if accepted > 0 {
+        Written::Part
+    } else {
+        Written::Nothing
+    }
+}
+
+fn write_bytes(writer: &mut impl Write, bytes: &[u8]) -> usize {
+    let mut rest = bytes;
     while !rest.is_empty() {
         match writer.write(rest) {
             Ok(0) => break,
@@ -395,13 +500,7 @@ fn write_line(writer: &mut impl Write, line: &[u8]) -> Written {
             Err(_) => break,
         }
     }
-    if rest.is_empty() {
-        Written::Whole
-    } else if rest.len() < line.len() {
-        Written::Part
-    } else {
-        Written::Nothing
-    }
+    bytes.len() - rest.len()
 }
 
 pub(super) fn describe_metrics() {
@@ -740,6 +839,251 @@ mod tests {
             }
             assert!(!format!("{result:?}").contains("private"));
         }
+    }
+
+    struct CountingWriter {
+        sizes: Arc<Mutex<Vec<usize>>>,
+        bytes: Arc<Mutex<Vec<u8>>>,
+        first_write: Option<(SyncSender<()>, Receiver<()>)>,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if let Some((entered, release)) = self.first_write.take() {
+                entered.send(()).expect("signal first write");
+                release
+                    .recv_timeout(TEST_TIMEOUT)
+                    .expect("release blocked test writer");
+            }
+            self.sizes.lock().expect("sizes mutex").push(bytes.len());
+            self.bytes
+                .lock()
+                .expect("test output mutex")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Counted {
+        sizes: Arc<Mutex<Vec<usize>>>,
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    type TestGate = Option<(Receiver<()>, SyncSender<()>)>;
+
+    fn counting(block_first: bool) -> (CountingWriter, Counted, TestGate) {
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (writer_gate, test_gate) = if block_first {
+            let (entered_tx, entered) = mpsc::sync_channel(1);
+            let (release, release_rx) = mpsc::sync_channel(1);
+            (Some((entered_tx, release_rx)), Some((entered, release)))
+        } else {
+            (None, None)
+        };
+        (
+            CountingWriter {
+                sizes: Arc::clone(&sizes),
+                bytes: Arc::clone(&bytes),
+                first_write: writer_gate,
+            },
+            Counted { sizes, bytes },
+            test_gate,
+        )
+    }
+
+    fn numbered(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("{index}\n")).collect()
+    }
+
+    #[test]
+    fn queued_burst_reaches_the_sink_in_few_ordered_bounded_writes() {
+        let (writer, counted, gate) = counting(true);
+        let (entered, release) = gate.expect("blocking gate");
+        let (output, guard) = start(writer).expect("start writer");
+        output.submit(record(b"first\n"));
+        entered
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("writer entered sink");
+        let lines = numbered(QUEUE_RECORDS);
+        let padded = [b'x'; 10 * 1024];
+        for line in &lines {
+            let mut bytes = padded.to_vec();
+            bytes.extend_from_slice(line.as_bytes());
+            output.submit(Record {
+                bytes: bytes.into(),
+            });
+        }
+        assert_eq!(guard.snapshot().dropped.into_array(), [0; 6]);
+        release.send(()).expect("resume sink");
+        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
+        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+
+        let expected = std::iter::once(b"first\n".to_vec())
+            .chain(lines.iter().map(|line| {
+                let mut bytes = padded.to_vec();
+                bytes.extend_from_slice(line.as_bytes());
+                bytes
+            }))
+            .flatten()
+            .collect::<Vec<u8>>();
+        assert_eq!(*counted.bytes.lock().expect("test output mutex"), expected);
+        let sizes = counted.sizes.lock().expect("sizes mutex");
+        assert!(
+            sizes.iter().all(|&size| size <= MAX_BATCH_BYTES),
+            "{sizes:?}"
+        );
+        assert!(
+            sizes.len() <= 1 + QUEUE_RECORDS / 4,
+            "{} writes for {} records",
+            sizes.len(),
+            QUEUE_RECORDS + 1
+        );
+    }
+
+    #[test]
+    fn records_further_apart_than_the_window_are_written_one_by_one() {
+        let (writer, counted, _) = counting(false);
+        let (output, guard) = start(writer).expect("start writer");
+        let pause = mpsc::channel::<()>();
+        for index in 0..3 {
+            output.submit(record(format!("{index}\n").as_bytes()));
+            while counted.sizes.lock().expect("sizes mutex").len() <= index {
+                let _ = pause.1.recv_timeout(Duration::from_millis(1));
+            }
+            let _ = pause.1.recv_timeout(BATCH_WINDOW * 5);
+        }
+        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
+        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+        assert_eq!(*counted.sizes.lock().expect("sizes mutex"), [2, 2, 2]);
+        drop(pause.0);
+    }
+
+    #[test]
+    fn a_shallow_queue_is_gathered_for_the_whole_window() {
+        let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
+        sender.send(record(b"one\n")).expect("queue a record");
+        let window = Duration::from_millis(20);
+        let started = Instant::now();
+
+        gather(&records, window);
+
+        assert!(started.elapsed() >= window);
+    }
+
+    #[test]
+    fn a_queue_that_grows_deep_ends_the_gathering_before_its_window() {
+        let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
+        let (open, _closed) = crossbeam_channel::bounded(0);
+        let (gathered_tx, gathered) = mpsc::sync_channel(1);
+        let waiter = thread::spawn(move || {
+            gather(&records, Duration::from_secs(3600));
+            gathered_tx.send(records.len()).expect("report the queue");
+        });
+        let output = Output {
+            sender,
+            shared: Arc::new(Shared {
+                closed: RwLock::new(Some(open)),
+                drain: AtomicU32::new(0),
+                counters: Counters::new(),
+            }),
+            writer: waiter.thread().clone(),
+        };
+
+        for _ in 0..DEEP_QUEUE_RECORDS {
+            output.submit(record(b"line\n"));
+        }
+
+        assert_eq!(gathered.recv_timeout(TEST_TIMEOUT), Ok(DEEP_QUEUE_RECORDS));
+    }
+
+    struct ScriptedSink {
+        accepts: std::collections::VecDeque<Option<usize>>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for ScriptedSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let accepted = match self.accepts.pop_front() {
+                Some(None) => return Err(io::Error::other("private test sink failure")),
+                Some(Some(limit)) => limit.min(bytes.len()),
+                None => bytes.len(),
+            };
+            self.bytes.extend_from_slice(&bytes[..accepted]);
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_batch_cut_short_loses_one_record_and_keeps_later_ones_on_their_own_lines() {
+        type Case = (bool, &'static [Option<usize>], &'static [u8]);
+        let cases: [Case; 6] = [
+            (false, &[None], b"bb\ncc\ndd\n"),
+            (false, &[Some(3), None], b"aa\ncc\ndd\n"),
+            (false, &[Some(4), None], b"aa\nb\ncc\ndd\n"),
+            (false, &[Some(7), None], b"aa\nbb\nc\ndd\n"),
+            (true, &[None], b"\nbb\ncc\ndd\n"),
+            (true, &[Some(1), None], b"\nbb\ncc\ndd\n"),
+        ];
+        for (after_torn_line, accepts, expected) in cases {
+            let shared = Shared {
+                closed: RwLock::new(None),
+                drain: AtomicU32::new(0),
+                counters: Counters::new(),
+            };
+            let mut sink = ScriptedSink {
+                accepts: accepts.iter().copied().collect(),
+                bytes: Vec::new(),
+            };
+            let mut batch = Batch {
+                torn: after_torn_line,
+                ..Batch::default()
+            };
+
+            for line in [b"aa\n", b"bb\n", b"cc\n"] {
+                batch.push(line);
+            }
+            batch.write(&mut sink, &shared);
+            batch.clear();
+            batch.push(b"dd\n");
+            batch.write(&mut sink, &shared);
+
+            assert_eq!(
+                sink.bytes.as_slice(),
+                expected,
+                "after_torn_line={after_torn_line} accepts={accepts:?}"
+            );
+            assert_eq!(
+                shared.counters.snapshot().sink_errors.into_array(),
+                [1, 0, 0],
+                "after_torn_line={after_torn_line} accepts={accepts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_writes_every_accepted_record_in_order() {
+        let (writer, counted, _) = counting(false);
+        let (output, guard) = start(writer).expect("start writer");
+        let lines = numbered(400);
+        for line in &lines {
+            output.submit(record(line.as_bytes()));
+        }
+        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
+        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+        assert_eq!(
+            *counted.bytes.lock().expect("test output mutex"),
+            lines.concat().as_bytes()
+        );
+        assert!(counted.sizes.lock().expect("sizes mutex").len() <= lines.len());
     }
 
     #[test]
