@@ -805,7 +805,7 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     );
     let corrupted = sqlx::query(
         "UPDATE background_jobs \
-         SET payload_text = jsonb_set(payload, '{payload_base64}', to_jsonb('not-base64'::text), false)::text \
+         SET payload_text = jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb('not-base64'::text), false)::text \
          WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
@@ -833,6 +833,10 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     )
     .await;
     assert_eq!(failed.failure_reason.as_deref(), Some("permanent"));
+    assert_eq!(
+        failed.error_summary.as_deref(),
+        Some("outbox_base64_invalid")
+    );
     assert_eq!(fixture.published().await, 0);
 
     finish(run, &[&publisher, &jobs]).await;
@@ -1119,7 +1123,7 @@ impl WebhookConsumer for HeldWebhookConsumer {
             .bind(incoming.message_id())
             .execute(&mut *tx)
             .await
-            .map_err(JobError::from)?;
+            .map_err(|_| JobError::retryable("webhook_effect_write_failed"))?;
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())

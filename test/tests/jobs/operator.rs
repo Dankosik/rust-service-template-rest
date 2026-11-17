@@ -213,11 +213,11 @@ mod outbox {
             .await
             .unwrap();
         let after = stored(&pool, &target).await;
-        assert_eq!(after["payload"], before["payload"]);
+        assert_eq!(after["payload_text"], before["payload_text"]);
         assert_eq!(after["unique_key"], before["unique_key"]);
         assert_eq!(after["id"], before["id"]);
         assert_eq!(super::super::job_count(&pool).await, 1);
-        let intent = &after["payload"];
+        let intent: Value = serde_json::from_str(after["payload_text"].as_str().unwrap()).unwrap();
         assert_eq!(intent["subject"], "events.operator.created");
         assert_eq!(intent["message_id"], "operator-recovery-event");
         assert_eq!(intent["publication_id"], "operator-recovery-event");

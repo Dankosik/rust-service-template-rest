@@ -707,7 +707,8 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     );
     let api = listener_addr(&mut worker, "http listener bound").await;
     let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
-    worker.await_record("jobs_claiming_started").await;
+    let started = worker.await_record("jobs_engine_starting").await;
+    assert_eq!(started["groups"], 2, "{started}");
     worker.await_record("jobs_worker_ready").await;
 
     let (status, _) = get(&format!("http://{api}/health/ready"))
@@ -1028,8 +1029,7 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
         &[("APP__HTTP__DRAIN_TIMEOUT", "1s")],
     );
     // template:begin outbox:test-jobs-process-shared-engines
-    let started = worker.await_record("jobs_claiming_started").await;
-    assert_eq!(started["engines"], 2, "{started}");
+    worker.await_record("jobs_claiming_started").await;
     // template:end outbox:test-jobs-process-shared-engines
     worker.await_record("jobs_worker_ready").await;
     wait_running(&pool, &id).await;

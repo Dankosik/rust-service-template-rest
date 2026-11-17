@@ -98,17 +98,27 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     .await
 }
 
-pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
+pub(crate) async fn run_sampling(
+    shared: Arc<Shared>,
+    kinds: &[&'static str],
+    cancel: CancellationToken,
+) {
+    let _reset = std::mem::DropGuard::new(kinds, |kinds| {
+        for &kind in kinds {
+            reset_kind_metrics(kind);
+        }
+        invalidate_sample();
+    });
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
-            run_kind_sampling(&shared, &cancel),
+            run_kind_sampling(&shared, kinds, &cancel),
             run_population_sampling(&shared, &cancel),
         );
     }))
     .await;
 }
 
-async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
+async fn run_kind_sampling(shared: &Shared, kinds: &[&str], cancel: &CancellationToken) {
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     while !cancel.is_cancelled() {
@@ -116,16 +126,11 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
         if cancel.is_cancelled() {
             return;
         }
-        match sample_once(shared).await {
-            Ok(Some(sample)) => {
-                if shared
-                    .peers
-                    .publish_if_current(&sample.revision, || publish_sample(&sample))
-                {
-                    observe_recovery(shared, Operation::Sample);
-                }
+        match sample_once(shared, kinds).await {
+            Ok(sample) => {
+                publish_sample(&sample);
+                observe_recovery(shared, Operation::Sample);
             }
-            Ok(None) => {}
             Err(error) => {
                 observe_failure(shared, Operation::Sample, &error);
             }
@@ -231,20 +236,16 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
     invalidate_sample();
 }
 
-pub(crate) fn reset_kind_metrics(kind: &'static str) {
+fn reset_kind_metrics(kind: &'static str) {
     publish_kind(kind, KindQueueMetrics::default());
 }
 
-pub(crate) fn invalidate_sample() {
+fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
-async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {
+async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, OperationError> {
     let _turn = shared.statement_turn.lock().await;
-    let (kinds, revision) = shared.peers.sampling_kinds();
-    if kinds.is_empty() {
-        return Ok(None);
-    }
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
             set_statement_timeout(tx, SAMPLE_STATEMENT_TIMEOUT).await?;
@@ -311,18 +312,17 @@ async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> 
                             LIMIT $2 \
                          ) AS capped \
                      ) AS failed",
-                    &kinds as _,
+                    kinds as _,
                     PER_KIND_STATE_SAMPLE_CAP,
                 )
                 .fetch_all(&mut *tx),
             )
             .await?;
-            decode_sample(rows, revision)
+            decode_sample(rows)
         })
         .await
     })
     .await
-    .map(Some)
 }
 
 struct SampleRow {
@@ -357,22 +357,17 @@ struct KindQueueMetrics {
 }
 
 struct Sample {
-    revision: Arc<()>,
     rows: Vec<SampleRow>,
     observed_at: f64,
 }
 
-fn decode_sample(rows: Vec<SampleRow>, revision: Arc<()>) -> Result<Sample, OperationError> {
+fn decode_sample(rows: Vec<SampleRow>) -> Result<Sample, OperationError> {
     let Some(observed_at) = rows.first().map(|row| row.observed_at) else {
         return Err(OperationError::Statement(sqlx::Error::Decode(
             "jobs sample returned no rows".into(),
         )));
     };
-    Ok(Sample {
-        revision,
-        rows,
-        observed_at,
-    })
+    Ok(Sample { rows, observed_at })
 }
 
 fn publish_sample(sample: &Sample) {

@@ -10,7 +10,7 @@ use infra_jobs::{
     KindsBuilder, LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy,
     StartupError, compare_live_payload, enqueue,
 };
-use infra_postgres::{Dsn, PgPool, TxError, in_tx};
+use infra_postgres::{Dsn, PgPool, Tx, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,8 @@ fn locked_multi_kind_registry() -> infra_jobs::Kinds {
         sqlx::query("INSERT INTO stranded_attempts (job_id) VALUES ($1::uuid)")
             .bind(job.id().to_string())
             .execute(job.pool())
-            .await?;
+            .await
+            .map_err(|_| JobError::retryable("probe write failed"))?;
         job.cancellation().cancelled().await;
         Err(JobError::retryable("stranded test cancellation"))
     });
@@ -1190,28 +1191,35 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgPool) {
+async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     let jobs = open(&pool, 2).await;
     prepare(&jobs).await;
-    let ordinary = Engine::new(
+    let mut engine = Engine::new(
         jobs.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::MIN,
     );
     let mut kinds = KindsBuilder::new();
-    kinds.register(Policy::default(), |_: Job<Stranded>| async { Ok(()) });
-    let reserved = ordinary.beside(
-        kinds.validate().expect("the reserved kind"),
-        NonZeroU32::MIN,
-    );
+    let release = Arc::new(Notify::new());
+    let gate = Arc::clone(&release);
+    kinds.register(Policy::default(), move |_: Job<Stranded>| {
+        let gate = Arc::clone(&gate);
+        async move {
+            gate.notified().await;
+            Ok(())
+        }
+    });
+    engine
+        .add_group(
+            kinds.validate().expect("the reserved kind"),
+            NonZeroU32::MIN,
+        )
+        .expect("the groups have different kinds");
     let recorder = WakeRecorder::default();
     let _local = metrics::set_default_local_recorder(&recorder);
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
-    let runs = [
-        ordinary.start(&tracker, &cancel),
-        reserved.start(&tracker, &cancel),
-    ];
+    let run = engine.start(&tracker, &cancel);
     let listener = wake_listener_ready(&jobs, &recorder, 2).await;
     let mut clock = WakeClock::pause().await;
     prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME, Stranded::NAME])
@@ -1224,7 +1232,7 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
         .await;
     clock.advance_cooldown().await;
     clock
-        .wait("the engine beside claims", recorder.observations.pickup())
+        .wait("the reserved group claims", recorder.observations.pickup())
         .await;
     let view = clock
         .wait("the reserved claim", load(&jobs, &reserved_id))
@@ -1241,14 +1249,20 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
 
     let ordinary_id = enqueue_one(&jobs, ProbeAction::Succeed).await;
     let by_ordinary = completed(&jobs, &ordinary_id).await.attempted_by;
+    until(
+        "only the reserved job is running",
+        super::WAIT,
+        async || (run.in_flight() == 1).then_some(()),
+    )
+    .await;
+    run.stop_claiming();
+    assert!(futures_util::poll!(Box::pin(run.drained())).is_pending());
+    release.notify_one();
+    super::bounded("both groups drain", run.drained()).await;
     let by_reserved = completed(&jobs, &reserved_id).await.attempted_by;
     assert!(by_ordinary.is_some());
     assert_eq!(by_ordinary, by_reserved);
 
-    for run in &runs {
-        run.stop_claiming();
-        super::bounded("the engine drains", run.drained()).await;
-    }
     cancel.cancel();
     tracker.close();
     super::bounded("the engine tasks join", tracker.wait()).await;
@@ -1275,7 +1289,8 @@ fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Kinds {
                 capped.peak.fetch_max(running, Ordering::SeqCst);
                 let pass = capped.open.acquire().await;
                 capped.running.fetch_sub(1, Ordering::SeqCst);
-                pass.map_err(JobError::permanent)?.forget();
+                pass.map_err(|_| JobError::permanent("test semaphore closed"))?
+                    .forget();
                 Ok(())
             }
         },
@@ -1620,37 +1635,32 @@ fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Kind
     kinds.validate().expect("the grace registry")
 }
 
+impl infra_jobs::TransactionalHandler<TransactionGate> for Arc<TransactionGateState> {
+    async fn run(
+        &self,
+        job: infra_jobs::TransactionalJob<TransactionGate>,
+        tx: &mut Tx<'_>,
+    ) -> Result<(), JobError> {
+        sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
+            .bind(job.id().to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| JobError::retryable("test effect write failed"))?;
+        self.business_written.notify_one();
+        self.complete.notified().await;
+        Ok(())
+    }
+}
+
 fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::Kinds {
     let mut kinds = KindsBuilder::new();
-    kinds.register::<TransactionGate>(
+    kinds.register_transactional::<TransactionGate>(
         Policy {
             max_attempts: 2,
             timeout: DEFAULT_TIMEOUT,
             ..Policy::default()
         },
-        move |job: Job<TransactionGate>| {
-            let gate = Arc::clone(&gate);
-            async move {
-                let completed = in_tx(job.pool(), async |tx| -> Result<(), AttemptError> {
-                    sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
-                        .bind(job.id().to_string())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(AttemptError::Query)?;
-                    gate.business_written.notify_one();
-                    gate.complete.notified().await;
-                    job.complete_in_tx(tx).await.map_err(|error| match error {
-                        infra_jobs::CompleteError::Database(error) => AttemptError::Query(error),
-                        infra_jobs::CompleteError::StaleClaim => AttemptError::Rejected,
-                    })
-                })
-                .await;
-                completed.map_err(|error| match error {
-                    AttemptError::Tx(TxError::CommitUnknown(error)) => JobError::retryable(error),
-                    error => JobError::retryable(error),
-                })
-            }
-        },
+        gate,
     );
     kinds.validate().expect("the transactional gate registry")
 }
@@ -1695,7 +1705,10 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
         gate.entered.notified(),
     )
     .await;
-    proxy.arm_autocommit(Fault::ForwardThenDrop, "SET state = 'completed'");
+    proxy.arm_autocommit(
+        Fault::ForwardThenDrop,
+        "UPDATE background_jobs AS job SET state = 'completed'",
+    );
     gate.complete.notify_one();
 
     let view = completed(&jobs, &id).await;
@@ -1709,7 +1722,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool: PgPool) {
     let jobs = open(&pool, 1).await;
-    let replacement = open(&pool, 1).await;
+    let (proxy, replacement) = proxied_pool(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
         .execute(&jobs)
         .await
@@ -1786,6 +1799,7 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     assert_eq!(view.error_summary, reclaimed.error_summary);
     assert!(!view.claim_cleared);
 
+    proxy.arm_autocommit(Fault::ForwardThenDrop, "SET state = 'completed'");
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;
     assert_eq!(done.attempts, 2);
@@ -1799,6 +1813,12 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     );
     finish(run, &[]).await;
     finish(replacement_run, &[&jobs, &replacement]).await;
+    assert_eq!(
+        proxy.fired(),
+        None,
+        "a confirmed transaction needs no second completion"
+    );
+    proxy.shutdown().await;
 }
 
 async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPool, fault: Fault) {

@@ -110,7 +110,7 @@ enum Ended {
 struct Prepared {
     readiness: PreparedReadiness,
     // template:begin jobs:worker-bootstrap-prepared-jobs
-    engines: Vec<infra_jobs::Engine>,
+    engine: Option<infra_jobs::Engine>,
     // template:end jobs:worker-bootstrap-prepared-jobs
     // template:begin messaging:worker-bootstrap-prepared-consumer
     consumer: Option<infra_messaging::Consumer>,
@@ -200,7 +200,7 @@ async fn run_worker(
         return ended;
     }
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
-    if let Some(ended) = jobs::start_engines(prepared.engines, resources, background, signals) {
+    if let Some(ended) = jobs::start_engine(prepared.engine, resources, background, signals) {
         return ended;
     }
     // template:end jobs:worker-bootstrap-start-admitted-jobs
@@ -347,12 +347,12 @@ async fn prepare(
     };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
-    let engines = jobs::build_engines(config, capabilities.jobs.take(), resources).await?;
+    let engine = jobs::build_engine(config, capabilities.jobs.take(), resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
     Ok(Prepared {
         readiness: prepare_readiness(config, &metrics, background, resources).await?,
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
-        engines,
+        engine,
         // template:end jobs:worker-bootstrap-prepared-jobs-value
         // template:begin messaging:worker-bootstrap-prepared-consumer-value
         consumer,

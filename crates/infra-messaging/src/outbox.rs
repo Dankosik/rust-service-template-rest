@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::Producer;
-use crate::error::EnvelopeError;
+use crate::error::PublishError;
 use crate::prepared::{PreparedEvent, PreparedEventParts};
 use crate::wire::prefixed_digest_hex;
 
@@ -45,20 +45,6 @@ pub enum OutboxEnqueueError {
     LiveIdentityChanged,
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
-}
-
-#[derive(Debug, thiserror::Error)]
-enum IntentError {
-    #[error("format version is not supported")]
-    FormatVersion,
-    #[error("occurrence time is out of range")]
-    Timestamp,
-    #[error("payload is not base64")]
-    Base64,
-    #[error("payload is not JSON")]
-    NotJson,
-    #[error(transparent)]
-    Envelope(#[from] EnvelopeError),
 }
 
 pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
@@ -172,14 +158,15 @@ struct Publisher {
 
 impl Handler<PublishDomainEvent> for Publisher {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
-        let event = job.payload().to_prepared().map_err(|error| {
-            JobError::permanent(format!("outbox immutable intent is invalid: {error}"))
-        })?;
+        let event = job.payload().to_prepared().map_err(JobError::permanent)?;
         self.producer
             .publish(&event, &job.context())
             .await
             .map(|_| ())
-            .map_err(JobError::retryable)
+            .map_err(|error| match error {
+                PublishError::Rejected => JobError::retryable("publication_rejected"),
+                PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
+            })
     }
 }
 
@@ -265,21 +252,21 @@ impl PublishDomainEvent {
 }
 
 impl PublishDomainEvent {
-    fn to_prepared(&self) -> Result<PreparedEvent, IntentError> {
+    fn to_prepared(&self) -> Result<PreparedEvent, &'static str> {
         if self.format_version != FORMAT_VERSION {
-            return Err(IntentError::FormatVersion);
+            return Err("outbox_format_unsupported");
         }
         let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
             .ok()
             .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond).ok())
-            .ok_or(IntentError::Timestamp)?;
+            .ok_or("outbox_timestamp_invalid")?;
         let payload = self
             .payload
             .clone()
-            .map_err(|InvalidBase64| IntentError::Base64)?;
+            .map_err(|InvalidBase64| "outbox_base64_invalid")?;
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
-            .map_err(|_| IntentError::NotJson)?;
-        Ok(PreparedEvent::from_parts(PreparedEventParts {
+            .map_err(|_| "outbox_json_invalid")?;
+        PreparedEvent::from_parts(PreparedEventParts {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),
             publication_id: self.publication_id.clone(),
@@ -287,7 +274,8 @@ impl PublishDomainEvent {
             schema_version: self.schema_version,
             occurred_at,
             payload,
-        })?)
+        })
+        .map_err(|_| "outbox_envelope_invalid")
     }
 }
 
@@ -309,8 +297,8 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        FORMAT_VERSION, IntentError, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL,
-        PublishDomainEvent, event_key, raw_payload_capacity,
+        FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
+        event_key, raw_payload_capacity,
     };
     use crate::prepared::{PreparedEvent, PreparedEventParts};
 
@@ -383,7 +371,7 @@ mod tests {
         corrupt["payload_base64"] = serde_json::Value::String("not-base64".to_owned());
         let stored: PublishDomainEvent =
             serde_json::from_value(corrupt).expect("corrupt base64 still decodes as an outbox job");
-        std::assert_matches!(stored.to_prepared(), Err(IntentError::Base64));
+        std::assert_matches!(stored.to_prepared(), Err("outbox_base64_invalid"));
 
         let mut non_string = baseline;
         non_string["payload_base64"] = serde_json::Value::Null;

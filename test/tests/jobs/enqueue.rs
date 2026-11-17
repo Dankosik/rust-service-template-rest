@@ -141,7 +141,7 @@ async fn open(pool: &PgPool, max_connections: u32) -> PgPool {
 
 async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
     let row = sqlx::query(
-        "SELECT id::text AS id_text, kind, payload::text AS payload, \
+        "SELECT id::text AS id_text, kind, payload_text, payload IS NULL AS text_only, \
          unique_key IS NULL AS unique_key_is_null, state, attempts, claim_generation, \
          claim_expires_at IS NULL AS claim_expires_at_is_null, \
          finished_at IS NULL AS finished_at_is_null, \
@@ -154,11 +154,12 @@ async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
     .fetch_one(pool)
     .await
     .expect("the committed job");
-    let payload: String = row.try_get("payload").expect("payload");
+    let payload: String = row.try_get("payload_text").expect("canonical payload");
+    assert!(row.get::<bool, _>("text_only"));
     StoredJob {
         id_text: row.try_get("id_text").expect("id_text"),
         kind: row.try_get("kind").expect("kind"),
-        payload: serde_json::from_str(&payload).expect("JSONB payload"),
+        payload: serde_json::from_str(&payload).expect("JSON payload"),
         unique_key_is_null: row
             .try_get("unique_key_is_null")
             .expect("unique_key_is_null"),
@@ -1355,6 +1356,36 @@ async fn e6_compare_live_payload_distinguishes_same_and_different_live_duplicate
     .expect("the conflicting duplicate commits");
     assert_eq!(different, LivePayloadComparison::Different);
     assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1);
+    super::close_pools(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn previous_producers_remain_comparable_after_the_storage_migration(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    let note = Note {
+        text: "existing".to_owned(),
+    };
+    let bytes = serde_json::to_string(&note).unwrap();
+    in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        sqlx::query(
+            "INSERT INTO background_jobs (id, kind, unique_key, payload, payload_text, not_before) \
+             VALUES (gen_random_uuid(), $1, 'legacy', $2::text::jsonb, NULL, now()), \
+                    (gen_random_uuid(), $1, 'dual', $2::text::jsonb, $2, now())",
+        )
+        .bind(Note::NAME)
+        .bind(&bytes)
+        .execute(&mut *tx)
+        .await?;
+        for key in ["legacy", "dual"] {
+            assert_eq!(
+                duplicate_then_compare(tx, key, &note).await?,
+                LivePayloadComparison::Same
+            );
+        }
+        Ok(())
+    })
+    .await
+    .expect("both generations of producer can write and match their live job");
     super::close_pools(&[&jobs]).await;
 }
 
