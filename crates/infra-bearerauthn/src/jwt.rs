@@ -9,9 +9,9 @@ use moka::{Expiry, sync::Cache};
 use shared_rules::rfc7515;
 
 use crate::{
-    BearerToken, JwtAlgorithm, Principal, VerificationError, VerificationReason,
+    JwtAlgorithm, PresentedToken, Principal, VerificationError, VerificationReason,
     claims::{ClaimPolicy, VerifiedJwt, validate_jwt_claims},
-    jwks::MAX_SIGNATURE_BYTES,
+    jwks::{KeySet, MAX_SIGNATURE_BYTES},
     refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh},
 };
 
@@ -59,6 +59,7 @@ pub(crate) struct JwtVerifier {
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
     key_store: Arc<KeyStore>,
+    jwks_max_age: Duration,
     remembered: Cache<Box<[u8]>, Remembered, foldhash::quality::RandomState>,
 }
 
@@ -68,12 +69,14 @@ impl JwtVerifier {
         token_profile: TokenProfile,
         algorithms: Vec<JwtAlgorithm>,
         key_store: Arc<KeyStore>,
+        jwks_max_age: Duration,
     ) -> Self {
         Self {
             claim_policy,
             token_profile,
             algorithms,
             key_store,
+            jwks_max_age,
             remembered: Cache::builder()
                 .max_capacity(MAX_REMEMBERED)
                 .expire_after(RememberedExpiry)
@@ -85,20 +88,22 @@ impl JwtVerifier {
 impl JwtVerifier {
     pub(crate) async fn verify(
         &self,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
     ) -> Result<Principal, VerificationError> {
         self.verify_with_now(token, crate::unix_now).await
     }
 
     async fn verify_with_now(
         &self,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
         now: impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<Principal, VerificationError> {
         let bytes = token.as_bytes();
+        let keys = self.key_store.current();
+        keys.require_fresh(self.jwks_max_age)?;
         if let Some(remembered) = self.remembered.get(bytes) {
-            if remembered.key_generation == self.key_store.generation() {
-                let verified = remembered.verified.deliver(now()?.as_secs(), token);
+            if remembered.key_generation == keys.generation() {
+                let verified = remembered.verified.deliver(now()?.as_secs());
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -106,16 +111,17 @@ impl JwtVerifier {
             }
             self.remembered.invalidate(bytes);
         }
-        let remembered = self.verify_uncached(token, &now).await?;
-        let principal = remembered.verified.identity.presented_as(token);
+        let remembered = self.verify_uncached(token, &now, keys).await?;
+        let principal = remembered.verified.identity.clone();
         self.remembered.insert(bytes.into(), remembered);
         Ok(principal)
     }
 
     async fn verify_uncached(
         &self,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
         now: &impl Fn() -> Result<Duration, VerificationError>,
+        keys: Arc<KeySet>,
     ) -> Result<Remembered, VerificationError> {
         let rfc7515::Compact {
             signing_input: message,
@@ -143,23 +149,31 @@ impl JwtVerifier {
                 now.as_secs(),
             )
         };
-        let key_generation = self
-            .verify_signature(message, signature, header.kid.as_deref(), algorithm, || {
-                decoded_payload()
-                    .and_then(|payload| admitted_claims(payload, now()?))
-                    .is_ok()
-            })
+        let signing_keys = self
+            .verify_signature(
+                keys,
+                message,
+                signature,
+                header.kid.as_deref(),
+                algorithm,
+                || {
+                    decoded_payload()
+                        .and_then(|payload| admitted_claims(payload, now()?))
+                        .is_ok()
+                },
+            )
             .await?;
         let payload = decoded_payload()?;
         let sampled_at = MonotonicInstant::now();
         let now = now()?;
         let verified = admitted_claims(payload, now)?;
+        signing_keys.require_fresh(self.jwks_max_age)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR
                 .min(Duration::from_secs(verified.identity.expires_at()).saturating_sub(now)),
             sampled_at,
             verified,
-            key_generation,
+            key_generation: signing_keys.generation(),
         })
     }
 
@@ -190,25 +204,32 @@ impl JwtVerifier {
 
     async fn verify_signature(
         &self,
+        checked: Arc<KeySet>,
         message: &[u8],
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
         claims_would_be_admitted: impl FnOnce() -> bool,
-    ) -> Result<u64, VerificationError> {
-        let checked = self.key_store.current();
+    ) -> Result<Arc<KeySet>, VerificationError> {
         let Err(miss) = checked.verify(message, signature, kid, algorithm) else {
-            return Ok(checked.generation());
+            return Ok(checked);
         };
         if !claims_would_be_admitted() {
             return Err(miss.into());
         }
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::NewerSet(key_set) => {
+                key_set.require_fresh(self.jwks_max_age)?;
                 key_set.verify(message, signature, kid, algorithm)?;
-                Ok(key_set.generation())
+                Ok(key_set)
             }
-            SignatureRefresh::NoNewerSet => Err(miss.into()),
+            SignatureRefresh::NoNewerSet => {
+                checked.require_fresh(self.jwks_max_age)?;
+                Err(miss.into())
+            }
+            SignatureRefresh::WorkerLost => Err(VerificationError::unavailable(
+                VerificationReason::RefreshWorkerLost,
+            )),
         }
     }
 }
@@ -263,6 +284,7 @@ mod tests {
             TokenProfile::ResourceServer,
             algorithms.to_vec(),
             KeyStore::new(keys),
+            Duration::from_hours(1),
         )
     }
 
@@ -325,21 +347,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_jwk_without_alg_serves_every_configured_algorithm_of_its_family() {
-        let both = [JwtAlgorithm::Rs256, JwtAlgorithm::Ps256];
+    async fn a_jwk_without_alg_is_rejected_when_its_family_has_multiple_allowed_algorithms() {
+        let algorithms = [
+            JwtAlgorithm::Rs256,
+            JwtAlgorithm::Ps256,
+            JwtAlgorithm::Es256,
+        ];
         let keys = key_set(
-            &[jwk(&rsa_signing(), Algorithm::RS256, Some("entra"), false)],
-            &both,
+            &[
+                jwk(&rsa_signing(), Algorithm::RS256, Some("ambiguous"), false),
+                jwk(&ec_signing(), Algorithm::ES256, Some("unrelated"), true),
+            ],
+            &algorithms,
         );
-        let verifier = verifier(keys, &both);
+        let verifier = verifier(keys, &algorithms);
         for algorithm in [Algorithm::RS256, Algorithm::PS256] {
             let token = signed(
                 &rsa_signing(),
                 algorithm,
-                Some("entra"),
+                Some("ambiguous"),
                 &serde_json::json!({}),
             );
-            check(&verifier, &token).await.unwrap();
+            assert_eq!(
+                check(&verifier, &token).await.unwrap_err(),
+                VerificationReason::UnknownKey
+            );
         }
     }
 
@@ -629,20 +661,6 @@ mod tests {
             assert!(!rendered.contains("verified-tenant"));
             assert!(!rendered.contains("permissions"));
         }
-    }
-
-    #[tokio::test]
-    async fn access_token_equals_the_presented_bearer_text() {
-        use secrecy::ExposeSecret;
-        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
-        let token = signed(
-            &rsa_signing(),
-            Algorithm::RS256,
-            Some("fixture"),
-            &serde_json::json!({}),
-        );
-        let principal = check(&verifier, &token).await.unwrap();
-        assert_eq!(principal.access_token().expose_secret(), token);
     }
 
     #[tokio::test]
@@ -1577,6 +1595,45 @@ mod tests {
         assert_eq!(remembered_count(&memo), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stale_keys_refuse_cached_and_unseen_tokens_until_a_successful_acquisition() {
+        let signing = ec_signing();
+        let verifier = ec_verifier(&signing, "k");
+        let token = |subject: &str| {
+            let jwt = signed(
+                &signing,
+                Algorithm::ES256,
+                Some("k"),
+                &serde_json::json!({"sub": subject, "exp": u64::MAX}),
+            );
+            format!("Bearer {jwt}")
+        };
+        let cached = token("cached");
+        let unseen = token("unseen");
+        let cached = parse_bearer([cached.as_bytes()]).unwrap();
+        let unseen = parse_bearer([unseen.as_bytes()]).unwrap();
+        verifier.verify(&cached).await.unwrap();
+        tokio::time::advance(Duration::from_hours(1) - Duration::from_nanos(1)).await;
+        verifier.key_store.finish(1, Err(KeySetFailure::Parse));
+        verifier.verify(&cached).await.unwrap();
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        for token in [&cached, &unseen] {
+            let error = verifier.verify(token).await.unwrap_err();
+            assert_eq!(error.failure, Failure::Unavailable);
+            assert_eq!(error.reason, VerificationReason::StaleJwks);
+        }
+        verifier.key_store.finish(
+            2,
+            Ok(key_set(
+                &[jwk(&signing, Algorithm::ES256, Some("k"), true)],
+                &[JwtAlgorithm::Es256],
+            )),
+        );
+        for token in [&cached, &unseen] {
+            verifier.verify(token).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn a_remembered_token_is_refused_once_its_key_rotates_to_another_key_under_the_same_kid()
     {
@@ -1608,8 +1665,11 @@ mod tests {
                 .map(|remembered| remembered.key_generation)
         };
         verify_at(&memo, &token, 1_000).await.unwrap();
-        assert_eq!(generation(&memo), Some(memo.key_store.generation()));
-        let before = memo.key_store.generation();
+        assert_eq!(
+            generation(&memo),
+            Some(memo.key_store.current().generation())
+        );
+        let before = memo.key_store.current().generation();
         memo.key_store.finish(
             1,
             Ok(key_set(
@@ -1617,9 +1677,12 @@ mod tests {
                 &[JwtAlgorithm::Es256],
             )),
         );
-        assert_ne!(before, memo.key_store.generation());
+        assert_ne!(before, memo.key_store.current().generation());
         verify_at(&memo, &token, 1_000).await.unwrap();
-        assert_eq!(generation(&memo), Some(memo.key_store.generation()));
+        assert_eq!(
+            generation(&memo),
+            Some(memo.key_store.current().generation())
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1640,7 +1703,10 @@ mod tests {
         memo.key_store.finish(1, Ok(rotated_set));
         assert_eq!(call.await.unwrap(), Ok(()));
         let remembered = memo.remembered.get(token.as_bytes()).unwrap();
-        assert_eq!(remembered.key_generation, memo.key_store.generation());
+        assert_eq!(
+            remembered.key_generation,
+            memo.key_store.current().generation()
+        );
         assert!(verify_at(&memo, &token, 1_000).await.is_ok());
     }
 

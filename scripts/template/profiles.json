@@ -49,6 +49,7 @@
   },
   "oidc-jwt": {
     "remove_when_unselected": [
+      "env/config/oidc-jwt.toml",
       "crates/infra-bearerauthn/src/jwks.rs",
       "crates/infra-bearerauthn/src/jwt.rs",
       "crates/infra-bearerauthn/src/jwt/prepare.rs",

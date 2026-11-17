@@ -34,6 +34,8 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
         ..LoadOptions::default()
     };
     let environment = env(&[
+        ("APP__AUTHN__TOKEN_PROFILE", "resource-server"),
+        ("APP__AUTHN__JWKS_MAX_AGE", "1h"),
         ("APP__AUTHN__ALGORITHMS", "ES256, EdDSA"),
         ("APP__AUTHN__AUDIENCES", r#"["api-a", " api-b ", "api-a"]"#),
     ]);
@@ -142,7 +144,7 @@ fn jwt_load_accepts_a_quoted_date_or_list_from_a_later_file() {
     let base = write(
         &dir,
         "base.toml",
-        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = 2026-11-13\n",
+        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = 2026-11-13\ntoken_profile = \"resource-server\"\njwks_max_age = \"1h\"\n",
     );
     for (input, expected) in [
         (r#""2026-11-13""#, &["2026-11-13"][..]),
@@ -174,6 +176,8 @@ fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
         r#"
         mode = "oidc-jwt"
         issuer = " issuer grammar belongs to the adapter "
+        token_profile = "resource-server"
+        jwks_max_age = "1h"
         audience = "service"
         "#,
     )
@@ -185,6 +189,7 @@ fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
         audience = ["service", " api ", "service"]
         algorithms = ["ES256", "EdDSA"]
         token_profile = "rfc9068"
+        jwks_max_age = "1h"
         "#,
     )
     .unwrap();
@@ -227,6 +232,8 @@ fn jwt_rejects_empty_algorithms_and_invalid_audience_shape() {
         issuer = "issuer"
         audience = "service"
         algorithms = []
+        token_profile = "resource-server"
+        jwks_max_age = "1h"
         "#,
     )
     .unwrap();
@@ -246,7 +253,7 @@ fn jwt_rejects_empty_algorithms_and_invalid_audience_shape() {
 fn jwt_accepts_an_optional_nonblank_jwks_uri() {
     let source = |extra: &str| {
         parse(&format!(
-            "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n{extra}"
+            "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\ntoken_profile = \"rfc9068\"\njwks_max_age = \"1h\"\n{extra}"
         ))
         .unwrap()
     };
@@ -278,6 +285,8 @@ fn jwt_debug_redacts_trust_inputs() {
         mode = "oidc-jwt"
         issuer = "https://private-issuer.example"
         audience = "private-audience"
+        token_profile = "resource-server"
+        jwks_max_age = "1h"
         "#,
     )
     .unwrap();
@@ -399,6 +408,10 @@ fn modes_reject_foreign_provider_fields() {
     for (source, expected_key) in [
         ("mode = \"none\"\nissuer = \"issuer\"\n", "authn.issuer"),
         // template:begin oidc-jwt:authn-foreign-fields-jwt-case
+        (
+            "mode = \"none\"\njwks_max_age = \"1h\"\n",
+            "authn.jwks_max_age",
+        ),
         (
             "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
             "authn.introspection_endpoint",
@@ -620,6 +633,7 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
             ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
             ("APP__AUTHN__AUDIENCE", "service"),
             ("APP__AUTHN__TOKEN_PROFILE", "rfc9068"),
+            ("APP__AUTHN__JWKS_MAX_AGE", "1m"),
             ("APP__AUTHN__JWKS_URI", jwks_uri),
         ])
     };
@@ -632,6 +646,7 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
     let AuthnConfig::OidcJwt {
         token_profile,
         jwks_uri,
+        jwks_max_age,
         ..
     } = &jwt.authn
     else {
@@ -639,6 +654,7 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
     };
     assert_eq!(*token_profile, TokenProfile::Rfc9068);
     assert_eq!(jwks_uri.as_deref(), Some("https://issuer.example/keys"));
+    assert_eq!(*jwks_max_age, std::time::Duration::from_mins(1));
     assert!(load_from(&LoadOptions::default(), BUILD, jwt_environment(" ")).is_err());
 }
 // template:end oidc-jwt:load-jwt-token-profile-environment
@@ -655,25 +671,45 @@ fn introspection_secret_in_a_file_is_refused() {
 
 // template:begin oidc-jwt:load-jwt-token-profile-file
 #[test]
-fn jwt_token_profile_in_a_file_is_public() {
-    let dir = tempfile::tempdir().unwrap();
-    let profile = write(
-        &dir,
-        "profile.toml",
-        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\ntoken_profile = \"rfc9068\"\n",
-    );
+fn the_projected_jwt_overlay_selects_rfc9068_with_service_supplied_trust_inputs() {
+    let configs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../env/config");
     let cfg = load_from(
         &LoadOptions {
-            config: Some(profile),
+            config: Some(configs.join("local.toml")),
+            config_overlay: vec![configs.join("oidc-jwt.toml")],
             ..LoadOptions::default()
         },
         BUILD,
-        env(&[]),
+        env(&[
+            ("APP__AUTHN__ISSUER", "https://issuer.example"),
+            ("APP__AUTHN__AUDIENCE", "service"),
+            ("APP__AUTHN__JWKS_MAX_AGE", "1h"),
+        ]),
     )
     .unwrap();
     let AuthnConfig::OidcJwt { token_profile, .. } = &cfg.authn else {
         panic!("expected OIDC JWT configuration");
     };
     assert_eq!(*token_profile, TokenProfile::Rfc9068);
+}
+
+#[test]
+fn enabling_jwt_requires_an_explicit_profile_and_supported_maximum_key_age() {
+    let base = "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n";
+    for (extra, key) in [
+        ("jwks_max_age = \"1h\"", "authn.token_profile"),
+        ("token_profile = \"resource-server\"", "authn.jwks_max_age"),
+        (
+            "token_profile = \"rfc9068\"\njwks_max_age = \"0s\"",
+            "authn.jwks_max_age",
+        ),
+        (
+            "token_profile = \"rfc9068\"\njwks_max_age = \"59999ms\"",
+            "authn.jwks_max_age",
+        ),
+    ] {
+        let input = parse(&format!("{base}{extra}")).unwrap();
+        assert!(admit_with(|v| input.admit(v)).unwrap_err().names(key));
+    }
 }
 // template:end oidc-jwt:load-jwt-token-profile-file

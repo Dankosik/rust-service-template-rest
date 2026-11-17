@@ -27,7 +27,6 @@ itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
-secrecy = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
 bytes = { workspace = true, features = ["std"] }

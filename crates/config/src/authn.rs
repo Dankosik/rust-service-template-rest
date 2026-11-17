@@ -99,10 +99,9 @@ where
 }
 
 // template:begin oidc-jwt:authn-token-profile
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TokenProfile {
-    #[default]
     ResourceServer,
     /// Require RFC 9068 access-token typing and claims.
     Rfc9068,
@@ -149,7 +148,7 @@ pub(crate) struct AuthnInput {
     #[serde(default, deserialize_with = "deserialize_audience_list")]
     audiences: Option<Audiences>,
     // template:begin oidc-jwt:authn-config-jwt-variant
-    /// JWT access-token contract. Missing uses `resource-server`.
+    /// Required JWT access-token contract.
     #[serde(default, deserialize_with = "crate::de::optional_string_enum")]
     token_profile: Option<TokenProfile>,
     /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
@@ -160,6 +159,9 @@ pub(crate) struct AuthnInput {
     /// metadata.
     #[serde(default, deserialize_with = "crate::de::optional_string")]
     jwks_uri: Option<String>,
+    /// Maximum age since the verifier last acquired usable keys.
+    #[serde(default, deserialize_with = "crate::de::optional_duration")]
+    jwks_max_age: Option<std::time::Duration>,
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
     #[serde(default, deserialize_with = "crate::de::optional_string")]
@@ -203,6 +205,7 @@ pub enum AuthnConfig {
         token_profile: TokenProfile,
         algorithms: Vec<JwtAlgorithm>,
         jwks_uri: Option<String>,
+        jwks_max_age: std::time::Duration,
     },
     // template:end oidc-jwt:authn-admitted-jwt-variant
     // template:begin oidc-introspection:authn-admitted-introspection-variant
@@ -229,6 +232,21 @@ impl std::fmt::Debug for AuthnConfig {
 }
 
 // template:begin oidc-jwt:authn-default-algorithms
+fn required_jwks_max_age(
+    value: Option<std::time::Duration>,
+    condition: &str,
+) -> Result<std::time::Duration, ValidationError> {
+    let key = "authn.jwks_max_age";
+    let age = required(key, value, condition)?;
+    let minimum = shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE;
+    if age < minimum {
+        return Err(ValidationError::new(
+            key, format!("must be at least {}", crate::de::display_duration(minimum))
+        ));
+    }
+    Ok(age)
+}
+
 fn default_algorithms() -> Vec<JwtAlgorithm> {
     vec![JwtAlgorithm::Rs256]
 }
@@ -332,6 +350,7 @@ impl AuthnInput {
             ("authn.token_profile", self.token_profile.is_some()),
             ("authn.algorithms", self.algorithms.is_some()),
             ("authn.jwks_uri", self.jwks_uri.is_some()),
+            ("authn.jwks_max_age", self.jwks_max_age.is_some()),
         ] {
             if present {
                 v.check(Err(ValidationError::new(
@@ -389,7 +408,12 @@ impl AuthnInput {
                 let condition = "authn.mode = oidc-jwt";
                 let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
                 let audience = self.take_audience(condition, v);
-                let token_profile = self.token_profile.unwrap_or_default();
+                let token_profile = v.take(required(
+                    "authn.token_profile",
+                    self.token_profile,
+                    condition,
+                ));
+                let jwks_max_age = v.take(required_jwks_max_age(self.jwks_max_age, condition));
                 let algorithms = self.algorithms.unwrap_or_else(default_algorithms);
                 if self
                     .jwks_uri
@@ -410,7 +434,8 @@ impl AuthnInput {
                 Ok(AuthnConfig::OidcJwt {
                     issuer: issuer?,
                     audience: audience?,
-                    token_profile,
+                    token_profile: token_profile?,
+                    jwks_max_age: jwks_max_age?,
                     algorithms,
                     jwks_uri: self.jwks_uri,
                 })

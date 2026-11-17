@@ -108,6 +108,8 @@ impl Example {
             .env("APP__GRPC__CERTIFICATE", certificate)
             .env("APP__GRPC__PRIVATE_KEY", private_key)
             .env("APP__AUTHN__MODE", "oidc-jwt")
+            .env("APP__AUTHN__TOKEN_PROFILE", "resource-server")
+            .env("APP__AUTHN__JWKS_MAX_AGE", "1h")
             .env("APP__AUTHN__ISSUER", &fixture.issuer)
             .env("APP__AUTHN__AUDIENCE", "grpc-example")
             .env("SSL_CERT_FILE", &fixture.root_path)

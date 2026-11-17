@@ -238,6 +238,23 @@ impl Services {
 
     // template:begin authn:grpc-services-require-scopes
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
+        self.register_scopes(path, scopes, false)
+    }
+
+    pub fn require_scopes_for_delegation(
+        &mut self,
+        path: &str,
+        scopes: &[&str],
+    ) -> Result<(), Error> {
+        self.register_scopes(path, scopes, true)
+    }
+
+    fn register_scopes(
+        &mut self,
+        path: &str,
+        scopes: &[&str],
+        delegate: bool,
+    ) -> Result<(), Error> {
         if !self.is_registered_method(path) {
             return Err(Error::UnregisteredMethodPath(path.to_owned()));
         }
@@ -245,7 +262,10 @@ impl Services {
             return Err(Error::DuplicateScopeRequirement(path.to_owned()));
         }
         let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
-        self.scopes.insert(path.to_owned(), scopes);
+        self.scopes.insert(
+            path.to_owned(),
+            crate::authn::ScopeRequirement { scopes, delegate },
+        );
         Ok(())
     }
     // template:end authn:grpc-services-require-scopes

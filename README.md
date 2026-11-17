@@ -108,6 +108,15 @@ configured.
 - `AUTHN=oidc-jwt|oidc-introspection`: bearer authentication against an OIDC
   provider ([`infra-bearerauthn`](crates/infra-bearerauthn)).
 <!-- template:end authn:readme-authn-profile -->
+<!-- template:begin oidc-jwt:readme-jwt-migration -->
+  For a new JWT service, pass `--config-overlay env/config/oidc-jwt.toml` and
+  supply the issuer, API audience and `authn.jwks_max_age` for the deployment.
+  The overlay selects RFC 9068 access tokens. When migrating an existing JWT
+  service, set `authn.token_profile` explicitly. An omitted profile previously
+  selected `resource-server`. Qualify the issuer and choose the key-revocation
+  window before rolling out the new binary. See the
+  [production contract](docs/production-contract.md#edge-and-trust).
+<!-- template:end oidc-jwt:readme-jwt-migration -->
 <!-- template:begin outbound-http:readme-outbound-http-profile -->
 - `OUTBOUND_HTTP=bounded`: an HTTPS client with budgets
   ([`infra-outbound-http`](crates/infra-outbound-http)).
