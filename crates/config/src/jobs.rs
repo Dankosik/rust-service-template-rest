@@ -49,14 +49,16 @@ impl Default for JobsConfig {
 }
 
 impl JobsConfig {
-    pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
+    pub fn validate_pool_capacity(
+        &self,
+        postgres_max_connections: NonZeroU32,
+    ) -> Result<(), ValidationError> {
         let required = self.ordinary_pool_requirement();
-        if u64::from(postgres.max_connections.get()) < required {
+        if u64::from(postgres_max_connections.get()) < required {
             return Err(ValidationError::new(
                 "postgres.max_connections",
                 format!(
-                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker, got {}",
-                    postgres.max_connections
+                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker, got {postgres_max_connections}"
                 ),
             ));
         }
@@ -70,7 +72,7 @@ impl JobsConfig {
     // template:begin outbox:jobs-outbox-capacity
     pub fn validate_pool_capacity_with_outbox(
         &self,
-        postgres: &PostgresConfig,
+        postgres_max_connections: NonZeroU32,
         ordinary_jobs: bool,
     ) -> Result<(), ValidationError> {
         const PUBLISHER_CONNECTIONS: u64 = 3;
@@ -83,12 +85,11 @@ impl JobsConfig {
         } else {
             (PUBLISHER_CONNECTIONS, PUBLISHER_CONNECTIONS.to_string())
         };
-        if u64::from(postgres.max_connections.get()) < required {
+        if u64::from(postgres_max_connections.get()) < required {
             return Err(ValidationError::new(
                 "postgres.max_connections",
                 format!(
-                    "must be at least {formula} ({required}) for the outbox worker, got {}",
-                    postgres.max_connections
+                    "must be at least {formula} ({required}) for the outbox worker, got {postgres_max_connections}"
                 ),
             ));
         }
