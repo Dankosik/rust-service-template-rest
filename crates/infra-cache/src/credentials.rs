@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use tokio_util::task::TaskTracker;
 use zeroize::Zeroizing;
 
 use crate::CacheError;
 
 const DEFAULT_USER: &str = "default";
+const PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(derive_more::Debug)]
 #[debug("PasswordFile {{ .. }}")]
@@ -50,20 +52,21 @@ impl PasswordFile {
         &self.username
     }
 
-    pub(crate) async fn read(&self) -> Result<Zeroizing<String>, ReadFailure> {
+    pub(crate) async fn read(&self, tasks: &TaskTracker) -> Result<Zeroizing<String>, ReadFailure> {
         let permit = self
             .reading
             .clone()
             .try_acquire_owned()
             .map_err(|_| ReadFailure::Busy)?;
         let path = self.path.clone();
-        let content = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            read_password_file(&path)
-        })
-        .await
-        .map_err(|_| ReadFailure::Panicked)?
-        .map_err(ReadFailure::Io)?;
+        let content = tasks
+            .spawn_blocking(move || {
+                let _permit = permit;
+                read_password_file(&path)
+            })
+            .await
+            .map_err(|_| ReadFailure::Panicked)?
+            .map_err(ReadFailure::Io)?;
         password_from(content).ok_or(ReadFailure::Empty)
     }
 }
@@ -71,10 +74,9 @@ impl PasswordFile {
 #[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    clippy::verbose_file_reads,
     reason = "blocking workers must read from the same descriptor they validated as a regular file"
 )]
-pub(crate) fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -83,17 +85,20 @@ pub(crate) fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
 
         options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     if !file.metadata()?.is_file() {
         return Err(ErrorKind::InvalidInput.into());
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(ErrorKind::InvalidData.into());
+    }
     Ok(bytes)
 }
 
 fn read_password_file(path: &Path) -> Result<String, ErrorKind> {
-    let bytes = read_regular_file(path).map_err(|error| error.kind())?;
+    let bytes = read_regular_file(path, PASSWORD_FILE_BYTES).map_err(|error| error.kind())?;
     String::from_utf8(bytes).map_err(|_| ErrorKind::InvalidData)
 }
 

@@ -18,7 +18,6 @@ use infra_grpc::Services;
 use infra_object_storage::{
     CredentialSource, ObjectKey, ObjectStorage, ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
-use operation_context::OperationContext;
 use serde::Serialize;
 use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -331,7 +330,11 @@ impl Echo {
         Ok("ok".to_owned())
     }
 
-    async fn upload(&self, context: &OperationContext) -> Result<String, Status> {
+    async fn upload(&self, request: &Request<UnaryRequest>) -> Result<String, Status> {
+        let context = request
+            .extensions()
+            .get()
+            .ok_or_else(|| Status::internal("missing operation context"))?;
         self.counts.upload_started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.upload_active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts
@@ -443,13 +446,7 @@ impl EchoService for Echo {
                 message
             }
             Some("cpu") => self.cpu().await?,
-            Some("upload") => {
-                let context = request
-                    .extensions()
-                    .get::<OperationContext>()
-                    .ok_or_else(|| Status::internal("fixture request context unavailable"))?;
-                self.upload(context).await?
-            }
+            Some("upload") => self.upload(&request).await?,
             Some("prepare") => self.prepare()?,
             Some("log") => {
                 self.counts.log_attempted.fetch_add(1, Ordering::SeqCst);

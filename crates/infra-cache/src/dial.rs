@@ -7,7 +7,7 @@ use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_util::either::Either;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -36,6 +36,7 @@ impl Dial {
         &self,
         settings: &redis::RedisConnectionInfo,
         config: redis::AsyncConnectionConfig,
+        tasks: &TaskTracker,
     ) -> redis::RedisResult<Dialed> {
         let tcp = self.connect_tcp().await?;
         let stream = match &self.tls {
@@ -46,7 +47,7 @@ impl Dial {
             MultiplexedConnection::new_with_config(settings, stream, config).await?;
         Ok(Dialed {
             connection,
-            driver: AbortOnDropHandle::new(tokio::spawn(driver)),
+            driver: AbortOnDropHandle::new(tasks.spawn(driver)),
         })
     }
 
