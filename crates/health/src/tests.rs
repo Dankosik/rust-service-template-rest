@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use proptest::prelude::*;
 
@@ -36,20 +36,55 @@ impl Probe for Hanging {
     }
 }
 
-fn policy() -> RefreshPolicy {
-    RefreshPolicy {
-        interval: Duration::from_millis(50),
-        probe_budget: Duration::from_millis(20),
-        failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
+struct Slow {
+    name: &'static str,
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl Probe for Slow {
+    fn name(&self) -> &'static str {
+        self.name
     }
+    async fn check(&self) -> Result<(), ProbeError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(())
+    }
+}
+
+struct Gated {
+    hold: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl Probe for Gated {
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+    async fn check(&self) -> Result<(), ProbeError> {
+        if self.hold.load(Ordering::Relaxed) {
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+fn policy() -> RefreshPolicy {
+    RefreshPolicy::try_new(
+        Duration::from_millis(50),
+        Duration::from_millis(20),
+        NonZeroU32::new(3).unwrap(),
+    )
+    .unwrap()
 }
 
 fn flaky_probe(healthy: bool) -> (Box<dyn Probe>, Arc<AtomicBool>, Arc<AtomicU32>) {
     let flag = Arc::new(AtomicBool::new(healthy));
     let calls = Arc::new(AtomicU32::new(0));
     let probe = Box::new(Flaky {
-        healthy: flag.clone(),
-        calls: calls.clone(),
+        healthy: Arc::clone(&flag),
+        calls: Arc::clone(&calls),
     });
     (probe, flag, calls)
 }
@@ -57,6 +92,56 @@ fn flaky_probe(healthy: bool) -> (Box<dyn Probe>, Arc<AtomicBool>, Arc<AtomicU32
 fn flaky(healthy: bool) -> (Readiness, Arc<AtomicBool>, Arc<AtomicU32>) {
     let (probe, flag, calls) = flaky_probe(healthy);
     (Readiness::new(vec![probe], policy()), flag, calls)
+}
+
+#[test]
+fn probe_error_formats_borrowed_and_owned_messages() {
+    let borrowed = ProbeError::from_static("connection refused");
+    let owned = ProbeError::format(format_args!("upstream status {}", 503));
+    assert_eq!(borrowed.to_string(), "connection refused");
+    assert_eq!(owned.to_string(), "upstream status 503");
+}
+
+#[test]
+fn refresh_policy_enforces_duration_bounds() {
+    let threshold = NonZeroU32::new(3).unwrap();
+    let valid = Duration::from_millis(50);
+
+    for invalid in [
+        Duration::ZERO,
+        Duration::from_micros(999),
+        Duration::from_hours(1) + Duration::from_nanos(1),
+    ] {
+        assert_eq!(
+            RefreshPolicy::try_new(invalid, valid, threshold),
+            Err(PolicyError::Interval(invalid))
+        );
+        assert_eq!(
+            RefreshPolicy::try_new(valid, invalid, threshold),
+            Err(PolicyError::ProbeBudget(invalid))
+        );
+    }
+
+    for boundary in [Duration::from_millis(1), Duration::from_hours(1)] {
+        let by_interval = RefreshPolicy::try_new(boundary, valid, threshold).unwrap();
+        assert_eq!(by_interval.interval, boundary);
+        assert_eq!(by_interval.probe_budget, valid);
+        assert_eq!(by_interval.failure_threshold, threshold);
+
+        let by_budget = RefreshPolicy::try_new(valid, boundary, threshold).unwrap();
+        assert_eq!(by_budget.interval, valid);
+        assert_eq!(by_budget.probe_budget, boundary);
+        assert_eq!(by_budget.failure_threshold, threshold);
+    }
+
+    assert_eq!(policy().stale_after(), Duration::from_millis(170));
+    let budget_dominated = RefreshPolicy::try_new(
+        Duration::from_millis(10),
+        Duration::from_millis(40),
+        threshold,
+    )
+    .unwrap();
+    assert_eq!(budget_dominated.stale_after(), Duration::from_millis(160));
 }
 
 #[tokio::test]
@@ -110,6 +195,55 @@ async fn healthy_instance_survives_blips_below_the_threshold() {
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
     assert_eq!(readiness.reader().verdict(), Ok(()), "one success recovers");
+}
+
+#[tokio::test(start_paused = true)]
+async fn is_ready_and_is_draining_match_verdict_across_lifecycle() {
+    let assert_state = |reader: &ReadinessReader, expected_ready: bool, expected_draining: bool| {
+        assert_eq!(reader.is_ready(), expected_ready);
+        assert_eq!(reader.is_draining(), expected_draining);
+        assert_eq!(reader.verdict().is_ok(), expected_ready);
+        assert_eq!(
+            reader.verdict() == Err(NotReady::Draining),
+            expected_draining
+        );
+    };
+
+    let (readiness, flag, _) = flaky(true);
+    let reader = readiness.reader();
+
+    assert_eq!(reader.verdict(), Err(NotReady::NotEvaluated));
+    assert_state(&reader, false, false);
+
+    readiness.refresh().await;
+    assert_eq!(reader.verdict(), Ok(()));
+    assert_state(&reader, true, false);
+
+    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+    std::assert_matches!(reader.verdict(), Err(NotReady::Stale { .. }));
+    assert_state(&reader, false, false);
+
+    readiness.refresh().await;
+    assert_eq!(reader.verdict(), Ok(()));
+    assert_state(&reader, true, false);
+
+    flag.store(false, Ordering::Relaxed);
+    readiness.refresh().await;
+    assert_eq!(reader.verdict(), Ok(()));
+    assert_state(&reader, true, false);
+
+    readiness.refresh().await;
+    readiness.refresh().await;
+    std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
+    assert_state(&reader, false, false);
+
+    flag.store(true, Ordering::Relaxed);
+    readiness.refresh().await;
+    assert_state(&reader, true, false);
+
+    readiness.start_drain();
+    assert_eq!(reader.verdict(), Err(NotReady::Draining));
+    assert_state(&reader, false, true);
 }
 
 #[tokio::test(start_paused = true)]
@@ -228,190 +362,6 @@ async fn a_verdict_nobody_refreshes_goes_stale() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
-    let (readiness, flag, _) = flaky(false);
-    assert_eq!(
-        readiness.arm_progress(),
-        Err(ArmError::Refused(NotReady::NotEvaluated))
-    );
-    readiness.refresh().await;
-    std::assert_matches!(
-        readiness.arm_progress(),
-        Err(ArmError::Refused(NotReady::ProbeFailed { .. }))
-    );
-    assert!(readiness.observe_progress_loss().is_none());
-    flag.store(true, Ordering::Relaxed);
-    readiness.refresh().await;
-    tokio::time::advance(policy().stale_after()).await;
-    assert_eq!(readiness.arm_progress(), Ok(()), "equality is fresh");
-    tokio::time::advance(Duration::from_nanos(1)).await;
-    assert!(
-        readiness.observe_progress_loss().is_some(),
-        "arm must not reset age"
-    );
-
-    let (late, _, _) = flaky(true);
-    late.refresh().await;
-    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    assert_eq!(late.arm_progress(), Err(ArmError::ProgressLost));
-    assert!(late.progress_lost());
-    late.start_drain();
-    assert_eq!(
-        late.arm_progress(),
-        Err(ArmError::ProgressLost),
-        "a lost gap outranks the drain refusal"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
-    let (readiness, _, _) = flaky(true);
-    readiness.refresh().await;
-    readiness.arm_progress().unwrap();
-    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    readiness.refresh().await;
-    let loss = readiness
-        .observe_progress_loss()
-        .expect("terminal completion gap");
-    std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
-    readiness.refresh().await;
-    assert_eq!(readiness.observe_progress_loss(), Some(loss));
-    readiness.stop_progress();
-    assert_eq!(readiness.observe_progress_loss(), Some(loss));
-    readiness.start_drain();
-    readiness.refresh().await;
-    assert_eq!(readiness.observe_progress_loss(), Some(loss));
-    assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
-}
-
-#[tokio::test(start_paused = true)]
-async fn progress_observer_needs_no_readers_or_new_completions() {
-    let readiness = Readiness::new(Vec::new(), policy());
-    readiness.refresh().await;
-    readiness.arm_progress().unwrap();
-    let cancel = CancellationToken::new();
-    let mut observer = Box::pin(readiness.wait_for_progress_loss(&cancel));
-    assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
-    tokio::time::advance(policy().stale_after()).await;
-    assert!(
-        readiness.observe_progress_loss().is_none(),
-        "strictly above the bound"
-    );
-    tokio::time::advance(Duration::from_millis(1)).await;
-    let loss = tokio::time::timeout(Duration::from_millis(1), observer)
-        .await
-        .expect("observer wakes without a reader or publication")
-        .expect("progress loss");
-    assert_eq!(readiness.observe_progress_loss(), Some(loss));
-}
-
-#[tokio::test(start_paused = true)]
-async fn stop_and_drain_close_obligations_but_preserve_an_already_expired_gap() {
-    for drain in [false, true] {
-        for expired in [false, true] {
-            let (readiness, _, _) = flaky(true);
-            readiness.refresh().await;
-            readiness.arm_progress().unwrap();
-            tokio::time::advance(
-                policy().stale_after()
-                    + if expired {
-                        Duration::from_nanos(1)
-                    } else {
-                        Duration::ZERO
-                    },
-            )
-            .await;
-            if drain {
-                readiness.start_drain();
-            } else {
-                readiness.stop_progress();
-                assert_eq!(readiness.progress_lost(), expired);
-            }
-            tokio::time::advance(policy().stale_after() * 2).await;
-            assert_eq!(readiness.observe_progress_loss().is_some(), expired);
-            readiness.refresh().await;
-            assert_eq!(readiness.observe_progress_loss().is_some(), expired);
-            readiness.start_drain();
-            assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
-            if !expired {
-                let cancel = CancellationToken::new();
-                let mut observer = Box::pin(readiness.wait_for_progress_loss(&cancel));
-                assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
-                cancel.cancel();
-                assert_eq!(observer.await, None, "stop alone cannot end tracked work");
-            }
-        }
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn failed_and_timed_out_completed_rounds_keep_armed_progress_recoverable() {
-    struct Controlled(Arc<AtomicU32>);
-    #[async_trait::async_trait]
-    impl Probe for Controlled {
-        fn name(&self) -> &'static str {
-            "controlled"
-        }
-        async fn check(&self) -> Result<(), ProbeError> {
-            match self.0.load(Ordering::Relaxed) {
-                0 => Ok(()),
-                1 => Err(ProbeError::from_static("unavailable")),
-                _ => std::future::pending().await,
-            }
-        }
-    }
-    for outcome in [1, 2] {
-        let control = Arc::new(AtomicU32::new(0));
-        let readiness = Readiness::new(vec![Box::new(Controlled(control.clone()))], policy());
-        readiness.refresh().await;
-        readiness.arm_progress().unwrap();
-        control.store(outcome, Ordering::Relaxed);
-        for _ in 0..10 {
-            tokio::time::advance(policy().interval).await;
-            readiness.refresh().await;
-            assert!(readiness.observe_progress_loss().is_none());
-        }
-        assert!(readiness.reader().verdict().is_err());
-        control.store(0, Ordering::Relaxed);
-        readiness.refresh().await;
-        assert_eq!(readiness.reader().verdict(), Ok(()));
-        assert!(readiness.observe_progress_loss().is_none());
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recovery() {
-    let events = Events::default();
-    let _guard = tracing::subscriber::set_default(events.clone());
-    let recorder = recorder();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (readiness, flag, _) = flaky(true);
-    readiness.refresh().await;
-    readiness.arm_progress().unwrap();
-    flag.store(false, Ordering::Relaxed);
-    for _ in 0..3 {
-        readiness.refresh().await;
-    }
-    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    flag.store(true, Ordering::Relaxed);
-    readiness.refresh().await;
-    assert!(readiness.observe_progress_loss().is_some());
-    readiness.stop_progress();
-    readiness.start_drain();
-    readiness.refresh().await;
-    assert_sample(&recorder.handle().render(), "readiness_ready 0");
-    let logged = events.0.lock().unwrap();
-    assert_eq!(
-        logged
-            .iter()
-            .filter(|event| *event == "readiness_progress_lost")
-            .count(),
-        1
-    );
-    assert!(!logged.iter().any(|event| event == "readiness_recovered"));
-}
-
-#[tokio::test(start_paused = true)]
 async fn refreshes_on_the_interval_and_stops_on_cancel() {
     let (readiness, flag, _) = flaky(true);
     let cancel = CancellationToken::new();
@@ -453,7 +403,6 @@ async fn refresh_until_stops_while_an_evaluation_is_in_flight() {
     let readiness = Readiness::new(vec![Box::new(Hanging)], policy());
     let cancel = CancellationToken::new();
     let refresher = tokio::spawn({
-        let readiness = readiness.clone();
         let cancel = cancel.clone();
         async move { readiness.refresh_until(cancel).await }
     });
@@ -477,72 +426,18 @@ async fn an_already_cancelled_refresher_never_checks_a_probe() {
     assert_eq!(readiness.reader().verdict(), Err(NotReady::NotEvaluated));
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_zero_interval_refreshes_at_the_timer_resolution() {
-    let (probe, _, calls) = flaky_probe(true);
-    let readiness = Readiness::new(
-        vec![probe],
-        RefreshPolicy {
-            interval: Duration::ZERO,
-            probe_budget: Duration::from_micros(100),
-            ..policy()
-        },
-    );
-    let cancel = CancellationToken::new();
-    let refresher = tokio::spawn({
-        let readiness = readiness.clone();
-        let cancel = cancel.clone();
-        async move { readiness.refresh_until(cancel).await }
-    });
-    readiness.tx.subscribe().changed().await.unwrap();
-    readiness.arm_progress().unwrap();
-    for _ in 0..3 {
-        tokio::time::advance(MIN_INTERVAL).await;
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(readiness.reader().verdict(), Ok(()));
-    assert!(
-        readiness.observe_progress_loss().is_none(),
-        "a refresher on schedule is not a completion gap"
-    );
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        4,
-        "the first check, then one per millisecond"
-    );
-
-    cancel.cancel();
-    refresher
-        .await
-        .expect("a zero interval must not panic the refresher");
-}
-
-struct Slow {
-    name: &'static str,
-    delay: Duration,
-}
-
-#[async_trait::async_trait]
-impl Probe for Slow {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-    async fn check(&self) -> Result<(), ProbeError> {
-        tokio::time::sleep(self.delay).await;
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_named() {
     let (healthy, _, healthy_calls) = flaky_probe(true);
     let (failing, _, failing_calls) = flaky_probe(false);
     let readiness = Readiness::new(
         vec![Box::new(Hanging), healthy, failing],
-        RefreshPolicy {
-            probe_budget: Duration::from_millis(1),
-            ..policy()
-        },
+        RefreshPolicy::try_new(
+            policy().interval,
+            Duration::from_millis(1),
+            policy().failure_threshold,
+        )
+        .unwrap(),
     );
     readiness.refresh().await;
     let verdict = readiness.reader().verdict();
@@ -559,42 +454,23 @@ async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_n
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_budget_beyond_the_clock_runs_probes_without_a_deadline() {
-    let readiness = Readiness::new(
-        vec![Box::new(Slow {
-            name: "slow",
-            delay: Duration::from_secs(60),
-        })],
-        RefreshPolicy {
-            probe_budget: Duration::MAX,
-            ..policy()
-        },
-    );
-    assert_eq!(readiness.admit().await, Ok(()));
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
-    struct Gated(Arc<tokio::sync::Notify>);
-    #[async_trait::async_trait]
-    impl Probe for Gated {
-        fn name(&self) -> &'static str {
-            "gated"
-        }
-        async fn check(&self) -> Result<(), ProbeError> {
-            self.0.notified().await;
-            Ok(())
-        }
-    }
     let recorder = recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let readiness = Readiness::new(vec![Box::new(Gated(gate.clone()))], policy());
+    let hold = Arc::new(AtomicBool::new(true));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let readiness = Readiness::new(
+        vec![Box::new(Gated {
+            hold,
+            release: Arc::clone(&release),
+        })],
+        policy(),
+    );
     let refresh = readiness.refresh();
     tokio::pin!(refresh);
     assert!(futures_util::FutureExt::now_or_never(refresh.as_mut()).is_none());
     readiness.start_drain();
-    gate.notify_one();
+    release.notify_one();
     refresh.await;
     assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
     assert_sample(&recorder.handle().render(), "readiness_ready 0");
@@ -743,6 +619,35 @@ async fn the_ready_gauge_is_the_published_verdict() {
         Some("readiness_ready 1")
     );
 
+    let stale_wakeup = recorder();
+    {
+        let _recorder = metrics::set_default_local_recorder(&stale_wakeup);
+        let hold = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let readiness = Readiness::new(
+            vec![Box::new(Gated {
+                hold: Arc::clone(&hold),
+                release: Arc::clone(&release),
+            })],
+            policy(),
+        );
+        readiness.refresh().await;
+        assert_eq!(ready(&stale_wakeup).as_deref(), Some("readiness_ready 1"));
+        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+        hold.store(true, Ordering::Relaxed);
+        let refresh = readiness.refresh();
+        tokio::pin!(refresh);
+        assert!(futures_util::FutureExt::now_or_never(refresh.as_mut()).is_none());
+        assert_eq!(
+            ready(&stale_wakeup).as_deref(),
+            Some("readiness_ready 0"),
+            "stale wakeup drops ready gauge before slow probes finish"
+        );
+        release.notify_one();
+        refresh.await;
+        assert_eq!(ready(&stale_wakeup).as_deref(), Some("readiness_ready 1"));
+    }
+
     let withdrawn = recorder();
     {
         let _recorder = metrics::set_default_local_recorder(&withdrawn);
@@ -764,77 +669,6 @@ async fn the_ready_gauge_is_the_published_verdict() {
         readiness.refresh().await;
     }
     assert_eq!(ready(&draining).as_deref(), Some("readiness_ready 0"));
-}
-
-#[tokio::test(start_paused = true)]
-async fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    let timestamp = || {
-        handle
-            .render()
-            .lines()
-            .find_map(|line| line.strip_prefix("readiness_last_completed_timestamp_seconds "))
-            .expect("completion timestamp is exposed")
-            .parse::<f64>()
-            .unwrap()
-    };
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (readiness, flag, _) = flaky(true);
-    assert_eq!(timestamp(), 0.0);
-    assert_sample(&handle.render(), "readiness_stale_after_seconds 0.17");
-    let before = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    readiness.refresh().await;
-    let completed = timestamp();
-    let after = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    assert!((before..=after).contains(&completed));
-    tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
-    assert_eq!(
-        timestamp().to_bits(),
-        completed.to_bits(),
-        "stopped refresh leaves a dated completion"
-    );
-    assert_sample(&handle.render(), "readiness_ready 1");
-    std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
-    readiness.start_drain();
-    assert_eq!(
-        timestamp().to_bits(),
-        completed.to_bits(),
-        "drain does not forge a completion"
-    );
-    flag.store(false, Ordering::Relaxed);
-    let before_failure = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    readiness.refresh().await;
-    assert!(
-        timestamp() >= before_failure,
-        "failure during drain is still a completion"
-    );
-    assert_sample(&handle.render(), "readiness_ready 0");
-
-    let hanging = Readiness::new(vec![Box::new(Hanging)], policy());
-    let cancel = CancellationToken::new();
-    let refresh = hanging.refresh_until(cancel.clone());
-    tokio::pin!(refresh);
-    std::future::poll_fn(|cx| {
-        assert!(refresh.as_mut().poll(cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    assert_eq!(timestamp(), 0.0, "in-flight is not completed");
-    cancel.cancel();
-    refresh.await;
-    assert_eq!(timestamp(), 0.0, "cancellation is not completed");
-    hanging.refresh().await;
-    assert!(timestamp() > 0.0, "a timed-out round is completed");
 }
 
 #[tokio::test(start_paused = true)]
@@ -883,33 +717,119 @@ async fn a_draining_owner_logs_no_check_outcome() {
 
 // template:begin grpc:health-changed-verdict-test
 #[tokio::test(start_paused = true)]
-async fn an_unrepresentable_stale_edge_waits_for_publication_or_cancellation() {
-    let readiness = Readiness::new(
-        vec![],
-        RefreshPolicy {
-            interval: Duration::from_secs(4_000_000_000_000_000_000),
-            ..policy()
-        },
-    );
+async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain() {
+    let (readiness, flag, _) = flaky(true);
     readiness.refresh().await;
-    assert_eq!(readiness.arm_progress(), Ok(()));
-
-    let cancel = CancellationToken::new();
-    let progress = readiness.wait_for_progress_loss(&cancel);
     let mut reader = readiness.reader();
-    let publication = reader.wait_for_verdict_event();
-    tokio::pin!(progress, publication);
-    tokio::select! {
-        biased;
-        result = &mut progress => panic!("unexpected progress loss: {result:?}"),
-        result = &mut publication => panic!("unexpected publication: {result:?}"),
-        () = std::future::ready(()) => {},
+    let waiter = tokio::spawn(async move {
+        let result = reader.wait_for_verdict_event().await;
+        (reader, result)
+    });
+    tokio::task::yield_now().await;
+
+    for _ in 0..6 {
+        tokio::time::advance(policy().interval).await;
+        readiness.refresh().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "steady-state Ok -> Ok must not wake waiter past original stale_after"
+        );
     }
 
-    cancel.cancel();
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..2 {
+        tokio::time::advance(policy().interval).await;
+        readiness.refresh().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "absorbed failure keeps verdict ready and waiter asleep"
+        );
+    }
+
+    tokio::time::advance(policy().interval).await;
     readiness.refresh().await;
-    assert!(progress.await.is_none());
-    assert_eq!(publication.await, Ok(()));
+    let (mut reader, result) = tokio::time::timeout(Duration::from_millis(1), waiter)
+        .await
+        .expect("threshold failure wakes waiter immediately")
+        .unwrap();
+    assert_eq!(result, Ok(()));
+    assert!(!reader.is_ready());
+
+    flag.store(true, Ordering::Relaxed);
+    readiness.refresh().await;
+    assert_eq!(reader.wait_for_verdict_event().await, Ok(()));
+    assert!(reader.is_ready());
+
+    let waiter = tokio::spawn(async move {
+        let result = reader.wait_for_verdict_event().await;
+        (reader, result)
+    });
+    tokio::task::yield_now().await;
+
+    for _ in 0..6 {
+        tokio::time::advance(policy().interval).await;
+        readiness.refresh().await;
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+    }
+
+    readiness.start_drain();
+    let (reader, result) = tokio::time::timeout(Duration::from_millis(1), waiter)
+        .await
+        .expect("start_drain wakes waiter immediately")
+        .unwrap();
+    assert_eq!(result, Ok(()));
+    assert!(reader.is_draining());
+    assert!(!reader.is_ready());
+    assert_eq!(reader.verdict(), Err(NotReady::Draining));
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_for_drain_or_owner_drop_resolves_on_both_events() {
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    let mut reader = readiness.reader();
+    let waiter = tokio::spawn(async move {
+        reader.wait_for_drain_or_owner_drop().await;
+        reader
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
+        readiness.refresh().await;
+    }
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "probe failure must not resolve wait_for_drain_or_owner_drop"
+    );
+
+    readiness.start_drain();
+    let mut reader = tokio::time::timeout(Duration::from_millis(1), waiter)
+        .await
+        .expect("start_drain must resolve wait_for_drain_or_owner_drop")
+        .unwrap();
+    assert!(reader.is_draining());
+    assert!(futures_util::FutureExt::now_or_never(reader.wait_for_drain_or_owner_drop()).is_some());
+
+    let readiness = Readiness::new(Vec::new(), policy());
+    let mut reader = readiness.reader();
+    let waiter = tokio::spawn(async move {
+        reader.wait_for_drain_or_owner_drop().await;
+        reader
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    drop(readiness);
+    let reader = tokio::time::timeout(Duration::from_millis(1), waiter)
+        .await
+        .expect("owner drop must resolve wait_for_drain_or_owner_drop")
+        .unwrap();
+    assert!(!reader.is_draining());
 }
 
 #[tokio::test(start_paused = true)]
@@ -925,19 +845,26 @@ async fn wait_for_verdict_event_delivers_drain_once_then_waits_without_losing_dr
     tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
-        "observed draining must wait for another publication"
+        "observed draining must wait without spurious wakeups"
     );
 
     readiness.refresh().await;
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("drain publication waiter must finish")
-            .expect("drain publication waiter must not panic"),
-        Ok(())
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "refresh during drain must not wake waiter"
     );
     assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    drop(readiness);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("owner drop must finish waiter")
+            .expect("waiter must not panic"),
+        Err(OwnerDropped)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1030,7 +957,7 @@ proptest! {
             let observed = if succeeds {
                 Ok(())
             } else {
-                Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::ZERO })
+                Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::from_millis(1) })
             };
             let threshold = NonZeroU32::new(failure_threshold).unwrap();
             let (check, _) =

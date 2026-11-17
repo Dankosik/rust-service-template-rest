@@ -1134,8 +1134,8 @@ fn recovery_metrics_checks(
         );
         require(
             failures,
-            metric(&scrape.body, "readiness_stale_after_seconds") == Some(16.0),
-            format!("{label}: frozen readiness stale bound changed"),
+            metric(&scrape.body, "readiness_ready") == Some(1.0),
+            format!("{label}: readiness gauge is not 1 during recovery"),
         );
     }
     require(
@@ -1157,8 +1157,8 @@ fn recovery_metrics_checks(
         );
         require(
             failures,
-            metric(&last.body, "readiness_last_completed_timestamp_seconds").unwrap_or(0.0)
-                > metric(&first.body, "readiness_last_completed_timestamp_seconds")
+            metric(&last.body, "readiness_checks_total{outcome=\"ok\"}").unwrap_or(0.0)
+                > metric(&first.body, "readiness_checks_total{outcome=\"ok\"}")
                     .unwrap_or(f64::INFINITY),
             format!("{label}: readiness completion did not refresh during recovery"),
         );
@@ -1246,7 +1246,6 @@ fn metrics_checks(
 }
 
 fn sampler_observation(completed: f64, samples: u32) -> Scrape {
-    let readiness_completed = 1000.0 + completed;
     Scrape {
         started: completed - 0.01,
         completed,
@@ -1259,8 +1258,8 @@ fn sampler_observation(completed: f64, samples: u32) -> Scrape {
              runtime_scheduler_lag_max_seconds 0.1\n\
              runtime_scheduler_samples_total {samples}\n\
              runtime_scheduler_sample_age_seconds 0.1\n\
-             readiness_stale_after_seconds 16\n\
-             readiness_last_completed_timestamp_seconds {readiness_completed}\n\
+             readiness_ready 1\n\
+             readiness_checks_total{{outcome=\"ok\"}} {samples}\n\
              telemetry_log_records_dropped_total 1\n"
         ),
     }

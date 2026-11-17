@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use health::Probe;
 use infra_object_storage::{
     ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
     ObjectStorageOptions, Provider, PutOptions,
@@ -204,7 +203,6 @@ async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
             .unwrap(),
         body
     );
-    storage.probe().check().await.unwrap();
 
     let http = reqwest::Client::new();
     let url = storage

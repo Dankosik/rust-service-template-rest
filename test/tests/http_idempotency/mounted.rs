@@ -1884,11 +1884,12 @@ async fn p9_a_corrupt_commit_ack_keeps_uncertainty_and_replays(pool: PgPool) {
 fn readiness_reader() -> health::ReadinessReader {
     Readiness::new(
         Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        RefreshPolicy::try_new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     )
     .reader()
 }

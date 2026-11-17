@@ -26,10 +26,13 @@ use super::{PoolEvents, dsn_at, dsn_for, server_address, template_pool};
 const WAIT: Duration = Duration::from_secs(25);
 const CALL: Duration = Duration::from_secs(6);
 const HTTP_CONNECTIONS: u32 = 4;
-const POLICY: RefreshPolicy = RefreshPolicy {
-    interval: Duration::from_secs(2),
-    probe_budget: Duration::from_secs(4),
-    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
+const POLICY: RefreshPolicy = match RefreshPolicy::try_new(
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    std::num::NonZeroU32::new(3).unwrap(),
+) {
+    Ok(policy) => policy,
+    Err(_) => panic!("valid refresh policy"),
 };
 
 async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {

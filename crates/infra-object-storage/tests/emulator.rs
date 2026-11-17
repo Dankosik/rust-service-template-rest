@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use health::Probe;
 use infra_object_storage::{
     ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
     ObjectStorageOptions, Provider, PutBody, PutOptions,
@@ -159,17 +158,18 @@ async fn presigned_get_works_until_it_expires() {
 }
 
 #[tokio::test]
-async fn wrong_credentials_are_rejected_and_the_probe_passes() {
+async fn wrong_credentials_are_rejected_while_valid_credentials_succeed() {
     let emulator = Emulator::from_env();
-    emulator
-        .storage(&emulator.secret_access_key)
-        .probe()
-        .check()
-        .await
-        .unwrap();
+    let key = unique_key("denied.txt");
+    assert_eq!(
+        emulator
+            .storage(&emulator.secret_access_key)
+            .head(&key)
+            .await,
+        Err(ObjectStorageError::NotFound)
+    );
 
     let storage = emulator.storage("not-the-secret");
-    let key = unique_key("denied.txt");
     assert_eq!(storage.head(&key).await, Err(ObjectStorageError::Rejected));
     assert_eq!(
         storage

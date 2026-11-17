@@ -144,11 +144,12 @@ fn limits() -> Limits {
 fn readiness() -> Readiness {
     Readiness::new(
         Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_mins(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        RefreshPolicy::try_new(
+            Duration::from_mins(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     )
 }
 

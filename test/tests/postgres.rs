@@ -1010,11 +1010,14 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
 #[sqlx::test(migrations = false)]
 async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(pool: PgPool) {
     let ours = template_pool(&dsn_for(&pool).await, 1).await;
-    let policy = health::RefreshPolicy {
-        interval: Duration::from_secs(2),
-        probe_budget: Duration::from_secs(4),
-        failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
-    };
+    let interval = Duration::from_secs(2);
+    let probe_budget = Duration::from_secs(4);
+    let policy = health::RefreshPolicy::try_new(
+        interval,
+        probe_budget,
+        std::num::NonZeroU32::new(3).unwrap(),
+    )
+    .unwrap();
     let readiness =
         health::Readiness::new(vec![Box::new(PostgresProbe::new(ours.clone()))], policy);
     readiness.refresh().await;
@@ -1068,7 +1071,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
         assert_eq!(value, 42);
         poll_until(
             "next successful refresh restores readiness",
-            policy.interval + policy.probe_budget + Duration::from_secs(1),
+            interval + probe_budget + Duration::from_secs(1),
             Duration::from_millis(20),
             async || reader.verdict().ok(),
         )

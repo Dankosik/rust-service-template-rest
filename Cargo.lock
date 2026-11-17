@@ -2156,7 +2156,6 @@ name = "health"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "compact_str",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2864,7 +2863,6 @@ name = "infra-object-storage"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
@@ -2879,7 +2877,6 @@ dependencies = [
  "derive_more",
  "enum-map",
  "futures-util",
- "health",
  "http-body",
  "http-body-util",
  "metrics",
