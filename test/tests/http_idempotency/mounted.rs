@@ -51,7 +51,7 @@ use tokio_util::task::AbortOnDropHandle;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::commit_proxy::{CommitProxy, Fault};
+use crate::commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close_pools, count, make_read_only, template_pool,
 };
@@ -65,6 +65,7 @@ const KEY: &str = "idempotency-key";
 const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
 const BUDGET: Duration = Duration::from_secs(5);
 const SHORT_BUDGET: Duration = Duration::from_secs(2);
+const COMMAND_BUDGET: Duration = Duration::from_secs(1);
 const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
@@ -265,13 +266,8 @@ impl FreshCommand for CreateWidget {
         created_response(&widget)
     }
 
-    fn attempt_timeout(&self) -> Option<(Duration, Problem)> {
-        self.handler_timeout.then(|| {
-            (
-                Duration::from_secs(1),
-                Problem::new(Code::GatewayTimeout).detail("widget handler deadline expired"),
-            )
-        })
+    fn attempt_timeout(&self) -> Option<Duration> {
+        self.handler_timeout.then_some(COMMAND_BUDGET)
     }
 }
 
@@ -283,7 +279,6 @@ fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
         LOCATION,
         HeaderValue::from_str(&location).expect("a location"),
     );
-    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("br"));
     headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("en"));
     headers.append(CONTENT_LANGUAGE, HeaderValue::from_static("fr"));
     headers.insert(
@@ -700,6 +695,25 @@ fn problem(response: &TestResponse, status: StatusCode, code: &str, request_id: 
     body
 }
 
+fn command_timed_out(response: &TestResponse, request_id: &str) {
+    let body = problem(
+        response,
+        StatusCode::GATEWAY_TIMEOUT,
+        "gateway_timeout",
+        request_id,
+    );
+    assert_eq!(
+        body["detail"],
+        concat!(
+            "the idempotent request outcome is unknown. Retry the same request with the same ",
+            "Idempotency-Key within the published retry window. If the window has expired, ",
+            "reconcile the outcome before attempting the operation again",
+        )
+    );
+    assert!(retry_after(response).is_none());
+    assert!(response.maybe_header("idempotent-replayed").is_none());
+}
+
 fn created(response: &TestResponse, request_id: &str) -> Value {
     assert_eq!(
         response.status_code(),
@@ -730,10 +744,7 @@ fn created(response: &TestResponse, request_id: &str) -> Value {
             .collect::<Vec<_>>(),
         vec![b"en".as_slice(), b"fr".as_slice()]
     );
-    assert_eq!(
-        response.maybe_header(CONTENT_ENCODING),
-        Some(HeaderValue::from_static("br"))
-    );
+    assert!(response.maybe_header(CONTENT_ENCODING).is_none());
     assert_eq!(
         response.maybe_header(CONTENT_DISPOSITION),
         Some(HeaderValue::from_static("attachment; filename=widget.json"))
@@ -1094,11 +1105,15 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
     let response = bounded("outer request completed", response).await.unwrap();
-    problem(
+    let body = problem(
         &response,
         StatusCode::GATEWAY_TIMEOUT,
         "gateway_timeout",
         "outer-timeout",
+    );
+    assert_eq!(
+        body["detail"],
+        "request budget expired before a response could be committed"
     );
     assert!(response.maybe_header(WWW_AUTHENTICATE).is_none());
     assert_eq!(
@@ -1811,13 +1826,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         mounted.create(ALICE, "k-handler", &input, "req-abandoned"),
         pause_on_entry
     );
-    let body = problem(
-        &abandoned,
-        StatusCode::GATEWAY_TIMEOUT,
-        "gateway_timeout",
-        "req-abandoned",
-    );
-    assert_eq!(body["detail"], "widget handler deadline expired");
+    command_timed_out(&abandoned, "req-abandoned");
     tokio::time::resume();
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
     let (stored, retry_conflicts) =
@@ -1835,13 +1844,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         .create(ALICE, "k-handler", &input, "req-acquiring")
         .await;
     drop(connections);
-    let body = problem(
-        &blocked,
-        StatusCode::GATEWAY_TIMEOUT,
-        "gateway_timeout",
-        "req-acquiring",
-    );
-    assert_eq!(body["detail"], "widget handler deadline expired");
+    command_timed_out(&blocked, "req-acquiring");
     let replay = mounted
         .create(ALICE, "k-handler", &input, "req-replay")
         .await;
@@ -2029,6 +2032,47 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
         Some(HeaderValue::from_static("true"))
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    mounted.finish().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_command_timeout_awaiting_commit_ack_replays_the_committed_effect(pool: PgPool) {
+    create_widgets(&pool).await;
+    let (proxy, proxied) = CommitProxy::start_for(&pool).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
+
+    proxy.arm_ready_hold(ReadyBoundary::Commit);
+    let pause_on_commit = async {
+        proxy.ready_held().await;
+        tokio::time::pause();
+    };
+    let (timed_out, ()) = tokio::join!(
+        mounted.create(ALICE, "k-commit-timeout", &input, "req-commit-timeout"),
+        pause_on_commit
+    );
+    tokio::time::resume();
+    command_timed_out(&timed_out, "req-commit-timeout");
+
+    let original: Vec<u8> = sqlx::query_scalar("SELECT body FROM http_idempotency_records")
+        .fetch_one(&pool)
+        .await
+        .expect("PostgreSQL committed the response while the proxy held its acknowledgement");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    proxy.release_ready();
+
+    let replay = mounted
+        .create(ALICE, "k-commit-timeout", &input, "req-replay")
+        .await;
+    created(&replay, "req-replay");
+    assert_eq!(replay.as_bytes().as_ref(), original.as_slice());
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        1
+    );
     mounted.finish().await;
     proxy.shutdown().await;
 }

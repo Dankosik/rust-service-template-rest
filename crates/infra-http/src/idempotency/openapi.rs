@@ -20,7 +20,7 @@ pub(super) fn key_parameter() -> Parameter {
         .name(KEY_HEADER)
         .parameter_in(ParameterIn::Header)
         .description(Some(format!(
-            "One key for one intended effect. Supply exactly one header field. {KEY_GRAMMAR} After decoding, the key must contain 1 to {MAX_DECODED_KEY_BYTES} bytes. Retry the same request with the same decoded key."
+            "One key for one intended effect. Supply exactly one header field. {KEY_GRAMMAR} After decoding, the key must contain 1 to {MAX_DECODED_KEY_BYTES} bytes. After a timeout or lost response, retry the same request with the same decoded key only within the service's published retry window, measured from the first send. Allow time for the retry to reach the service. After expiry the same key can execute again. Check whether the original operation took effect before sending another request."
         )))
         .required(Required::True)
         .schema(Some(
@@ -111,7 +111,7 @@ pub(super) struct IdempotencyBadRequest(pub Problem);
 
 /// A request with this Idempotency-Key is still in progress, or the operation
 /// reports a conflict. For `idempotency_request_in_progress`, retry with the
-/// same key after the Retry-After interval.
+/// same key after the Retry-After interval if still within the published retry window.
 #[derive(Debug, ToResponse)]
 #[expect(
     dead_code,
@@ -137,7 +137,8 @@ pub(super) struct IdempotencyRequestInProgress(pub Problem);
 pub(super) struct IdempotencyKeyMismatch(pub Problem);
 
 /// bearer authentication trust or idempotent request processing is unavailable,
-/// or the committed outcome is uncertain; retry with the same Idempotency-Key
+/// or the committed outcome is uncertain. Retry the same request with the same
+/// Idempotency-Key within the published retry window.
 #[derive(Debug, ToResponse)]
 #[expect(
     dead_code,
