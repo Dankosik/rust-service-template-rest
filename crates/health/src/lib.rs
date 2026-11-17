@@ -32,12 +32,6 @@ impl ProbeError {
     }
 }
 
-// template:begin grpc:health-owner-dropped
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("readiness owner dropped")]
-pub struct OwnerDropped;
-// template:end grpc:health-owner-dropped
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NotReady {
     #[error("service is draining")]
@@ -211,9 +205,6 @@ pub struct ReadinessReader {
     rx: watch::Receiver<State>,
     draining: Arc<AtomicBool>,
     stale_after: Duration,
-    // template:begin grpc:health-reader-stale-edge
-    stale_edge_for: Option<Instant>,
-    // template:end grpc:health-reader-stale-edge
 }
 
 impl Readiness {
@@ -231,7 +222,7 @@ impl Readiness {
         );
         metrics::describe_gauge!(
             READY_METRIC,
-            "1 while the last completed check is ready and fresh and the service is not draining, 0 otherwise."
+            "1 while the last completed check published a ready verdict and the service is not draining, 0 otherwise."
         );
         metrics::gauge!(READY_METRIC).set(0.0);
         Self {
@@ -251,9 +242,6 @@ impl Readiness {
             rx: self.tx.subscribe(),
             draining: Arc::clone(&self.draining),
             stale_after: self.policy.stale_after(),
-            // template:begin grpc:health-reader-stale-edge-init
-            stale_edge_for: None,
-            // template:end grpc:health-reader-stale-edge-init
         }
     }
 
@@ -271,18 +259,12 @@ impl Readiness {
 
     pub async fn admit(&self) -> Result<(), NotReady> {
         self.refresh().await;
-        if self.draining.load(Ordering::Acquire) {
-            return Err(NotReady::Draining);
-        }
         self.tx
             .borrow()
             .verdict(Instant::now(), self.policy.stale_after())
     }
 
     pub async fn refresh(&self) {
-        if !self.reader().is_ready() {
-            metrics::gauge!(READY_METRIC).set(0.0);
-        }
         let observed = self.check_probes().await;
         metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         let failure_threshold = self.policy.failure_threshold;
@@ -442,62 +424,43 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        if self.is_draining() {
-            return false;
-        }
-        let state = self.rx.borrow();
-        !state.draining
-            && state
-                .last_check
-                .as_ref()
-                .is_some_and(|check| check.is_ready_at(Instant::now(), self.stale_after))
+        self.verdict().is_ok()
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
-        if self.is_draining() {
-            return Err(NotReady::Draining);
-        }
         self.rx.borrow().verdict(Instant::now(), self.stale_after)
     }
 
     // template:begin grpc:health-changed-verdict
     pub async fn wait_for_drain_or_owner_drop(&mut self) {
-        if self.is_draining() {
-            return;
-        }
         let _ = self.rx.wait_for(|state| state.draining).await;
     }
 
-    pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
+    pub async fn wait_until_ready_is_not(&mut self, seen: bool) -> Option<bool> {
         loop {
-            if self.rx.has_changed().map_err(|_| OwnerDropped)? {
-                return self.rx.changed().await.map_err(|_| OwnerDropped);
-            }
-            let ready_checked_at = {
-                let state = self.rx.borrow();
+            let stale_at = {
+                let state = self.rx.borrow_and_update();
+                let ready = state.verdict(Instant::now(), self.stale_after).is_ok();
+                if ready != seen {
+                    return Some(ready);
+                }
+                if state.draining {
+                    return None;
+                }
                 state
                     .last_check
                     .as_ref()
-                    .filter(|check| !state.draining && check.verdict.is_ok())
-                    .map(|check| check.at)
+                    .filter(|_| ready)
+                    .map(|check| check.at + self.stale_after + Duration::from_nanos(1))
             };
-            let Some(checked_at) = ready_checked_at.filter(|at| self.stale_edge_for != Some(*at))
-            else {
-                return self.rx.changed().await.map_err(|_| OwnerDropped);
-            };
-            let stale_at = checked_at + self.stale_after + Duration::from_nanos(1);
-            if let Ok(changed) = tokio::time::timeout_at(stale_at, self.rx.changed()).await {
-                return changed.map_err(|_| OwnerDropped);
-            }
-            let unchanged = self
-                .rx
-                .borrow()
-                .last_check
-                .as_ref()
-                .is_some_and(|check| !self.is_draining() && check.at == checked_at);
-            if unchanged {
-                self.stale_edge_for = Some(checked_at);
-                return Ok(());
+            let changed = self.rx.changed();
+            match stale_at {
+                Some(stale_at) => {
+                    if let Ok(changed) = tokio::time::timeout_at(stale_at, changed).await {
+                        changed.ok()?;
+                    }
+                }
+                None => changed.await.ok()?,
             }
         }
     }

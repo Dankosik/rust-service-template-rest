@@ -139,7 +139,9 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
         ("APP__POSTGRES__SESSION_BUDGETS", "server"),
         ("APP__POSTGRES__MIGRATION_DEADLINE", "2h"),
         ("APP__LOG__FORMAT", "text"),
+        // template:begin grpc:postgres-migration-test-grpc-env
         ("APP__GRPC__ENABLED", "true"),
+        // template:end grpc:postgres-migration-test-grpc-env
     ];
     assert!(load_from(&options, BUILD, env(&variables)).is_err());
 
@@ -172,6 +174,16 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     .unwrap_err();
     assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
 
+    let typo_section = load_migration_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
+    )
+    .unwrap_err();
+    assert_matches!(&typo_section, Error::Deserialize(_), "{typo_section}");
+    assert!(!typo_section.to_string().contains("secret-pw"));
+    assert!(!format!("{typo_section:?}").contains("secret-pw"));
+
     let unknown_source = load_migration_from(
         &LoadOptions::default(),
         BUILD,
@@ -189,10 +201,22 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     assert_matches!(&missing_dsn, Error::Validate(errors) if errors.names("postgres.dsn"), "{missing_dsn}");
 
     let dir = tempfile::tempdir().unwrap();
+    let unknown_table = write(&dir, "unknown.toml", "[unrelated]\nvalue = 1\n");
+    let unknown_err = load_migration_from(
+        &LoadOptions {
+            config: Some(unknown_table),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(unknown_err, Error::Deserialize(_), "{unknown_err}");
+
     let leaked = write(
         &dir,
         "leaked.toml",
-        "[grpc]\nprivate_key = \"private-key-material\"\n",
+        "[observability.otel.exporter]\notlp_headers = \"private-key-material\"\n",
     );
     let err = load_migration_from(
         &LoadOptions {

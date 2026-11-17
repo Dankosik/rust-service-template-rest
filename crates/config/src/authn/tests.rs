@@ -22,9 +22,9 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
     let config = write(
         &dir,
         "authn.toml",
-        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = 2026-11-13\nalgorithms = [\"RS256\"]\n",
+        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\nalgorithms = [\"RS256\"]\n",
     );
-    write(&dir, "APP__AUTHN__AUDIENCE", "mounted");
+    write(&dir, "APP__AUTHN__AUDIENCES", r#"["mounted"]"#);
     let options = LoadOptions {
         config: Some(config),
         secrets_dir: Some(dir.path().to_owned()),
@@ -34,27 +34,39 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
         ("APP__AUTHN__ALGORITHMS", "ES256, EdDSA"),
         ("APP__AUTHN__AUDIENCES", r#"["api-a", " api-b ", "api-a"]"#),
     ]);
-    let config = load_from(&options, BUILD, environment).unwrap();
+    let loaded = load_from(&options, BUILD, environment.clone()).unwrap();
     let AuthnConfig::OidcJwt {
         audience,
         algorithms,
         ..
-    } = config.authn
+    } = loaded.authn
     else {
         panic!("expected OIDC JWT configuration");
     };
     assert_eq!(audience.as_slice(), ["api-a", " api-b "]);
     assert_eq!(algorithms, [JwtAlgorithm::Es256, JwtAlgorithm::EdDsa]);
+
+    write(&dir, "APP__AUTHN__AUDIENCE", "conflicting");
+    let conflict = load_from(&options, BUILD, environment).unwrap_err();
+    assert_matches!(
+        &conflict,
+        crate::Error::Validate(errors) if errors.names("authn.audiences"),
+        "{conflict}"
+    );
 }
 
 #[test]
 fn jwt_load_errors_name_the_rejected_field() {
     for (audience, algorithms, expected) in [
-        (" ", "ES256", "`authn.audience` values must be nonblank"),
+        (
+            " ",
+            "ES256",
+            "expected a nonempty string or list of nonblank exact values for key `authn.audience`",
+        ),
         (
             "service",
             "ES256,invalid-jwt-algorithm",
-            "`authn.algorithms` must contain only supported JWT algorithms",
+            "expected a list of supported JWT algorithms or a comma-separated string for key `authn.algorithms`",
         ),
     ] {
         let error = load_from(
@@ -81,22 +93,22 @@ fn jwt_load_errors_describe_the_expected_field_shape() {
         (
             r#"["rejected-value", 7]"#,
             r#"["RS256"]"#,
-            "`authn.audience` must be a string or a list of strings",
+            "expected a string or a list of strings for key `authn.audience`",
         ),
         (
             "2026-11-13t12:00:00z",
             r#"["RS256"]"#,
-            "`authn.audience` must be a string or a list of strings",
+            "key `authn.audience`",
         ),
         (
             r#"["service", 2026-11-13]"#,
             r#"["RS256"]"#,
-            "`authn.audience` must be a string or a list of strings",
+            "key `authn.audience`",
         ),
         (
             r#""service""#,
             r#"["rejected-value"]"#,
-            "`authn.algorithms` must be a list of supported JWT algorithms or a comma-separated string",
+            "expected a list of supported JWT algorithms or a comma-separated string for key `authn.algorithms`",
         ),
     ] {
         let config = write(
@@ -363,13 +375,33 @@ fn introspection_debug_redacts_trust_inputs_and_credentials() {
 
 #[test]
 fn modes_reject_foreign_provider_fields() {
-    assert_matches!(parse("mode = \"none\"\n").unwrap(), AuthnInput::None {});
-    for source in [
-        "mode = \"none\"\nissuer = \"issuer\"\n",
-        "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
-        "mode = \"oidc-introspection\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\nintrospection_client_id = \"client\"\nintrospection_client_secret = \"secret\"\nalgorithms = [\"RS256\"]\n",
+    let none = parse("mode = \"none\"\n").unwrap();
+    assert_matches!(admit_with(|v| none.admit(v)), Ok(AuthnConfig::None));
+
+    let assert_rejected_field = |source: &str, expected_key: &str| match parse(source) {
+        Ok(input) => {
+            let errors = admit_with(|v| input.admit(v)).unwrap_err();
+            assert!(errors.names(expected_key), "{source}: {errors}");
+        }
+        Err(err) => {
+            let rendered = err.to_string();
+            let field = expected_key.strip_prefix("authn.").unwrap_or(expected_key);
+            assert!(rendered.contains(field), "{source}: {rendered}");
+        }
+    };
+
+    for (source, expected_key) in [
+        ("mode = \"none\"\nissuer = \"issuer\"\n", "authn.issuer"),
+        (
+            "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
+            "authn.introspection_endpoint",
+        ),
+        (
+            "mode = \"oidc-introspection\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\nintrospection_client_id = \"client\"\nintrospection_client_secret = \"secret\"\nalgorithms = [\"RS256\"]\n",
+            "authn.algorithms",
+        ),
     ] {
-        assert!(parse(source).is_err(), "{source}");
+        assert_rejected_field(source, expected_key);
     }
     for mode in ["none", "oidc-jwt"] {
         let base = if mode == "none" {
@@ -377,13 +409,13 @@ fn modes_reject_foreign_provider_fields() {
         } else {
             "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n"
         };
-        for field in [
-            "cache_enabled = false",
-            "cache_capacity = 256",
-            "cache_ttl = \"30s\"",
+        for (field, expected_key) in [
+            ("cache_enabled = false", "authn.cache_enabled"),
+            ("cache_capacity = 256", "authn.cache_capacity"),
+            ("cache_ttl = \"30s\"", "authn.cache_ttl"),
         ] {
             let source = format!("{base}{field}\n");
-            assert!(parse(&source).is_err(), "{source}");
+            assert_rejected_field(&source, expected_key);
         }
     }
 }
@@ -463,7 +495,11 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
 
     environment.push(("APP__AUTHN__AUDIENCES".to_owned(), literal.to_owned()));
     let error = load_from(&options, BUILD, environment.clone()).unwrap_err();
-    assert_matches!(error, crate::load::Error::AmbiguousName { .. });
+    assert_matches!(
+        &error,
+        crate::Error::Validate(errors) if errors.names("authn.audiences"),
+        "{error}"
+    );
 
     environment.retain(|(name, _)| name != "APP__AUTHN__AUDIENCE");
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
@@ -476,7 +512,12 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
     let error = load_from(&options, BUILD, environment)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("APP__AUTHN__AUDIENCES"), "{error}");
+    assert!(
+        error.contains(
+            "expected a TOML array of nonblank strings for key `authn.audiences` in the environment"
+        ),
+        "{error}"
+    );
     assert!(!error.contains("malformed-list"), "{error}");
 }
 
@@ -508,42 +549,42 @@ fn introspection_environment_rejects_invalid_scalar_overrides() {
         (
             "APP__AUTHN__CACHE_ENABLED",
             "",
-            "`authn.cache_enabled` must be true or false",
+            "expected a boolean for key `authn.cache_enabled` in the environment",
         ),
         (
             "APP__AUTHN__CACHE_ENABLED",
             "not-a-boolean",
-            "`authn.cache_enabled` must be true or false",
+            "expected a boolean for key `authn.cache_enabled` in the environment",
         ),
         (
             "APP__AUTHN__CACHE_CAPACITY",
             "",
-            "`authn.cache_capacity` must be an integer from 1 to 1024",
+            "expected an integer for key `authn.cache_capacity` in the environment",
         ),
         (
             "APP__AUTHN__CACHE_CAPACITY",
             "-1",
-            "`authn.cache_capacity` must be an integer from 1 to 1024",
+            "expected an integer for key `authn.cache_capacity` in the environment",
         ),
         (
             "APP__AUTHN__CACHE_CAPACITY",
             "1.5",
-            "`authn.cache_capacity` must be an integer from 1 to 1024",
+            "expected an integer for key `authn.cache_capacity` in the environment",
         ),
         (
             "APP__AUTHN__PROVIDER_CONCURRENCY",
             "",
-            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+            "expected an integer for key `authn.provider_concurrency` in the environment",
         ),
         (
             "APP__AUTHN__PROVIDER_CONCURRENCY",
             "0",
-            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+            "expected an integer for key `authn.provider_concurrency` in the environment",
         ),
         (
             "APP__AUTHN__PROVIDER_CONCURRENCY",
             "4294967296",
-            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+            "expected an integer for key `authn.provider_concurrency` in the environment",
         ),
     ] {
         let rendered = load_from(
@@ -554,6 +595,7 @@ fn introspection_environment_rejects_invalid_scalar_overrides() {
         .unwrap_err()
         .to_string();
         assert!(rendered.contains(expected), "{key}={value}: {rendered}");
+        assert!(!rendered.contains("not-a-boolean"), "{rendered}");
     }
 }
 // template:end oidc-introspection:load-introspection-environment

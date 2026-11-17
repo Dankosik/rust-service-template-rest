@@ -824,11 +824,7 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
             // template:begin outbox:test-jobs-process-supervisor-nats-argument
             &nats,
             // template:end outbox:test-jobs-process-supervisor-nats-argument
-            &[
-                ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
-                ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
-                ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
-            ],
+            &[("APP__HTTP__DRAIN_TIMEOUT", "1s")],
         );
         worker.await_record("jobs_worker_ready").await;
         let action = if cleanup {
@@ -1036,11 +1032,7 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
         // template:begin outbox:test-jobs-process-nats-fixture-argument-5
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-5
-        &[
-            ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
-            ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
-            ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
-        ],
+        &[("APP__HTTP__DRAIN_TIMEOUT", "1s")],
     );
     // template:begin outbox:test-jobs-process-shared-engines
     let started = worker.await_record("jobs_claiming_started").await;

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
+use serde::de::IgnoredAny as IgnoredSection;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{
@@ -29,6 +30,7 @@ pub enum PostgresSessionBudgets {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct PostgresInput {
+    #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
@@ -42,6 +44,7 @@ pub(crate) struct PostgresInput {
     /// the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     password_file: Option<PathBuf>,
+    #[serde(deserialize_with = "crate::de::string_enum")]
     session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
@@ -109,18 +112,46 @@ impl PostgresInput {
     }
 }
 
-/// What the migration binary decoded, from the same files and environment as
-/// [`crate::Config`].
-///
-/// Other sections are ignored during decoding. The shared input rules
-/// still apply to all files and variables passed to [`crate::load_migration`].
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields, default)]
 pub(crate) struct MigrationInput {
     pub(crate) app: AppConfig,
+    // template:begin authn:migration-input-authn
+    authn: IgnoredSection,
+    // template:end authn:migration-input-authn
+    // template:begin cache:migration-input-cache
+    cache: IgnoredSection,
+    // template:end cache:migration-input-cache
+    // template:begin grpc:migration-input-grpc
+    grpc: IgnoredSection,
+    // template:end grpc:migration-input-grpc
+    health: IgnoredSection,
+    http: IgnoredSection,
+    // template:begin http-idempotency:migration-input-http-idempotency
+    http_idempotency: IgnoredSection,
+    // template:end http-idempotency:migration-input-http-idempotency
+    // template:begin inbound-webhooks:migration-input-inbound-webhooks
+    inbound_webhooks: IgnoredSection,
+    // template:end inbound-webhooks:migration-input-inbound-webhooks
+    // template:begin jobs:migration-input-jobs
+    jobs: IgnoredSection,
+    // template:end jobs:migration-input-jobs
     log: LogConfig,
+    // template:begin messaging:migration-input-messaging
+    messaging: IgnoredSection,
+    // template:end messaging:migration-input-messaging
+    // template:begin object-storage:migration-input-object-storage
+    object_storage: IgnoredSection,
+    // template:end object-storage:migration-input-object-storage
     observability: ObservabilityConfig,
     postgres: PostgresInput,
+    runtime: IgnoredSection,
+    // template:begin service-auth:migration-input-service-auth
+    service_auth: IgnoredSection,
+    // template:end service-auth:migration-input-service-auth
+    // template:begin webhooks:migration-input-webhooks
+    webhooks: IgnoredSection,
+    // template:end webhooks:migration-input-webhooks
 }
 
 #[derive(Clone, Debug, Default)]

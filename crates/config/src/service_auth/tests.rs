@@ -110,7 +110,22 @@ fn every_violated_jwt_rule_is_reported_together() {
 
 #[test]
 fn none_accepts_no_dormant_input_and_debug_names_only_the_mode() {
-    assert!(toml::from_str::<ServiceAuthInput>("mode = \"none\"\nname = \"x\"\n").is_err());
+    let dormant: ServiceAuthInput = toml::from_str("mode = \"none\"\nname = \"x\"\n").unwrap();
+    assert_eq!(rejected_keys(dormant, "local"), ["service_auth.name"]);
+    let all_dormant: ServiceAuthInput = toml::from_str(
+        "mode = \"none\"\nname = \"x\"\njwt_type = \"t\"\ntrust = \"{}\"\nkey_id = \"k\"\nprivate_key = \"p\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rejected_keys(all_dormant, "local"),
+        [
+            "service_auth.name",
+            "service_auth.jwt_type",
+            "service_auth.trust",
+            "service_auth.key_id",
+            "service_auth.private_key",
+        ]
+    );
     let config = admit(
         jwt("key_id = \"catalog/1\"\nprivate_key = \"-----BEGIN PRIVATE KEY-----\""),
         "production",

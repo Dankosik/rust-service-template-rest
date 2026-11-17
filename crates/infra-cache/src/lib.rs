@@ -19,8 +19,6 @@ use self::connection::Link;
 pub use self::observe::HISTOGRAMS;
 use self::observe::NamespaceHistograms;
 
-pub const STARTUP_TIMEOUT: Duration = connection::SETUP_TIMEOUT;
-
 #[derive(Debug)]
 pub struct CacheOptions {
     pub dsn: SecretString,
@@ -77,12 +75,6 @@ pub enum CacheError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("cache connection failed: {reason}")]
-pub struct ConnectError {
-    pub reason: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
 pub struct Unavailable;
 
@@ -95,10 +87,10 @@ pub enum SetError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ServerEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub tls: bool,
+pub(crate) struct ServerEndpoint {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) tls: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -127,20 +119,6 @@ impl Cache {
                 command_timeout,
             )),
         })
-    }
-
-    pub async fn wait_connected(&self) -> Result<(), ConnectError> {
-        self.link
-            .wait_connected()
-            .await
-            .map_err(|error| ConnectError {
-                reason: error.label(),
-            })
-    }
-
-    #[must_use]
-    pub fn server(&self) -> &ServerEndpoint {
-        &self.link.server
     }
 }
 

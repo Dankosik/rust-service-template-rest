@@ -90,8 +90,8 @@ fn a_sub_microsecond_part_loads_unchanged() {
 }
 
 #[test]
-fn the_retention_key_is_not_treated_as_secret_like() {
-    assert!(!crate::secret_policy::is_secret_like_key(
+fn the_retention_key_is_not_treated_as_secret() {
+    assert!(!crate::secret_policy::is_secret_key(
         "http_idempotency.retention"
     ));
 }

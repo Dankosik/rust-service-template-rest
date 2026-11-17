@@ -7,13 +7,44 @@ use crate::validate::{ValidationError, ValidationErrors, Violations, int_range};
 
 const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
 
-/// What jobs operator commands decoded; the only section they read. Unrelated
-/// sections are ignored, while the shared loader still enforces namespace and
-/// file rules.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields, default)]
 pub(crate) struct JobsOperatorInput {
     postgres: PostgresInput,
+    jobs: serde::de::IgnoredAny,
+    // template:begin webhooks:jobs-operator-input-webhooks
+    webhooks: serde::de::IgnoredAny,
+    // template:end webhooks:jobs-operator-input-webhooks
+    // template:begin inbound-webhooks:jobs-operator-input-inbound-webhooks
+    inbound_webhooks: serde::de::IgnoredAny,
+    // template:end inbound-webhooks:jobs-operator-input-inbound-webhooks
+    // template:begin messaging:jobs-operator-input-messaging
+    messaging: serde::de::IgnoredAny,
+    // template:end messaging:jobs-operator-input-messaging
+    // template:begin http-idempotency:jobs-operator-input-http-idempotency
+    http_idempotency: serde::de::IgnoredAny,
+    // template:end http-idempotency:jobs-operator-input-http-idempotency
+    // template:begin service-auth:jobs-operator-input-service-auth
+    service_auth: serde::de::IgnoredAny,
+    // template:end service-auth:jobs-operator-input-service-auth
+    // template:begin authn:jobs-operator-input-authn
+    authn: serde::de::IgnoredAny,
+    // template:end authn:jobs-operator-input-authn
+    // template:begin object-storage:jobs-operator-input-object-storage
+    object_storage: serde::de::IgnoredAny,
+    // template:end object-storage:jobs-operator-input-object-storage
+    // template:begin cache:jobs-operator-input-cache
+    cache: serde::de::IgnoredAny,
+    // template:end cache:jobs-operator-input-cache
+    // template:begin grpc:jobs-operator-input-grpc
+    grpc: serde::de::IgnoredAny,
+    // template:end grpc:jobs-operator-input-grpc
+    observability: serde::de::IgnoredAny,
+    runtime: serde::de::IgnoredAny,
+    log: serde::de::IgnoredAny,
+    health: serde::de::IgnoredAny,
+    http: serde::de::IgnoredAny,
+    app: serde::de::IgnoredAny,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -9,8 +9,9 @@ implementation falsifiers and verdicts.
 Review one fixed delivery candidate containing the assembled task ledger or
 unit.
 
-Try to disprove the postcondition and important constraints on the real path,
-retained scope, dependencies, and claim-scoped proof. Consume the accepted
+Read touched production code before its tests, and try to disprove the
+postcondition and important constraints on the real path, retained scope,
+dependencies, and claim-scoped proof. Consume the accepted
 sources, fixed candidate identity when crossing a boundary, current proof, and
 irreproducible external evidence. Reuse valid results. A concrete diagnostic
 question may use an existing bounded falsifier within the [Evidence
@@ -51,6 +52,17 @@ aligned by hand, is a `TASK_DEFECT` unless a concrete boundary divergence
 justifies keeping it. A shorter equivalent spelling alone does not establish a
 violation; an alternative organization that preserves current responsibilities
 and single ownership is `FOLLOW_UP`.
+
+For a test `TASK_DEFECT` on candidate-added or edited tests, name the falsified
+proof claim or `rust-testing` constraint: a guard that stays green when the
+claimed behavior breaks or mocks away the boundary under claim, assertions that
+mirror internal steps rather than observable contracts, retries or wall-clock
+sleeps masking nondeterminism, copy-pasted suites duplicating an already-covered
+path at the same layer instead of consolidating around the strongest check, or
+deleting/weakening an independent safety, durability, or integration guard (or
+the sole regression guard) to clear a failure without an accepted contract
+change. Untouched historical test debt and stylistic reorganization of valid
+contract checks remain `FOLLOW_UP`.
 
 `PASS` returns the candidate for acceptance. `FAIL` returns anchored
 candidate-caused findings. `NEEDS_PARENT` names proof or action outside reviewer

@@ -1,7 +1,7 @@
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -26,7 +26,7 @@ use crate::observe::{
     RETIREMENTS_METRIC,
 };
 
-pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
 const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
@@ -160,55 +160,40 @@ impl AbandonedReply {
 type QueryFuture<T> = Pin<Box<dyn Future<Output = redis::RedisResult<T>> + Send>>;
 
 struct Exchange<'a, T: Send + 'static> {
-    shared: &'a Shared,
-    generation: &'a Arc<Generation>,
+    generation: &'a Generation,
     reservation: Option<OwnedSemaphorePermit>,
-    reply: ReplyState<T>,
+    reply: Option<QueryFuture<T>>,
     wire_deadline: Deadline,
-}
-
-enum ReplyState<T> {
-    Pending(QueryFuture<T>),
-    Keep,
-    Retire,
 }
 
 impl<'a, T: Send + 'static> Exchange<'a, T> {
     fn new(
-        shared: &'a Shared,
-        generation: &'a Arc<Generation>,
+        generation: &'a Generation,
         reservation: OwnedSemaphorePermit,
         reply: impl Future<Output = redis::RedisResult<T>> + Send + 'static,
         wire_deadline: Deadline,
     ) -> Self {
         Self {
-            shared,
             generation,
             reservation: Some(reservation),
-            reply: ReplyState::Pending(Box::pin(reply)),
+            reply: Some(Box::pin(reply)),
             wire_deadline,
         }
     }
 
     fn poll_reply(&mut self, cx: &mut Context<'_>) -> Poll<redis::RedisResult<T>> {
-        let mut reply = match std::mem::replace(&mut self.reply, ReplyState::Retire) {
-            ReplyState::Pending(reply) => reply,
-            settled @ (ReplyState::Keep | ReplyState::Retire) => {
-                self.reply = settled;
-                return Poll::Pending;
-            }
+        let Some(mut reply) = self.reply.take() else {
+            return Poll::Pending;
         };
         match reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
-                self.reply = if command_keeps_generation(&result) {
-                    ReplyState::Keep
-                } else {
-                    ReplyState::Retire
-                };
+                if !command_keeps_generation(&result) {
+                    self.generation.retired.cancel();
+                }
                 Poll::Ready(result)
             }
             Poll::Pending => {
-                self.reply = ReplyState::Pending(reply);
+                self.reply = Some(reply);
                 Poll::Pending
             }
         }
@@ -223,39 +208,27 @@ fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
 
 impl<T: Send + 'static> Drop for Exchange<'_, T> {
     fn drop(&mut self) {
-        if matches!(self.reply, ReplyState::Pending(_)) && !std::thread::panicking() {
-            let _ = self.poll_reply(&mut Context::from_waker(Waker::noop()));
-        }
-        let retire = match self.reply {
-            ReplyState::Keep => false,
-            ReplyState::Pending(_) => self.wire_deadline.expired(),
-            ReplyState::Retire => true,
+        let (Some(reply), Some(reservation)) = (self.reply.take(), self.reservation.take()) else {
+            return;
         };
-        if retire {
-            self.shared.retire(self.generation);
-        } else if let ReplyState::Pending(reply) =
-            std::mem::replace(&mut self.reply, ReplyState::Keep)
-            && let Some(reservation) = self.reservation.take()
-        {
-            let wire_deadline = self.wire_deadline;
-            let retired = self.generation.retired.clone();
-            let _ = self.generation.abandoned.send(AbandonedReply {
-                reservation,
-                reply: Box::pin(async move {
-                    tokio::select! {
-                        biased;
-                        result = reply => {
-                            if !command_keeps_generation(&result) {
-                                retired.cancel();
-                            }
-                        }
-                        () = wire_deadline.wait() => {
+        let wire_deadline = self.wire_deadline;
+        let retired = self.generation.retired.clone();
+        let _ = self.generation.abandoned.send(AbandonedReply {
+            reservation,
+            reply: Box::pin(async move {
+                tokio::select! {
+                    biased;
+                    result = reply => {
+                        if !command_keeps_generation(&result) {
                             retired.cancel();
                         }
                     }
-                }),
-            });
-        }
+                    () = wire_deadline.wait() => {
+                        retired.cancel();
+                    }
+                }
+            }),
+        });
     }
 }
 
@@ -422,7 +395,6 @@ impl Link {
             }
             let wire_deadline = Deadline::new(Instant::now(), self.command_timeout);
             let mut exchange = Exchange::new(
-                &self.shared,
                 &generation,
                 reservation,
                 query(command, generation.connection.clone()),
@@ -442,10 +414,6 @@ impl Link {
             stopped = context.wait_stopped() => Err(CommandError::Stopped(stopped)),
             () = generation.retired.cancelled() => Err(ErrorType::Io.into()),
         }
-    }
-
-    pub(crate) async fn wait_connected(&self) -> Result<(), ErrorType> {
-        self.shared.acquire().await.map(drop)
     }
 
     fn claim_slot(&self) -> Result<impl Drop + '_, ErrorType> {
@@ -584,6 +552,12 @@ async fn run_supervisor(
                 if !shared.publish(generation.clone()) {
                     return;
                 }
+                tracing::info!(
+                    server.address = %server.host,
+                    server.port = server.port,
+                    cache.tls = server.tls,
+                    "cache_connected"
+                );
                 next_attempt = generation.cooldown_until;
                 backoff = setup_backoff();
                 let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
@@ -720,6 +694,7 @@ async fn maintain(
 ) {
     let mut next_ping = Instant::now() + PING_INTERVAL;
     let mut next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
+    let mut ping_refusal_logged = false;
     loop {
         tokio::select! {
             biased;
@@ -734,13 +709,18 @@ async fn maintain(
                 }
             }
             () = sleep_until(next_ping) => {
-                if let Err((error, disposition)) = ping_until(generation, command_timeout).await {
-                    tracing::warn!(
-                        server.address = %server.host,
-                        server.port = server.port,
-                        error.type = error.label(),
-                        "cache_ping_failed"
-                    );
+                let outcome = ping_until(generation, command_timeout).await;
+                let repeated_refusal =
+                    std::mem::replace(&mut ping_refusal_logged, outcome.is_err());
+                if let Err((error, disposition)) = outcome {
+                    if disposition == Disposition::Retire || !repeated_refusal {
+                        tracing::warn!(
+                            server.address = %server.host,
+                            server.port = server.port,
+                            error.type = error.label(),
+                            "cache_ping_failed"
+                        );
+                    }
                     if disposition == Disposition::Retire {
                         return;
                     }
