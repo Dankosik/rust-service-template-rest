@@ -125,8 +125,10 @@ sum by(job, http_route, http_response_status_code) (
   rate(http_server_request_duration_seconds_count{http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[5m]))
 ```
 
-For shedding, check capacity. For `authentication_unavailable`, inspect
-`authn_provider_request_duration_seconds_count` by `operation` and `outcome`.
+For shedding, check capacity. For `authentication_unavailable`, group
+`authn_token_verifications_total{outcome="failure"}` by `mode` and `reason`.
+For provider failures, inspect `authn_provider_request_duration_seconds_count`
+by `operation` and `outcome`.
 For a route using object storage, look for `object_storage_operation_failed`
 with its `error.type` and provider request ID. Compare the start of errors
 with the deployment history.
