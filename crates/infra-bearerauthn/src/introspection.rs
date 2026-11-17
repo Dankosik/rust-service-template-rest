@@ -10,7 +10,7 @@ use futures_util::{
     future::{BoxFuture, Shared, WeakShared},
 };
 use moka::{Expiry, future::Cache};
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
@@ -19,7 +19,7 @@ use tokio::sync::Semaphore;
 use crate::{
     BearerToken, PreparationError, Principal, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::ProviderClient,
+    provider::{CallerStop, ProviderClient},
 };
 
 const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -77,32 +77,55 @@ pub(crate) struct IntrospectionVerifier {
 
 struct PositiveCache {
     retained: Cache<TokenDigest, VerifiedIntrospection, foldhash::quality::RandomState>,
-    fills: Mutex<HashMap<TokenDigest, WeakShared<FillFuture>>>,
+    fills: Mutex<HashMap<TokenDigest, RunningFill>>,
 }
+
+struct RunningFill {
+    shared: WeakShared<FillFuture>,
+    last_waiter_stop: LastWaiterStop,
+}
+
+type LastWaiterStop = Arc<Mutex<Option<Stopped>>>;
 
 type TokenDigest = [u8; 32];
 type FillResult = Result<Fill, VerificationError>;
 type FillFuture = BoxFuture<'static, FillResult>;
 
 impl PositiveCache {
-    fn join_fill<F>(&self, key: TokenDigest, start: impl FnOnce() -> F) -> FillWaiter<'_>
+    fn join_fill<'a, F>(
+        &'a self,
+        key: TokenDigest,
+        context: &'a OperationContext,
+        start: impl FnOnce(LastWaiterStop) -> F,
+    ) -> FillWaiter<'a>
     where
         F: Future<Output = FillResult> + Send + 'static,
     {
         let mut fills = self.fills.lock();
-        let shared = fills
-            .get(&key)
-            .and_then(WeakShared::upgrade)
-            .unwrap_or_else(|| {
-                let shared = start().boxed().shared();
-                if let Some(weak) = shared.downgrade() {
-                    fills.insert(key, weak);
-                }
-                shared
-            });
+        let running = fills.get(&key).and_then(|fill| {
+            fill.shared
+                .upgrade()
+                .map(|shared| (shared, Arc::clone(&fill.last_waiter_stop)))
+        });
+        let (shared, last_waiter_stop) = running.unwrap_or_else(|| {
+            let last_waiter_stop = LastWaiterStop::default();
+            let shared = start(Arc::clone(&last_waiter_stop)).boxed().shared();
+            if let Some(weak) = shared.downgrade() {
+                fills.insert(
+                    key,
+                    RunningFill {
+                        shared: weak,
+                        last_waiter_stop: Arc::clone(&last_waiter_stop),
+                    },
+                );
+            }
+            (shared, last_waiter_stop)
+        });
         FillWaiter {
             shared,
             registration: FillRegistration { cache: self, key },
+            context,
+            last_waiter_stop,
         }
     }
 }
@@ -110,6 +133,14 @@ impl PositiveCache {
 struct FillWaiter<'a> {
     shared: Shared<FillFuture>,
     registration: FillRegistration<'a>,
+    context: &'a OperationContext,
+    last_waiter_stop: LastWaiterStop,
+}
+
+impl Drop for FillWaiter<'_> {
+    fn drop(&mut self) {
+        *self.last_waiter_stop.lock() = self.context.stopped();
+    }
 }
 
 impl FillWaiter<'_> {
@@ -128,7 +159,7 @@ struct FillRegistration<'a> {
 impl FillRegistration<'_> {
     fn retire(&self, completed: &Shared<FillFuture>) {
         let mut fills = self.cache.fills.lock();
-        if let Some(current) = fills.get(&self.key).and_then(WeakShared::upgrade)
+        if let Some(current) = fills.get(&self.key).and_then(|fill| fill.shared.upgrade())
             && current.ptr_eq(completed)
         {
             fills.remove(&self.key);
@@ -141,7 +172,7 @@ impl Drop for FillRegistration<'_> {
         let mut fills = self.cache.fills.lock();
         if fills
             .get(&self.key)
-            .is_some_and(|fill| fill.upgrade().is_none())
+            .is_some_and(|fill| fill.shared.upgrade().is_none())
         {
             fills.remove(&self.key);
         }
@@ -211,7 +242,7 @@ impl IntrospectionVerifier {
         })?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token.to_secret(), context, &now)
+                .introspect(token.to_secret(), &|| context.stopped(), &now)
                 .await?
                 .deliver(now()?);
         };
@@ -223,7 +254,7 @@ impl IntrospectionVerifier {
                 return Ok(value.principal);
             }
             let filled = cache
-                .join_fill(key, || {
+                .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
                     let now = now.clone();
@@ -235,7 +266,7 @@ impl IntrospectionVerifier {
                             return Ok(Fill::RecheckCache);
                         }
                         let value = verifier
-                            .introspect(token, &OperationContext::unbounded(), &now)
+                            .introspect(token, &|| *last_waiter_stop.lock(), &now)
                             .await?;
                         retained.insert(key, value.clone()).await;
                         Ok(Fill::Fresh(value))
@@ -252,7 +283,7 @@ impl IntrospectionVerifier {
     async fn introspect(
         &self,
         token: SecretString,
-        context: &OperationContext,
+        caller_stop: CallerStop<'_>,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
         now()?;
@@ -270,7 +301,7 @@ impl IntrospectionVerifier {
                     ("token", token.expose_secret()),
                     ("token_type_hint", "access_token"),
                 ],
-                context,
+                caller_stop,
             )
             .await
             .map_err(|failure| {
@@ -942,14 +973,28 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(diagnostics.recorder());
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _dispatch = tracing::dispatcher::set_default(&diagnostics.dispatch());
-        for (drop_on_stop, stopped, inbound, provider) in [
-            (false, Stopped::Deadline, "timeout", "caller_deadline"),
-            (false, Stopped::Cancelled, "cancelled", "cancelled"),
-            (true, Stopped::Deadline, "timeout", "caller_deadline"),
-            (true, Stopped::Cancelled, "cancelled", "cancelled"),
+        for (cache, drop_on_stop, stopped, inbound, provider) in [
+            (None, false, Stopped::Deadline, "timeout", "caller_deadline"),
+            (None, false, Stopped::Cancelled, "cancelled", "cancelled"),
+            (None, true, Stopped::Deadline, "timeout", "caller_deadline"),
+            (None, true, Stopped::Cancelled, "cancelled", "cancelled"),
+            (
+                Some(cache_options(1)),
+                false,
+                Stopped::Deadline,
+                "timeout",
+                "caller_deadline",
+            ),
+            (
+                Some(cache_options(1)),
+                true,
+                Stopped::Deadline,
+                "timeout",
+                "caller_deadline",
+            ),
         ] {
             let fixture = Fixture::new().await;
-            let verifier = fixture.prepared(None);
+            let verifier = fixture.prepared(cache);
             let _gate = fixture.block_responses();
             let budget = Duration::from_secs(2);
             let context = OperationContext::with_timeout(budget);
@@ -1187,7 +1232,7 @@ mod tests {
             let before = fixture.calls();
             let gate = Arc::new(Semaphore::new(0));
             let publication_gate = gate.clone();
-            let publication = cache.join_fill(key, || async move {
+            let publication = cache.join_fill(key, &context, |_| async move {
                 publication_gate.acquire().await.unwrap().forget();
                 Ok(super::Fill::RecheckCache)
             });
