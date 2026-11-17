@@ -12,6 +12,7 @@ use axum::response::{IntoResponse as _, Response};
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
+use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
 use operation_context::{Deadline, OperationContext};
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
@@ -33,8 +34,6 @@ pub struct Limits {
     pub request_timeout: Duration,
     pub max_in_flight: Option<NonZeroU32>,
     pub max_admission_wait: Duration,
-    pub max_connections: Option<NonZeroU32>,
-    pub max_connection_age: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -164,14 +163,11 @@ pub fn router(
 }
 
 #[must_use]
-pub fn server_options(limits: Limits) -> infra_http_transport::Http2Options {
-    infra_http_transport::Http2Options {
+pub fn server_options(connections: ConnectionLimits) -> Http2Options {
+    Http2Options {
         preface_timeout: Duration::from_secs(5),
         max_header_list_size: 16 * 1024,
-        connections: infra_http_transport::ConnectionLimits {
-            max_connections: limits.max_connections,
-            max_connection_age: limits.max_connection_age,
-        },
+        connections,
     }
 }
 

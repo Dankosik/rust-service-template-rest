@@ -39,7 +39,7 @@ use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
-use infra_http_transport::{BoundListener, Drained, Server, TlsOptions};
+use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
@@ -451,6 +451,7 @@ impl Fixture {
             true,
             Some((pki, false)),
             limits(),
+            connection_limits(),
             address,
             grpc_contracts::FILE_DESCRIPTOR_SET,
         )
@@ -474,6 +475,7 @@ impl Fixture {
             seed,
             tls,
             limits,
+            connection_limits(),
             loopback(),
             grpc_contracts::FILE_DESCRIPTOR_SET,
         )
@@ -484,6 +486,7 @@ impl Fixture {
         seed: bool,
         tls: Option<(&Pki, bool)>,
         limits: Limits,
+        connections: ConnectionLimits,
         address: SocketAddr,
         descriptor_set: &'static [u8],
     ) -> Self {
@@ -544,7 +547,7 @@ impl Fixture {
             }
         });
         let listener = BoundListener::bind(address).expect("listener binds");
-        let bound = app.serve(listener, server_options(limits), tls);
+        let bound = app.serve(listener, server_options(connections), tls);
         let address = bound.local_addr();
         Self {
             server: Some(bound),
@@ -590,6 +593,11 @@ fn limits() -> Limits {
         request_timeout: Duration::from_secs(8),
         max_in_flight: NonZeroU32::new(256),
         max_admission_wait: Duration::from_secs(8),
+    }
+}
+
+fn connection_limits() -> ConnectionLimits {
+    ConnectionLimits {
         max_connections: NonZeroU32::new(4096),
         max_connection_age: None,
     }
@@ -1782,6 +1790,70 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
 }
 
 #[tokio::test]
+async fn one_connection_serves_concurrent_rpcs_and_capacity_returns_after_it_closes() {
+    let fixture = Fixture::open_with_at(
+        true,
+        None,
+        Limits {
+            max_in_flight: NonZeroU32::new(2),
+            ..limits()
+        },
+        ConnectionLimits {
+            max_connections: Some(NonZeroU32::MIN),
+            ..connection_limits()
+        },
+        loopback(),
+        grpc_contracts::FILE_DESCRIPTOR_SET,
+    )
+    .await;
+    let mut first = fixture.echo_client();
+    let mut second = first.clone();
+    let (first_reply, second_reply, ()) = timeout(WAIT, async {
+        tokio::join!(
+            first.unary(request(unary("hold"))),
+            second.unary(request(unary("hold"))),
+            async {
+                fixture.echo.hold.wait_for(2).await;
+                let mut excess = TcpStream::connect(fixture.address).await.unwrap();
+                match excess.read(&mut [0]).await {
+                    Ok(bytes) => assert_eq!(bytes, 0, "excess peer received HTTP/2 bytes"),
+                    Err(error) => assert!(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+                    )),
+                }
+                fixture.echo.hold.release();
+            }
+        )
+    })
+    .await
+    .expect("one connection serves both calls and refuses the excess peer");
+    assert_eq!(first_reply.unwrap().into_inner().message, "released");
+    assert_eq!(second_reply.unwrap().into_inner().message, "released");
+    drop((first, second));
+
+    let recovered = timeout(WAIT, async {
+        loop {
+            match fixture
+                .echo_client()
+                .unary(request(unary("recovered")))
+                .await
+            {
+                Err(error) if error.code() == Code::Unavailable => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await
+    .expect("the closed connection releases capacity")
+    .expect("a new connection serves an RPC");
+    assert_eq!(recovered.into_inner().message, "recovered");
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn opened_stream_holds_capacity_until_terminal_release() {
     let fixture = Fixture::limited(1).await;
     let mut client = fixture.echo_client();
@@ -1975,10 +2047,11 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
         reason = "the loopback peer echoes the timeout it received over HTTP/2"
     )]
     let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
-    let server =
-        BoundListener::bind(loopback())
-            .unwrap()
-            .serve_h2(app, server_options(limits()), None);
+    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
+        app,
+        server_options(connection_limits()),
+        None,
+    );
     let client = plaintext_client(server.local_addr());
     for original in [None, Some("30S")] {
         let mut request = http::Request::builder()
@@ -2714,7 +2787,15 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
     unregistered.name = Some("Unregistered".to_owned());
     file.service.push(unregistered);
     let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
-    let fixture = Fixture::open_with_at(true, None, limits(), loopback(), descriptor_set).await;
+    let fixture = Fixture::open_with_at(
+        true,
+        None,
+        limits(),
+        connection_limits(),
+        loopback(),
+        descriptor_set,
+    )
+    .await;
     let expected_names = [
         ECHO_SERVICE,
         "grpc.health.v1.Health",
@@ -2819,7 +2900,15 @@ async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
     echo.method.retain(|method| method.name() != "ServerStream");
     assert_eq!(echo.method.len() + 1, original_count);
     let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
-    let fixture = Fixture::open_with_at(true, None, limits(), loopback(), descriptor_set).await;
+    let fixture = Fixture::open_with_at(
+        true,
+        None,
+        limits(),
+        connection_limits(),
+        loopback(),
+        descriptor_set,
+    )
+    .await;
     let mut client = fixture.echo_client();
 
     let omitted = timeout(
@@ -3123,10 +3212,11 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
         let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
-        let server =
-            BoundListener::bind(loopback())
-                .unwrap()
-                .serve_h2(app, server_options(limits()), None);
+        let server = BoundListener::bind(loopback()).unwrap().serve_h2(
+            app,
+            server_options(connection_limits()),
+            None,
+        );
         let adapter = Client::try_new(
             &format!("http://{}", server.local_addr()),
             ClientSecurity::Plaintext,

@@ -358,6 +358,33 @@ fn http_can_limit_connections_below_concurrent_requests() {
     );
 }
 
+// template:begin grpc:config-test-finite-listener-connection-caps
+#[rstest::rstest]
+#[case::all_listeners("4", ":9090", "true", "7", 15)]
+#[case::disabled_diagnostics("4", "", "true", "7", 11)]
+#[case::disabled_grpc("4", ":9090", "false", "7", 8)]
+#[case::uncapped_http("0", ":9090", "true", "7", 7)]
+#[case::uncapped_grpc("4", ":9090", "true", "0", 8)]
+fn service_counts_finite_caps_of_enabled_listeners(
+    #[case] http_max_connections: &str,
+    #[case] diagnostics_addr: &str,
+    #[case] grpc_enabled: &str,
+    #[case] grpc_max_connections: &str,
+    #[case] expected: u64,
+) {
+    let cfg = load_env(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__HTTP__MAX_CONNECTIONS", http_max_connections),
+        ("APP__OBSERVABILITY__METRICS__ADDR", diagnostics_addr),
+        ("APP__GRPC__ENABLED", grpc_enabled),
+        ("APP__GRPC__ADDR", "127.0.0.1:0"),
+        ("APP__GRPC__SECURITY", "plaintext"),
+        ("APP__GRPC__MAX_CONNECTIONS", grpc_max_connections),
+    ]);
+    assert_eq!(cfg.finite_listener_connection_caps(), expected);
+}
+// template:end grpc:config-test-finite-listener-connection-caps
+
 #[test]
 fn precedence_is_defaults_then_files_in_order_then_env() {
     let dir = tempfile::tempdir().unwrap();

@@ -41,6 +41,7 @@ pub struct ConnectionLimits {
 // template:begin grpc:http2-listener-options
 #[derive(Clone, Copy, Debug)]
 pub struct Http2Options {
+    /// Time to read the 24-octet client preface magic in RFC 9113 §3.4, before the SETTINGS frame.
     pub preface_timeout: Duration,
     pub max_header_list_size: u32,
     pub connections: ConnectionLimits,
@@ -369,10 +370,7 @@ where
     Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let BoundListener {
-        listener,
-        local_addr,
-    } = bound;
+    let local_addr = bound.local_addr;
     let connection_shutdown = ConnectionShutdown {
         finish: CancellationToken::new(),
         force: CancellationToken::new(),
@@ -403,7 +401,7 @@ where
         },
     );
     let accept = accept_loop(
-        listener,
+        bound,
         app,
         limits,
         driver,
@@ -425,7 +423,10 @@ where
 }
 
 async fn accept_loop<F, Fut, IO>(
-    listener: TcpListener,
+    BoundListener {
+        listener,
+        local_addr,
+    }: BoundListener,
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
@@ -467,7 +468,7 @@ async fn accept_loop<F, Fut, IO>(
             Some(Ok(permit)) => Some(permit),
             Some(Err(_)) => {
                 metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
-                tracing::debug!(%peer, "http_connection_refused");
+                tracing::debug!(%local_addr, %peer, "http_connection_refused");
                 drop(stream);
                 continue;
             }

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use infra_grpc::{Authentication as GrpcAuthentication, ServerTlsMaterial};
-use infra_http_transport::{Http2Options, TlsOptions};
+use infra_http_transport::{ConnectionLimits, Http2Options, TlsOptions};
 use service_config::{GrpcConfig, GrpcListenerSecurity, ValidationError};
 
 use super::background::{Background, BackgroundRegistration};
@@ -71,7 +71,10 @@ pub(super) fn prepare(
         addr: grpc.addr,
         app,
         tls: tls(&grpc.security)?,
-        options: infra_grpc::server_options(limits),
+        options: infra_grpc::server_options(ConnectionLimits {
+            max_connections: grpc.max_connections,
+            max_connection_age: grpc.max_connection_age,
+        }),
     })
 }
 
@@ -80,8 +83,6 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
         request_timeout: grpc.request_timeout,
         max_in_flight: grpc.max_in_flight,
         max_admission_wait: grpc.admission_wait,
-        max_connections: grpc.max_connections,
-        max_connection_age: grpc.max_connection_age,
     }
 }
 
