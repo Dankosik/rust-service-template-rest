@@ -395,23 +395,22 @@ fn modes_reject_foreign_provider_fields() {
 
     for (source, expected_key) in [
         ("mode = \"none\"\nissuer = \"issuer\"\n", "authn.issuer"),
+        // template:begin oidc-jwt:authn-foreign-fields-jwt-case
         (
             "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
             "authn.introspection_endpoint",
         ),
+        // template:end oidc-jwt:authn-foreign-fields-jwt-case
+        // template:begin oidc-introspection:authn-foreign-fields-introspection-case
         (
             "mode = \"oidc-introspection\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\nintrospection_client_id = \"client\"\nintrospection_client_secret = \"secret\"\nalgorithms = [\"RS256\"]\n",
             "authn.algorithms",
         ),
+        // template:end oidc-introspection:authn-foreign-fields-introspection-case
     ] {
         assert_rejected_field(source, expected_key);
     }
-    for mode in ["none", "oidc-jwt"] {
-        let base = if mode == "none" {
-            "mode = \"none\"\n"
-        } else {
-            "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n"
-        };
+    let assert_rejected_cache_fields = |base: &str| {
         for (field, expected_key) in [
             ("cache_enabled = false", "authn.cache_enabled"),
             ("cache_capacity = 256", "authn.cache_capacity"),
@@ -420,7 +419,13 @@ fn modes_reject_foreign_provider_fields() {
             let source = format!("{base}{field}\n");
             assert_rejected_field(&source, expected_key);
         }
-    }
+    };
+    assert_rejected_cache_fields("mode = \"none\"\n");
+    // template:begin oidc-jwt:authn-foreign-cache-fields-jwt-case
+    assert_rejected_cache_fields(
+        "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\n",
+    );
+    // template:end oidc-jwt:authn-foreign-cache-fields-jwt-case
 }
 
 // template:begin oidc-introspection:load-introspection-environment
