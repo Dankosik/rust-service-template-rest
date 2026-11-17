@@ -2,7 +2,7 @@ use health::{Probe, ReadinessReader, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions, HttpContract};
 use infra_http_transport::{BoundListener, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
-use service_config::WorkerConfig;
+use service_config::{HttpListenerConfig, WorkerConfig};
 
 use super::WorkerError;
 use crate::background::Background;
@@ -27,16 +27,17 @@ pub(super) fn bind_listeners(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    let options = server_options(config);
+    let http = config.http.listener();
+    let options = server_options(http);
     let app = HttpContract::default().with_probes("/").build(
         readiness.clone(),
         Authentication::Public,
-        &harden_options(config, readiness.clone()),
+        &harden_options(http, readiness.clone()),
     )?;
     let health = resources
         .listeners
         .health
-        .insert(app.serve(BoundListener::bind(config.http.addr)?, options));
+        .insert(app.serve(BoundListener::bind(http.addr)?, options));
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
@@ -63,23 +64,22 @@ fn watch_listener(name: &'static str, server: &Server, background: &Background) 
     });
 }
 
-fn server_options(config: &WorkerConfig) -> ServerOptions {
+fn server_options(http: &HttpListenerConfig) -> ServerOptions {
     ServerOptions {
-        header_read_timeout: config.http.header_read_timeout,
-        max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
-        max_connections: config.http.connection_cap(),
-        max_connection_age: config.http.connection_age_cap(),
+        header_read_timeout: http.header_read_timeout,
+        max_header_bytes: usize::try_from(http.max_header_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_connections: http.max_connections,
+        max_connection_age: http.max_connection_age,
     }
 }
 
-fn harden_options(config: &WorkerConfig, readiness: ReadinessReader) -> HardenOptions {
+fn harden_options(http: &HttpListenerConfig, readiness: ReadinessReader) -> HardenOptions {
     HardenOptions {
-        max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
-        request_timeout: config.http.request_timeout,
-        max_in_flight: config.http.in_flight_cap(),
-        admission_wait: config.http.admission_wait_cap(),
-        log_health_probes: config.http.access_log_health_probes,
+        max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
+        request_timeout: http.request_timeout,
+        max_in_flight: http.max_in_flight,
+        admission_wait: http.admission_wait,
+        log_health_probes: http.access_log_health_probes,
         draining: Some(readiness),
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use operation_context::OperationContext;
 
 #[test]
 fn redis_errors_map_to_bounded_error_types() {
@@ -71,12 +72,13 @@ fn a_failed_command_names_its_cause_on_the_series() {
 
 #[tokio::test]
 async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true).await;
     let namespace = cache.namespace(namespace!("ttl"));
-    assert_eq!(namespace.get("ready").await, Ok(None));
+    assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
     let connections = server.connections();
     let maximum = Duration::from_millis(i64::MAX.cast_unsigned());
 
@@ -87,20 +89,18 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
         Duration::MAX,
     ] {
         assert_eq!(
-            namespace.set("key", b"value", ttl).await,
+            namespace.set(&caller, "key", b"value", ttl).await,
             Err(crate::SetError::InvalidTtl),
             "{ttl:?}"
         );
-        let stopped = operation_context::OperationContext::with_timeout(Duration::ZERO);
+        let stopped = OperationContext::with_timeout(Duration::ZERO);
         assert_eq!(
-            namespace
-                .set_with_context("key", b"value", ttl, &stopped)
-                .await,
+            namespace.set(&stopped, "key", b"value", ttl).await,
             Err(crate::SetError::InvalidTtl),
             "invalid TTL takes precedence over stopped context: {ttl:?}"
         );
     }
-    assert_eq!(namespace.get("ready").await, Ok(None));
+    assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
     assert_eq!(server.command_count("SET", None), 0);
     assert_eq!(
         server.connections(),
@@ -116,7 +116,7 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
         (Duration::from_millis(27), "27"),
     ];
     for (ttl, _) in admitted {
-        assert_eq!(namespace.set("key", b"value", ttl).await, Ok(()));
+        assert_eq!(namespace.set(&caller, "key", b"value", ttl).await, Ok(()));
     }
     let commands = server.observed.commands.lock().expect("commands lock");
     let sets: Vec<_> = commands
@@ -133,6 +133,7 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
 
 #[tokio::test]
 async fn a_dropped_get_records_cancelled_without_the_key() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -158,7 +159,7 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
     .expect("start connect admits without a server");
     let namespace = cache.namespace(namespace!("obs"));
     {
-        let mut operation = std::pin::pin!(namespace.get("hunter2-key"));
+        let mut operation = std::pin::pin!(namespace.get(&caller, "hunter2-key"));
         let _ = tokio::time::timeout(Duration::from_millis(30), &mut operation).await;
     }
     let scrape = recorder.handle().render();
@@ -171,6 +172,7 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
 
 #[tokio::test]
 async fn a_silent_server_records_timeout() {
+    let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -196,7 +198,7 @@ async fn a_silent_server_records_timeout() {
     .expect("start connect");
     let namespace = cache.namespace(namespace!("obs"));
     let started = std::time::Instant::now();
-    let err = namespace.get("hunter2-key").await.unwrap_err();
+    let err = namespace.get(&caller, "hunter2-key").await.unwrap_err();
     assert_eq!(err.to_string(), "cache unavailable");
     assert!(started.elapsed() < Duration::from_millis(450));
     let scrape = recorder.handle().render();
@@ -212,6 +214,7 @@ async fn a_silent_server_records_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
+    let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
     *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_millis(700);
     let cache = Cache::start(CacheOptions {
@@ -222,7 +225,10 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
     .expect("start connect");
 
     assert_eq!(
-        cache.namespace(namespace!("slow")).get("slow").await,
+        cache
+            .namespace(namespace!("slow"))
+            .get(&caller, "slow")
+            .await,
         Ok(None)
     );
 }
@@ -232,16 +238,19 @@ async fn each_outcome_records_into_its_own_series() {
     use metrics::Key;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
+    let caller = OperationContext::unbounded();
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true).await;
     let namespace = cache.namespace(namespace!("series"));
-    assert_eq!(namespace.get("key").await, Ok(None));
-    assert_eq!(namespace.get("key").await, Ok(None));
+    assert_eq!(namespace.get(&caller, "key").await, Ok(None));
+    assert_eq!(namespace.get(&caller, "key").await, Ok(None));
     assert_eq!(
-        namespace.set("key", b"value", Duration::from_secs(1)).await,
+        namespace
+            .set(&caller, "key", b"value", Duration::from_secs(1))
+            .await,
         Ok(())
     );
     let snapshot = snapshotter.snapshot().into_vec();

@@ -37,22 +37,10 @@ impl Operation {
 }
 
 impl CacheNamespace {
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, OperationError> {
-        self.get_bounded(key, None).await
-    }
-
-    pub async fn get_with_context(
+    pub async fn get(
         &self,
+        parent: &OperationContext,
         key: &str,
-        context: &OperationContext,
-    ) -> Result<Option<Vec<u8>>, OperationError> {
-        self.get_bounded(key, Some(context)).await
-    }
-
-    async fn get_bounded(
-        &self,
-        key: &str,
-        parent: Option<&OperationContext>,
     ) -> Result<Option<Vec<u8>>, OperationError> {
         let operation = Operation::Get;
         let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
@@ -72,26 +60,12 @@ impl CacheNamespace {
         .map_err(Into::into)
     }
 
-    pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, None).await
-    }
-
-    pub async fn set_with_context(
+    pub async fn set(
         &self,
+        parent: &OperationContext,
         key: &str,
         value: &[u8],
         ttl: Duration,
-        context: &OperationContext,
-    ) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, Some(context)).await
-    }
-
-    async fn set_bounded(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: Duration,
-        parent: Option<&OperationContext>,
     ) -> Result<(), SetError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
@@ -117,23 +91,7 @@ impl CacheNamespace {
             .map_err(Into::into)
     }
 
-    pub async fn delete(&self, key: &str) -> Result<(), MutationError> {
-        self.delete_bounded(key, None).await
-    }
-
-    pub async fn delete_with_context(
-        &self,
-        key: &str,
-        context: &OperationContext,
-    ) -> Result<(), MutationError> {
-        self.delete_bounded(key, Some(context)).await
-    }
-
-    async fn delete_bounded(
-        &self,
-        key: &str,
-        parent: Option<&OperationContext>,
-    ) -> Result<(), MutationError> {
+    pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
         let operation = Operation::Delete;
         let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
         self.run(parent, operation, build_command, |(): &()| Outcome::Ok)
@@ -143,7 +101,7 @@ impl CacheNamespace {
 
     async fn run<T: redis::FromRedisValue + Send + 'static>(
         &self,
-        parent: Option<&OperationContext>,
+        parent: &OperationContext,
         operation: Operation,
         build_command: impl FnOnce() -> redis::Cmd,
         outcome: fn(&T) -> Outcome,

@@ -2,7 +2,7 @@ use std::assert_matches;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_jobs_operator_from, load_worker_from};
+use crate::load::{load_jobs_operator_from, load_worker_from};
 use crate::test_support::{BUILD, env, load_worker_env, write};
 use crate::validate::validate_with;
 
@@ -144,7 +144,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
     )
     .unwrap();
     assert_eq!(
-        cfg.postgres().unwrap().session_budgets,
+        cfg.postgres().session_budgets,
         crate::PostgresSessionBudgets::Server
     );
 }
@@ -154,7 +154,7 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     use std::path::Path;
 
     fn password_file(config: &crate::JobsOperatorConfig) -> Option<&Path> {
-        config.postgres().unwrap().password_file.as_deref()
+        config.postgres().password_file.as_deref()
     }
 
     let enabled = [
@@ -200,28 +200,51 @@ fn jobs_operator_uses_the_shared_source_precedence() {
         ]),
     )
     .unwrap_err();
-    assert_matches!(&blanked, Error::Validate(errors) if errors.names("postgres.dsn"), "{blanked}");
+    assert_matches!(
+        &blanked,
+        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        "{blanked}"
+    );
 }
 
 #[test]
 fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     let options = LoadOptions::default();
+    let disabled =
+        load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "false")])).unwrap_err();
+    assert_matches!(disabled, JobsOperatorLoadError::PostgresDisabled);
     let unknown =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
-    assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
+    assert_matches!(
+        unknown,
+        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        "{unknown}"
+    );
     let missing =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "true")])).unwrap_err();
-    assert_matches!(&missing, Error::Validate(errors) if errors.names("postgres.dsn"), "{missing}");
+    assert_matches!(
+        &missing,
+        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        "{missing}"
+    );
     let budgets = load_jobs_operator_from(
         &options,
         env(&[("APP__POSTGRES__SESSION_BUDGETS", "invalid")]),
     )
     .unwrap_err();
-    assert_matches!(&budgets, Error::Deserialize(_), "{budgets}");
+    assert_matches!(
+        &budgets,
+        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        "{budgets}"
+    );
     let secret = "fixture-private-value";
     let error =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", secret)])).unwrap_err();
-    assert_matches!(error, Error::Deserialize(_), "{error}");
+    assert_matches!(
+        error,
+        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        "{error}"
+    );
     assert!(!error.to_string().contains(secret));
     assert!(!format!("{error:?}").contains(secret));
 }
@@ -238,14 +261,22 @@ fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(error, Error::Deserialize(_), "{error}");
+    assert_matches!(
+        error,
+        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        "{error}"
+    );
 
     let typo = load_jobs_operator_from(
         &LoadOptions::default(),
         env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
     )
     .unwrap_err();
-    assert_matches!(&typo, Error::Deserialize(_), "{typo}");
+    assert_matches!(
+        &typo,
+        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        "{typo}"
+    );
     assert!(!typo.to_string().contains("secret-pw"));
     assert!(!format!("{typo:?}").contains("secret-pw"));
 }
@@ -266,7 +297,11 @@ fn jobs_operator_prescans_unrelated_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(error, Error::SecretInFile { .. }, "{error}");
+    assert_matches!(
+        error,
+        JobsOperatorLoadError::Config(Error::SecretInFile { .. }),
+        "{error}"
+    );
     assert!(!error.to_string().contains("fixture-private-value"));
 
     let unaddressable = write(&dir, "unaddressable.toml", "[Unrelated]\nvalue = 1\n");
@@ -278,11 +313,19 @@ fn jobs_operator_prescans_unrelated_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(error, Error::UnaddressableKey { .. }, "{error}");
+    assert_matches!(
+        error,
+        JobsOperatorLoadError::Config(Error::UnaddressableKey { .. }),
+        "{error}"
+    );
     let malformed = load_jobs_operator_from(
         &LoadOptions::default(),
         env(&[("APP__UNRELATED__", "fixture-private-value")]),
     )
     .unwrap_err();
-    assert_matches!(malformed, Error::MalformedEnvName { .. }, "{malformed}");
+    assert_matches!(
+        malformed,
+        JobsOperatorLoadError::Config(Error::MalformedEnvName { .. }),
+        "{malformed}"
+    );
 }

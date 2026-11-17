@@ -56,7 +56,7 @@ use validate::Violations;
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
 pub use health::HealthConfig;
-pub use http::{HttpConfig, ShutdownTail};
+pub use http::{HttpConfig, HttpListenerConfig, ShutdownTail};
 // template:begin worker:config-worker-export
 pub use http::WorkerHttpConfig;
 pub use load::load_worker;
@@ -92,7 +92,7 @@ pub use authn::{JwtAlgorithm, TokenProfile};
 pub use service_auth::{ServiceAuthConfig, ServiceSigningKey};
 // template:end service-auth:config-service-auth-export
 // template:begin postgres:config-export
-pub use load::load_migration;
+pub use load::{MigrationLoadError, load_migration};
 pub use postgres::{
     MigrationConfig, MigrationPostgresConfig, PostgresConfig, PostgresSessionBudgets,
 };
@@ -102,7 +102,7 @@ pub use http_idempotency::HttpIdempotencyConfig;
 // template:end http-idempotency:config-http-idempotency-export
 // template:begin jobs:config-jobs-export
 pub use jobs::{JobsConfig, JobsOperatorConfig};
-pub use load::load_jobs_operator;
+pub use load::{JobsOperatorLoadError, load_jobs_operator};
 pub use postgres::OperatorPostgresConfig;
 // template:end jobs:config-jobs-export
 // template:begin webhooks:config-webhooks-export
@@ -114,7 +114,7 @@ pub use validate::{ValidationError, ValidationErrors};
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ConfigInput {
     pub(crate) app: AppConfig,
-    http: HttpConfig,
+    http: http::HttpInput,
     // template:begin grpc:config-input-field
     grpc: grpc::GrpcInput,
     // template:end grpc:config-input-field
@@ -166,7 +166,7 @@ impl ConfigInput {
             unused_variables,
             reason = "only the gRPC and cache profiles compare against HTTP timings"
         )]
-        let http_timings = self.http.validate(shutdown_tail, v);
+        let (http, http_timings) = self.http.admit(shutdown_tail, v);
         // template:begin grpc:config-admit
         let grpc = self.grpc.admit(http_timings.drain_budget, v);
         // template:end grpc:config-admit
@@ -205,7 +205,7 @@ impl ConfigInput {
         let admitted: Result<Config, validate::Rejected> = (|| {
             Ok(Config(ServiceSections {
                 app: self.app,
-                http: self.http,
+                http,
                 // template:begin grpc:config-admitted-field
                 grpc: grpc?,
                 // template:end grpc:config-admitted-field

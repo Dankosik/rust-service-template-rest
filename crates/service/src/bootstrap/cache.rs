@@ -31,3 +31,23 @@ pub(super) async fn open(
     *retained = Some(Cache::start(options).await?);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::extract::State;
+    use infra_cache::CacheNamespace;
+    use infra_http::RequestContext;
+
+    #[test]
+    fn a_feature_handler_can_forward_its_request_context_to_the_cache() {
+        let _: axum::routing::MethodRouter<CacheNamespace> = axum::routing::get(
+            async |State(cache): State<CacheNamespace>, request: RequestContext| {
+                cache
+                    .get(request.operation(), "key")
+                    .await
+                    .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?
+                    .ok_or(axum::http::StatusCode::NOT_FOUND)
+            },
+        );
+    }
+}

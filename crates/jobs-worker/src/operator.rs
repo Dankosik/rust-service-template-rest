@@ -14,7 +14,7 @@ use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use serde_with::{DisplayFromStr, serde_as, skip_serializing_none};
-use service_config::{LoadOptions, OperatorPostgresConfig};
+use service_config::{JobsOperatorLoadError, LoadOptions, OperatorPostgresConfig};
 
 use crate::report_failure;
 
@@ -373,11 +373,11 @@ struct FailureFields<'a> {
 )]
 pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
-        Ok(config) => match config.postgres() {
-            Some(postgres) => run_configured(postgres, request),
-            None => request.failed_before_start(Cause::PostgresDisabled).into(),
-        },
-        Err(error) => {
+        Ok(config) => run_configured(config.postgres(), request),
+        Err(JobsOperatorLoadError::PostgresDisabled) => {
+            request.failed_before_start(Cause::PostgresDisabled).into()
+        }
+        Err(JobsOperatorLoadError::Config(error)) => {
             report_failure(&error);
             request.failed_before_start(Cause::Configuration).into()
         }

@@ -109,8 +109,9 @@ impl FullPipeline {
 }
 
 async fn fill_with_cancelled_commands(namespace: &CacheNamespace) {
+    let caller = OperationContext::unbounded();
     for _ in 0..ABANDONED_COMMANDS {
-        let mut abandoned = pin!(namespace.get("abandoned"));
+        let mut abandoned = pin!(namespace.get(&caller, "abandoned"));
         assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
     }
 }
@@ -126,12 +127,13 @@ impl Wake for DriverWake {
 
 #[tokio::test]
 async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
+    let caller = OperationContext::unbounded();
     for delete in [false, true] {
         tokio::task::unconstrained(async {
             let mut pipeline = FullPipeline::new().await;
             let namespace = pipeline.cache.namespace(namespace!("test"));
             let generation = pipeline.generation.clone();
-            let mut peer = pin!(namespace.get("peer"));
+            let mut peer = pin!(namespace.get(&caller, "peer"));
             assert!(futures_util::poll!(peer.as_mut()).is_pending());
             fill_with_cancelled_commands(&namespace).await;
             let mut maintenance = pin!(ping_until(&generation, BUDGET));
@@ -139,10 +141,10 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
 
             let mut mutation = Box::pin(async {
                 if delete {
-                    namespace.delete("cancelled").await.expect("DEL");
+                    namespace.delete(&caller, "cancelled").await.expect("DEL");
                 } else {
                     namespace
-                        .set("cancelled", b"value", Duration::from_secs(1))
+                        .set(&caller, "cancelled", b"value", Duration::from_secs(1))
                         .await
                         .expect("SET");
                 }
