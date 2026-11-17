@@ -13,9 +13,10 @@ the `source` part; runtime parts appear when they have a selected graph. The
 artifact matrix runs the selected release representatives in the legs of
 ARTIFACT_LEGS, each restoring the initializer cache of its graphs' family.
 
-The classifier selects runtime graphs with initializer_runtime and the four
-release representatives with initializer_artifacts; --artifacts-only emits the
-latter selection for make verify.
+The classifier selects the source part with initializer_source, runtime graphs
+with initializer_runtime and the four release representatives with
+initializer_artifacts; --artifacts-only emits the latter selection for make
+verify.
 Such a path under a narrowable prefix affects a graph only when the initializer
 keeps it for the graph's profile tuple: a path the graph removes cannot reach
 its build. Any other one (manifests, the lockfile, the initializer, Make,
@@ -151,14 +152,15 @@ def select(paths: list[str] | None, inventory: dict[int, dict[str, str]],
              initializer_surfaces([path for path in paths if not path.startswith(NARROWABLE)], base))
     selected = {surface: numbers if surface in broad else set() for surface, numbers in candidates.items()}
     narrow = candidates.keys() - broad
-    if narrow and paths:
+    narrow_paths = list(dict.fromkeys(path for path in (paths or ()) if path.startswith(NARROWABLE)))
+    if narrow and narrow_paths:
         profiles = template_init._profile_data(ROOT)
 
         @cache
         def removals(number: int) -> tuple[str, ...]:
             return removed_paths(profiles, inventory[number])
 
-        for path in dict.fromkeys(path for path in paths if path.startswith(NARROWABLE)):
+        for path in narrow_paths:
             for surface in _narrow_surfaces(path, base) & narrow:
                 selected[surface].update(number for number in candidates[surface] if kept(path, removals(number)))
     return selected.get("initializer_runtime", set()), sorted(selected["initializer_artifacts"])
@@ -203,6 +205,9 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "crates/infra-serviceauth/src/verify.rs": {n for n, g in inventory.items() if g["service_auth"] != "none"},
         "Cargo.lock": everything,
         "scripts/template/init.py": everything,
+        "scripts/template/state.py": everything,
+        "scripts/template/sync.py": set(),
+        "build/docker/runtime-progress.Dockerfile": set(),
     }
     for path, expected in cases.items():
         actual, _ = select([path], inventory)
@@ -238,9 +243,13 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "crates/infra-serviceauth/src/verify.rs": [],
         "crates/service/src/main.rs": [1, 7, 47, 65],
         "build/docker/Dockerfile": [1, 7, 47, 65],
+        "build/docker/pgo-train.sh": [1, 7, 47, 65],
+        "build/docker/runtime-progress.Dockerfile": [],
         "scripts/image/inventory.py": [1, 7, 47, 65],
         "Cargo.lock": [1, 7, 47, 65],
         "scripts/template/init.py": [1, 7, 47, 65],
+        "scripts/template/state.py": [1, 7, 47, 65],
+        "scripts/template/sync.py": [],
     }
     for path, expected in artifact_cases.items():
         _, actual = select([path], inventory, artifacts_only=True)

@@ -8,10 +8,6 @@ SHELL := /bin/sh
 # file. `make tools-check` proves manifest shape, Cargo pins, Dockerfile parity, and cooldowns.
 include tools/versions.env
 
-ifneq (,$(filter template-init,$(MAKECMDGOALS)))
-$(foreach var,$(TEMPLATE_INIT_VARS),$(eval override $(var) := $$(value $(var))))
-endif
-
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
 export CARGO CARGO_FLAGS
@@ -92,7 +88,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 # The only portable registry of standard target names. Local service recipes
 # may not override these names; profile blocks extend it statically so
 # `scripts/template/sync.py` can inspect it without executing Make.
-TEMPLATE_STANDARD_TARGETS := help template-init template-sync build run test test-package test-changed mutants fmt fmt-check lint lint-changed \
+TEMPLATE_STANDARD_TARGETS := help template-sync build run test test-package test-changed mutants fmt fmt-check lint lint-changed \
 	check check-unlocked check-instructions clean \
 	agent-harness-sync agent-harness-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
@@ -140,9 +136,6 @@ include make/profile-postgres.mk
 
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-
-template-init: ## Initialize the service identity and selected profiles once
-	@python3 scripts/template/init.py --repo .
 
 SYNC_MODE ?= --check
 template-sync: ## Synchronize portable template files from TEMPLATE_SOURCE=<path> (SYNC_MODE=--check|--apply)
@@ -373,7 +366,7 @@ docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 			echo "$@ requires Docker ($(LYCHEE_IMAGE)) or local lychee" >&2; exit 2; \
 		fi; \
 	}; \
-	if [ -n "$(MARKDOWN_FILES)" ]; then run_lychee "$(CURDIR)" $(MARKDOWN_FILES); fi; \
+	if [ -n "$(MARKDOWN_FILES)" ]; then run_lychee "$(CURDIR)" $(MARKDOWN_FILES) || exit; fi; \
 	if [ -f make/source.mk ]; then \
 		stage="$$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.mkdtemp(prefix="docs-check-")).resolve())')" && \
 		trap 'rm -rf "$$stage"' EXIT && \
@@ -487,7 +480,7 @@ install-hooks: ## Run `make verify` before every push from this clone; `git push
 
 verify-check: ## Self-test of the verification router, checks, and image scripts
 	python3 -m unittest scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py $(wildcard scripts/tests/test_profile_runners.py)
-	@if test -f make/source.mk; then python3 scripts/template/matrix.py --self-test; bash scripts/template/check_init.sh --self-test; fi
+	@if test -f make/source.mk; then python3 scripts/template/matrix.py --self-test && bash scripts/template/check_init.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	python3 -m unittest scripts/tests/test_verify.py -k Surfaces
@@ -505,7 +498,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 check-unlocked: fmt-check lint test unused-deps typos openapi-lint check-instructions docs-check \
 	duplication-check architecture-check quality-check-self-test \
 	$(POSTGRES_CHECK_TARGETS) $(MONITORING_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
-	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+	validation-lock-self-test verify-check
 
 clean: ## Remove build output
 	$(CARGO) clean

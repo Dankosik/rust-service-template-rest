@@ -95,11 +95,14 @@ outputs:
     description: Validation router, lock, or checker scripts changed.
     value: ${{ steps.surfaces.outputs.validation_system }}
   template_engine:
-    description: Template initialization or sync engine changed.
+    description: Template initialization or projection inputs changed.
     value: ${{ steps.surfaces.outputs.template_engine }}
   module_initializer:
     description: Source-template projections changed.
     value: ${{ steps.surfaces.outputs.module_initializer }}
+  initializer_source:
+    description: Source-template and sync behavior changed.
+    value: ${{ steps.surfaces.outputs.initializer_source }}
   initializer_runtime:
     description: Source-template runtime graph inputs changed.
     value: ${{ steps.surfaces.outputs.initializer_runtime }}
@@ -206,6 +209,6 @@ runs:
             echo "rust_analysis=false"
           fi
         } | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
-        if [[ "${PLAN_INITIALIZER}" == true && -f scripts/template/matrix.py ]] && grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
+        if [[ "${PLAN_INITIALIZER}" == true ]] && grep -Eq '^initializer_(source|runtime|artifacts)=true$' "${surfaces}"; then
           python3 ./scripts/template/matrix.py "${plan[@]}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
         fi

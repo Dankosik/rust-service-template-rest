@@ -22,11 +22,11 @@ make template-init \
   AGENT_HARNESS=claude
 ```
 
-[`Makefile`](../Makefile) and [`scripts/template/state.py`](../scripts/template/state.py)
-own all profile flags, allowed values, defaults, and cross-profile prerequisites
-(`python3 scripts/template/init.py --repo .` accepts the same flags in
-`--kebab-case`; unset ambient shell `JOBS=<n>` before running `make
-template-init` unless selecting the `JOBS` profile).
+Run `make template-init` in the source template checkout. Unset an ambient
+`JOBS=<n>` before running it unless selecting the jobs profile.
+`python3 scripts/template/init.py --repo .` accepts the same options in
+`--kebab-case`. The [profile rules](../scripts/template/state.py) define
+allowed values and cross-profile prerequisites.
 
 The initializer validates inputs before mutating the checkout, renames the
 service package and main binary (keeping `crates/service/`, the library target,

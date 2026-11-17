@@ -1,6 +1,6 @@
-# Capture initializer input as literal Make data only for the initialization
-# goal. Other goals must not inherit empty identity variables and thereby
-# conflict with the init CLI's duplicate-input refusal.
+# template:begin source-template:make-initializer-inputs
+# Capture initializer variables literally before the other Makefiles are read,
+# and export them only for initialization.
 ifneq (,$(filter template-init,$(MAKECMDGOALS)))
 TEMPLATE_INIT_VARS := SERVICE_NAME REPOSITORY DESCRIPTION CODEOWNER DATABASE AUTHN \
 	OUTBOUND_HTTP OUTBOUND_AUTH GRPC HTTP_IDEMPOTENCY JOBS MESSAGING OUTBOX \
@@ -20,8 +20,10 @@ CACHE ?= none
 OBJECT_STORAGE ?= none
 SERVICE_AUTH ?= none
 AGENT_HARNESS ?= all
+$(foreach var,$(TEMPLATE_INIT_VARS),$(eval override $(var) := $$(value $(var))))
 export $(TEMPLATE_INIT_VARS)
 endif
+# template:end source-template:make-initializer-inputs
 
 include make/service.mk
 include make/template.mk
