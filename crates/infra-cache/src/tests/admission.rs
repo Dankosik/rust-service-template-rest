@@ -45,6 +45,16 @@ fn an_authenticated_tls_address_is_admitted_without_a_server() {
 }
 
 #[test]
+fn valkey_schemes_are_admitted_like_redis_schemes() {
+    assert!(!admitted("valkey://127.0.0.1:6379", true, true).server().tls);
+    assert!(
+        admitted("valkeys://:hunter2@cache.example:6380", false, false)
+            .server()
+            .tls
+    );
+}
+
+#[test]
 fn insecure_tls_fragment_is_refused() {
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379#insecure",
@@ -288,28 +298,6 @@ fn an_unparsable_dsn_does_not_echo_the_password() {
 fn an_admitted_dsn_outside_a_runtime_is_refused() {
     let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::NoRuntime);
-}
-
-#[test]
-fn a_tokio_runtime_without_timers_is_refused_at_startup() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .expect("Tokio runtime with I/O");
-    let _entered = runtime.enter();
-    let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
-    assert_eq!(err, CacheError::NoTimeDriver);
-}
-
-#[test]
-fn a_tokio_runtime_without_io_is_refused_at_startup() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("Tokio runtime with time");
-    let _entered = runtime.enter();
-    let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
-    assert_eq!(err.to_string(), "cache requires the Tokio I/O driver");
 }
 
 #[test]

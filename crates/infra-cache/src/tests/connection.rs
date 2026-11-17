@@ -1447,6 +1447,59 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     }
 }
 
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
+)]
+async fn a_password_the_server_keeps_refusing_is_reported_once() {
+    let metrics = TestMetrics::new();
+    let _recorder = metrics::set_default_local_recorder(metrics.recorder());
+    let captured = CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let server = FakeServer::start().await;
+    let initial = ephemeral_password();
+    let refused = ephemeral_password();
+    server.require_password(&initial);
+    let file = temp_file(format!("{initial}\n"));
+    let cache = Cache::start(with_password_file(
+        &format!("redis://{}", server.address),
+        file.path().to_path_buf(),
+    ))
+    .expect("start cache");
+    let namespace = cache.namespace(namespace!("refused_password"));
+    assert_eq!(namespace.get("ready").await, Ok(None));
+
+    std::fs::write(file.path(), format!("{refused}\n")).expect("refused password");
+    server
+        .wait_for(
+            Duration::from_secs(12),
+            "the refused password was not retried",
+            || {
+                password_refresh_samples(&metrics).contains(&(
+                    "refresh_failed".to_owned(),
+                    "auth".to_owned(),
+                    2,
+                ))
+            },
+        )
+        .await;
+    assert_eq!(
+        captured
+            .rendered()
+            .matches("cache_password_refresh_failed")
+            .count(),
+        1
+    );
+    assert_eq!(namespace.get("still-usable").await, Ok(None));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[expect(

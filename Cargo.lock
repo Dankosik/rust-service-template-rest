@@ -2634,6 +2634,7 @@ dependencies = [
  "rcgen",
  "redis",
  "rustls",
+ "rustls-platform-verifier",
  "secrecy",
  "shared-rules",
  "socket2",

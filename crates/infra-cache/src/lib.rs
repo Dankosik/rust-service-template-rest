@@ -1,6 +1,7 @@
 mod admission;
 mod connection;
 mod credentials;
+mod dial;
 mod namespace;
 mod observe;
 
@@ -73,12 +74,6 @@ pub enum CacheError {
     InvalidClientKey,
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
-    #[error("cache requires the Tokio time driver")]
-    NoTimeDriver,
-    #[error("cache requires the Tokio I/O driver")]
-    NoIoDriver,
-    #[error("cache could not check the Tokio I/O driver ({kind})")]
-    IoDriverCheck { kind: std::io::ErrorKind },
     #[error("cache client could not be built")]
     ClientBuild,
 }
@@ -112,13 +107,20 @@ impl Cache {
         let command_timeout = options.command_timeout;
         let Admitted {
             server,
-            client,
+            dial,
+            settings,
             password_file,
         } = admission::admit(options)?;
         admission::check_runtime()?;
         observe::describe();
         Ok(Self {
-            link: Arc::new(Link::start(server, client, password_file, command_timeout)),
+            link: Arc::new(Link::start(
+                server,
+                dial,
+                settings,
+                password_file,
+                command_timeout,
+            )),
         })
     }
 
