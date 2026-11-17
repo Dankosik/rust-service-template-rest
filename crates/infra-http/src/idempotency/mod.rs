@@ -6,6 +6,17 @@ mod input;
 mod openapi;
 mod stored;
 
+#[macro_export]
+macro_rules! idempotent_route {
+    ($($handler:ident)::+) => {{
+        #[derive(utoipa::OpenApi)]
+        #[openapi(paths($($handler)::+))]
+        struct Document;
+
+        $crate::idempotency::route(<Document as utoipa::OpenApi>::openapi(), $($handler)::+)
+    }};
+}
+
 pub use compose::route;
 pub use declaration::CompositionError;
 pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback};

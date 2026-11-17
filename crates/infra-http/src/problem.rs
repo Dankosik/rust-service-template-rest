@@ -253,6 +253,15 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct RequestEntityTooLarge(pub Problem);
 
+    /// Content-Type is missing or is not `application/json` or an `application/*+json` type
+    #[derive(Debug, ToResponse)]
+    #[expect(
+        dead_code,
+        reason = "The response body exists only for the OpenAPI derive"
+    )]
+    #[response(content_type = "application/problem+json")]
+    pub(crate) struct UnsupportedMediaType(pub Problem);
+
     /// request body was not received within the request budget
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json", headers(("Connection" = String, description = "close when the upload times out over HTTP/1.x")))]

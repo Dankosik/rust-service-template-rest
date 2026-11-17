@@ -813,11 +813,7 @@ impl Policy {
         let mut extension_allow = HashMap::default();
         let mut first_protected = None;
         for (path, item) in &document.paths.paths {
-            let path = if path.is_empty() {
-                "/".to_owned()
-            } else {
-                path.clone()
-            };
+            let path = path.as_str();
             let mut ordered_methods = BTreeMap::new();
             if item.query.is_some() || !item.additional_operations.is_empty() {
                 let methods = documented_methods(item)
@@ -825,7 +821,7 @@ impl Policy {
                     .join(",");
                 let allow = HeaderValue::from_str(&methods)
                     .map_err(|_| FinalizeError::InvalidRegistration)?;
-                extension_allow.insert(path.as_str().into(), allow);
+                extension_allow.insert(path.into(), allow);
             }
             let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
@@ -835,7 +831,7 @@ impl Policy {
                 ordered_methods.insert(
                     method.to_owned(),
                     compile_operation(
-                        document, &path, method, operation,
+                        document, path, method, operation,
                         // template:begin http-idempotency:http-fixed-operation-mounts
                         mounted,
                         // template:end http-idempotency:http-fixed-operation-mounts
@@ -848,7 +844,7 @@ impl Policy {
                     .any(|(fixed, _)| *fixed == method.as_str())
                 {
                     return Err(FinalizeError::InvalidPolicy {
-                        path,
+                        path: path.to_owned(),
                         method: method.clone(),
                         fault: "fixed_method_in_additional_operations",
                     });
@@ -856,7 +852,7 @@ impl Policy {
                 ordered_methods.insert(
                     method.clone(),
                     compile_operation(
-                        document, &path, method, operation,
+                        document, path, method, operation,
                         // template:begin http-idempotency:http-additional-operation-mounts
                         mounted,
                         // template:end http-idempotency:http-additional-operation-mounts
@@ -868,13 +864,13 @@ impl Policy {
                     .iter()
                     .find(|(_, access)| matches!(access, Access::Protected(..)))
             {
-                first_protected = Some((path.as_str().into(), method.as_str().into()));
+                first_protected = Some((path.into(), method.as_str().into()));
             }
             let methods = ordered_methods
                 .into_iter()
                 .map(|(method, access)| (method.into_boxed_str(), access))
                 .collect();
-            routes.insert(path.into_boxed_str(), methods);
+            routes.insert(path.into(), methods);
         }
         Ok(Self(Arc::new(CompiledPolicy {
             routes,
@@ -1292,6 +1288,81 @@ mod tests {
         }
     }
     // template:end http-idempotency:http-unregistered-contract-test
+
+    #[test]
+    fn json_body_outcome_respects_declared_media_types_and_responses() {
+        let explicit = serde_json::json!({
+            "description": "unsupported widget version",
+            "content": {"text/plain": {"schema": {"type": "string"}}},
+            "headers": {"Accept": {"schema": {"type": "string"}}}
+        });
+        let local = serde_json::json!({"$ref": "#/components/responses/UnsupportedWidgetVersion"});
+        let opaque = serde_json::json!({"$ref": "https://api.example/problems.yaml#/Unsupported"});
+        let mut opaque_content = explicit.clone();
+        opaque_content["content"]["application/problem+json"] = serde_json::json!({
+            "$ref": "https://api.example/problems.yaml#/components/mediaTypes/Unsupported"
+        });
+        let json_body = serde_json::json!({"$ref": "#/components/requestBodies/Widget"});
+        let mixed_body = serde_json::json!({
+            "content": {"application/json": {}, "application/octet-stream": {}}
+        });
+        let application = utoipa::openapi::OpenApiBuilder::new()
+            .openapi(utoipa::openapi::OpenApiVersion::Version32)
+            .build();
+        for (body, response, adds_problem) in [
+            (json_body.clone(), explicit.clone(), true),
+            (json_body.clone(), local, true),
+            (json_body.clone(), opaque_content, false),
+            (json_body, opaque, false),
+            (mixed_body, explicit.clone(), false),
+        ] {
+            let document = serde_json::from_value(serde_json::json!({
+                "openapi": "3.2.0",
+                "info": {"title": "fixture", "version": "1"},
+                "components": {
+                    "requestBodies": {"Widget": {
+                        "content": {"application/vnd.widget+json": {}}
+                    }},
+                    "responses": {"UnsupportedWidgetVersion": explicit},
+                },
+                "paths": {"/widgets": {"post": {
+                    "requestBody": body,
+                    "responses": {"204": {"description": "updated"}, "415": response}
+                }}}
+            }))
+            .unwrap();
+            let feature = HttpContract::<()>::annotated(document, || async {}).unwrap();
+            let contract = HttpContract::application(application.clone())
+                .unwrap()
+                .merge(feature)
+                .unwrap();
+            let published = serde_json::to_value(contract.into_openapi().unwrap()).unwrap();
+            assert_eq!(published["openapi"], "3.2.0");
+            let media_type_response = &published["paths"]["/widgets"]["post"]["responses"]["415"];
+            if adds_problem {
+                assert_eq!(
+                    media_type_response["content"]["application/problem+json"]["schema"]["$ref"],
+                    "#/components/schemas/Problem"
+                );
+                assert_eq!(
+                    media_type_response["content"]["text/plain"],
+                    explicit["content"]["text/plain"]
+                );
+                assert_eq!(
+                    media_type_response["headers"]["Accept"],
+                    explicit["headers"]["Accept"]
+                );
+                assert!(
+                    media_type_response["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unsupported widget version")
+                );
+            } else {
+                assert_eq!(media_type_response, &response);
+            }
+        }
+    }
 
     #[test]
     fn additional_operations_cannot_redeclare_fixed_methods() {
