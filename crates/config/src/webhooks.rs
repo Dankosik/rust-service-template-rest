@@ -20,9 +20,10 @@ pub struct WebhooksConfig {
     pub max_concurrent_deliveries: Option<NonZeroU32>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, derive_more::Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookEndpointConfig {
+    #[debug(skip)]
     #[serde(deserialize_with = "crate::de::string")]
     pub url: String,
     #[serde(deserialize_with = "crate::de::secret")]

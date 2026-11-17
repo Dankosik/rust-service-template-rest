@@ -18,7 +18,7 @@ test-support = []
 [dependencies]
 bytesize = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
-config = { workspace = true, features = ["toml"] }
+config = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 jiff = { workspace = true, features = ["std"] }
 secrecy = { workspace = true, features = ["serde"] }
