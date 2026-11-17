@@ -82,6 +82,66 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 
+async fn order_served_by_a_one_connection_pool(
+    pool: &PgPool,
+    wait_order: infra_postgres::WaitOrder,
+) -> Vec<&'static str> {
+    let ours = infra_postgres::connect(
+        &dsn_for(pool).await,
+        &PoolOptions {
+            max_connections: NonZeroU32::MIN,
+            application_name: APP,
+            default_isolation: Isolation::ServerDefault,
+            session_settings_source: SessionSettingsSource::Startup,
+            wait_order,
+        },
+    )
+    .await
+    .unwrap();
+    let held = infra_postgres::acquire(&ours, "held").await.unwrap();
+    let served = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let caller = |name: &'static str| {
+        let ours = ours.clone();
+        let served = std::sync::Arc::clone(&served);
+        tokio::spawn(async move {
+            let connection = infra_postgres::acquire(&ours, name).await.unwrap();
+            served.lock().unwrap().push(name);
+            drop(connection);
+        })
+    };
+
+    let first = caller("first");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let early = caller("early");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let late = caller("late");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(held);
+
+    for task in [first, early, late] {
+        task.await.unwrap();
+    }
+    ours.close().await;
+    std::mem::take(&mut *served.lock().unwrap())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn callers_beyond_the_pool_are_served_newest_first_once_the_queue_stands(pool: PgPool) {
+    assert_eq!(
+        order_served_by_a_one_connection_pool(&pool, infra_postgres::WaitOrder::NewestOnceStanding)
+            .await,
+        ["first", "late", "early"]
+    );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn a_pool_in_arrival_order_serves_its_longest_waiter_first(pool: PgPool) {
+    assert_eq!(
+        order_served_by_a_one_connection_pool(&pool, infra_postgres::WaitOrder::Arrival).await,
+        ["first", "early", "late"]
+    );
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
     let mut url = url_for(&pool, DATABASE_URL).await;
@@ -125,6 +185,7 @@ async fn pool_with_default_isolation(
             application_name: APP,
             default_isolation,
             session_settings_source: SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         },
     )
     .await
@@ -142,6 +203,7 @@ async fn pool_with_server_budgets(
             application_name: APP,
             default_isolation,
             session_settings_source: SessionSettingsSource::Server,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         },
     )
     .await
@@ -254,6 +316,7 @@ async fn silent_session_readback_rejects_admission_before_the_relay_is_released(
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
             session_settings_source,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         };
         let started = Instant::now();
         let mut admission =
@@ -297,6 +360,7 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         };
         let ours = infra_postgres::prepare_pool(&proxied, &options);
         proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");

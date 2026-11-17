@@ -1,6 +1,9 @@
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
+
+use crate::slots::{Slot, Slots};
 
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -92,6 +95,20 @@ pub struct PoolOptions<'a> {
     pub application_name: &'a str,
     pub default_isolation: Isolation,
     pub session_settings_source: SessionSettingsSource,
+    pub wait_order: WaitOrder,
+}
+
+/// Who gets a freed connection when more callers wait than the pool holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitOrder {
+    /// The longest waiter. For callers that wait as long as it takes, such as
+    /// a job writing its outcome: a caller that has waited is still there.
+    Arrival,
+    /// The newest waiter once the queue has stood for a moment. For callers
+    /// that give up, such as a request with a client timeout: in a standing
+    /// queue the longest waiter is the one most likely to be gone, and
+    /// serving in arrival order answers every caller just after it left.
+    NewestOnceStanding,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +136,7 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     }
     let connect_options = session_connect_options(dsn, options.application_name, settings)
         .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
+    let alive = Arc::new(());
     let pool_options = PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
@@ -128,11 +146,62 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
         .before_acquire(ping_if_idle)
-        .after_release(|conn, _meta| {
-            conn.shrink_buffers();
-            Box::pin(async { Ok(true) })
+        .after_release({
+            let alive = Arc::clone(&alive);
+            move |conn, _meta| {
+                let _ = &alive;
+                conn.shrink_buffers();
+                Box::pin(async { Ok(true) })
+            }
         });
-    pool_options.connect_lazy_with(connect_options)
+    let pool = pool_options.connect_lazy_with(connect_options);
+    let address = std::ptr::from_ref(pool.options()).addr();
+    let mut known = TURNS.lock().unwrap_or_else(PoisonError::into_inner);
+    known.retain(|turns| turns.alive.strong_count() > 0 && turns.options != address);
+    if options.wait_order == WaitOrder::NewestOnceStanding {
+        known.push(Turns {
+            options: address,
+            alive: Arc::downgrade(&alive),
+            slots: Slots::new(options.max_connections.get() as usize),
+        });
+    }
+    drop(known);
+    pool
+}
+
+/// The driver's own queue is first come, first served and cannot be told
+/// otherwise, so only as many callers as the pool has connections wait in
+/// it; the rest wait for a turn here, in the order the pool asked for.
+struct Turns {
+    options: usize,
+    alive: Weak<()>,
+    slots: Arc<Slots>,
+}
+
+/// A pool has no place for caller state, so its turns are found by the
+/// address of its options. `alive` is owned by a callback stored in those
+/// options: while it lives the address belongs to that pool, and a pool
+/// prepared at an address forgets whatever was recorded there before it.
+static TURNS: Mutex<Vec<Turns>> = Mutex::new(Vec::new());
+
+async fn turn(pool: &PgPool, deadline: tokio::time::Instant) -> Result<Option<Slot>, sqlx::Error> {
+    let options = std::ptr::from_ref(pool.options()).addr();
+    let turns = TURNS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|turns| turns.options == options && turns.alive.strong_count() > 0)
+        .map(|turns| Arc::clone(&turns.slots));
+    let Some(turns) = turns else {
+        return Ok(None);
+    };
+    if let Some(turn) = turns.try_take() {
+        return Ok(Some(turn));
+    }
+    tokio::time::timeout_at(deadline, turns.take())
+        .await
+        .map(Some)
+        .map_err(|_elapsed| sqlx::Error::PoolTimedOut)
 }
 
 #[expect(
@@ -143,11 +212,14 @@ pub async fn acquire(
     pool: &PgPool,
     operation: &'static str,
 ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquisition(
-        operation,
-        pool.options().get_acquire_timeout(),
-        pool.acquire(),
-    )
+    let budget = pool.options().get_acquire_timeout();
+    let deadline = tokio::time::Instant::now() + budget;
+    acquisition(operation, budget, async {
+        let _turn = turn(pool, deadline).await?;
+        tokio::time::timeout_at(deadline, pool.acquire())
+            .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+    })
     .await
 }
 
@@ -164,6 +236,7 @@ pub async fn acquire_until(
         operation,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         async {
+            let _turn = turn(pool, deadline).await?;
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout_at(deadline, pool.acquire()).await {
                     Err(_elapsed) => break,
@@ -425,6 +498,7 @@ mod tests {
             application_name: "svc",
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,
+            wait_order: WaitOrder::Arrival,
         };
         let pool = prepare_pool(&dsn, &options);
         assert_eq!(pool.size(), 0, "preparation must not open a connection");
@@ -438,5 +512,57 @@ mod tests {
             "admission must leave cleanup to its owner"
         );
         assert_eq!(close(&pool, ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
+    }
+    fn unreachable_pool(wait_order: WaitOrder) -> PgPool {
+        let dsn = Dsn::admit_with_environment(
+            "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
+            |_| false,
+        )
+        .unwrap();
+        prepare_pool(
+            &dsn,
+            &PoolOptions {
+                max_connections: NonZeroU32::MIN,
+                application_name: "svc",
+                default_isolation: Isolation::ServerDefault,
+                session_settings_source: SessionSettingsSource::Startup,
+                wait_order,
+            },
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_pool_that_asked_takes_turns_and_a_turn_is_bounded_by_the_deadline() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let in_arrival_order = unreachable_pool(WaitOrder::Arrival);
+        assert!(turn(&in_arrival_order, deadline).await.unwrap().is_none());
+
+        let newest_first = unreachable_pool(WaitOrder::NewestOnceStanding);
+        let held = turn(&newest_first, deadline).await.unwrap();
+        assert!(held.is_some());
+        let beyond_the_pool = turn(&newest_first, deadline).await;
+        std::assert_matches!(beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
+        assert!(tokio::time::Instant::now() >= deadline);
+
+        drop(held);
+        let later = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert!(turn(&newest_first, later).await.unwrap().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turns_outlive_a_rotated_password_and_end_with_the_pool() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
+        let options = std::ptr::from_ref(pool.options()).addr();
+        pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
+        assert!(turn(&pool, deadline).await.unwrap().is_some());
+
+        drop(pool);
+        let known = TURNS.lock().unwrap();
+        assert!(
+            known
+                .iter()
+                .all(|turns| turns.options != options || turns.alive.strong_count() == 0)
+        );
     }
 }

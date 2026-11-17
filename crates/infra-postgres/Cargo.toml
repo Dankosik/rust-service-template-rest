@@ -29,7 +29,7 @@ shared-rules = { workspace = true }
 # resolved sqlx graph is the same whichever optional packs are retained.
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "uuid"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time", "macros", "fs"] }
+tokio = { workspace = true, features = ["time", "macros", "fs", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

@@ -169,6 +169,7 @@ async fn open_pool() -> Result<PgPool, ReceiverError> {
             application_name: "reading-counter-fixture",
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         },
     )
     .await?)

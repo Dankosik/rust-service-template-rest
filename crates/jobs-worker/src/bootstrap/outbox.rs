@@ -117,6 +117,7 @@ mod tests {
                 application_name: "factory-composition-test",
                 default_isolation: infra_postgres::Isolation::ReadCommitted,
                 session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+                wait_order: infra_postgres::WaitOrder::Arrival,
             },
         );
         let resources = Resources {
