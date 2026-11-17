@@ -19,6 +19,92 @@ mod prepare;
 
 pub use prepare::{JwtOptions, RefreshTask, prepare_jwt};
 
+#[cfg(feature = "test-support")]
+pub use fixtures::JwtFixture;
+
+#[cfg(feature = "test-support")]
+mod fixtures {
+    use std::sync::{Arc, OnceLock};
+
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
+    use serde_json::json;
+
+    use super::{ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile};
+    use crate::{
+        Verifier,
+        jwks::{
+            KeySet,
+            fixtures::{ensure_crypto_provider, jwk, key_set, rsa_signing},
+        },
+    };
+
+    const ISSUER: &str = "https://issuer.example";
+    const AUDIENCE: &str = "api";
+    const KEY_ID: &str = "fixture";
+    const ALGORITHMS: [JwtAlgorithm; 1] = [JwtAlgorithm::Rs256];
+
+    pub struct JwtFixture {
+        keys: Arc<KeySet>,
+        signing: EncodingKey,
+    }
+
+    impl JwtFixture {
+        #[must_use]
+        pub fn shared() -> &'static Self {
+            static FIXTURE: OnceLock<JwtFixture> = OnceLock::new();
+            FIXTURE.get_or_init(|| {
+                ensure_crypto_provider();
+                let signing = rsa_signing();
+                let keys = key_set(
+                    &[jwk(&signing, Algorithm::RS256, Some(KEY_ID), true)],
+                    &ALGORITHMS,
+                );
+                Self { keys, signing }
+            })
+        }
+
+        #[must_use]
+        #[expect(
+            clippy::expect_used,
+            reason = "fixture setup must fail if its known inputs cannot be signed"
+        )]
+        pub fn token(&self, scope: &str) -> String {
+            let header = Header {
+                kid: Some(KEY_ID.to_owned()),
+                ..Header::new(Algorithm::RS256)
+            };
+            encode(
+                &header,
+                &json!({
+                    "iss": ISSUER,
+                    "aud": AUDIENCE,
+                    "sub": "subject",
+                    "exp": get_current_timestamp() + 3600,
+                    "scope": scope,
+                }),
+                &self.signing,
+            )
+            .expect("sign fixture bearer")
+        }
+
+        #[must_use]
+        #[expect(
+            clippy::expect_used,
+            reason = "fixture setup must fail if its fixed issuer or audience is invalid"
+        )]
+        pub fn verifier(&self) -> Verifier {
+            let claims = ClaimPolicy::try_new(ISSUER.to_owned(), vec![AUDIENCE.to_owned()])
+                .expect("valid fixture claim policy");
+            Verifier::jwt(JwtVerifier::new(
+                claims,
+                TokenProfile::ResourceServer,
+                ALGORITHMS.to_vec(),
+                KeyStore::new(Arc::clone(&self.keys)),
+            ))
+        }
+    }
+}
+
 const MAX_REMEMBERED: u64 = 1024;
 const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 

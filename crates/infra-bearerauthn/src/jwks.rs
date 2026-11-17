@@ -366,15 +366,17 @@ impl KeySetFailure {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixture failures surface at key generation and parsing"
+)]
+pub(crate) mod fixtures {
     use std::sync::Arc;
 
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, jwk::Jwk};
 
-    use super::{JwtAlgorithm, KeySet, KeySetFailure, parse_key_set};
-    use crate::test_metrics::{Diagnostics, labeled};
+    use super::{JwtAlgorithm, KeySet, parse_key_set};
 
     pub(crate) const JWT_SIGNING_DER: &[u8] =
         include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
@@ -385,20 +387,6 @@ pub(crate) mod tests {
 
     pub(crate) fn rsa_signing() -> EncodingKey {
         EncodingKey::from_rsa_der(JWT_SIGNING_DER)
-    }
-
-    pub(crate) fn ec_signing() -> EncodingKey {
-        EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
-    }
-
-    pub(crate) fn ed_signing(kid: &str) -> (EncodingKey, serde_json::Value) {
-        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
-
-        let pair = Ed25519KeyPair::generate().unwrap();
-        let signing = EncodingKey::from_ed_der(pair.to_pkcs8v1().unwrap().as_ref());
-        let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
-        let jwk = serde_json::json!({"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": x});
-        (signing, jwk)
     }
 
     pub(crate) fn jwk(
@@ -419,6 +407,32 @@ pub(crate) mod tests {
         ensure_crypto_provider();
         let bytes = serde_json::to_vec(&serde_json::json!({ "keys": keys })).unwrap();
         Arc::new(parse_key_set(&bytes, configured).unwrap())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use jsonwebtoken::{Algorithm, EncodingKey, jwk::Jwk};
+
+    pub(crate) use super::fixtures::{
+        JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
+    };
+    use super::{JwtAlgorithm, KeySetFailure, parse_key_set};
+    use crate::test_metrics::{Diagnostics, labeled};
+
+    pub(crate) fn ec_signing() -> EncodingKey {
+        EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
+    }
+
+    pub(crate) fn ed_signing(kid: &str) -> (EncodingKey, serde_json::Value) {
+        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
+
+        let pair = Ed25519KeyPair::generate().unwrap();
+        let signing = EncodingKey::from_ed_der(pair.to_pkcs8v1().unwrap().as_ref());
+        let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
+        let jwk = serde_json::json!({"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": x});
+        (signing, jwk)
     }
 
     #[test]

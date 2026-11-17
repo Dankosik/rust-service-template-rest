@@ -55,15 +55,11 @@ tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 [dev-dependencies]
 grpc-contracts = { workspace = true }
 rustls = { workspace = true, features = ["tls12"] }
-# template:begin grpc-client-tests:grpc-client-test-dependencies
 infra-outbound-grpc = { workspace = true }
-# template:end grpc-client-tests:grpc-client-test-dependencies
-# template:begin grpc-transport-tests:grpc-transport-test-dependencies
 hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
-# template:end grpc-transport-tests:grpc-transport-test-dependencies
 # template:begin oidc-introspection:grpc-introspection-test-url
 url = { workspace = true }
 # template:end oidc-introspection:grpc-introspection-test-url

@@ -569,10 +569,10 @@ mod grpc {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             };
-            let router = infra_grpc::router(services, reader, authentication, limits).unwrap();
-            let server = infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
-                .unwrap()
-                .serve_h2(router, infra_grpc::server_options(limits), None);
+            let app = infra_grpc::router(services, reader, authentication, limits).unwrap();
+            let listener =
+                infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let server = app.serve(listener, infra_grpc::server_options(limits), None);
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),

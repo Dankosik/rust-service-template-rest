@@ -478,6 +478,12 @@ run_graph() {
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
 		"${runtime_environment[@]}" cargo clippy --workspace --all-targets \
 			${check_features[@]+"${check_features[@]}"} --locked --offline --manifest-path "${target}/Cargo.toml" -- -D warnings
+	case "${graph}" in
+	57 | 58 | 59 | 68)
+		record_command "${receipt}" "${log_dir}/runtime-${graph}-grpc-transport.log" "runtime-${graph}-grpc-transport" \
+			"${runtime_environment[@]}" cargo test -p infra-grpc --test transport --locked --offline --manifest-path "${target}/Cargo.toml"
+		;;
+	esac
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${runtime_environment[@]}" make -C "${target}" test-package PKG=infra-webhooks
@@ -576,7 +582,7 @@ each_runtime_graph() {
 	# authentication (the two jsonwebtoken lock edges); both run their tests.
 	graph=66; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none enabled none none jwt
 	graph=67; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt none none none none none none none none enabled none none jwt
-	# Graph 65's profile set plus service tokens. Focused like 65.
+	# Graph 65's profile set plus service tokens, with the gRPC wire suite.
 	graph=68; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3 jwt
 	[[ ${graph} == 68 ]] || { echo "profile graph inventory ended at ${graph}, expected 68" >&2; return 1; }
 }

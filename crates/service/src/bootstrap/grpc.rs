@@ -22,7 +22,7 @@ pub type GrpcRegistration = fn(
 
 pub(super) struct Prepared {
     pub(super) addr: SocketAddr,
-    pub(super) router: axum::Router,
+    pub(super) app: infra_grpc::Application,
     pub(super) tls: Option<Arc<ServerConfig>>,
     pub(super) options: ServerOptions,
 }
@@ -69,10 +69,10 @@ pub(super) fn prepare(
             &mut BackgroundRegistration { background },
         )?;
     }
-    let router = infra_grpc::router(services, state.readiness.clone(), authentication, limits)?;
+    let app = infra_grpc::router(services, state.readiness.clone(), authentication, limits)?;
     Ok(Prepared {
         addr: grpc.addr,
-        router,
+        app,
         tls: tls(&grpc.security)?,
         options: infra_grpc::server_options(limits),
     })
@@ -81,10 +81,10 @@ pub(super) fn prepare(
 fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
     infra_grpc::Limits {
         request_timeout: grpc.request_timeout,
-        max_in_flight: grpc.in_flight_cap(),
-        max_admission_wait: grpc.admission_wait_cap(),
-        max_connections: grpc.connection_cap(),
-        max_connection_age: grpc.connection_age_cap(),
+        max_in_flight: grpc.max_in_flight,
+        max_admission_wait: grpc.admission_wait,
+        max_connections: grpc.max_connections,
+        max_connection_age: grpc.max_connection_age,
     }
 }
 

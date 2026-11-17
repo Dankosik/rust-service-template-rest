@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -7,10 +8,10 @@ use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
-use operation_context::{Deadline, Stopped};
+use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio_util::sync::DropGuard;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
@@ -22,6 +23,7 @@ pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
     pub(crate) deadline: Option<Deadline>,
+    pub(crate) end_on_drain: Option<CancellationToken>,
 }
 
 pub(crate) fn deadline_status() -> tonic::Status {
@@ -262,23 +264,33 @@ where
         if let Some(finalizer) = finalizer {
             finalizer.emit();
         }
-        let armed_deadline = match &state.stage {
-            StreamStage::Active(active) => active.deadline,
-            StreamStage::PendingTrailers(_) | StreamStage::Closed => None,
-        };
+        let response_active = matches!(state.stage, StreamStage::Active(_));
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
             timer: None,
             #[cfg(test)]
             timer_done: None,
         };
-        if let Some(deadline) = armed_deadline {
-            this.arm_timer(deadline);
+        if response_active {
+            if let Some(drain) = custody.end_on_drain {
+                let context = OperationContext::new(custody.deadline, drain);
+                this.watch_stop(async move {
+                    match context.wait_stopped().await {
+                        Stopped::Deadline => deadline_status(),
+                        Stopped::Cancelled => tonic::Status::ok(""),
+                    }
+                });
+            } else if let Some(deadline) = custody.deadline {
+                this.watch_stop(async move {
+                    deadline.wait().await;
+                    deadline_status()
+                });
+            }
         }
         this
     }
 
-    fn arm_timer(&mut self, deadline: Deadline) {
+    fn watch_stop(&mut self, stopped: impl Future<Output = tonic::Status> + Send + 'static) {
         let weak = Arc::downgrade(&self.state);
         #[cfg(test)]
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -290,9 +302,9 @@ where
             #[cfg(test)]
             let _done_tx = done_tx;
             let result = AssertUnwindSafe(async {
-                deadline.wait().await;
+                let status = stopped.await;
                 if let Some(state) = weak.upgrade() {
-                    terminate_from_timer(&state, &deadline_status());
+                    terminate_from_timer(&state, &status);
                 }
             })
             .catch_unwind()
@@ -307,7 +319,7 @@ where
 
     fn poll_timer(&mut self, cx: &mut Context<'_>) {
         if let Some(timer) = &mut self.timer
-            && let Poll::Ready(joined) = std::future::Future::poll(Pin::new(timer), cx)
+            && let Poll::Ready(joined) = Future::poll(Pin::new(timer), cx)
         {
             self.timer = None;
             if joined.is_err() {
@@ -416,7 +428,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Semaphore;
     use tokio::time::Instant;
-    use tokio_util::sync::CancellationToken;
 
     const BUDGET: Duration = Duration::from_secs(1);
 
@@ -498,6 +509,7 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(token.clone().drop_guard()),
                 deadline: Some(budget_deadline()),
+                end_on_drain: None,
             },
         );
         let timer = body.timer.take().unwrap();
@@ -532,6 +544,43 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn watched_drain_releases_an_unpolled_response_without_a_deadline() {
+        let permits = Arc::new(Semaphore::new(1));
+        let listener_drain = CancellationToken::new();
+        let response_token = listener_drain.child_token();
+        let source = ProbeBody::pending();
+        let dropped = Arc::clone(&source.dropped);
+        let polls = Arc::clone(&source.polls);
+        let mut body = start_response(
+            source,
+            ServerCustody {
+                permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
+                cancel_on_drop: Some(response_token.clone().drop_guard()),
+                deadline: None,
+                end_on_drain: Some(response_token),
+            },
+        );
+        let watcher = body.timer.take().unwrap();
+        listener_drain.cancel();
+        tokio::time::timeout(BUDGET, watcher)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(permits.available_permits(), 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let trailers = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        assert_eq!(header_status_code(&trailers), Some(tonic::Code::Ok));
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn terminal_status_releases_capacity_once_and_aborts_the_timer() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -550,6 +599,7 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
                 deadline: Some(budget_deadline()),
+                end_on_drain: None,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -585,6 +635,7 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(cancellation.clone().drop_guard()),
                 deadline: Some(budget_deadline()),
+                end_on_drain: None,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -630,6 +681,7 @@ mod tests {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
                 deadline: Some(budget_deadline()),
+                end_on_drain: None,
             },
         );
         let done = body.timer_done.take().unwrap();
@@ -678,6 +730,7 @@ mod tests {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                     cancel_on_drop: None,
                     deadline: Some(budget_deadline()),
+                    end_on_drain: None,
                 },
             )
         };
