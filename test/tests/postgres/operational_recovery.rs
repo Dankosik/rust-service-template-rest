@@ -547,9 +547,12 @@ mod grpc {
 
     impl Consumer {
         pub(super) async fn start(pool: PgPool, reader: health::ReadinessReader) -> Self {
+            #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
+            let authentication = infra_grpc::Authentication::None;
             // template:end postgres-grpc-consumers:recovery-grpc-module-3
             // template:begin postgres-grpc-auth:recovery-start-provider
             let (verifier, provider, provider_cancel) = provider();
+            let authentication = infra_grpc::Authentication::Bearer(verifier);
             // template:end postgres-grpc-auth:recovery-start-provider
             // template:begin postgres-grpc-consumers:recovery-grpc-module-4
             let mut services = Services::new();
@@ -566,17 +569,7 @@ mod grpc {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             };
-            let router = infra_grpc::router(
-                services,
-                reader,
-                // template:end postgres-grpc-consumers:recovery-grpc-module-4
-                // template:begin postgres-grpc-auth:recovery-router-verifier
-                Some(verifier),
-                // template:end postgres-grpc-auth:recovery-router-verifier
-                // template:begin postgres-grpc-consumers:recovery-grpc-router-tail
-                limits,
-            )
-            .unwrap();
+            let router = infra_grpc::router(services, reader, authentication, limits).unwrap();
             let server = infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
                 .unwrap()
                 .serve_h2(router, infra_grpc::server_options(limits), None);
@@ -603,7 +596,7 @@ mod grpc {
                 health,
                 watch,
                 observed: None,
-                // template:end postgres-grpc-consumers:recovery-grpc-router-tail
+                // template:end postgres-grpc-consumers:recovery-grpc-module-4
                 // template:begin postgres-grpc-auth:recovery-provider-value
                 provider,
                 provider_cancel,

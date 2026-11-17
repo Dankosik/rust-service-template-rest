@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::sync::{Arc, OnceLock};
 
 use foldhash::{HashMap, HashSet};
 use prost::Message as _;
@@ -8,10 +9,64 @@ use tonic_reflection::pb::{v1, v1alpha};
 
 use crate::Error;
 use crate::health::HealthServer;
-use crate::observe::CallType;
+use crate::observe::MethodMetrics;
 use crate::protocol::{method_path, split_method_path};
 
 const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CallType {
+    Unary,
+    ClientStream,
+    ServerStream,
+    BidiStream,
+}
+
+impl CallType {
+    pub(crate) const fn new(client_streaming: bool, server_streaming: bool) -> Self {
+        match (client_streaming, server_streaming) {
+            (false, false) => Self::Unary,
+            (true, false) => Self::ClientStream,
+            (false, true) => Self::ServerStream,
+            (true, true) => Self::BidiStream,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Method {
+    pub(crate) call_type: Option<CallType>,
+    pub(crate) metrics: OnceLock<Arc<MethodMetrics>>,
+}
+
+pub(crate) struct Methods {
+    registered: HashMap<Box<str>, Method>,
+    unknown: Method,
+}
+
+impl Methods {
+    pub(crate) fn new(paths: impl IntoIterator<Item = (Box<str>, CallType)>) -> Self {
+        Self {
+            registered: paths
+                .into_iter()
+                .map(|(path, call_type)| {
+                    (
+                        path,
+                        Method {
+                            call_type: Some(call_type),
+                            metrics: OnceLock::new(),
+                        },
+                    )
+                })
+                .collect(),
+            unknown: Method::default(),
+        }
+    }
+
+    pub(crate) fn resolve(&self, path: &str) -> &Method {
+        self.registered.get(path).unwrap_or(&self.unknown)
+    }
+}
 
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
@@ -26,11 +81,10 @@ pub struct Services {
     descriptor_sets: Vec<&'static [u8]>,
     pub(crate) reflection: bool,
     // template:begin authn:grpc-services-scopes-field
-    pub(crate) scopes: HashMap<String, Box<[String]>>,
+    pub(crate) scopes: crate::authn::Scopes,
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
-    caller_rules: HashMap<String, Box<[infra_serviceauth::ServiceName]>>,
-    caller_verifier: Option<infra_serviceauth::Verifier>,
+    pub(crate) caller_rules: crate::service_auth::CallerRules,
     // template:end service-auth:grpc-services-callers-field
 }
 
@@ -167,18 +221,19 @@ impl Services {
         })
     }
 
-    pub(crate) fn method_paths(&self) -> HashMap<Box<str>, CallType> {
-        self.names
-            .iter()
-            .copied()
-            .chain([HealthServer::NAME])
-            .flat_map(|service| {
-                let methods = self.described.get(service).into_iter().flatten();
-                methods.map(move |(method, call_type)| {
-                    (method_path(service, method).into_boxed_str(), *call_type)
-                })
-            })
-            .collect()
+    pub(crate) fn methods(&self) -> Methods {
+        Methods::new(
+            self.names
+                .iter()
+                .copied()
+                .chain([HealthServer::NAME])
+                .flat_map(|service| {
+                    let methods = self.described.get(service).into_iter().flatten();
+                    methods.map(move |(method, call_type)| {
+                        (method_path(service, method).into_boxed_str(), *call_type)
+                    })
+                }),
+        )
     }
 
     // template:begin authn:grpc-services-require-scopes
@@ -221,27 +276,16 @@ impl Services {
         Ok(())
     }
 
-    pub fn authenticate_callers(&mut self, verifier: infra_serviceauth::Verifier) {
-        self.caller_verifier = Some(verifier);
-    }
-
-    pub(crate) fn take_caller_admission(
-        &mut self,
-    ) -> Result<crate::service_auth::CallerAdmission, Error> {
-        if self.caller_verifier.is_some() || !self.caller_rules.is_empty() {
-            for service in &self.names {
-                for (method, _) in self.described.get(*service).into_iter().flatten() {
-                    let path = method_path(service, method);
-                    if !self.caller_rules.contains_key(&path) {
-                        return Err(Error::MissingCallerRule(path));
-                    }
+    pub(crate) fn validate_caller_rules(&self) -> Result<(), Error> {
+        for service in &self.names {
+            for (method, _) in self.described.get(*service).into_iter().flatten() {
+                let path = method_path(service, method);
+                if !self.caller_rules.contains_key(&path) {
+                    return Err(Error::MissingCallerRule(path));
                 }
             }
         }
-        Ok(crate::service_auth::CallerAdmission::new(
-            self.caller_verifier.take(),
-            std::mem::take(&mut self.caller_rules),
-        ))
+        Ok(())
     }
     // template:end service-auth:grpc-services-allow-callers
 }

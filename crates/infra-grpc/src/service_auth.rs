@@ -19,40 +19,18 @@ pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
     extensions.remove::<Caller>();
 }
 
-pub(crate) struct CallerAdmission {
-    verifier: Option<Verifier>,
-    caller_rules: HashMap<String, Box<[ServiceName]>>,
-}
-
-impl CallerAdmission {
-    pub(crate) fn new(
-        verifier: Option<Verifier>,
-        caller_rules: HashMap<String, Box<[ServiceName]>>,
-    ) -> Self {
-        Self {
-            verifier,
-            caller_rules,
-        }
-    }
-
-    pub(crate) const fn verifies(&self) -> bool {
-        self.verifier.is_some()
-    }
-}
+pub(crate) type CallerRules = HashMap<String, Box<[ServiceName]>>;
 
 #[expect(
     clippy::result_large_err,
     reason = "the error is the refusal response the call returns"
 )]
 pub(crate) async fn admit_caller(
-    admission: &CallerAdmission,
+    verifier: &Verifier,
+    caller_rules: &CallerRules,
     context: &OperationContext,
     mut request: Request,
 ) -> Result<Request, Response> {
-    let Some(verifier) = &admission.verifier else {
-        request.headers_mut().remove(AUTHORIZATION);
-        return Ok(request);
-    };
     if let Some(reason) = context.stopped() {
         return Err(server_stopped(reason).into_http());
     }
@@ -74,7 +52,7 @@ pub(crate) async fn admit_caller(
         }
     };
     let path = request.uri().path();
-    let rule = admission.caller_rules.get(path);
+    let rule = caller_rules.get(path);
     if !rule.is_some_and(|callers| callers.contains(caller.name())) {
         let method = if rule.is_some() { path } else { "unknown" };
         tracing::warn!(
@@ -123,7 +101,7 @@ mod tests {
     const METHOD: &str = "/example.v1.EchoService/Unary";
     const TYPE: &str = "example-svc+jwt";
 
-    fn orders_only_admission() -> (CallerAdmission, String, String) {
+    fn orders_only_admission() -> (Verifier, CallerRules, String, String) {
         let orders = TestKey::new("orders/2026-10");
         let billing = TestKey::new("billing/2026-10");
         let trust = TrustRegistry::parse(&registry(&[
@@ -156,7 +134,8 @@ mod tests {
             format!("Bearer {token}")
         };
         (
-            CallerAdmission::new(Some(verifier), rules),
+            verifier,
+            rules,
             sign(&billing, "billing"),
             sign(&orders, "orders"),
         )
@@ -164,7 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_context_answers_before_caller_admission() {
-        let (admission, billing_bearer, orders_bearer) = orders_only_admission();
+        let (verifier, rules, billing_bearer, orders_bearer) = orders_only_admission();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let make_request = |authorization: Option<&str>| {
             let polls = Arc::clone(&body_polls);
@@ -181,7 +160,7 @@ mod tests {
 
         for authorization in [Some(billing_bearer.as_str()), None] {
             let context = OperationContext::with_timeout(Duration::ZERO);
-            let rejected = admit_caller(&admission, &context, make_request(authorization))
+            let rejected = admit_caller(&verifier, &rules, &context, make_request(authorization))
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -195,7 +174,8 @@ mod tests {
         let cancelled_context = OperationContext::unbounded();
         cancelled_context.cancellation().cancel();
         let cancelled = admit_caller(
-            &admission,
+            &verifier,
+            &rules,
             &cancelled_context,
             make_request(Some(&billing_bearer)),
         )
@@ -210,9 +190,14 @@ mod tests {
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
 
         let live = OperationContext::with_timeout(Duration::from_secs(5));
-        let denied = admit_caller(&admission, &live, make_request(Some(&billing_bearer)))
-            .await
-            .unwrap_err();
+        let denied = admit_caller(
+            &verifier,
+            &rules,
+            &live,
+            make_request(Some(&billing_bearer)),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             tonic::Status::from_header_map(denied.headers())
                 .unwrap()
@@ -220,7 +205,7 @@ mod tests {
             tonic::Code::PermissionDenied
         );
 
-        let admitted = admit_caller(&admission, &live, make_request(Some(&orders_bearer)))
+        let admitted = admit_caller(&verifier, &rules, &live, make_request(Some(&orders_bearer)))
             .await
             .unwrap();
         assert_eq!(

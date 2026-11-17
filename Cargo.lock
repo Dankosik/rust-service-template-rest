@@ -2631,6 +2631,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rcgen",
+ "regex",
  "rustls",
  "secrecy",
  "serde",

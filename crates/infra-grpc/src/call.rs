@@ -462,18 +462,10 @@ mod tests {
     }
 
     fn server_call() -> Call {
-        let request = http::Request::builder()
-            .uri("/test.Service/Stream")
-            .body(())
-            .unwrap();
-        let methods = crate::observe::Methods::new(
-            std::iter::once((
-                "/test.Service/Stream".into(),
-                crate::observe::CallType::BidiStream,
-            ))
-            .collect(),
-        );
-        Call::start(&methods, &request)
+        let path = "/test.Service/Stream";
+        let methods =
+            crate::services::Methods::new([(path.into(), crate::services::CallType::BidiStream)]);
+        Call::start(methods.resolve(path), path)
     }
 
     fn start_response<B>(body: B, custody: ServerCustody) -> ResponseBody<B>

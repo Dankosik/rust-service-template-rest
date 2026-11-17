@@ -2,7 +2,7 @@ use std::mem::DropGuard;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-use foldhash::HashMap;
+use crate::services::{CallType, Method};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -17,7 +17,6 @@ const SERVER_ADMISSION_WAITING_METRIC: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES_METRIC: &str = "grpc_server_failures_total";
 
 const DIAGNOSTIC_BYTES: usize = 1024;
-const UNKNOWN_PATH: &str = "";
 const HANDLING_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -29,24 +28,7 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[
 
 static DESCRIBE: Once = Once::new();
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum CallType {
-    Unary,
-    ClientStream,
-    ServerStream,
-    BidiStream,
-}
-
 impl CallType {
-    pub(crate) const fn new(client_streaming: bool, server_streaming: bool) -> Self {
-        match (client_streaming, server_streaming) {
-            (false, false) => Self::Unary,
-            (true, false) => Self::ClientStream,
-            (false, true) => Self::ServerStream,
-            (true, true) => Self::BidiStream,
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Unary => "unary",
@@ -57,13 +39,7 @@ impl CallType {
     }
 }
 
-pub(crate) struct Methods {
-    registered: HashMap<Box<str>, (CallType, OnceLock<Arc<MethodMetrics>>)>,
-    unknown: OnceLock<Arc<MethodMetrics>>,
-}
-
-struct MethodMetrics {
-    call_type: Option<CallType>,
+pub(crate) struct MethodMetrics {
     rpc_method: Option<Arc<str>>,
     base_labels: Box<[metrics::Label]>,
     started: metrics::Counter,
@@ -72,34 +48,9 @@ struct MethodMetrics {
     failed: [OnceLock<metrics::Counter>; service_failure::Code::ALL.len()],
 }
 
-impl Methods {
-    pub(crate) fn new(methods: HashMap<Box<str>, CallType>) -> Self {
-        describe();
-        Self {
-            registered: methods
-                .into_iter()
-                .map(|(path, call_type)| (path, (call_type, OnceLock::new())))
-                .collect(),
-            unknown: OnceLock::new(),
-        }
-    }
-
-    fn resolve(&self, path: &str) -> Arc<MethodMetrics> {
-        if let Some((registered_path, (call_type, slot))) = self.registered.get_key_value(path) {
-            return Arc::clone(slot.get_or_init(|| {
-                Arc::new(MethodMetrics::build(registered_path, Some(*call_type)))
-            }));
-        }
-        Arc::clone(
-            self.unknown
-                .get_or_init(|| Arc::new(MethodMetrics::build(UNKNOWN_PATH, None))),
-        )
-    }
-}
-
 impl MethodMetrics {
     fn build(path: &str, call_type: Option<CallType>) -> Self {
-        let parsed = crate::protocol::split_method_path(path);
+        let parsed = call_type.and_then(|_| crate::protocol::split_method_path(path));
         let (service, method) = parsed.unwrap_or(("unknown", "unknown"));
         let labels = vec![
             metrics::Label::new("grpc_type", call_type.map_or("unknown", CallType::label)),
@@ -107,7 +58,6 @@ impl MethodMetrics {
             metrics::Label::new("grpc_method", method.to_owned()),
         ];
         Self {
-            call_type,
             rpc_method: parsed.map(|(svc, rpc)| Arc::from(format!("{svc}/{rpc}"))),
             started: metrics::counter!(SERVER_STARTED_METRIC, labels.clone()),
             handling_seconds: metrics::histogram!(SERVER_HANDLING_METRIC, labels.clone()),
@@ -152,10 +102,13 @@ pub(crate) struct Call {
 }
 
 impl Call {
-    pub(crate) fn start<B>(methods: &Methods, request: &http::Request<B>) -> Self {
+    pub(crate) fn start(method: &Method, path: &str) -> Self {
         let started_at = Instant::now();
-        let path = request.uri().path();
-        let metrics = methods.resolve(path);
+        let metrics = Arc::clone(
+            method
+                .metrics
+                .get_or_init(|| Arc::new(MethodMetrics::build(path, method.call_type))),
+        );
         let span = open_server_span(path, &metrics);
         metrics.started.increment(1);
         Self {
@@ -164,10 +117,6 @@ impl Call {
             started_at,
             completed: false,
         }
-    }
-
-    pub(crate) fn call_type(&self) -> Option<CallType> {
-        self.metrics.call_type
     }
 
     pub(crate) const fn span(&self) -> &tracing::Span {
@@ -249,7 +198,7 @@ pub(crate) fn admission_waiting() -> impl Drop {
     })
 }
 
-fn describe() {
+pub(crate) fn describe() {
     DESCRIBE.call_once(|| {
         metrics::describe_counter!(
             SERVER_STARTED_METRIC,
@@ -340,17 +289,13 @@ mod tests {
         let _anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let guard = tracing::subscriber::set_default(subscriber);
 
-        let methods = Methods::new(
-            std::iter::once(("/example.v1.EchoService/Unary".into(), CallType::Unary)).collect(),
-        );
-        let build_req = |path: &str| http::Request::builder().uri(path).body(()).unwrap();
-
-        let known = Call::start(&methods, &build_req("/example.v1.EchoService/Unary"));
-        assert_eq!(known.call_type(), Some(CallType::Unary));
+        let path = "/example.v1.EchoService/Unary";
+        let methods = crate::services::Methods::new([(path.into(), CallType::Unary)]);
+        let known = Call::start(methods.resolve(path), path);
         known.finish(tonic::Code::Unauthenticated);
 
-        let unknown = Call::start(&methods, &build_req("/example.v1.EchoService/Invented"));
-        assert_eq!(unknown.call_type(), None);
+        let path = "/example.v1.EchoService/Invented";
+        let unknown = Call::start(methods.resolve(path), path);
         unknown.finish(tonic::Code::Unimplemented);
         drop(guard);
 
