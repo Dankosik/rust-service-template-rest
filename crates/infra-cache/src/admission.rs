@@ -94,6 +94,7 @@ fn admit_address(
             Ok(ServerEndpoint {
                 host: host.clone(),
                 port: *port,
+                database_index: info.redis_settings().db(),
                 tls: false,
             })
         }
@@ -106,6 +107,7 @@ fn admit_address(
         } => Ok(ServerEndpoint {
             host: host.clone(),
             port: *port,
+            database_index: info.redis_settings().db(),
             tls: true,
         }),
         _ => Err(CacheError::UnsupportedAddress),

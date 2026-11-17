@@ -36,8 +36,6 @@ const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_FACTOR: f32 = 2.0;
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const APPLICATION_SLOTS: usize = 256;
-const PIPELINE_BUFFER_SIZE: usize = APPLICATION_SLOTS + 1;
 
 #[cfg(test)]
 #[path = "tests/full_pipeline.rs"]
@@ -187,6 +185,7 @@ struct LinkMetrics {
 }
 
 struct Shared {
+    max_concurrency: usize,
     state: ArcSwap<State>,
     write: Mutex<()>,
     changed: Notify,
@@ -467,6 +466,7 @@ impl Link {
         settings: redis::RedisConnectionInfo,
         password_file: Option<PasswordFile>,
         command_timeout: Duration,
+        max_concurrency: usize,
     ) -> Self {
         let LinkMetrics {
             admission_refused,
@@ -474,6 +474,7 @@ impl Link {
             retirements,
         } = register_link_metrics();
         let shared = Arc::new(Shared {
+            max_concurrency,
             state: ArcSwap::from_pointee(State::Connecting),
             write: Mutex::new(()),
             changed: Notify::new(),
@@ -498,7 +499,7 @@ impl Link {
             server,
             command_timeout,
             shared,
-            application_slots: Semaphore::new(APPLICATION_SLOTS),
+            application_slots: Semaphore::new(max_concurrency),
             admission_refused,
             commands_in_flight,
             supervisor,
@@ -732,22 +733,13 @@ async fn run_supervisor(
             return;
         }
         let retired = CancellationToken::new();
-        match setup_attempt(
-            server,
-            dial,
-            settings,
-            password_file,
-            &retired,
-            &shared.tasks,
-        )
-        .await
-        {
+        match setup_attempt(server, dial, settings, password_file, &retired, shared).await {
             Ok((dialed, rotation)) => {
                 let _driver = dialed.driver;
                 let (abandoned, replies) = mpsc::unbounded_channel();
                 let generation = Arc::new(Generation {
                     connection: dialed.connection,
-                    caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
+                    caller_capacity: Arc::new(Semaphore::new(shared.max_concurrency)),
                     abandoned,
                     retired,
                     cooldown_until: Instant::now() + MIN_GENERATION_SPACING,
@@ -814,12 +806,12 @@ async fn setup_attempt<'a>(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
     retired: &CancellationToken,
-    tasks: &'a TaskTracker,
+    shared: &'a Shared,
 ) -> Result<(Dialed, Option<Rotation<'a>>), ErrorType> {
     let setup = async {
         let (settings, rotation) =
-            credentialed_settings(server, settings, password_file, tasks).await?;
-        let dialed = connect(dial, &settings, retired.clone(), tasks).await?;
+            credentialed_settings(server, settings, password_file, &shared.tasks).await?;
+        let dialed = connect(dial, &settings, retired.clone(), shared).await?;
         Ok((dialed, rotation))
     };
     match timeout(SETUP_TIMEOUT, setup).await {
@@ -862,19 +854,19 @@ async fn connect(
     dial: &Dial,
     settings: &redis::RedisConnectionInfo,
     retired: CancellationToken,
-    tasks: &TaskTracker,
+    shared: &Shared,
 ) -> Result<Dialed, ErrorType> {
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
         .set_connection_timeout(None)
-        .set_pipeline_buffer_size(PIPELINE_BUFFER_SIZE)
+        .set_pipeline_buffer_size(shared.max_concurrency + 1)
         .set_push_sender(move |push: redis::PushInfo| {
             if push.kind == redis::PushKind::Disconnection {
                 retired.cancel();
             }
             Ok::<(), redis::aio::SendError>(())
         });
-    dial.connect(settings, config, tasks)
+    dial.connect(settings, config, &shared.tasks)
         .await
         .map_err(|error| error_type(&error))
 }

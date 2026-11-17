@@ -23,6 +23,7 @@ pub(super) async fn open(
         allow_plaintext: cache.allow_plaintext,
         allow_unauthenticated: cache.allow_unauthenticated,
         command_timeout: cache.command_timeout,
+        max_concurrency: cache.max_concurrency,
         max_key_bytes: usize::try_from(cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
         max_value_bytes: usize::try_from(cache.max_value_bytes.as_u64()).unwrap_or(usize::MAX),
     };

@@ -47,6 +47,9 @@ pub(crate) struct CacheInput {
     /// Bound for one cache command, including a reconnect wait.
     #[serde(deserialize_with = "crate::de::duration")]
     command_timeout: Duration,
+    /// Maximum simultaneous application commands per cache client.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    max_concurrency: usize,
     /// Maximum wire key including namespace and separator.
     max_key_bytes: ByteSize,
     /// Largest value the service will write or return from a lookup.
@@ -64,6 +67,7 @@ impl Default for CacheInput {
             allow_plaintext: false,
             allow_unauthenticated: false,
             command_timeout: Duration::from_secs(2),
+            max_concurrency: 256,
             max_key_bytes: ByteSize::kib(1),
             max_value_bytes: ByteSize::kib(64),
         }
@@ -79,6 +83,7 @@ pub struct CacheConfig {
     pub allow_plaintext: bool,
     pub allow_unauthenticated: bool,
     pub command_timeout: Duration,
+    pub max_concurrency: usize,
     pub max_key_bytes: ByteSize,
     pub max_value_bytes: ByteSize,
 }
@@ -120,6 +125,11 @@ impl CacheInput {
             self.command_timeout,
             Duration::from_millis(1)..=Duration::from_secs(10),
         ));
+        v.check(int_range(
+            "cache.max_concurrency",
+            self.max_concurrency,
+            1..=usize::MAX,
+        ));
         for (key, size) in [
             ("cache.max_key_bytes", self.max_key_bytes),
             ("cache.max_value_bytes", self.max_value_bytes),
@@ -140,6 +150,7 @@ impl CacheInput {
             allow_plaintext: self.allow_plaintext,
             allow_unauthenticated: self.allow_unauthenticated,
             command_timeout: self.command_timeout,
+            max_concurrency: self.max_concurrency,
             max_key_bytes: self.max_key_bytes,
             max_value_bytes: self.max_value_bytes,
         }))

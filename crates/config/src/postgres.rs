@@ -39,8 +39,8 @@ pub(crate) struct PostgresFields<Session, Capacity, Deadline> {
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
     /// password. The DSN then carries no password, and the running service
-    /// follows the file. Missing, empty, or whitespace-only is unset (`None`),
-    /// the default.
+    /// follows the file. Its target must be a regular file of at most 16 KiB.
+    /// Missing, empty, or whitespace-only is unset (`None`), the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     password_file: Option<PathBuf>,
     session_budgets: Session,

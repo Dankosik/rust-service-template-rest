@@ -306,6 +306,19 @@ async fn direct_cache_start_rejects_unsupported_byte_limits() {
 }
 
 #[tokio::test]
+async fn a_cache_window_must_leave_room_for_maintenance() {
+    for max_concurrency in [0, tokio::sync::Semaphore::MAX_PERMITS, usize::MAX] {
+        let error = Cache::start(CacheOptions {
+            max_concurrency,
+            ..options("redis://127.0.0.1", true, true, None)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, CacheError::InvalidConcurrency);
+    }
+}
+
+#[tokio::test]
 async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -867,6 +880,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     let _recorder = metrics::set_default_local_recorder(metrics.recorder());
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(1),
+        max_concurrency: 2,
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .await
@@ -874,14 +888,14 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     assert_work_metrics(&metrics, 0, 0, 0);
     let namespace = cache.namespace(namespace!("waiting"));
     let mut waiting = Vec::new();
-    for _ in 0..256 {
+    for _ in 0..2 {
         let mut command = Box::pin(namespace.get(&caller, "pending"));
         assert!(futures_util::poll!(command.as_mut()).is_pending());
         waiting.push(command);
     }
-    assert_work_metrics(&metrics, 256, 0, 0);
+    assert_work_metrics(&metrics, 2, 0, 0);
     let other = admitted(&format!("redis://{}", server.address), true, true).await;
-    assert_work_metrics(&metrics, 256, 0, 0);
+    assert_work_metrics(&metrics, 2, 0, 0);
     drop(other);
     let mut excess = Box::pin(namespace.get(&caller, "refused"));
     assert_eq!(
@@ -901,9 +915,9 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
             ErrorType::Other
         ))))
     ));
-    assert_work_metrics(&metrics, 256, 2, 0);
+    assert_work_metrics(&metrics, 2, 2, 0);
     drop(waiting.pop());
-    assert_work_metrics(&metrics, 255, 2, 0);
+    assert_work_metrics(&metrics, 1, 2, 0);
     let mut replacement = Box::pin(namespace.get(&caller, "replacement"));
     assert!(futures_util::poll!(replacement.as_mut()).is_pending());
     drop(waiting);
@@ -923,6 +937,7 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(5),
+        max_concurrency: 2,
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .await
@@ -931,7 +946,7 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
     let old = server.stall_existing();
     let pings = server.command_count("PING", None);
-    let mut pending = Vec::from_fn(256, |_| Box::pin(namespace.get(&caller, "pending")));
+    let mut pending = Vec::from_fn(2, |_| Box::pin(namespace.get(&caller, "pending")));
     tokio::select! {
         () = std::future::poll_fn(|context| {
             for command in &mut pending {
@@ -942,7 +957,7 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
         () = server.wait_for(
             Duration::from_secs(1),
             "application window never reached the socket",
-            || server.command_count("GETRANGE", Some("capacity:pending")) == 256,
+            || server.command_count("GETRANGE", Some("capacity:pending")) == 2,
         ) => {}
     }
     let sibling = cache.namespace(namespace!("other_capacity"));
@@ -950,6 +965,14 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(MutationError::NotApplied(OperationError::Unavailable)))
+    );
+    drop(pending);
+    let deadline = OperationContext::with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        sibling.delete(&deadline, "waiting-for-replies").await,
+        Err(MutationError::NotApplied(OperationError::Stopped(
+            Stopped::Deadline
+        )))
     );
     server
         .wait_for(
@@ -967,6 +990,10 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
         server.command_count("DEL", Some("other_capacity:refused")),
         0
     );
+    assert_eq!(
+        server.command_count("DEL", Some("other_capacity:waiting-for-replies")),
+        0
+    );
     server
         .wait_for(
             Duration::from_secs(7),
@@ -979,7 +1006,6 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
             server.closed_through(old)
         })
         .await;
-    drop(pending);
     assert_eq!(namespace.get(&caller, "recovered").await, Ok(None));
 }
 
@@ -2061,12 +2087,12 @@ async fn reliability_password_file_preserves_case_crlf_and_username() {
 }
 
 #[derive(Clone, Default)]
-struct CapturedLogs {
+pub(super) struct CapturedLogs {
     bytes: tokio::sync::watch::Sender<Vec<u8>>,
 }
 
 impl CapturedLogs {
-    fn rendered(&self) -> String {
+    pub(super) fn rendered(&self) -> String {
         String::from_utf8(self.bytes.borrow().clone()).expect("UTF-8 logs")
     }
 

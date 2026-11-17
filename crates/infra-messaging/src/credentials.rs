@@ -1,3 +1,4 @@
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,6 +6,8 @@ use itertools::Itertools;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
+
+const CREDENTIALS_FILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
@@ -120,7 +123,7 @@ async fn read(
     clippy::disallowed_types,
     reason = "the blocking worker validates and reads the same open descriptor"
 )]
-fn read_file(path: &Path) -> std::io::Result<SecretString> {
+fn read_file(path: &Path) -> io::Result<SecretString> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -130,9 +133,15 @@ fn read_file(path: &Path) -> std::io::Result<SecretString> {
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(std::io::ErrorKind::InvalidInput.into());
+        return Err(io::ErrorKind::InvalidInput.into());
     }
-    std::io::read_to_string(file).map(SecretString::from)
+    let content = SecretString::from(io::read_to_string(
+        file.take(CREDENTIALS_FILE_BYTES as u64 + 1),
+    )?);
+    if content.expose_secret().len() > CREDENTIALS_FILE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(content)
 }
 
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
@@ -286,7 +295,9 @@ mod tests {
         assert!(!error.to_string().contains("sentinel"), "{error}");
 
         let user = nkeys::KeyPair::new_user();
-        std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
+        let mut at_limit = creds("user.jwt.value", &user).into_bytes();
+        at_limit.resize(1024 * 1024, b'\n');
+        std::fs::write(&path, &at_limit).unwrap();
         let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
         assert!(
             !recorder
@@ -296,6 +307,12 @@ mod tests {
         );
         std::fs::remove_file(&path).unwrap();
         assert!(credentials.answer(b"nonce").await.is_err());
+        at_limit.push(b'\n');
+        std::fs::write(&path, at_limit).unwrap();
+        assert_eq!(
+            credentials.answer(b"nonce").await.err(),
+            Some(CredentialsFileError::Unreadable(io::ErrorKind::InvalidData))
+        );
         for content in ["sentinel-content", "other-invalid-tuple"] {
             std::fs::write(&path, content).unwrap();
             assert_eq!(
@@ -315,7 +332,7 @@ mod tests {
             samples,
             [
                 "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"malformed\"} 2",
-                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 1",
+                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 2",
                 "messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 1",
             ]
         );

@@ -35,7 +35,8 @@ pub(crate) struct MessagingInput {
     credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
     /// a platform that rotates it: the client reads the file again for every
-    /// connection. Missing, empty, or whitespace-only is unset (`None`).
+    /// connection. Its target must be a regular file of at most 1 MiB.
+    /// Missing, empty, or whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
     credentials_file: Option<PathBuf>,
     /// Optional PEM root CA path for the operator-selected broker. Missing,

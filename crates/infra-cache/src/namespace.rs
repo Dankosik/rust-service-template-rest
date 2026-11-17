@@ -30,7 +30,7 @@ pub(super) enum Operation {
 impl Operation {
     pub(super) fn redis_name(self) -> &'static str {
         match self {
-            Self::Get => "GET",
+            Self::Get => "MULTI",
             Self::Set => "SET",
             Self::Delete => "DEL",
         }
@@ -144,7 +144,7 @@ impl CacheNamespace {
                 Ok(value)
             }
             Err(error) => {
-                guard.failed(error.failure());
+                guard.failed(error);
                 Err(error)
             }
         }
