@@ -142,7 +142,7 @@ mod tests {
     }
 
     fn app(reader: ReadinessReader) -> (Application, serde_json::Value) {
-        let contract = HttpContract::default().with_probes("/");
+        let contract = HttpContract::default().with_probes("/").unwrap();
         let document = serde_json::to_value(contract.clone().into_openapi().unwrap()).unwrap();
         (
             contract

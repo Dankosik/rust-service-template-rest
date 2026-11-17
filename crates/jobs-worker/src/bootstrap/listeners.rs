@@ -29,7 +29,7 @@ pub(super) fn bind_listeners(
 ) -> Result<(), WorkerError> {
     let http = config.http.listener();
     let options = server_options(http);
-    let app = HttpContract::default().with_probes("/").build(
+    let app = HttpContract::default().with_probes("/")?.build(
         readiness.clone(),
         Authentication::Public,
         &harden_options(http, readiness.clone()),

@@ -9,8 +9,9 @@ use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use foldhash::{HashMap, HashMapExt as _};
+use utoipa::openapi::path::{Operation, PathItem, Paths};
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
-use utoipa::openapi::{OpenApi, RefOr, path::Operation};
+use utoipa::openapi::{OpenApi, RefOr};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::HardenOptions;
@@ -31,6 +32,10 @@ pub enum FinalizeError {
         "HTTP contract finalization failed: components.{kind}.{name} conflicts with the shared HTTP contract"
     )]
     ConflictingComponent { kind: &'static str, name: String },
+    #[error("HTTP contract composition defines {method} {path} more than once")]
+    DuplicateOperation { path: String, method: String },
+    #[error("HTTP contract composition cannot merge {path} with different path-level {field}")]
+    ConflictingPathItem { path: String, field: &'static str },
     #[error("HTTP contract finalization failed: {method} {path} response {status}: {fault}")]
     InvalidResponse {
         method: String,
@@ -141,60 +146,55 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     }
     // template:end http-idempotency:http-typed-registration
 
-    #[must_use]
-    pub fn merge(mut self, other: Self) -> Self {
+    pub fn merge(mut self, mut other: Self) -> Result<Self, FinalizeError> {
+        normalize_root(&mut self.routes.get_openapi_mut().paths)?;
+        normalize_root(&mut other.routes.get_openapi_mut().paths)?;
+        let parent = &self.routes.get_openapi().paths.paths;
+        for (path, incoming) in &other.routes.get_openapi().paths.paths {
+            if let Some(existing) = parent.get(path) {
+                check_path_merge(path, existing, incoming)?;
+            }
+        }
         self.routes = self.routes.merge(other.routes);
         self.probes.extend(other.probes);
         // template:begin http-idempotency:http-merge-mounted-operations
         self.idempotency.0.extend(other.idempotency.0);
         // template:end http-idempotency:http-merge-mounted-operations
-        self
+        Ok(self)
     }
 
-    #[must_use]
-    pub fn nest(mut self, prefix: &str, other: Self) -> Self {
-        self.routes = self
-            .routes
-            .merge(OpenApiRouter::default().nest(prefix, other.routes));
-        self.probes.extend(
-            other
-                .probes
-                .into_iter()
-                .map(|path| nested_path(prefix, &path)),
-        );
+    pub fn nest(self, prefix: &str, mut other: Self) -> Result<Self, FinalizeError> {
+        normalize_root(&mut other.routes.get_openapi_mut().paths)?;
+        other.routes = OpenApiRouter::default().nest(prefix, other.routes);
+        for path in &mut other.probes {
+            *path = nested_path(prefix, path);
+        }
         // template:begin http-idempotency:http-nest-mounted-operations
-        self.idempotency.0.extend(
-            other
-                .idempotency
-                .0
-                .into_iter()
-                .map(|(path, method)| (nested_path(prefix, &path), method)),
-        );
+        for (path, _) in &mut other.idempotency.0 {
+            *path = nested_path(prefix, path);
+        }
         // template:end http-idempotency:http-nest-mounted-operations
-        self
+        self.merge(other)
     }
 
-    #[must_use]
-    pub fn with_probes(mut self, prefix: &str) -> Self
+    pub fn with_probes(self, prefix: &str) -> Result<Self, FinalizeError>
     where
         health::ReadinessReader: axum::extract::FromRef<S>,
     {
-        let probes = crate::probes::router();
-        let mounted = if prefix.is_empty() || prefix == "/" {
-            probes
+        let mut probes = Self::new(crate::probes::router());
+        probes.probes = probes
+            .routes
+            .get_openapi()
+            .paths
+            .paths
+            .keys()
+            .map(|path| path.as_str().into())
+            .collect();
+        if prefix.is_empty() || prefix == "/" {
+            self.merge(probes)
         } else {
-            OpenApiRouter::new().nest(prefix, probes)
-        };
-        self.probes.extend(
-            mounted
-                .get_openapi()
-                .paths
-                .paths
-                .keys()
-                .map(|path| path.as_str().into()),
-        );
-        self.routes = self.routes.merge(mounted);
-        self
+            self.nest(prefix, probes)
+        }
     }
 
     fn probe_routes(&self) -> ProbeRoutes {
@@ -465,6 +465,63 @@ macro_rules! fixed_path_operations {
 }
 
 pub(super) use fixed_path_operations;
+
+fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
+    fixed_path_operations!(item, as_ref)
+        .into_iter()
+        .filter_map(|(method, operation)| operation.map(|_| method))
+        .chain(item.additional_operations.keys().map(String::as_str))
+}
+
+fn check_path_merge(
+    path: &str,
+    existing: &PathItem,
+    incoming: &PathItem,
+) -> Result<(), FinalizeError> {
+    let mut incoming_methods = documented_methods(incoming).peekable();
+    if incoming_methods.peek().is_none() && incoming.ref_path.is_none() {
+        return Ok(());
+    }
+    let existing_fixed = fixed_path_operations!(existing, as_ref);
+    if let Some(method) = incoming_methods.find(|method| {
+        existing.additional_operations.contains_key(*method)
+            || existing_fixed
+                .iter()
+                .any(|(name, op)| name == method && op.is_some())
+    }) {
+        return Err(FinalizeError::DuplicateOperation {
+            path: path.to_owned(),
+            method: method.to_owned(),
+        });
+    }
+    let left = existing.parameters.as_deref().unwrap_or_default();
+    let right = incoming.parameters.as_deref().unwrap_or_default();
+    if existing.ref_path != incoming.ref_path {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "$ref",
+        });
+    }
+    if left.len() != right.len() || !left.iter().all(|parameter| right.contains(parameter)) {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "parameters",
+        });
+    }
+    Ok(())
+}
+
+fn normalize_root(paths: &mut Paths) -> Result<(), FinalizeError> {
+    if let Some(item) = paths.paths.remove("") {
+        if let Some(root) = paths.paths.get_mut("/") {
+            check_path_merge("/", root, &item)?;
+            root.merge_operations(item);
+        } else {
+            paths.paths.insert("/".to_owned(), item);
+        }
+    }
+    Ok(())
+}
 
 impl Policy {
     fn compile(
@@ -839,7 +896,7 @@ mod tests {
         let child = HttpContract::new(
             OpenApiRouter::default().routes(utoipa_axum::routes!(documented_get)),
         );
-        let contract = parent.nest("/api", child);
+        let contract = parent.nest("/api", child).unwrap();
         let document = contract.into_openapi().unwrap();
         let path = &document.paths.paths["/api/_test/method"];
         assert!(path.get.is_some());

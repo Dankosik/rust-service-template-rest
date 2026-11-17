@@ -330,11 +330,12 @@ mod tests {
     struct TestCommand;
 
     impl crate::idempotency::FreshCommand for TestCommand {
-        async fn execute(
+        fn execute(
             self,
             _: &mut super::super::Tx<'_>,
-        ) -> Result<super::super::ReplayableResponse, super::super::Rollback> {
-            unreachable!("offline export")
+        ) -> impl Future<Output = Result<super::super::ReplayableResponse, super::super::Rollback>> + Send
+        {
+            std::future::poll_fn(|_| unreachable!("offline export"))
         }
     }
 

@@ -179,10 +179,10 @@ impl CreateWidgets for SqlWidgets {
         ProtectedOperationProblemResponses
     )
 )]
-async fn create_widget(input: CreateInput) -> Result<CreateWidget, Problem> {
+async fn create_widget(input: CreateInput) -> Result<CreateWidget, Box<Problem>> {
     let (principal, State(widgets), headers, Json(mut input)) = input;
     if !may_create(&principal) {
-        return Err(forbidden());
+        return Err(Box::new(forbidden()));
     }
     if let Some(name) = headers.get("x-widget-name") {
         let name = name.to_str().map_err(|_| Problem::new(Code::BadRequest))?;
@@ -226,10 +226,10 @@ struct CreateDocument;
         ProtectedOperationProblemResponses
     )
 )]
-async fn replace_widget(input: ReplaceInput) -> Result<CreateWidget, Problem> {
+async fn replace_widget(input: ReplaceInput) -> Result<CreateWidget, Box<Problem>> {
     let (Path(_id), principal, State(widgets), Json(input)) = input;
     if !may_create(&principal) {
-        return Err(forbidden());
+        return Err(Box::new(forbidden()));
     }
     Ok(CreateWidget {
         widgets,
@@ -564,10 +564,12 @@ fn widget_contract() -> HttpContract<WidgetState> {
         .merge(
             idempotency::route(CreateDocument::openapi(), create_widget).expect("create composes"),
         )
+        .unwrap()
         .merge(
             idempotency::route(ReplaceDocument::openapi(), replace_widget)
                 .expect("replace composes"),
         )
+        .unwrap()
 }
 
 #[test]
@@ -600,11 +602,15 @@ impl Mounted {
         let contract = widget_contract();
         let mounted = HttpContract::new(OpenApiRouter::with_openapi(bearer_document()))
             .nest(PRIMARY_PREFIX, contract.clone())
-            .nest(SECONDARY_PREFIX, contract);
+            .unwrap()
+            .nest(SECONDARY_PREFIX, contract)
+            .unwrap();
         assert_eq!(mounted.idempotent_operations(), 4);
         let app = mounted
             .with_probes(PRIMARY_PREFIX)
+            .unwrap()
             .with_probes(SECONDARY_PREFIX)
+            .unwrap()
             .build_with_idempotency_store(
                 WidgetState {
                     readiness: readiness_reader(),
@@ -966,6 +972,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .routes(routes!(inherited_get));
     let app = HttpContract::new(contract)
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1116,6 +1123,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
         OpenApiRouter::with_openapi(root_policy).routes(routes!(authorized_without_idempotency));
     let app = HttpContract::new(contract)
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1190,6 +1198,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
     let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1564,7 +1573,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .unwrap();
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
     let store = Store::new(pool, RETENTION).unwrap();
-    let contract = widget_contract().with_probes("");
+    let contract = widget_contract().with_probes("").unwrap();
     let document = serde_json::to_value(contract.clone().into_openapi().unwrap()).unwrap();
     let app = contract
         .build_with_idempotency_store(

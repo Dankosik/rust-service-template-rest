@@ -425,6 +425,10 @@ def classify_report(
         if _matches(
             file,
             ".redocly.yaml", "api/openapi/*", "crates/infra-webhooks/src/inbound/route.rs",
+            "crates/infra-http/src/contract.rs", "crates/infra-http/src/contract/*",
+            "crates/infra-http/src/authn.rs", "crates/infra-http/src/probes.rs",
+            "crates/infra-http/src/problem.rs", "crates/infra-http/src/idempotency/openapi.rs",
+            "crates/infra-http/src/idempotency/declaration.rs",
             "crates/service/src/api.rs", "scripts/image/cargo_artifact.py", "scripts/checks/npx.py",
         ):
             mark("openapi")

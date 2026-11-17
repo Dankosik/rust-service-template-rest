@@ -781,7 +781,9 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     options.request_timeout = Duration::from_secs(30);
     let app = crate::HttpContract::new(routes)
         .with_probes("/")
+        .unwrap()
         .with_probes("/api")
+        .unwrap()
         .build(readiness.reader(), crate::Authentication::Public, &options)
         .unwrap();
 

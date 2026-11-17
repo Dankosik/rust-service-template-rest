@@ -37,7 +37,7 @@ where
     I: FromRequest<S, M> + Send + 'static,
     M: 'static,
     C: FreshCommand + 'static,
-    F: Future<Output = Result<C, Problem>> + Send + 'static,
+    F: Future<Output = Result<C, Box<Problem>>> + Send + 'static,
 {
     let mut paths = std::mem::take(&mut document.paths);
     let operation = declaration::prepare(&mut paths)?;

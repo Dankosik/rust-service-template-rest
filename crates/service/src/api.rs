@@ -65,7 +65,7 @@ pub enum ContractError {
 }
 
 pub fn contract() -> Result<HttpContract<AppState>, ContractError> {
-    Ok(HttpContract::new(assemble()).with_probes("/"))
+    Ok(HttpContract::new(assemble()).with_probes("/")?)
 }
 
 fn assemble() -> OpenApiRouter<AppState> {
@@ -157,6 +157,7 @@ mod tests {
     fn public_probe_contract_does_not_depend_on_a_verifier() {
         let document = HttpContract::new(assemble())
             .with_probes("/")
+            .unwrap()
             .into_openapi()
             .expect("valid probe contract");
         assert!(public_check(document).is_ok());
@@ -189,7 +190,7 @@ mod idempotency_tests {
             infra_http::authn::ProtectedOperationProblemResponses,
         )
     )]
-    async fn idempotent(_input: ()) -> Result<Create, infra_http::Problem> {
+    async fn idempotent(_input: ()) -> Result<Create, Box<infra_http::Problem>> {
         Ok(Create)
     }
 
@@ -200,12 +201,19 @@ mod idempotency_tests {
     struct Create;
 
     impl FreshCommand for Create {
-        async fn execute(self, _: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
+        fn execute(
+            self,
+            _: &mut Tx<'_>,
+        ) -> impl Future<Output = Result<ReplayableResponse, Rollback>> + Send {
             let headers = axum::http::HeaderMap::from_iter([(
                 axum::http::header::CONTENT_TYPE,
                 axum::http::HeaderValue::from_static("text/plain"),
             )]);
-            ReplayableResponse::bytes(StatusCode::CREATED, &headers, "created".into())
+            std::future::ready(ReplayableResponse::bytes(
+                StatusCode::CREATED,
+                &headers,
+                "created".into(),
+            ))
         }
     }
 
@@ -215,7 +223,7 @@ mod idempotency_tests {
 
     #[test]
     fn test_only_idempotent_route_generates_the_served_contract() {
-        let contract = contract().unwrap().merge(test_route());
+        let contract = contract().unwrap().merge(test_route()).unwrap();
         assert_eq!(contract.idempotent_operations(), 1);
         let document = serde_json::to_value(contract.into_openapi().unwrap()).unwrap();
         let operation = &document["paths"]["/_test/idempotent"]["post"];
@@ -257,6 +265,25 @@ mod idempotency_tests {
         assert_eq!(
             operation["responses"]["201"]["headers"]["Idempotent-Replayed"]["schema"],
             serde_json::json!({ "type": "string", "enum": ["true"] })
+        );
+    }
+
+    #[test]
+    fn a_document_only_operation_cannot_shadow_a_nested_idempotent_handler() {
+        let stale = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.0", "info": {"title": "stale", "version": "1"},
+            "paths": {"/api/_test/idempotent": {"post": {
+                "security": [], "responses": {"200": {"description": "stale public response"}}
+            }}}
+        }))
+        .unwrap();
+        let parent = HttpContract::new(OpenApiRouter::with_openapi(stale));
+        assert_eq!(
+            parent.nest("/api", test_route()).unwrap_err(),
+            infra_http::FinalizeError::DuplicateOperation {
+                path: "/api/_test/idempotent".into(),
+                method: "POST".into(),
+            }
         );
     }
 

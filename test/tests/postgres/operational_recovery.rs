@@ -57,6 +57,7 @@ fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Applic
         .with_state(pool);
     infra_http::HttpContract::new(work)
         .with_probes("/")
+        .unwrap()
         .build(
             readiness.reader(),
             infra_http::Authentication::Public,
