@@ -30,6 +30,12 @@ pub(crate) fn load_env(pairs: &[(&str, &str)]) -> Config {
     load_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
 }
 
+// template:begin worker:test-support-worker
+pub(crate) fn load_worker_env(pairs: &[(&str, &str)]) -> crate::WorkerConfig {
+    crate::load::load_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
+}
+// template:end worker:test-support-worker
+
 pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
     let dir = tempfile::tempdir().unwrap();
     let leaked = write(&dir, "leaked.toml", toml);

@@ -55,7 +55,9 @@ pub struct OtelConfig {
     /// The jobs worker derives its own identity from it: `{name}-jobs-worker`.
     // template:end jobs:otel-jobs-worker-identity-doc
     /// The initializer rewrites this default for a derived service.
+    #[serde(deserialize_with = "crate::de::string")]
     pub service_name: String,
+    #[serde(deserialize_with = "crate::de::string_enum")]
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
@@ -151,6 +153,7 @@ mod tests {
     fn sampler_names_follow_opentelemetry_spelling() {
         #[derive(Deserialize)]
         struct Probe {
+            #[serde(deserialize_with = "crate::de::string_enum")]
             sampler: TracesSampler,
         }
         for (text, expected) in [

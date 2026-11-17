@@ -254,7 +254,6 @@ _PROFILE_SECTION_ORDER = (
     "outbound-http",
     "request-budget",
     "outbound-auth",
-    "client-integrations",
     "grpc",
     "grpc-authn",
     "grpc-transport-tests",
@@ -436,8 +435,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("outbound-http")
     if inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("outbound-auth")
-    if inputs.grpc == "enabled" or inputs.outbound_auth == "oauth2-client-credentials":
-        selected.add("client-integrations")
     if inputs.grpc == "enabled":
         selected.add("grpc")
         if inputs.authn != "none":

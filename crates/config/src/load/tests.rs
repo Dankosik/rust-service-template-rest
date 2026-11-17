@@ -281,7 +281,7 @@ fn utf8_bom_loads_once_and_rejects_a_second_bom() {
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
-    let (source, _) = scan_file(&path, &mut BTreeSet::new()).unwrap();
+    let source = scan_file(&path, &mut BTreeSet::new(), &mut BTreeMap::new()).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
     let merged = config::Config::builder()
@@ -611,12 +611,10 @@ fn missing_file_is_reported() {
 #[test]
 fn nonzero_counts_reject_zero_and_boolean_text() {
     let cases: &[(&str, &str)] = &[
+        ("APP__HEALTH__FAILURE_THRESHOLD", "health.failure_threshold"),
         // template:begin postgres:load-zero-postgres-count
         ("APP__POSTGRES__MAX_CONNECTIONS", "postgres.max_connections"),
         // template:end postgres:load-zero-postgres-count
-        // template:begin jobs:load-zero-jobs-count
-        ("APP__JOBS__MAX_WORKERS", "jobs.max_workers"),
-        // template:end jobs:load-zero-jobs-count
         // template:begin messaging:load-zero-messaging-count
         (
             "APP__MESSAGING__CONSUMER_CONCURRENCY",
@@ -631,7 +629,28 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
             assert!(err.to_string().contains(key), "{name}: {err}");
         }
     }
+    // template:begin jobs:load-zero-jobs-count
+    for input in ["0", "yes"] {
+        let err = load_worker_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__JOBS__MAX_WORKERS", input)]),
+        )
+        .unwrap_err();
+        assert_matches!(err, Error::Deserialize(_), "{err}");
+        assert!(err.to_string().contains("jobs.max_workers"), "{err}");
+    }
+    // template:end jobs:load-zero-jobs-count
 }
+
+// template:begin worker:load-worker-defaults
+#[test]
+fn worker_defaults_load_with_build_info() {
+    let cfg = load_worker_from(&LoadOptions::default(), BUILD, env(&[])).unwrap();
+    assert_eq!(cfg.app.version, "1.2.3");
+    assert_eq!(cfg.app.commit, "abc123");
+}
+// template:end worker:load-worker-defaults
 
 #[test]
 fn drain_timeout_and_probe_budget_load_from_env() {
@@ -873,4 +892,112 @@ fn typed_version_and_commit_override_build_info() {
     ]);
     assert_eq!(cfg.app.version, "9.9.9");
     assert_eq!(cfg.app.commit, "deadbeef");
+}
+
+#[test]
+fn toml_non_string_on_string_field_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "bad.toml", "[app]\ninstance_id = false\n");
+    let err = load_from(
+        &LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    let rendered = err.to_string();
+    assert!(rendered.contains("app.instance_id"), "{rendered}");
+    assert!(rendered.contains("expected a string"), "{rendered}");
+}
+
+#[test]
+fn toml_non_boolean_on_boolean_field_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "bad.toml", "[http]\naccess_log_health_probes = 42\n");
+    let err = load_from(
+        &LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("http.access_log_health_probes"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("expected a boolean"), "{rendered}");
+}
+
+#[test]
+fn environment_enum_rejection_names_variants_without_echoing_value() {
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[("APP__LOG__FORMAT", "yaml")]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("expected `json` or `text` for key `log.format` in the environment"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("yaml"), "{rendered}");
+    assert!(!format!("{err:?}").contains("yaml"), "{err:?}");
+}
+
+#[test]
+fn unquoted_toml_datetime_is_rejected_unless_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = write(&dir, "base.toml", "[app]\nenv = 2026-11-13\n");
+    let base_only = LoadOptions {
+        config: Some(base.clone()),
+        ..LoadOptions::default()
+    };
+    let err = load_from(&base_only, BUILD, env(&[])).unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    let rendered = err.to_string();
+    assert!(rendered.contains("app.env"), "{rendered}");
+    assert!(
+        rendered.contains("must not be an unquoted TOML datetime"),
+        "{rendered}"
+    );
+
+    let overlay = write(&dir, "overlay.toml", "[app]\nenv = \"2026-11-13\"\n");
+    let with_overlay = LoadOptions {
+        config: Some(base),
+        config_overlay: vec![overlay],
+        ..LoadOptions::default()
+    };
+    let cfg = load_from(&with_overlay, BUILD, env(&[])).unwrap();
+    assert_eq!(cfg.app.env, "2026-11-13");
+
+    let cfg = load_from(&base_only, BUILD, env(&[("APP__APP__ENV", "production")])).unwrap();
+    assert_eq!(cfg.app.env, "production");
+}
+
+#[test]
+fn shutdown_tail_aggregates_grace_budget_with_other_violations() {
+    let err = load_with_tail_from(
+        &LoadOptions::default(),
+        BUILD,
+        Some(crate::ShutdownTail::new(
+            Duration::from_millis(18_500),
+            "teardown tail",
+        )),
+        env(&[("APP__HTTP__GRACE_PERIOD", "40s"), ("APP__APP__ENV", " ")]),
+    )
+    .unwrap_err();
+    let Error::Validate(errors) = &err else {
+        panic!("expected aggregated validation errors: {err}");
+    };
+    assert!(errors.names("http.grace_period"), "{errors}");
+    assert!(errors.names("app.env"), "{errors}");
 }
