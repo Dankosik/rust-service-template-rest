@@ -218,25 +218,67 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
 }
 
 #[tokio::test]
-async fn the_refresh_driver_finishes_when_the_last_service_handle_is_released() {
+async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_open() {
     let fixture = Fixture::new().await;
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
+    );
     let registration = fixture.build(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
-    let client = service_tokens.http(fixture.resource_client());
+    let (service, driver) = registration.service_tokens(TokenTarget::default());
     let exchange = registration
         .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
         .unwrap()
         .http(fixture.resource_client());
-    let mut driver = Box::pin(tokio::spawn(driver.run(std::future::pending())));
-    drop(service_tokens);
+    let client = service.http(fixture.resource_client());
     fixture.send(&client).await.unwrap();
+    fixture.token_received().await;
+    fixture.token_completed().await;
+    advance(Duration::from_secs(3321)).await;
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "replacement", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let gate = fixture.block_tokens();
+    fixture.send(&client).await.unwrap();
+    let mut driver = Box::pin(tokio::spawn(driver.run(std::future::pending())));
+    fixture.token_received().await;
+    drop(service);
     poll_pending(driver.as_mut()).await;
-
+    gate.add_permits(1);
+    fixture.token_completed().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            fixture.send(&client).await.unwrap();
+            if fixture
+                .resource_requests()
+                .last()
+                .unwrap()
+                .header("authorization")
+                == Some("Bearer replacement")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    *fixture.state.token_gate.lock().unwrap() = None;
+    advance(Duration::from_secs(3321)).await;
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "final", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let final_gate = fixture.block_tokens();
+    fixture.send(&client).await.unwrap();
+    fixture.token_received().await;
     drop(client);
     tokio::time::timeout(Duration::from_secs(2), driver)
         .await
         .unwrap()
         .unwrap();
+    *fixture.state.token_gate.lock().unwrap() = None;
+    final_gate.add_permits(1);
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
         .send_request(&exchange, fixture.on_behalf_of_request("alice"))

@@ -111,6 +111,61 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
 }
 
 #[tokio::test]
+async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
+    let fixture = Fixture::new().await;
+    let registration = fixture.build(fixture.options());
+    let bindings = ["catalog", "billing"].map(|audience| {
+        let target = token_target(&[], Some(audience));
+        let (service, driver) = registration.service_tokens(target.clone());
+        fixture.drive(driver);
+        let exchange = registration
+            .exchange_tokens(target, EXCHANGE_CAPACITY)
+            .unwrap();
+        (
+            audience,
+            service.http(fixture.resource_client()),
+            exchange.http(fixture.resource_client()),
+        )
+    });
+
+    for (audience, service, exchange) in &bindings {
+        for (grant, client, request) in [
+            ("service", service, fixture.request()),
+            (
+                "exchange",
+                exchange,
+                fixture.on_behalf_of_request("same-subject"),
+            ),
+        ] {
+            let token = format!("{audience}-{grant}");
+            fixture.token_json(StatusCode::OK, &exchange_response(&token));
+            fixture.send_request(client, request).await.unwrap();
+        }
+    }
+    let audiences: Vec<_> = fixture
+        .token_requests()
+        .iter()
+        .map(|request| form_value(&form_pairs(&request.body), "audience").to_owned())
+        .collect();
+    assert_eq!(audiences, ["catalog", "catalog", "billing", "billing"]);
+    let resources = fixture.resource_requests();
+    let headers: Vec<_> = resources
+        .iter()
+        .map(|request| request.header("authorization").unwrap())
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            "Bearer catalog-service",
+            "Bearer catalog-exchange",
+            "Bearer billing-service",
+            "Bearer billing-exchange"
+        ]
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
