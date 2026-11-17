@@ -293,8 +293,8 @@ fn fragmented_body(mut bytes: Bytes) -> Body {
 
 #[tokio::test]
 async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above_it() {
-    let parent = OperationContext::unbounded();
     const LIMIT: usize = 1024 * 1024;
+    let parent = OperationContext::unbounded();
     let prefix = "<Error><Code>NoSuchBucket</Code><Message>";
     let suffix = "</Message><RequestId>bounded-response</RequestId></Error>";
     for (method, create_only) in [
@@ -562,9 +562,9 @@ async fn oversized_put_sends_nothing() {
 
 #[tokio::test]
 async fn get_reads_the_body_and_validates_a_returned_checksum() {
-    let parent = OperationContext::unbounded();
     use aws_smithy_checksums::ChecksumAlgorithm;
 
+    let parent = OperationContext::unbounded();
     for payload in [
         Bytes::from_static(b"{\"ok\":true}"),
         Bytes::from(vec![b'x'; 1024 * 1024 + 1]),
@@ -597,7 +597,7 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
             Some("application/json")
         );
         assert!(download.metadata().last_modified.is_some());
-        assert_eq!(download.into_bytes(1024).await.unwrap(), expected);
+        assert_eq!(download.into_bytes(expected.len()).await.unwrap(), expected);
         assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
 
         let download = storage.get(&parent, &key()).await.unwrap();
@@ -651,9 +651,9 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
 
 #[tokio::test]
 async fn get_distinguishes_short_eof_from_an_interrupted_body() {
-    let parent = OperationContext::unbounded();
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let parent = OperationContext::unbounded();
     for (status, expected) in [
         ("204 No Content", ObjectStorageError::Integrity),
         ("200 OK", ObjectStorageError::Unavailable),
@@ -803,7 +803,6 @@ async fn a_mutation_keeps_the_whole_budget_for_its_one_attempt() {
 
 #[tokio::test]
 async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
-    let parent = OperationContext::unbounded();
     #[derive(Debug)]
     struct NoIdentity;
 
@@ -822,6 +821,7 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
         }
     }
 
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| ok_empty()).await;
     let options = options(Provider::Local {
         endpoint: stub.endpoint.clone(),
@@ -1142,13 +1142,13 @@ impl tracing::Subscriber for Records {
 
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
-    let parent = OperationContext::unbounded();
     const REQUEST_ID: &str = "4442587FB7D0A2F9";
     const EXTENDED_REQUEST_ID: &str =
         "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
     if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
         return;
     }
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, index| {
         let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
         let headers = response.headers_mut();
