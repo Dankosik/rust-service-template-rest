@@ -304,6 +304,7 @@ pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
     outcome: TransactionOutcome,
+    commit_started: bool,
 }
 
 impl TransactionObservation {
@@ -312,6 +313,7 @@ impl TransactionObservation {
             started: Instant::now(),
             span,
             outcome: TransactionOutcome::Cancelled,
+            commit_started: false,
         }
     }
 
@@ -321,6 +323,10 @@ impl TransactionObservation {
             "db.client.connection.pool.name" => "postgres"
         )
         .record(self.started.elapsed().as_secs_f64());
+    }
+
+    pub(crate) fn begin_commit(&mut self) {
+        self.commit_started = true;
     }
 
     pub(crate) fn end(&mut self, outcome: TransactionOutcome) {
@@ -341,6 +347,14 @@ impl TransactionObservation {
 
 impl Drop for TransactionObservation {
     fn drop(&mut self) {
+        if self.commit_started && self.outcome == TransactionOutcome::Cancelled {
+            tracing::warn!(
+                parent: &self.span,
+                phase = "commit",
+                commit_outcome = "unknown",
+                "postgres_transaction_cancelled"
+            );
+        }
         self.span
             .record("postgres.transaction.outcome", self.outcome.label());
         self.outcome

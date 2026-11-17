@@ -280,6 +280,7 @@ where
                 .await
                 .map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
         }
+        observed.begin_commit();
         tx.commit()
             .await
             .map_err(|err| observed.fail(classify_commit(err)))?;
