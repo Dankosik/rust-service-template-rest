@@ -14,7 +14,7 @@ use grpc_contracts::example::v1::{
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::{ResponseContext, Services};
+use infra_grpc::Services;
 use infra_object_storage::{
     CredentialSource, ObjectKey, ObjectStorage, ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
@@ -330,7 +330,11 @@ impl Echo {
         Ok("ok".to_owned())
     }
 
-    async fn upload(&self, context: &ResponseContext) -> Result<String, Status> {
+    async fn upload(&self, request: &Request<UnaryRequest>) -> Result<String, Status> {
+        let context = request
+            .extensions()
+            .get()
+            .ok_or_else(|| Status::internal("missing operation context"))?;
         self.counts.upload_started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.upload_active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts
@@ -355,7 +359,7 @@ impl Echo {
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self
             .storage
-            .put(context.operation(), &key, body, PutOptions::default())
+            .put(context, &key, body, PutOptions::default())
             .await;
         *work = true;
         if result == Ok(()) {
@@ -442,13 +446,7 @@ impl EchoService for Echo {
                 message
             }
             Some("cpu") => self.cpu().await?,
-            Some("upload") => {
-                let context = request
-                    .extensions()
-                    .get::<ResponseContext>()
-                    .ok_or_else(|| Status::internal("missing response context"))?;
-                self.upload(context).await?
-            }
+            Some("upload") => self.upload(&request).await?,
             Some("prepare") => self.prepare()?,
             Some("log") => {
                 self.counts.log_attempted.fetch_add(1, Ordering::SeqCst);
