@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -24,7 +25,7 @@ struct State {
     free: usize,
     next_waiter: u64,
     waiters: BTreeMap<u64, oneshot::Sender<()>>,
-    occupied_since: Option<Instant>,
+    waiters_since: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -38,24 +39,20 @@ impl Slots {
                 free: capacity,
                 next_waiter: 0,
                 waiters: BTreeMap::new(),
-                occupied_since: None,
+                waiters_since: None,
             }),
         })
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     pub(crate) fn try_take(self: &Arc<Self>) -> Option<Slot> {
-        let mut state = self.state();
+        let mut state = self.state.lock();
         state.free = state.free.checked_sub(1)?;
         Some(Slot(Arc::clone(self)))
     }
 
     pub(crate) async fn take(self: &Arc<Self>) -> Slot {
         let (id, granted) = {
-            let mut state = self.state();
+            let mut state = self.state.lock();
             if let Some(free) = state.free.checked_sub(1) {
                 state.free = free;
                 return Slot(Arc::clone(self));
@@ -64,7 +61,7 @@ impl Slots {
             state.next_waiter += 1;
             let (grant, granted) = oneshot::channel();
             if state.waiters.is_empty() {
-                state.occupied_since = Some(Instant::now());
+                state.waiters_since = Some(Instant::now());
             }
             state.waiters.insert(id, grant);
             (id, granted)
@@ -72,22 +69,21 @@ impl Slots {
         let mut wait = Wait {
             slots: self,
             id,
-            granted: Some(granted),
+            granted,
+            pending: true,
         };
-        if let Some(granted) = wait.granted.as_mut() {
-            // The sender stays in the queue until it grants or this wait removes it.
-            let _ = granted.await;
-        }
-        wait.granted = None;
+        // The sender stays in the queue until it grants or this wait removes it.
+        let _ = (&mut wait.granted).await;
+        wait.pending = false;
         Slot(Arc::clone(self))
     }
 
     fn release(&self) {
-        let mut state = self.state();
+        let mut state = self.state.lock();
         let now = Instant::now();
         loop {
             let newest_first = state
-                .occupied_since
+                .waiters_since
                 .is_some_and(|since| now.saturating_duration_since(since) > STANDING_AFTER);
             let next = if newest_first {
                 state.waiters.pop_last()
@@ -95,7 +91,7 @@ impl Slots {
                 state.waiters.pop_first()
             };
             if state.waiters.is_empty() {
-                state.occupied_since = None;
+                state.waiters_since = None;
             }
             let Some((_, grant)) = next else {
                 state.free += 1;
@@ -111,19 +107,20 @@ impl Slots {
 struct Wait<'a> {
     slots: &'a Slots,
     id: u64,
-    granted: Option<oneshot::Receiver<()>>,
+    granted: oneshot::Receiver<()>,
+    pending: bool,
 }
 
 impl Drop for Wait<'_> {
     fn drop(&mut self) {
-        if self.granted.is_none() {
+        if !self.pending {
             return;
         }
         let queued = {
-            let mut state = self.slots.state();
+            let mut state = self.slots.state.lock();
             let queued = state.waiters.remove(&self.id).is_some();
             if state.waiters.is_empty() {
-                state.occupied_since = None;
+                state.waiters_since = None;
             }
             queued
         };

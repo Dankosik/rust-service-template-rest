@@ -432,6 +432,32 @@ impl Batch {
         self.ends.push(self.bytes.len());
     }
 
+    // `self.ends[0]` includes the leading `\n` pushed when `self.torn` was true.
+    // For a short write (`accepted < self.bytes.len()`), returns whether the sink
+    // was left mid-line and every record after the failed one (record 0 if even the
+    // separating `\n` prefix was not written).
+    fn after_short_write(&self, accepted: usize) -> (bool, impl Iterator<Item = &[u8]>) {
+        let prefix = usize::from(self.torn);
+        let (torn, failed) = if accepted < prefix {
+            (self.torn, 0)
+        } else {
+            let failed = self.ends.partition_point(|&end| end <= accepted);
+            let start = if failed == 0 {
+                prefix
+            } else {
+                self.ends[failed - 1]
+            };
+            (accepted > start, failed)
+        };
+        let mut start = self.ends[failed];
+        let remaining = self.ends[failed + 1..].iter().map(move |&end| {
+            let line = &self.bytes[start..end];
+            start = end;
+            line
+        });
+        (torn, remaining)
+    }
+
     fn write(&mut self, writer: &mut impl Write, shared: &Shared) {
         let accepted = write_bytes(writer, &self.bytes);
         if accepted == self.bytes.len() {
@@ -439,27 +465,10 @@ impl Batch {
             return;
         }
         shared.record_sink_error(SinkOperation::Write);
-        let prefix = usize::from(self.torn);
-        if accepted < prefix {
-            self.resume_after(1, writer, shared);
-            return;
-        }
-        let failed = self.ends.partition_point(|&end| end <= accepted);
-        let start = if failed == 0 {
-            prefix
-        } else {
-            self.ends[failed - 1]
-        };
-        self.torn = accepted > start;
-        self.resume_after(failed + 1, writer, shared);
-    }
-
-    fn resume_after(&mut self, next: usize, writer: &mut impl Write, shared: &Shared) {
-        let mut start = self.ends.get(next - 1).copied().unwrap_or(self.bytes.len());
-        for &end in self.ends.iter().skip(next) {
-            let line = &self.bytes[start..end];
-            start = end;
-            if self.torn && write_line(writer, b"\n") != Written::Whole {
+        // Drop the failed record and write remaining ones individually to keep lines separated.
+        let (mut torn, remaining) = self.after_short_write(accepted);
+        for line in remaining {
+            if torn && write_line(writer, b"\n") != Written::Whole {
                 shared.record_sink_error(SinkOperation::Write);
                 continue;
             }
@@ -467,8 +476,9 @@ impl Batch {
             if written != Written::Whole {
                 shared.record_sink_error(SinkOperation::Write);
             }
-            self.torn = written == Written::Part;
+            torn = written == Written::Part;
         }
+        self.torn = torn;
     }
 }
 
