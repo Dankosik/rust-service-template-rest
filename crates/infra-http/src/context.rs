@@ -33,6 +33,9 @@ pub struct RequestContext {
 struct UploadReads {
     pending: AtomicUsize,
     pending_at_deadline: AtomicBool,
+    // template:begin object-storage:http-request-put-outcomes
+    put_outcomes: std::sync::OnceLock<infra_object_storage::PutOutcomes>,
+    // template:end object-storage:http-request-put-outcomes
 }
 
 impl RequestContext {
@@ -50,6 +53,44 @@ impl RequestContext {
 
     pub async fn read_body_bytes(&self, body: Body, limit: usize) -> Result<Bytes, axum::Error> {
         track_body_read(Some(self), to_bytes(body, limit)).await
+    }
+
+    // template:begin object-storage:http-observe-put-outcomes
+    pub(super) fn observe_put(
+        &self,
+        body: infra_object_storage::PutBody,
+    ) -> infra_object_storage::PutBody {
+        match &self.upload_reads {
+            Some(reads) => reads
+                .put_outcomes
+                .get_or_init(Default::default)
+                .observe(body),
+            None => body,
+        }
+    }
+    // template:end object-storage:http-observe-put-outcomes
+
+    fn stopped_response(&self, reason: Stopped, version: Version) -> Response {
+        if reason == Stopped::Deadline
+            && self.upload_reads.as_ref().is_some_and(|reads| {
+                reads.pending.load(Ordering::Acquire) != 0
+                    || reads.pending_at_deadline.load(Ordering::Relaxed)
+            })
+        {
+            return upload_timeout_response(version);
+        }
+        let problem = Problem::from(reason);
+        // template:begin object-storage:http-stopped-put-outcome
+        if self
+            .upload_reads
+            .as_ref()
+            .and_then(|reads| reads.put_outcomes.get())
+            .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
+        {
+            return crate::object_storage::unconfirmed_write(problem).into_response();
+        }
+        // template:end object-storage:http-stopped-put-outcome
+        problem.into_response()
     }
 }
 
@@ -209,24 +250,18 @@ pub(crate) async fn opening(
         .get::<Arrival>()
         .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
     let deadline = Deadline::new(origin, budget);
+    let track_upload = !request.body().is_end_stream();
+    // template:begin object-storage:http-opening-put-outcomes
+    let track_upload = track_upload || !request.method().is_safe();
+    // template:end object-storage:http-opening-put-outcomes
     let context = RequestContext {
         operation: OperationContext::new(
             Some(deadline),
             response_context.operation().cancellation().clone(),
         ),
-        upload_reads: (!request.body().is_end_stream()).then(Arc::default),
+        upload_reads: track_upload.then(Arc::default),
     };
     let version = request.version();
-    let upload_version = || {
-        context
-            .upload_reads
-            .as_ref()
-            .filter(|reads| {
-                reads.pending.load(Ordering::Acquire) != 0
-                    || reads.pending_at_deadline.load(Ordering::Relaxed)
-            })
-            .map(|_| version)
-    };
     request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
     // template:begin request-budget:http-request-deadline-projection
@@ -239,22 +274,15 @@ pub(crate) async fn opening(
         stopped = async {
             let reason = context.operation.wait_stopped().await;
             response_context.operation().cancel();
-            stopped_response(reason, upload_version())
+            context.stopped_response(reason, version)
         } => return stopped,
         response = next.run(request) => response,
     };
     if let Some(reason) = context.operation.stopped() {
         response_context.operation().cancel();
-        return stopped_response(reason, upload_version());
+        return context.stopped_response(reason, version);
     }
     response
-}
-
-fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
-    match (reason, upload) {
-        (Stopped::Deadline, Some(version)) => upload_timeout_response(version),
-        _ => Problem::from(reason).into_response(),
-    }
 }
 
 fn upload_timeout_response(version: Version) -> Response {

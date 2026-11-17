@@ -72,7 +72,7 @@ async fn upload(
     State(storage): State<ObjectStorage>,
     context: RequestContext,
     request: Request,
-) -> Result<StatusCode, Problem> {
+) -> impl axum::response::IntoResponse {
     let length = request.headers()[CONTENT_LENGTH]
         .to_str()
         .unwrap()
@@ -83,8 +83,10 @@ async fn upload(
     storage
         .put(context.operation(), &key, body, PutOptions::overwrite())
         .await
-        .map_err(write_problem)?;
-    Ok(StatusCode::CREATED)
+        .map_or_else(
+            |error| write_problem(error).into_response(),
+            |()| StatusCode::CREATED.into_response(),
+        )
 }
 
 const OPENING_BUDGET: Duration = Duration::from_secs(30);
@@ -148,7 +150,7 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
         let mut hold_reply = hold_reply.clone();
         async move {
             if let Ok(bytes) = to_bytes(request.into_body(), 1024).await {
-                assert!(bytes.windows(4).any(|window| window == b"file"));
+                assert!(bytes.is_empty() || bytes.windows(4).any(|window| window == b"file"));
                 notify.notify_one();
                 let _ = hold_reply.changed().await;
             }
@@ -157,7 +159,7 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
     };
     let (_provider, app) = file_route(put(provider_handler), put(upload));
 
-    for send_file in [false, true] {
+    for (length, send_file) in [(4, false), (4, true), (0, false), (0, true)] {
         let (poll, polled) = oneshot::channel();
         let (send, data) = oneshot::channel::<Bytes>();
         let body = Body::from_stream(stream::once(async move {
@@ -165,7 +167,7 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
             data.await
         }));
         let request = Request::put("/attachment")
-            .header(CONTENT_LENGTH, 4)
+            .header(CONTENT_LENGTH, length)
             .body(body)
             .unwrap();
         let response = tokio::spawn(app.clone().oneshot(request));
@@ -174,7 +176,12 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
             .unwrap()
             .unwrap();
         if send_file {
-            send.send(Bytes::from_static(b"file")).unwrap();
+            send.send(if length == 0 {
+                Bytes::new()
+            } else {
+                Bytes::from_static(b"file")
+            })
+            .unwrap();
             tokio::time::timeout(OPENING_BUDGET, received.notified())
                 .await
                 .unwrap();
@@ -183,20 +190,92 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
         tokio::time::advance(OPENING_BUDGET).await;
         let response = response.await.unwrap().unwrap();
         tokio::time::resume();
-        let (status, code, connection) = if send_file {
-            (StatusCode::GATEWAY_TIMEOUT, "gateway_timeout", None)
+        let (status, code, connection, detail) = if send_file {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "gateway_timeout",
+                None,
+                "the storage provider could not confirm whether the write took effect",
+            )
         } else {
             (
                 StatusCode::REQUEST_TIMEOUT,
                 "request_timeout",
                 Some(HeaderValue::from_static("close")),
+                "request body was not received within the request budget",
             )
         };
         assert_eq!(response.status(), status);
         assert_eq!(response.headers().get(CONNECTION), connection.as_ref());
-        assert_eq!(body_json(response).await["code"], code);
+        assert!(!response.headers().contains_key(RETRY_AFTER));
+        let problem = body_json(response).await;
+        assert_eq!(problem["code"], code);
+        assert_eq!(problem["detail"], detail);
     }
     drop(release_reply);
+}
+
+#[tokio::test]
+async fn a_later_timeout_distinguishes_unsent_acknowledged_and_unconfirmed_puts() {
+    let waiting = Arc::new(Notify::new());
+    let notify = waiting.clone();
+    let handler =
+        move |State(storage): State<ObjectStorage>, context: RequestContext, request: Request| {
+            let notify = notify.clone();
+            async move {
+                let body = context.buffered_upload(Bytes::new());
+                if let Some(scenario) = request.uri().query() {
+                    let key = ObjectKey::try_new("attachment").unwrap();
+                    let options = if scenario == "unconfirmed" {
+                        PutOptions::create_only()
+                    } else {
+                        PutOptions::overwrite()
+                    };
+                    let result = storage.put(context.operation(), &key, body, options).await;
+                    if scenario == "unconfirmed" {
+                        std::assert_matches!(result, Err(MutationError::OutcomeUnknown(_)));
+                    } else {
+                        result.unwrap();
+                    }
+                }
+                notify.notify_one();
+                std::future::pending::<StatusCode>().await
+            }
+        };
+    let provider = |headers: axum::http::HeaderMap| async move {
+        if headers.contains_key(axum::http::header::IF_NONE_MATCH) {
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::OK
+        }
+    };
+    let (_provider, app) = file_route(put(provider), put(handler));
+    for uri in [
+        "/attachment",
+        "/attachment?acknowledged",
+        "/attachment?unconfirmed",
+    ] {
+        let response = tokio::spawn(
+            app.clone()
+                .oneshot(Request::put(uri).body(Body::empty()).unwrap()),
+        );
+        tokio::time::timeout(OPENING_BUDGET, waiting.notified())
+            .await
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(OPENING_BUDGET).await;
+        let response = response.await.unwrap().unwrap();
+        tokio::time::resume();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            body_json(response).await["detail"],
+            if uri == "/attachment?unconfirmed" {
+                "the storage provider could not confirm whether the write took effect"
+            } else {
+                "request budget expired before a response could be committed"
+            }
+        );
+    }
 }
 
 #[tokio::test]

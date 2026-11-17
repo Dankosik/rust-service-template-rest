@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use futures_util::stream;
 use http_body_util::StreamBody;
 use infra_object_storage::{
@@ -15,7 +15,12 @@ impl RequestContext {
             let frame = context.read_body_frame(&mut body).await?;
             Some((frame, (context, body)))
         });
-        PutBody::stream(length, StreamBody::new(frames))
+        self.observe_put(PutBody::stream(length, StreamBody::new(frames)))
+    }
+
+    #[must_use]
+    pub fn buffered_upload(&self, bytes: Bytes) -> PutBody {
+        self.observe_put(PutBody::from(bytes))
     }
 }
 
@@ -65,9 +70,13 @@ pub fn mutation_problem(
                 MutationFailure::Stopped(stopped) => Problem::from(stopped),
                 _ => Problem::new(Code::ServiceUnavailable),
             };
-            problem.detail("the storage provider could not confirm whether the write took effect")
+            unconfirmed_write(problem)
         }
     }
+}
+
+pub(super) fn unconfirmed_write(problem: Problem) -> Problem {
+    problem.detail("the storage provider could not confirm whether the write took effect")
 }
 
 #[cfg(test)]

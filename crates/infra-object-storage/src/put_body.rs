@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use aws_sdk_s3::primitives::ByteStream;
@@ -23,6 +23,32 @@ pub struct PutBody {
     pub(crate) stream: ByteStream,
     #[debug(skip)]
     pub(crate) source: UploadSource,
+    #[debug(skip)]
+    pub(crate) outcomes: Option<PutOutcomes>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PutOutcomes(Arc<AtomicUsize>);
+
+impl PutOutcomes {
+    #[must_use]
+    pub fn observe(&self, mut body: PutBody) -> PutBody {
+        body.outcomes = Some(self.clone());
+        body
+    }
+
+    #[must_use]
+    pub fn has_unconfirmed_write(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+
+    pub(super) fn dispatched(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn settled(&self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
 }
 
 #[derive(Debug)]
@@ -51,6 +77,7 @@ impl PutBody {
             len,
             stream: ByteStream::from_body_1_x(body),
             source: UploadSource::Streamed { mismatch },
+            outcomes: None,
         }
     }
 
@@ -82,6 +109,7 @@ impl From<Bytes> for PutBody {
             len: bytes.len() as u64,
             stream: ByteStream::from(bytes),
             source: UploadSource::InMemory,
+            outcomes: None,
         }
     }
 }
