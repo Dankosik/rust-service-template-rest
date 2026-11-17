@@ -1,5 +1,3 @@
-use std::process::Command;
-
 #[test]
 #[expect(
     clippy::disallowed_methods,
@@ -7,7 +5,7 @@ use std::process::Command;
     reason = "the process test captures the shipped binary's startup refusal"
 )]
 fn postgres_disabled_uses_the_configured_format_for_one_terminal_record() -> std::io::Result<()> {
-    let output = Command::new(env!("CARGO_BIN_EXE_migrate"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_migrate"))
         .env_clear()
         .env("APP__POSTGRES__ENABLED", "false")
         .env("APP__LOG__LEVEL", "off")
