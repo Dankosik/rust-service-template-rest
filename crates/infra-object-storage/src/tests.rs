@@ -10,13 +10,14 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
+use operation_context::{OperationContext, Stopped};
 use secrecy::SecretString;
 
 use crate::error::{Failure, LocalFailure};
 use crate::provider::{UploadChecksum, admit};
 use crate::{
-    ConfigError, ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
-    ObjectStorageOptions, Provider, PutBody, PutOptions,
+    ConfigError, ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey,
+    ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -270,12 +271,14 @@ fn key() -> ObjectKey {
     ObjectKey::try_new("results/op-1.json").unwrap()
 }
 
-async fn put_json(storage: &ObjectStorage) -> Result<(), ObjectStorageError> {
+async fn put_json(storage: &ObjectStorage) -> Result<(), MutationError> {
+    let parent = OperationContext::unbounded();
     storage
         .put(
+            &parent,
             &key(),
             Bytes::from_static(b"{}").into(),
-            PutOptions::default(),
+            PutOptions::overwrite(),
         )
         .await
 }
@@ -290,6 +293,7 @@ fn fragmented_body(mut bytes: Bytes) -> Body {
 
 #[tokio::test]
 async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above_it() {
+    let parent = OperationContext::unbounded();
     const LIMIT: usize = 1024 * 1024;
     let prefix = "<Error><Code>NoSuchBucket</Code><Message>";
     let suffix = "</Message><RequestId>bounded-response</RequestId></Error>";
@@ -321,25 +325,37 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
                     options.operation_timeout = Duration::from_secs(10);
                 });
                 let put_options = if create_only {
-                    PutOptions::default().create_only()
+                    PutOptions::create_only()
                 } else {
-                    PutOptions::default()
+                    PutOptions::overwrite()
                 };
-                let result = match method {
-                    Method::PUT => storage.put(&key(), Bytes::new().into(), put_options).await,
-                    Method::DELETE => storage.delete(&key()).await,
-                    Method::GET => storage.get(&key()).await.map(|_| ()),
-                    _ => unreachable!(),
-                };
-                let expected = if length == LIMIT {
-                    ObjectStorageError::Rejected
-                } else if method == Method::GET {
-                    ObjectStorageError::Unavailable
+                if method == Method::GET {
+                    let expected = if length == LIMIT {
+                        ObjectStorageError::Rejected
+                    } else {
+                        ObjectStorageError::Unavailable
+                    };
+                    assert_eq!(
+                        storage.get(&parent, &key()).await.unwrap_err(),
+                        expected,
+                        "{status} {length}"
+                    );
                 } else {
-                    ObjectStorageError::OutcomeUnknown
-                };
-                assert_eq!(result, Err(expected), "{method} {status} {length}");
-                if method != Method::GET {
+                    let result = match method {
+                        Method::PUT => {
+                            storage
+                                .put(&parent, &key(), Bytes::new().into(), put_options)
+                                .await
+                        }
+                        Method::DELETE => storage.delete(&parent, &key()).await,
+                        _ => unreachable!(),
+                    };
+                    let expected = if length == LIMIT {
+                        MutationError::NotApplied(MutationFailure::Rejected)
+                    } else {
+                        MutationError::OutcomeUnknown(MutationFailure::Unavailable)
+                    };
+                    assert_eq!(result, Err(expected), "{method} {status} {length}");
                     assert_eq!(stub.seen().len(), 1, "mutation must not retry");
                 }
                 stub.stop().await;
@@ -350,19 +366,23 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
 
 #[tokio::test]
 async fn create_only_put_sends_if_none_match_once_and_maps_412() {
+    let parent = OperationContext::unbounded();
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed")).await;
     let storage = stub.storage(|_| {});
     let result = storage
         .put(
+            &parent,
             &key(),
             Bytes::from_static(b"{}").into(),
-            PutOptions::default()
-                .content_type(ContentType::try_new("application/json").unwrap())
-                .create_only(),
+            PutOptions::create_only()
+                .content_type(ContentType::try_new("application/json").unwrap()),
         )
         .await;
-    assert_eq!(result, Err(ObjectStorageError::AlreadyExists));
+    assert_eq!(
+        result,
+        Err(MutationError::NotApplied(MutationFailure::AlreadyExists))
+    );
     let seen = stub.seen();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].method, Method::PUT);
@@ -397,34 +417,43 @@ async fn a_provider_without_proven_checksums_gets_no_checksum_headers() {
 
 #[tokio::test]
 async fn failed_create_only_put_is_not_retried_and_is_unknown() {
+    let parent = OperationContext::unbounded();
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
     let storage = stub.storage(|_| {});
     let result = storage
         .put(
+            &parent,
             &key(),
             Bytes::from_static(b"{}").into(),
-            PutOptions::default().create_only(),
+            PutOptions::create_only(),
         )
         .await;
-    assert_eq!(result, Err(ObjectStorageError::OutcomeUnknown));
+    assert_eq!(
+        result,
+        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+    );
     assert_eq!(stub.seen().len(), 1);
 }
 
 #[tokio::test]
 async fn mutations_make_one_attempt() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
     let storage = stub.storage(|_| {});
     let result = put_json(&storage).await;
-    assert_eq!(result, Err(ObjectStorageError::Unavailable));
+    assert_eq!(
+        result,
+        Err(MutationError::NotApplied(MutationFailure::Unavailable))
+    );
     assert_eq!(stub.seen().len(), 1);
 
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
     let storage = stub.storage(|_| {});
     assert_eq!(
-        storage.delete(&key()).await,
-        Err(ObjectStorageError::OutcomeUnknown)
+        storage.delete(&parent, &key()).await,
+        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 
@@ -434,29 +463,36 @@ async fn mutations_make_one_attempt() {
     let body = Body::from("streamed");
     assert_eq!(
         storage
-            .put(&key(), PutBody::stream(8, body), PutOptions::default())
+            .put(
+                &parent,
+                &key(),
+                PutBody::stream(8, body),
+                PutOptions::overwrite()
+            )
             .await,
-        Err(ObjectStorageError::OutcomeUnknown)
+        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 }
 
 #[tokio::test]
 async fn a_stream_that_differs_from_its_length_is_rejected() {
+    let parent = OperationContext::unbounded();
     for (declared, sent) in [(4_u64, &b"longer"[..]), (16, &b"short"[..]), (0, &b"x"[..])] {
         let stub = Stub::start(|_, _| ok_empty()).await;
         let storage = stub.storage(|_| {});
         let body = http_body_util::Full::new(Bytes::from_static(sent));
         let result = storage
             .put(
+                &parent,
                 &key(),
                 PutBody::stream(declared, body),
-                PutOptions::default(),
+                PutOptions::overwrite(),
             )
             .await;
         assert_eq!(
             result,
-            Err(ObjectStorageError::Rejected),
+            Err(MutationError::NotApplied(MutationFailure::Rejected)),
             "declared {declared}"
         );
     }
@@ -464,6 +500,7 @@ async fn a_stream_that_differs_from_its_length_is_rejected() {
 
 #[tokio::test]
 async fn empty_stream_preparation_and_response_share_one_put_timeout() {
+    let parent = OperationContext::unbounded();
     let delay = Duration::from_millis(1500);
     let stub = Stub::start_with_delay(delay, |_, _| ok_empty()).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
@@ -476,37 +513,56 @@ async fn empty_stream_preparation_and_response_share_one_put_timeout() {
     }));
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        storage.put(&key(), PutBody::stream(0, body), PutOptions::default()),
+        storage.put(
+            &parent,
+            &key(),
+            PutBody::stream(0, body),
+            PutOptions::overwrite(),
+        ),
     )
     .await
     .unwrap();
     let sent = stub.seen().len();
     let follow_up = storage
-        .put(&key(), Bytes::new().into(), PutOptions::default())
+        .put(
+            &parent,
+            &key(),
+            Bytes::new().into(),
+            PutOptions::overwrite(),
+        )
         .await;
     stub.stop().await;
-    assert_eq!(result, Err(ObjectStorageError::OutcomeUnknown));
+    assert_eq!(
+        result,
+        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+    );
     assert_eq!(sent, 1, "the mutation must be dispatched exactly once");
     assert_eq!(follow_up, Ok(()));
 }
 
 #[tokio::test]
 async fn oversized_put_sends_nothing() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| ok_empty()).await;
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     let result = storage
         .put(
+            &parent,
             &key(),
             Bytes::from_static(b"12345").into(),
-            PutOptions::default(),
+            PutOptions::overwrite(),
         )
         .await;
-    assert_eq!(result, Err(ObjectStorageError::TooLarge));
+    assert_eq!(
+        result,
+        Err(MutationError::NotApplied(MutationFailure::TooLarge))
+    );
     assert!(stub.seen().is_empty());
 }
 
 #[tokio::test]
 async fn get_reads_the_body_and_validates_a_returned_checksum() {
+    let parent = OperationContext::unbounded();
     use aws_smithy_checksums::ChecksumAlgorithm;
 
     for payload in [
@@ -534,17 +590,17 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
         })
         .await;
         let storage = stub.storage(|options| options.max_object_bytes = 2 * 1024 * 1024);
-        let download = storage.get(&key()).await.unwrap();
+        let download = storage.get(&parent, &key()).await.unwrap();
         assert_eq!(download.metadata().size, expected.len() as u64);
         assert_eq!(
             download.metadata().content_type.as_deref(),
             Some("application/json")
         );
         assert!(download.metadata().last_modified.is_some());
-        assert_eq!(download.into_bytes().await.unwrap(), expected);
+        assert_eq!(download.into_bytes(1024).await.unwrap(), expected);
         assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
 
-        let download = storage.get(&key()).await.unwrap();
+        let download = storage.get(&parent, &key()).await.unwrap();
         assert_eq!(
             http_body::Body::size_hint(&download).exact(),
             Some(expected.len() as u64)
@@ -557,6 +613,7 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
 
 #[tokio::test]
 async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| {
         object(
             b"{\"ok\":true}",
@@ -568,7 +625,7 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
     })
     .await;
     let storage = stub.storage(|_| {});
-    let mut download = storage.get(&key()).await.unwrap();
+    let mut download = storage.get(&parent, &key()).await.unwrap();
     let mut outcome = download.next_chunk().await;
     while let Ok(Some(_)) = outcome {
         outcome = download.next_chunk().await;
@@ -579,7 +636,7 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
         Err(ObjectStorageError::Integrity)
     );
 
-    let mut download = storage.get(&key()).await.unwrap();
+    let mut download = storage.get(&parent, &key()).await.unwrap();
     let mut received = 0;
     let failure = loop {
         match download.frame().await {
@@ -594,6 +651,7 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
 
 #[tokio::test]
 async fn get_distinguishes_short_eof_from_an_interrupted_body() {
+    let parent = OperationContext::unbounded();
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     for (status, expected) in [
@@ -618,11 +676,11 @@ async fn get_distinguishes_short_eof_from_an_interrupted_body() {
         };
         let key = key();
         let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let (download, socket) = tokio::join!(storage.get(&key), reply);
+            let (download, socket) = tokio::join!(storage.get(&parent, &key), reply);
             let download = download.unwrap();
             assert_eq!(download.metadata().size, 3);
             drop(socket);
-            download.into_bytes().await
+            download.into_bytes(1024).await
         })
         .await
         .unwrap();
@@ -632,33 +690,35 @@ async fn get_distinguishes_short_eof_from_an_interrupted_body() {
 
 #[tokio::test]
 async fn get_without_a_checksum_is_readable() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| object(b"legacy", &[])).await;
     let storage = stub.storage(|_| {});
     let body = storage
-        .get(&key())
+        .get(&parent, &key())
         .await
         .unwrap()
-        .into_bytes()
+        .into_bytes(1024)
         .await
         .unwrap();
     assert_eq!(body, Bytes::from_static(b"legacy"));
 
-    let mut download = storage.get(&key()).await.unwrap();
+    let mut download = storage.get(&parent, &key()).await.unwrap();
     let first = download.next_chunk().await.unwrap().unwrap();
     assert_eq!(
-        download.into_bytes().await.unwrap(),
+        download.into_bytes(1024).await.unwrap(),
         Bytes::from_static(b"legacy").slice(first.len()..)
     );
 }
 
 #[tokio::test]
 async fn an_empty_object_ends_inside_get() {
+    let parent = OperationContext::unbounded();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let stub = Stub::start(|_, _| object(b"", &[])).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
-    let download = storage.get(&key()).await.unwrap();
+    let download = storage.get(&parent, &key()).await.unwrap();
     assert!(http_body::Body::is_end_stream(&download));
     assert_eq!(http_body::Body::size_hint(&download).exact(), Some(0));
     let rendered = handle.render();
@@ -668,34 +728,36 @@ async fn an_empty_object_ends_inside_get() {
         ),
         "{rendered}"
     );
-    storage.head(&key()).await.unwrap();
-    assert_eq!(download.into_bytes().await.unwrap(), Bytes::new());
+    storage.head(&parent, &key()).await.unwrap();
+    assert_eq!(download.into_bytes(1024).await.unwrap(), Bytes::new());
     assert!(!handle.render().contains("cancelled"));
 }
 
 #[tokio::test]
 async fn get_refuses_ranges_and_oversized_objects() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| object(b"partial", &[("content-range", "bytes 0-6/100")])).await;
     let storage = stub.storage(|_| {});
     assert_eq!(
-        storage.get(&key()).await.err(),
+        storage.get(&parent, &key()).await.err(),
         Some(ObjectStorageError::Integrity)
     );
 
     let stub = Stub::start(|_, _| object(b"12345", &[])).await;
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     assert_eq!(
-        storage.get(&key()).await.err(),
+        storage.get(&parent, &key()).await.err(),
         Some(ObjectStorageError::TooLarge)
     );
 }
 
 #[tokio::test]
 async fn missing_objects_are_not_found_and_reads_retry() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchKey")).await;
     let storage = stub.storage(|_| {});
     assert_eq!(
-        storage.get(&key()).await.err(),
+        storage.get(&parent, &key()).await.err(),
         Some(ObjectStorageError::NotFound)
     );
     assert_eq!(stub.seen().len(), 1);
@@ -703,7 +765,7 @@ async fn missing_objects_are_not_found_and_reads_retry() {
     let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
     let storage = stub.storage(|options| options.operation_timeout = Duration::from_secs(10));
     assert_eq!(
-        storage.get(&key()).await.err(),
+        storage.get(&parent, &key()).await.err(),
         Some(ObjectStorageError::Unavailable)
     );
     assert_eq!(stub.seen().len(), 3);
@@ -711,6 +773,7 @@ async fn missing_objects_are_not_found_and_reads_retry() {
 
 #[tokio::test]
 async fn a_hung_read_attempt_leaves_room_for_a_retry() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start_delaying(
         |index| Duration::from_secs(if index == 0 { 30 } else { 0 }),
         |_, _| object(b"{}", &[]),
@@ -718,7 +781,10 @@ async fn a_hung_read_attempt_leaves_room_for_a_retry() {
     .await;
     let storage = stub.storage(|options| options.operation_timeout = Duration::from_secs(4));
     assert_eq!(
-        storage.head(&key()).await.map(|metadata| metadata.size),
+        storage
+            .head(&parent, &key())
+            .await
+            .map(|metadata| metadata.size),
         Ok(2)
     );
     assert_eq!(stub.seen().len(), 2);
@@ -726,16 +792,18 @@ async fn a_hung_read_attempt_leaves_room_for_a_retry() {
 
 #[tokio::test]
 async fn a_mutation_keeps_the_whole_budget_for_its_one_attempt() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start_with_delay(Duration::from_millis(1300), |_, _| ok_empty()).await;
     let storage = stub.storage(|_| {});
     let result = put_json(&storage).await;
     assert_eq!(result, Ok(()));
-    assert_eq!(storage.delete(&key()).await, Ok(()));
+    assert_eq!(storage.delete(&parent, &key()).await, Ok(()));
     assert_eq!(stub.seen().len(), 2);
 }
 
 #[tokio::test]
 async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
+    let parent = OperationContext::unbounded();
     #[derive(Debug)]
     struct NoIdentity;
 
@@ -768,14 +836,18 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
     );
     let put = storage
         .put(
+            &parent,
             &key(),
             Bytes::from_static(b"{}").into(),
-            PutOptions::default().create_only(),
+            PutOptions::create_only(),
         )
         .await;
-    assert_eq!(put, Err(ObjectStorageError::Unavailable));
     assert_eq!(
-        storage.head(&key()).await,
+        put,
+        Err(MutationError::NotApplied(MutationFailure::Unavailable))
+    );
+    assert_eq!(
+        storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Unavailable)
     );
     assert!(stub.seen().is_empty());
@@ -783,6 +855,7 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
 
 #[tokio::test]
 async fn head_reports_size_above_the_limit() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| {
         Response::builder()
             .status(StatusCode::OK)
@@ -793,7 +866,7 @@ async fn head_reports_size_above_the_limit() {
     })
     .await;
     let storage = stub.storage(|options| options.max_object_bytes = 4);
-    let metadata = storage.head(&key()).await.unwrap();
+    let metadata = storage.head(&parent, &key()).await.unwrap();
     assert_eq!(metadata.size, 2_097_152);
 
     let stub = Stub::start(|_, _| {
@@ -805,13 +878,14 @@ async fn head_reports_size_above_the_limit() {
     .await;
     let storage = stub.storage(|_| {});
     assert_eq!(
-        storage.head(&key()).await,
+        storage.head(&parent, &key()).await,
         Err(ObjectStorageError::NotFound)
     );
 }
 
 #[tokio::test]
 async fn delete_of_a_missing_key_succeeds_and_a_missing_bucket_is_rejected() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| {
         Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -819,34 +893,39 @@ async fn delete_of_a_missing_key_succeeds_and_a_missing_bucket_is_rejected() {
             .unwrap()
     })
     .await;
-    stub.storage(|_| {}).delete(&key()).await.unwrap();
+    stub.storage(|_| {}).delete(&parent, &key()).await.unwrap();
 
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchKey")).await;
-    stub.storage(|_| {}).delete(&key()).await.unwrap();
+    stub.storage(|_| {}).delete(&parent, &key()).await.unwrap();
 
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchBucket")).await;
     assert_eq!(
-        stub.storage(|_| {}).delete(&key()).await,
-        Err(ObjectStorageError::Rejected)
+        stub.storage(|_| {}).delete(&parent, &key()).await,
+        Err(MutationError::NotApplied(MutationFailure::Rejected))
     );
 }
 
 #[tokio::test]
 async fn admission_refuses_excess_and_a_download_holds_its_slot() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| object(b"held", &[])).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
-    let held = storage.get(&key()).await.unwrap();
-    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let held = storage.get(&parent, &key()).await.unwrap();
+    assert_eq!(
+        storage.head(&parent, &key()).await,
+        Err(ObjectStorageError::Busy)
+    );
     assert_eq!(stub.seen().len(), 1);
     drop(held);
-    let mut completed = storage.get(&key()).await.unwrap();
+    let mut completed = storage.get(&parent, &key()).await.unwrap();
     while completed.next_chunk().await.unwrap().is_some() {}
     assert_eq!(completed.next_chunk().await.unwrap(), None);
-    storage.head(&key()).await.unwrap();
+    storage.head(&parent, &key()).await.unwrap();
 }
 
 #[tokio::test]
 async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() {
+    let parent = OperationContext::unbounded();
     #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
@@ -862,30 +941,32 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
     options.operation_timeout = Duration::from_secs(5);
     let storage = ObjectStorage::try_new(options).unwrap();
     assert_eq!(
-        storage.head(&key()).await,
+        storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Unavailable)
     );
     assert_eq!(
         storage
             .put(
+                &parent,
                 &key(),
                 Bytes::from_static(b"x").into(),
-                PutOptions::default()
+                PutOptions::overwrite()
             )
             .await,
-        Err(ObjectStorageError::OutcomeUnknown)
+        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
     );
 }
 
 #[tokio::test]
 async fn presign_is_bounded_and_redacted() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, _| ok_empty()).await;
     let mut storage = stub.storage(|_| {});
     std::sync::Arc::get_mut(&mut storage.inner)
         .unwrap()
         .expected_bucket_owner = Some("123456789012".to_owned());
     let url = storage
-        .presign_get(&key(), Duration::from_mins(1))
+        .presign_get(&parent, &key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert!(url.expose().contains("X-Amz-Signature="), "presigned query");
@@ -898,7 +979,7 @@ async fn presign_is_bounded_and_redacted() {
     assert_eq!(format!("{url:?}"), "PresignedUrl([REDACTED])");
     for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
         assert_eq!(
-            storage.presign_get(&key(), expires_in).await.err(),
+            storage.presign_get(&parent, &key(), expires_in).await.err(),
             Some(ObjectStorageError::Rejected)
         );
     }
@@ -907,6 +988,7 @@ async fn presign_is_bounded_and_redacted() {
 
 #[tokio::test]
 async fn the_span_names_the_region_only_on_amazon() {
+    let parent = OperationContext::unbounded();
     if !in_tracing_child("tests::the_span_names_the_region_only_on_amazon") {
         return;
     }
@@ -920,7 +1002,7 @@ async fn the_span_names_the_region_only_on_amazon() {
     }))
     .unwrap();
     amazon
-        .presign_get(&key(), Duration::from_mins(1))
+        .presign_get(&parent, &key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(
@@ -939,7 +1021,7 @@ async fn the_span_names_the_region_only_on_amazon() {
         endpoint: R2_ENDPOINT.to_owned(),
     }))
     .unwrap();
-    r2.presign_get(&key(), Duration::from_mins(1))
+    r2.presign_get(&parent, &key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(records.matching("span", " cloud.region=").len(), 1);
@@ -1060,6 +1142,7 @@ impl tracing::Subscriber for Records {
 
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
+    let parent = OperationContext::unbounded();
     const REQUEST_ID: &str = "4442587FB7D0A2F9";
     const EXTENDED_REQUEST_ID: &str =
         "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
@@ -1084,7 +1167,7 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
     assert_eq!(
-        storage.head(&key()).await,
+        storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Rejected)
     );
     let failed = records.matching("event", "object_storage_operation_failed");
@@ -1110,7 +1193,7 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     assert!(!event.contains("results/op-1.json"), "{event}");
 
     assert_eq!(
-        storage.head(&key()).await,
+        storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Rejected)
     );
     let failed = records.matching("event", "object_storage_operation_failed");
@@ -1132,8 +1215,8 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
             .build(),
     );
     assert_eq!(
-        late.get_with_context(&key(), &context).await.map(|_| ()),
-        Err(ObjectStorageError::Unavailable)
+        late.get(&context, &key()).await.map(|_| ()),
+        Err(ObjectStorageError::Stopped(Stopped::Cancelled))
     );
     let failed = records.matching("event", "object_storage_operation_failed");
     assert_eq!(failed.len(), 3);
@@ -1184,37 +1267,46 @@ async fn metrics_carry_only_operation_and_outcome() {
 
 #[tokio::test]
 async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
-    use operation_context::OperationContext;
-
     let stub = Stub::start(|_, _| object(b"{}", &[])).await;
     let storage = stub.storage(|_| {});
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
-    for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
+    for (context, stopped) in [
+        (
+            OperationContext::with_timeout(Duration::ZERO),
+            Stopped::Deadline,
+        ),
+        (cancelled, Stopped::Cancelled),
+    ] {
         assert_eq!(
             storage
-                .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
+                .put(
+                    &context,
+                    &key(),
+                    Bytes::new().into(),
+                    PutOptions::overwrite()
+                )
                 .await,
-            Err(ObjectStorageError::Unavailable)
+            Err(MutationError::NotApplied(MutationFailure::Stopped(stopped)))
         );
         assert_eq!(
-            storage.get_with_context(&key(), &context).await.err(),
-            Some(ObjectStorageError::Unavailable)
+            storage.get(&context, &key()).await.err(),
+            Some(ObjectStorageError::Stopped(stopped))
         );
         assert_eq!(
-            storage.head_with_context(&key(), &context).await,
-            Err(ObjectStorageError::Unavailable)
+            storage.head(&context, &key()).await,
+            Err(ObjectStorageError::Stopped(stopped))
         );
         assert_eq!(
-            storage.delete_with_context(&key(), &context).await,
-            Err(ObjectStorageError::Unavailable)
+            storage.delete(&context, &key()).await,
+            Err(MutationError::NotApplied(MutationFailure::Stopped(stopped)))
         );
         assert_eq!(
             storage
-                .presign_get_with_context(&key(), Duration::from_mins(1), &context)
+                .presign_get(&context, &key(), Duration::from_mins(1))
                 .await
                 .err(),
-            Some(ObjectStorageError::Unavailable)
+            Some(ObjectStorageError::Stopped(stopped))
         );
     }
     assert!(stub.seen().is_empty());
@@ -1223,8 +1315,6 @@ async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
 
 #[tokio::test]
 async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
-    use operation_context::OperationContext;
-
     for put in [false, true] {
         let dispatched = Arc::new(tokio::sync::Notify::new());
         let signal = Arc::clone(&dispatched);
@@ -1239,17 +1329,27 @@ async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
         let call = tokio::spawn(async move {
             if put {
                 storage
-                    .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
+                    .put(
+                        &context,
+                        &key(),
+                        Bytes::new().into(),
+                        PutOptions::overwrite(),
+                    )
                     .await
             } else {
-                storage.delete_with_context(&key(), &context).await
+                storage.delete(&context, &key()).await
             }
         });
         tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
             .await
             .unwrap();
         cancelled.cancel();
-        assert_eq!(call.await.unwrap(), Err(ObjectStorageError::OutcomeUnknown));
+        assert_eq!(
+            call.await.unwrap(),
+            Err(MutationError::OutcomeUnknown(MutationFailure::Stopped(
+                Stopped::Cancelled
+            )))
+        );
         assert_eq!(stub.seen().len(), 1, "recovery did not dispatch a replay");
         stub.stop().await;
     }
@@ -1257,6 +1357,7 @@ async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
 
 #[tokio::test]
 async fn silent_download_releases_admission_for_a_later_restored_operation() {
+    let parent = OperationContext::unbounded();
     let stub = Stub::start(|_, index| {
         if index == 1 {
             Response::builder()
@@ -1276,11 +1377,17 @@ async fn silent_download_releases_admission_for_a_later_restored_operation() {
         options.operation_timeout = Duration::from_millis(100);
     });
     assert_eq!(
-        storage.head(&key()).await.map(|metadata| metadata.size),
+        storage
+            .head(&parent, &key())
+            .await
+            .map(|metadata| metadata.size),
         Ok(2)
     );
-    let mut silent = storage.get(&key()).await.unwrap();
-    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let mut silent = storage.get(&parent, &key()).await.unwrap();
+    assert_eq!(
+        storage.head(&parent, &key()).await,
+        Err(ObjectStorageError::Busy)
+    );
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), silent.next_chunk())
             .await
@@ -1288,7 +1395,10 @@ async fn silent_download_releases_admission_for_a_later_restored_operation() {
         Err(ObjectStorageError::Unavailable)
     );
     assert_eq!(
-        storage.head(&key()).await.map(|metadata| metadata.size),
+        storage
+            .head(&parent, &key())
+            .await
+            .map(|metadata| metadata.size),
         Ok(2)
     );
     assert_eq!(stub.seen().len(), 3);
@@ -1297,9 +1407,10 @@ async fn silent_download_releases_admission_for_a_later_restored_operation() {
 
 #[tokio::test]
 async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
+    let parent = OperationContext::unbounded();
     let old = Stub::start(|_, _| object(b"{}", &[])).await;
     let current = old.storage(|_| {});
-    current.head(&key()).await.unwrap();
+    current.head(&parent, &key()).await.unwrap();
 
     let replacement = Stub::start(|_, _| object(b"{}", &[])).await;
     let mut replacement_options = options(Provider::Local {
@@ -1308,7 +1419,7 @@ async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
     });
     replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
     let reconstructed = ObjectStorage::try_new(replacement_options).unwrap();
-    reconstructed.head(&key()).await.unwrap();
+    reconstructed.head(&parent, &key()).await.unwrap();
 
     let old_seen = old.seen();
     let replacement_seen = replacement.seen();
@@ -1475,14 +1586,18 @@ fn tls_snapshot_storage(
 
 #[tokio::test]
 async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
+    let parent = OperationContext::unbounded();
     let (fixture, first_root, replacement_root) = TlsSnapshotFixture::start().await;
     let retained = tls_snapshot_storage(fixture.endpoint.clone(), &first_root, fixture.address);
     assert_eq!(
-        retained.head(&key()).await.map(|metadata| metadata.size),
+        retained
+            .head(&parent, &key())
+            .await
+            .map(|metadata| metadata.size),
         Ok(0)
     );
     assert_eq!(
-        retained.head(&key()).await,
+        retained.head(&parent, &key()).await,
         Err(ObjectStorageError::Unavailable)
     );
 
@@ -1490,7 +1605,7 @@ async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
         tls_snapshot_storage(fixture.endpoint.clone(), &replacement_root, fixture.address);
     assert_eq!(
         reconstructed
-            .head(&key())
+            .head(&parent, &key())
             .await
             .map(|metadata| metadata.size),
         Ok(0)
@@ -1504,8 +1619,6 @@ async fn tls_trust_replacement_requires_reconstructing_the_smithy_client() {
 
 #[tokio::test]
 async fn get_headers_and_body_spend_the_same_context_budget() {
-    use operation_context::OperationContext;
-
     let stub = Stub::start_with_delay(Duration::from_millis(100), |_, _| {
         let chunks = async_stream::stream! {
             for _ in 0..4 {
@@ -1521,10 +1634,10 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     .await;
     let storage = stub.storage(|_| {});
     let context = OperationContext::with_timeout(Duration::from_millis(350));
-    let download = storage.get_with_context(&key(), &context).await.unwrap();
+    let download = storage.get(&context, &key()).await.unwrap();
     assert_eq!(
-        download.into_bytes().await,
-        Err(ObjectStorageError::Unavailable)
+        download.into_bytes(4).await,
+        Err(ObjectStorageError::Stopped(Stopped::Deadline))
     );
     assert_eq!(stub.seen().len(), 1);
     stub.stop().await;
@@ -1594,27 +1707,41 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
                 })
                 .build(),
         );
-        let result = match method {
-            Method::PUT => {
-                storage
-                    .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
-                    .await
-            }
-            Method::DELETE => storage.delete_with_context(&key(), &context).await,
-            Method::GET => storage.get_with_context(&key(), &context).await.map(|_| ()),
-            _ => unreachable!(),
-        };
-        assert!(context.stopped().is_some());
-        assert_eq!(
-            result,
-            if method == Method::GET {
-                Err(ObjectStorageError::Unavailable)
-            } else if rejected {
-                Err(ObjectStorageError::Rejected)
+        if method == Method::GET {
+            let stopped = if deadline {
+                Stopped::Deadline
             } else {
-                Ok(())
-            }
-        );
+                Stopped::Cancelled
+            };
+            assert_eq!(
+                storage.get(&context, &key()).await.unwrap_err(),
+                ObjectStorageError::Stopped(stopped)
+            );
+        } else {
+            let result = match method {
+                Method::PUT => {
+                    storage
+                        .put(
+                            &context,
+                            &key(),
+                            Bytes::new().into(),
+                            PutOptions::overwrite(),
+                        )
+                        .await
+                }
+                Method::DELETE => storage.delete(&context, &key()).await,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                result,
+                if rejected {
+                    Err(MutationError::NotApplied(MutationFailure::Rejected))
+                } else {
+                    Ok(())
+                }
+            );
+        }
+        assert!(context.stopped().is_some());
         assert_eq!(stub.seen().len(), 1);
         stub.stop().await;
     }
@@ -1622,6 +1749,7 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
 
 #[tokio::test]
 async fn an_unpolled_get_expires_and_admits_fresh_work() {
+    let parent = OperationContext::unbounded();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -1632,8 +1760,11 @@ async fn an_unpolled_get_expires_and_admits_fresh_work() {
         options.operation_timeout = Duration::from_secs(1);
     });
     let started = tokio::time::Instant::now();
-    let mut held = storage.get(&key()).await.unwrap();
-    assert_eq!(storage.head(&key()).await, Err(ObjectStorageError::Busy));
+    let mut held = storage.get(&parent, &key()).await.unwrap();
+    assert_eq!(
+        storage.head(&parent, &key()).await,
+        Err(ObjectStorageError::Busy)
+    );
     let released = tokio::time::timeout_at(
         started + Duration::from_millis(1200),
         Arc::clone(&storage.inner.admission).acquire_owned(),
@@ -1642,7 +1773,7 @@ async fn an_unpolled_get_expires_and_admits_fresh_work() {
     .expect("unpolled GET must release its slot at the original deadline")
     .unwrap();
     drop(released);
-    storage.head(&key()).await.unwrap();
+    storage.head(&parent, &key()).await.unwrap();
     assert_eq!(
         held.next_chunk().await,
         Err(ObjectStorageError::Unavailable)

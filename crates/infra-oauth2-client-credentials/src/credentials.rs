@@ -260,7 +260,7 @@ impl Credentials {
         }
         let result = inner
             .endpoint
-            .fetch_service_token(deadline.cutoff.min(now + FETCH_TIMEOUT))
+            .fetch_service_token(&deadline.fetch_context(now), deadline.request_context)
             .await;
         if let Some(error) = deadline.stopped_error() {
             return Err(error);
@@ -359,7 +359,8 @@ impl Inner {
         }) {
             return;
         }
-        match self.endpoint.fetch_service_token(request.deadline).await {
+        let context = OperationContext::from_deadline(Deadline::at(request.deadline));
+        match self.endpoint.fetch_service_token(&context, None).await {
             Ok(token) => {
                 self.store_service_token(token);
                 self.cached().defer_refresh(Instant::now());
@@ -399,6 +400,11 @@ pub(crate) struct AcquisitionDeadline<'a> {
 }
 
 impl AcquisitionDeadline<'_> {
+    fn fetch_context(self, now: Instant) -> OperationContext {
+        self.context
+            .child_until(Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT)))
+    }
+
     fn expired_error(self) -> Option<AcquisitionError> {
         (Instant::now() >= self.cutoff).then_some(self.expiry)
     }

@@ -110,6 +110,7 @@ tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
 serde = { workspace = true, features = ["derive"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
+operation-context = { workspace = true }
 time = { workspace = true, features = ["std"] }
 # template:end runtime-progress:service-runtime-progress-dependencies
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies

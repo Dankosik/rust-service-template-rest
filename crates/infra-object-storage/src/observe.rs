@@ -7,8 +7,7 @@ use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
-use crate::ObjectStorageError;
-use crate::error::Failure;
+use crate::error::{Failure, MutationError, MutationFailure, ObjectStorageError};
 
 const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
@@ -54,7 +53,14 @@ impl Operation {
 enum Outcome {
     Ok,
     Cancelled,
-    Failure(ObjectStorageError),
+    NotFound,
+    AlreadyExists,
+    TooLarge,
+    Busy,
+    Unavailable,
+    Rejected,
+    OutcomeUnknown,
+    Integrity,
 }
 
 impl Outcome {
@@ -62,7 +68,14 @@ impl Outcome {
         match self {
             Self::Ok => "ok",
             Self::Cancelled => "cancelled",
-            Self::Failure(error) => error.label(),
+            Self::NotFound => "not_found",
+            Self::AlreadyExists => "already_exists",
+            Self::TooLarge => "too_large",
+            Self::Busy => "busy",
+            Self::Unavailable => "unavailable",
+            Self::Rejected => "rejected",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::Integrity => "integrity",
         }
     }
 }
@@ -151,9 +164,41 @@ impl OperationGuard {
     }
 
     pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
-        self.span.record("error.type", failure.error_type.as_str());
+        let outcome = match failure.error {
+            ObjectStorageError::NotFound => Outcome::NotFound,
+            ObjectStorageError::TooLarge => Outcome::TooLarge,
+            ObjectStorageError::Busy => Outcome::Busy,
+            ObjectStorageError::Unavailable | ObjectStorageError::Stopped(_) => {
+                Outcome::Unavailable
+            }
+            ObjectStorageError::Rejected => Outcome::Rejected,
+            ObjectStorageError::Integrity => Outcome::Integrity,
+        };
+        self.record_failure(outcome, failure.error_type.as_str());
+        failure.error
+    }
+
+    pub(crate) fn fail_mutation(&mut self, failure: &Failure<MutationError>) -> MutationError {
+        let outcome = match failure.error {
+            MutationError::OutcomeUnknown(_) => Outcome::OutcomeUnknown,
+            MutationError::NotApplied(reason) => match reason {
+                MutationFailure::AlreadyExists => Outcome::AlreadyExists,
+                MutationFailure::TooLarge => Outcome::TooLarge,
+                MutationFailure::Busy => Outcome::Busy,
+                MutationFailure::Conflict
+                | MutationFailure::Unavailable
+                | MutationFailure::Stopped(_) => Outcome::Unavailable,
+                MutationFailure::Rejected => Outcome::Rejected,
+            },
+        };
+        self.record_failure(outcome, failure.error_type.as_str());
+        failure.error
+    }
+
+    fn record_failure(&mut self, outcome: Outcome, error_type: &str) {
+        self.span.record("error.type", error_type);
         self.span.record("otel.status_code", "ERROR");
-        self.finish(Outcome::Failure(failure.error));
+        self.finish(outcome);
         let operation = self.operation.label();
         self.span.in_scope(|| {
             macro_rules! emit_failure {
@@ -161,8 +206,8 @@ impl OperationGuard {
                     tracing::event!(
                         $level,
                         object_storage.operation = operation,
-                        object_storage.outcome = failure.error.label(),
-                        error.type = failure.error_type.as_str(),
+                        object_storage.outcome = outcome.label(),
+                        error.type = error_type,
                         aws.request_id = self.request_id.as_deref(),
                         aws.extended_request_id = self.extended_request_id.as_deref(),
                         "object_storage_operation_failed"
@@ -170,18 +215,13 @@ impl OperationGuard {
                 };
             }
 
-            match failure.error {
-                ObjectStorageError::NotFound
-                | ObjectStorageError::AlreadyExists
-                | ObjectStorageError::TooLarge
-                | ObjectStorageError::Busy => emit_failure!(tracing::Level::DEBUG),
-                ObjectStorageError::Unavailable
-                | ObjectStorageError::Rejected
-                | ObjectStorageError::OutcomeUnknown
-                | ObjectStorageError::Integrity => emit_failure!(tracing::Level::WARN),
+            match outcome {
+                Outcome::NotFound | Outcome::AlreadyExists | Outcome::TooLarge | Outcome::Busy => {
+                    emit_failure!(tracing::Level::DEBUG)
+                }
+                _ => emit_failure!(tracing::Level::WARN),
             }
         });
-        failure.error
     }
 
     pub(crate) fn cancel(&mut self) {

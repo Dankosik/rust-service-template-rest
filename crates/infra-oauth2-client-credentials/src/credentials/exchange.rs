@@ -7,11 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, Credentials, provider_timeout};
-use crate::{
-    AcquisitionError,
-    token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TokenEndpoint},
-};
+use crate::{AcquisitionError, token::Token, token_endpoint::TokenEndpoint};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 
@@ -44,9 +40,12 @@ impl ExchangeState {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
         let result = endpoint
-            .fetch_exchange(subject, fetch_deadline)
+            .fetch_exchange(
+                subject,
+                &deadline.fetch_context(Instant::now()),
+                deadline.request_context,
+            )
             .await
             .map(Arc::new);
         if let Some(error) = deadline.stopped_error() {
