@@ -1,12 +1,41 @@
 use std::sync::Arc;
 
-use crate::claims::Scopes;
+use crate::{BearerToken, claims::Scopes};
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
     expiry_epoch_seconds: u64,
+    access_token: Arc<secrecy::SecretString>,
+}
+
+#[derive(Clone, derive_more::Debug)]
+#[debug("VerifiedIdentity([REDACTED])")]
+pub(crate) struct VerifiedIdentity {
+    identity: Arc<Identity>,
+    expiry_epoch_seconds: u64,
+}
+
+impl VerifiedIdentity {
+    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
+        Self {
+            identity: Arc::new(identity),
+            expiry_epoch_seconds,
+        }
+    }
+
+    pub(crate) const fn expires_at(&self) -> u64 {
+        self.expiry_epoch_seconds
+    }
+
+    pub(crate) fn presented_as(&self, token: &BearerToken<'_>) -> Principal {
+        Principal {
+            identity: Arc::clone(&self.identity),
+            expiry_epoch_seconds: self.expiry_epoch_seconds,
+            access_token: Arc::new(token.to_secret()),
+        }
+    }
 }
 
 pub(crate) struct Identity {
@@ -15,18 +44,10 @@ pub(crate) struct Identity {
     pub(crate) client_id: Option<String>,
     pub(crate) scopes: Scopes,
     pub(crate) payload: String,
-    pub(crate) access_token: secrecy::SecretString,
     pub(crate) actor: Option<Actor>,
 }
 
 impl Principal {
-    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
-        Self {
-            identity: Arc::new(identity),
-            expiry_epoch_seconds,
-        }
-    }
-
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
         serde_json::from_str(&self.identity.payload).map_err(|_| ClaimAccessError::InvalidShape)
     }
@@ -63,7 +84,7 @@ impl Principal {
 
     #[must_use]
     pub fn access_token(&self) -> &secrecy::SecretString {
-        &self.identity.access_token
+        &self.access_token
     }
 
     /// RFC 8693 §4.1
@@ -83,7 +104,7 @@ impl Principal {
             (
                 self.scopes(),
                 &identity.payload,
-                identity.access_token.expose_secret(),
+                self.access_token.expose_secret(),
             ),
             (&identity.actor, self.expiry_epoch_seconds),
         )
@@ -121,7 +142,7 @@ pub enum ClaimAccessError {
 }
 
 // template:begin oidc-introspection:authn-retained-payload
-impl Principal {
+impl VerifiedIdentity {
     pub(crate) fn payload_len(&self) -> usize {
         self.identity.payload.len()
     }
