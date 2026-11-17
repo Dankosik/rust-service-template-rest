@@ -2,7 +2,7 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use crate::load::variable_name;
-use crate::secret_policy::is_secret_like_key;
+use crate::secret_policy::is_secret_key;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{key}: {message}")]
@@ -164,13 +164,12 @@ pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
 )]
 pub(crate) fn required_when(
     key: &str,
-    value: &str,
+    value: Option<String>,
     condition: &str,
-) -> Result<(), ValidationError> {
-    if value.trim().is_empty() {
-        return Err(missing(key, condition));
-    }
-    Ok(())
+) -> Result<String, ValidationError> {
+    value
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| missing(key, condition))
 }
 
 #[allow(
@@ -187,7 +186,7 @@ pub(crate) fn required<T>(
 
 pub(crate) fn missing(key: &str, condition: &str) -> ValidationError {
     let mut message = format!("is required when {condition}");
-    if is_secret_like_key(key) {
+    if is_secret_key(key) {
         message.push_str("; set ");
         message.push_str(&variable_name(key));
     }

@@ -265,7 +265,6 @@
       "buf.yaml",
       "crates/config/src/grpc.rs",
       "crates/config/src/grpc/",
-      "crates/config/src/integrations/grpc_tests.rs",
       "crates/grpc-contracts/",
       "crates/infra-grpc/",
       "crates/infra-telemetry/src/traces/tests/delivery/",
@@ -313,18 +312,11 @@
       "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
     ]
   },
-  "client-integrations": {
-    "remove_when_unselected": [
-      "crates/config/src/integrations.rs",
-      "crates/config/src/integrations/"
-    ]
-  },
   "config-url": {
     "remove_when_unselected": []
   },
   "outbound-auth": {
     "remove_when_unselected": [
-      "crates/config/src/integrations/tests.rs",
       "crates/infra-oauth2-client-credentials/",
       "docs/decisions/outbound-machine-authentication-decisions.md"
     ]

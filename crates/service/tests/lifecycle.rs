@@ -321,9 +321,6 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
-    let startup = service.await_record("cache_unavailable_at_startup");
-    let reason = startup["reason"].as_str().expect("reason field");
-    assert!(!reason.is_empty(), "{startup}");
     let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
@@ -331,6 +328,8 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         poll_until(&ready, 200, Duration::from_secs(5)),
         "a cache outage must not keep the service from becoming ready"
     );
+    let outage = service.await_record("cache_connection_failed");
+    assert_eq!(outage["error.type"], "io", "{outage}");
     service.terminate();
     let (code, stderr) = service.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");
@@ -348,60 +347,6 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
     assert!(stdout.contains("plaintext"), "startup refusal: {stdout}");
     assert!(stdout.contains("shutdown_finishing"), "{stdout}");
     assert!(stderr.is_empty(), "duplicate failure fallback: {stderr}");
-}
-
-#[test]
-#[expect(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "the startup cancellation fixture holds an authenticated silent loopback connection until child teardown"
-)]
-fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
-    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
-    silent.set_nonblocking(true).expect("nonblocking listener");
-    let port = silent.local_addr().expect("silent listener").port();
-    let dsn = format!("redis://:startup-fixture@127.0.0.1:{port}");
-    let service = Service::spawn(&[
-        ("APP__APP__ENV", "local"),
-        ("APP__CACHE__DSN", &dsn),
-        ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
-        ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
-        ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
-    ]);
-    service.await_record("service_starting");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let peer = loop {
-        match silent.accept() {
-            Ok((peer, _)) => break peer,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "cache setup did not connect");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("accept cache setup: {error}"),
-        }
-    };
-    service.terminate();
-    let mut messages = Vec::new();
-    while let Ok(line) = service.lines.recv_timeout(Duration::from_secs(20)) {
-        let record: serde_json::Value = serde_json::from_str(&line).expect("JSON log record");
-        messages.push(record["message"].as_str().unwrap_or_default().to_owned());
-    }
-    let (code, stderr) = service.wait();
-    drop(peer);
-    drop(silent);
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert!(
-        messages
-            .iter()
-            .any(|message| message == "shutdown_finishing"),
-        "{messages:?}"
-    );
-    for skipped in ["http listener bound", "service_ready", "readiness_disabled"] {
-        assert!(
-            !messages.iter().any(|message| message == skipped),
-            "a stopped startup must not reach {skipped:?}: {messages:?}"
-        );
-    }
 }
 
 #[cfg(unix)]
@@ -446,6 +391,61 @@ fn assert_stop_reaches_blocking_password_file(
 }
 
 // template:begin postgres:service-postgres-lifecycle-admission
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the startup cancellation fixture holds a silent PostgreSQL loopback connection until child teardown"
+)]
+fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
+    silent.set_nonblocking(true).expect("nonblocking listener");
+    let port = silent.local_addr().expect("silent listener").port();
+    let dsn = format!("postgres://service@127.0.0.1:{port}/service?sslmode=disable");
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", &dsn),
+    ]);
+    service.await_record("service_starting");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let peer = loop {
+        match silent.accept() {
+            Ok((peer, _)) => break peer,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "PostgreSQL setup did not connect"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept PostgreSQL setup: {error}"),
+        }
+    };
+    service.terminate();
+    let mut messages = Vec::new();
+    while let Ok(line) = service.lines.recv_timeout(Duration::from_secs(20)) {
+        let record: serde_json::Value = serde_json::from_str(&line).expect("JSON log record");
+        messages.push(record["message"].as_str().unwrap_or_default().to_owned());
+    }
+    let (code, stderr) = service.wait();
+    drop(peer);
+    drop(silent);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "shutdown_finishing"),
+        "{messages:?}"
+    );
+    for skipped in ["http listener bound", "service_ready", "readiness_disabled"] {
+        assert!(
+            !messages.iter().any(|message| message == skipped),
+            "a stopped startup must not reach {skipped:?}: {messages:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {

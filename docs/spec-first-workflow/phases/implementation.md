@@ -13,20 +13,24 @@ implementation progress, dependency unlocking, and final acceptance.
 
 ## Execution
 
-Load the current task packet and consumed outputs. Choose and write the task's
-tests alongside production code from accepted behavior and existing test
-patterns. Reuse sufficient tests; add cases for changed behavior that existing
-tests would miss. Select fixtures, assertions, and the smallest proving layer
-locally, without a preliminary matrix, approval, or separate test-planning task.
-For a non-obvious test technique, consult the matching method within this task.
-Reopen only genuinely unresolved product behavior or architecture; a missing or
-incorrect test case stays with the executor.
+Load the current task packet and consumed outputs. Read the touched production
+code before its tests, then derive the task's tests from accepted behavior
+contracts rather than mirroring internal steps or copying bloated neighboring
+suites. Reuse sufficient tests, add only cases that catch realistic regressions
+existing types and checks would miss, and consolidate overlapping or obsolete
+tests around the strongest behavior check while preserving independent safety
+and integration guards. Select minimal fixtures, independent assertions, and
+the smallest proving layer locally under `rust-testing`—confirming when
+practical that new or consolidated guards fail for the broken behavior—without a
+preliminary matrix, approval, or separate test-planning task. Reopen only
+genuinely unresolved product behavior or architecture; a missing, flaky, or
+incorrect test stays with the executor.
 
-For a non-trivial fixture, find an existing valid fixture or producer while
-writing the test. Otherwise derive the required entities, relationships, and
-state transitions from the authoritative contract before expanding scenarios.
-Keep that construction in test code, not a separate preparation artifact.
-Execution follows the feedback and final-validation boundaries below.
+For a non-trivial fixture, reuse an existing valid fixture or producer when it
+stays minimal, or derive only the entities, relationships, and state transitions
+the asserted contract requires, removing unused fixture setup you touch. Keep
+that construction in test code, not a separate preparation artifact. Execution
+follows the feedback and final-validation boundaries below.
 
 Implement directly when handoff costs more than it saves. Run independent tasks
 and useful subtask lanes in parallel when accepted interfaces are stable, writable owners and exclusive

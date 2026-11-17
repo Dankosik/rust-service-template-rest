@@ -353,6 +353,10 @@ mod tests {
 
     const FIXTURE_HOST: &str = "provider.test";
 
+    fn unix_seconds() -> u64 {
+        crate::unix_now().unwrap().as_secs()
+    }
+
     #[derive(Clone, Debug)]
     struct RecordedRequest {
         method: Method,
@@ -462,10 +466,7 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 response: Arc::new(Mutex::new((
                     StatusCode::OK,
-                    Bytes::from(active_response(
-                        "subject",
-                        crate::unix_now().unwrap().as_secs() + 600,
-                    )),
+                    Bytes::from(active_response("subject", unix_seconds() + 600)),
                 ))),
                 gate: Arc::clone(&gate),
             };
@@ -767,7 +768,7 @@ mod tests {
         let independent = fixture.verifier(Some(cache_options(2)));
         fixture.respond(
             StatusCode::OK,
-            &active_response("new-subject", crate::unix_now().unwrap().as_secs() + 600),
+            &active_response("new-subject", unix_seconds() + 600),
         );
         assert_eq!(
             verify(&independent, b"Bearer first")
@@ -822,10 +823,7 @@ mod tests {
             (br#"{"active":false}"#.to_vec(), Some(Failure::Invalid)),
             (br#"{"active":true}"#.to_vec(), Some(Failure::Invalid)),
             (b"{".to_vec(), Some(Failure::Unavailable)),
-            (
-                active_response("subject", crate::unix_now().unwrap().as_secs() - 1),
-                None,
-            ),
+            (active_response("subject", unix_seconds() - 1), None),
         ] {
             fixture.respond(StatusCode::OK, &response);
             let before = fixture.calls();
@@ -840,18 +838,18 @@ mod tests {
     #[tokio::test]
     async fn concurrent_misses_share_provider_capacity_including_nonretained_success_and_errors() {
         let fixture = Fixture::new().await;
-        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":crate::unix_now().unwrap().as_secs()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
+        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":unix_seconds()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
         for (status, response, expected, retained) in [
             (
                 StatusCode::OK,
-                active_response("subject", crate::unix_now().unwrap().as_secs() + 600),
+                active_response("subject", unix_seconds() + 600),
                 None,
                 true,
             ),
             (StatusCode::OK, oversized, None, false),
             (
                 StatusCode::OK,
-                active_response("subject", crate::unix_now().unwrap().as_secs() - 1),
+                active_response("subject", unix_seconds() - 1),
                 None,
                 false,
             ),
@@ -901,7 +899,7 @@ mod tests {
             if expected.is_some() {
                 fixture.respond(
                     StatusCode::OK,
-                    &active_response("recovered", crate::unix_now().unwrap().as_secs() + 600),
+                    &active_response("recovered", unix_seconds() + 600),
                 );
                 assert_eq!(
                     verify(&verifier, b"Bearer shared").await.unwrap().subject(),
@@ -1117,7 +1115,7 @@ mod tests {
     async fn retained_evidence_checks_forward_expiry_and_backward_not_before() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = crate::unix_now().unwrap().as_secs();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer calendar".as_slice()]).unwrap();
         for (expiry, not_before, changed) in [
             (base + 60, None, base + 60),
@@ -1175,7 +1173,7 @@ mod tests {
     async fn joined_cache_hit_rechecks_the_current_entry() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = crate::unix_now().unwrap().as_secs();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
         let key = super::token_digest(&token);
         for (elapsed_seconds, replacement) in [(0, false), (60, false), (60, true)] {
@@ -1278,7 +1276,7 @@ mod tests {
     async fn joined_fresh_delivery_uses_each_callers_current_lifetime() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = crate::unix_now().unwrap().as_secs();
+        let base = unix_seconds();
         let token = parse_bearer([b"Bearer delayed".as_slice()]).unwrap();
         for (expiry, not_before, delivery, expected) in [
             (base + 30, None, Some(base + 59), None),
@@ -1350,7 +1348,7 @@ mod tests {
     async fn replacement_starts_its_own_fixed_retention() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = crate::unix_now().unwrap().as_secs();
+        let base = unix_seconds();
         fixture.respond(StatusCode::OK, &active_response("old", base + 60));
         let verifier = fixture.verifier(Some(
             IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap(),

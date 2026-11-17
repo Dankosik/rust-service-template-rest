@@ -2,8 +2,8 @@ use std::assert_matches;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_jobs_operator_from};
-use crate::test_support::{env, load_env, write};
+use crate::load::{Error, load_jobs_operator_from, load_worker_from};
+use crate::test_support::{BUILD, env, load_worker_env, write};
 use crate::validate::validate_with;
 
 fn parse(toml: &str) -> Result<JobsConfig, toml::de::Error> {
@@ -137,16 +137,56 @@ fn publisher_capacity_is_reserved_from_ordinary_slots(
 // template:end outbox:jobs-outbox-capacity-tests
 
 #[test]
-fn jobs_max_workers_is_not_secret_like() {
-    assert!(!crate::secret_policy::is_secret_like_key(
-        "jobs.max_workers"
-    ));
+fn jobs_max_workers_is_not_secret() {
+    assert!(!crate::secret_policy::is_secret_key("jobs.max_workers"));
 }
 
 #[test]
 fn jobs_environment_sets_max_workers() {
-    let cfg = load_env(&[("APP__JOBS__MAX_WORKERS", "8")]);
+    let cfg = load_worker_env(&[("APP__JOBS__MAX_WORKERS", "8")]);
     assert_eq!(cfg.jobs.max_workers.get(), 8);
+}
+
+#[test]
+fn worker_config_ignores_service_only_sections_without_demanding_their_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    #[allow(
+        unused_mut,
+        reason = "optional service profiles append their sections when selected"
+    )]
+    let mut body = String::from("[jobs]\nmax_workers = 2\n");
+    // template:begin authn:worker-ignores-service-authn-test
+    body.push_str("[authn]\nmode = \"oidc-introspection\"\n");
+    // template:end authn:worker-ignores-service-authn-test
+    // template:begin grpc:worker-ignores-service-grpc-test
+    body.push_str("[grpc]\nenabled = true\nsecurity = \"tls\"\n");
+    // template:end grpc:worker-ignores-service-grpc-test
+    // template:begin object-storage:worker-ignores-service-object-storage-test
+    body.push_str("[object_storage]\nprovider = \"amazon_s3\"\n");
+    // template:end object-storage:worker-ignores-service-object-storage-test
+    let file = write(&dir, "shared.toml", &body);
+    let cfg = load_worker_from(
+        &LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap();
+    assert_eq!(cfg.jobs.max_workers.get(), 2);
+
+    let unknown = write(&dir, "unknown.toml", "[unrelated]\nvalue = 1\n");
+    let err = load_worker_from(
+        &LoadOptions {
+            config: Some(unknown),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(err, Error::Deserialize(_), "{err}");
 }
 
 #[test]
@@ -166,10 +206,18 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         },
         env(&[
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            // template:begin authn:jobs-operator-test-authn-env
             ("APP__AUTHN__MODE", "invalid"),
+            // template:end authn:jobs-operator-test-authn-env
+            // template:begin messaging:jobs-operator-test-messaging-env
             ("APP__MESSAGING__ENABLED", "invalid"),
+            // template:end messaging:jobs-operator-test-messaging-env
+            // template:begin webhooks:jobs-operator-test-webhooks-env
             ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "invalid"),
+            // template:end webhooks:jobs-operator-test-webhooks-env
+            // template:begin object-storage:jobs-operator-test-object-storage-env
             ("APP__OBJECT_STORAGE__ENABLED", "invalid"),
+            // template:end object-storage:jobs-operator-test-object-storage-env
             ("APP__LOG__FORMAT", "invalid"),
             ("APP__OBSERVABILITY__OTEL", "invalid"),
         ]),
@@ -253,12 +301,36 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
 }
 
 #[test]
+fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let unknown = write(&dir, "unknown.toml", "[unrelated]\nvalue = 1\n");
+    let error = load_jobs_operator_from(
+        &LoadOptions {
+            config: Some(unknown),
+            ..LoadOptions::default()
+        },
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(error, Error::Deserialize(_), "{error}");
+
+    let typo = load_jobs_operator_from(
+        &LoadOptions::default(),
+        env(&[("APP__DATABASE__DSN", "postgres://u:secret-pw@localhost/db")]),
+    )
+    .unwrap_err();
+    assert_matches!(&typo, Error::Deserialize(_), "{typo}");
+    assert!(!typo.to_string().contains("secret-pw"));
+    assert!(!format!("{typo:?}").contains("secret-pw"));
+}
+
+#[test]
 fn jobs_operator_prescans_unrelated_sections() {
     let dir = tempfile::tempdir().unwrap();
     let leaked = write(
         &dir,
         "leaked.toml",
-        "[unrelated]\nsecret = \"fixture-private-value\"\n",
+        "[observability.otel.exporter]\notlp_headers = \"fixture-private-value\"\n",
     );
     let error = load_jobs_operator_from(
         &LoadOptions {

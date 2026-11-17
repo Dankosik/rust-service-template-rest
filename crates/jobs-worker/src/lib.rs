@@ -29,7 +29,7 @@ pub struct Registration<'a> {
     // template:begin outbox:worker-registration-postgres-messages
     postgres_messages: Option<PostgresMessages>,
     // template:end outbox:worker-registration-postgres-messages
-    config: &'a service_config::Config,
+    config: &'a service_config::WorkerConfig,
     background: &'a background::Background,
 }
 
@@ -58,7 +58,7 @@ impl<'a> Registration<'a> {
     // template:end outbox:worker-with-postgres-messages
 
     #[must_use]
-    pub fn config(&self) -> &'a service_config::Config {
+    pub fn config(&self) -> &'a service_config::WorkerConfig {
         self.config
     }
 
@@ -174,9 +174,8 @@ fn start(
 
 fn load_config_and_runtime(
     options: &LoadOptions,
-) -> Result<(service_config::Config, tokio::runtime::Runtime), bootstrap::WorkerError> {
-    let config = service_config::load(options, BUILD_INFO)?;
-    shutdown::validate_grace_budget(&config.http)?;
+) -> Result<(service_config::WorkerConfig, tokio::runtime::Runtime), bootstrap::WorkerError> {
+    let config = service_config::load_worker(options, BUILD_INFO, shutdown::TAIL)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime.effective_worker_threads())
         .enable_all()

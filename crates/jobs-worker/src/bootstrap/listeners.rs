@@ -1,7 +1,7 @@
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
-use service_config::Config;
+use service_config::WorkerConfig;
 
 use super::WorkerError;
 use crate::background::Background;
@@ -20,7 +20,7 @@ pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
 }
 
 pub(super) fn bind_listeners(
-    config: &Config,
+    config: &WorkerConfig,
     metrics: &Metrics,
     readiness: &Readiness,
     background: &Background,
@@ -65,7 +65,7 @@ fn watch_listener(name: &'static str, server: &Server, background: &Background) 
     });
 }
 
-fn server_options(config: &Config) -> ServerOptions {
+fn server_options(config: &WorkerConfig) -> ServerOptions {
     ServerOptions {
         header_read_timeout: config.http.header_read_timeout,
         max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
@@ -75,7 +75,7 @@ fn server_options(config: &Config) -> ServerOptions {
     }
 }
 
-fn harden_options(config: &Config, readiness: &Readiness) -> HardenOptions {
+fn harden_options(config: &WorkerConfig, readiness: &Readiness) -> HardenOptions {
     HardenOptions {
         max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: config.http.request_timeout,
@@ -86,7 +86,7 @@ fn harden_options(config: &Config, readiness: &Readiness) -> HardenOptions {
     }
 }
 
-pub(super) fn refresh_policy(config: &Config) -> Result<RefreshPolicy, WorkerError> {
+pub(super) fn refresh_policy(config: &WorkerConfig) -> Result<RefreshPolicy, WorkerError> {
     RefreshPolicy::try_new(
         config.health.refresh_interval,
         config.health.probe_budget,

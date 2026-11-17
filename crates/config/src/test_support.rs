@@ -30,6 +30,12 @@ pub(crate) fn load_env(pairs: &[(&str, &str)]) -> Config {
     load_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
 }
 
+// template:begin worker:test-support-worker
+pub(crate) fn load_worker_env(pairs: &[(&str, &str)]) -> crate::WorkerConfig {
+    crate::load::load_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
+}
+// template:end worker:test-support-worker
+
 #[allow(
     dead_code,
     reason = "removing every profile with secret fields leaves this assertion without a caller"

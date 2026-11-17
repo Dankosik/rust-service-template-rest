@@ -23,7 +23,9 @@ pub struct WebhooksConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookEndpointConfig {
+    #[serde(deserialize_with = "crate::de::string")]
     pub url: String,
+    #[serde(deserialize_with = "crate::de::secret")]
     pub secret: SecretString,
     /// Optional environment-only predecessor retained during a key rotation.
     /// Blank is absent.

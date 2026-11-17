@@ -417,7 +417,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
     .unwrap_err();
     assert!(
         err.to_string()
-            .contains("must be a list of strings or a comma-separated string"),
+            .contains("a list of strings or a comma-separated string"),
         "{err}"
     );
 
