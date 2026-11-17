@@ -1,13 +1,14 @@
 use std::{
+    mem::DropGuard,
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use foldhash::HashMap;
 use futures_util::{
     FutureExt,
-    future::{BoxFuture, Shared, WeakShared},
+    future::{BoxFuture, Shared},
 };
 use moka::{Expiry, future::Cache};
 use operation_context::{OperationContext, Stopped};
@@ -78,105 +79,64 @@ pub(crate) struct IntrospectionVerifier {
 
 struct PositiveCache {
     retained: Cache<TokenDigest, VerifiedIntrospection, foldhash::quality::RandomState>,
-    fills: Mutex<HashMap<TokenDigest, RunningFill>>,
+    fills: Mutex<HashMap<TokenDigest, Weak<RunningFill>>>,
 }
 
 struct RunningFill {
-    shared: WeakShared<FillFuture>,
+    shared: Shared<FillFuture>,
     last_waiter_stop: LastWaiterStop,
 }
 
-type LastWaiterStop = Arc<Mutex<Option<Stopped>>>;
+type LastWaiterStop = Arc<OnceLock<Stopped>>;
 
 type TokenDigest = [u8; 32];
 type FillResult = Result<Fill, VerificationError>;
 type FillFuture = BoxFuture<'static, FillResult>;
 
 impl PositiveCache {
-    fn join_fill<'a, F>(
-        &'a self,
+    async fn join_fill<F>(
+        &self,
         key: TokenDigest,
-        context: &'a OperationContext,
+        context: &OperationContext,
         start: impl FnOnce(LastWaiterStop) -> F,
-    ) -> FillWaiter<'a>
+    ) -> FillResult
     where
         F: Future<Output = FillResult> + Send + 'static,
     {
-        let mut fills = self.fills.lock();
-        let running = fills.get(&key).and_then(|fill| {
-            fill.shared
-                .upgrade()
-                .map(|shared| (shared, Arc::clone(&fill.last_waiter_stop)))
-        });
-        let (shared, last_waiter_stop) = running.unwrap_or_else(|| {
-            let last_waiter_stop = LastWaiterStop::default();
-            let shared = start(Arc::clone(&last_waiter_stop)).boxed().shared();
-            if let Some(weak) = shared.downgrade() {
-                fills.insert(
-                    key,
-                    RunningFill {
-                        shared: weak,
-                        last_waiter_stop: Arc::clone(&last_waiter_stop),
-                    },
-                );
+        let running = {
+            let mut fills = self.fills.lock();
+            fills.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                let last_waiter_stop = LastWaiterStop::default();
+                let running = Arc::new(RunningFill {
+                    shared: start(Arc::clone(&last_waiter_stop)).boxed().shared(),
+                    last_waiter_stop,
+                });
+                fills.insert(key, Arc::downgrade(&running));
+                running
+            })
+        };
+        let registration = Arc::downgrade(&running);
+        let retire = || {
+            let mut fills = self.fills.lock();
+            if fills
+                .get(&key)
+                .is_some_and(|fill| fill.ptr_eq(&registration))
+            {
+                fills.remove(&key);
             }
-            (shared, last_waiter_stop)
+        };
+        let waiter = DropGuard::new(running, |running| {
+            if let Some(last) = Arc::into_inner(running) {
+                if let Some(reason) = context.stopped() {
+                    let _ = last.last_waiter_stop.set(reason);
+                }
+                retire();
+            }
         });
-        FillWaiter {
-            shared,
-            registration: FillRegistration { cache: self, key },
-            context,
-            last_waiter_stop,
-        }
-    }
-}
-
-struct FillWaiter<'a> {
-    shared: Shared<FillFuture>,
-    registration: FillRegistration<'a>,
-    context: &'a OperationContext,
-    last_waiter_stop: LastWaiterStop,
-}
-
-impl Drop for FillWaiter<'_> {
-    fn drop(&mut self) {
-        *self.last_waiter_stop.lock() = self.context.stopped();
-    }
-}
-
-impl FillWaiter<'_> {
-    async fn wait(&self) -> FillResult {
-        let result = self.shared.clone().await;
-        self.registration.retire(&self.shared);
+        let result = waiter.shared.clone().await;
+        retire();
+        drop(DropGuard::dismiss(waiter));
         result
-    }
-}
-
-struct FillRegistration<'a> {
-    cache: &'a PositiveCache,
-    key: TokenDigest,
-}
-
-impl FillRegistration<'_> {
-    fn retire(&self, completed: &Shared<FillFuture>) {
-        let mut fills = self.cache.fills.lock();
-        if let Some(current) = fills.get(&self.key).and_then(|fill| fill.shared.upgrade())
-            && current.ptr_eq(completed)
-        {
-            fills.remove(&self.key);
-        }
-    }
-}
-
-impl Drop for FillRegistration<'_> {
-    fn drop(&mut self) {
-        let mut fills = self.cache.fills.lock();
-        if fills
-            .get(&self.key)
-            .is_some_and(|fill| fill.shared.upgrade().is_none())
-        {
-            fills.remove(&self.key);
-        }
     }
 }
 
@@ -267,13 +227,12 @@ impl IntrospectionVerifier {
                             return Ok(Fill::RecheckCache);
                         }
                         let value = verifier
-                            .introspect(token, &|| *last_waiter_stop.lock(), &now)
+                            .introspect(token, &|| last_waiter_stop.get().copied(), &now)
                             .await?;
                         retained.insert(key, value.clone()).await;
                         Ok(Fill::Fresh(value))
                     }
                 })
-                .wait()
                 .await?;
             if let Fill::Fresh(value) = filled {
                 return value.deliver(now()?, token);
@@ -1045,6 +1004,41 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn only_the_last_waiter_supplies_the_shared_exchanges_stop_reason() {
+        let cache = super::PositiveCache {
+            retained: moka::future::Cache::builder()
+                .build_with_hasher(foldhash::quality::RandomState::default()),
+            fills: parking_lot::Mutex::default(),
+        };
+        let cancelled = OperationContext::unbounded();
+        let budget = Duration::from_secs(1);
+        let deadline = OperationContext::with_timeout(budget);
+        let (report, mut observed) = tokio::sync::oneshot::channel();
+        let mut provider_stop = None;
+        let mut first = Box::pin(cache.join_fill([0; 32], &cancelled, |stop| {
+            provider_stop = Some(Arc::clone(&stop));
+            async move {
+                let _exchange = std::mem::DropGuard::new(report, |report| {
+                    report.send(stop.get().copied()).unwrap();
+                });
+                std::future::pending().await
+            }
+        }));
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        let mut last = Box::pin(cache.join_fill([0; 32], &deadline, |_| async {
+            panic!("started a second provider exchange")
+        }));
+        assert!(futures_util::poll!(last.as_mut()).is_pending());
+
+        cancelled.cancel();
+        drop(first);
+        assert_eq!(provider_stop.unwrap().get(), None);
+        tokio::time::advance(budget).await;
+        drop(last);
+        assert_eq!(observed.try_recv().unwrap(), Some(Stopped::Deadline));
+    }
+
     #[tokio::test]
     async fn provider_deadline_is_distinct_from_caller_cancellation_in_exchange_telemetry() {
         let diagnostics = Diagnostics::default();
@@ -1237,7 +1231,7 @@ mod tests {
                 publication_gate.acquire().await.unwrap().forget();
                 Ok(super::Fill::RecheckCache)
             });
-            let mut publication = Box::pin(publication.wait());
+            let mut publication = Box::pin(publication);
             assert!(futures_util::poll!(publication.as_mut()).is_pending());
             if elapsed_seconds == 0 {
                 cache.retained.invalidate(&key).await;
