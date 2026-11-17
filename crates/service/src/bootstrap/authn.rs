@@ -155,47 +155,6 @@ const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorit
 }
 // template:end oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 
-// template:begin oidc-introspection:bootstrap-introspection-cache-tests
-#[cfg(test)]
-mod tests {
-    use tokio_util::sync::CancellationToken;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn introspection_preparation_validates_cache_options_even_when_disabled() {
-        for (capacity, ttl) in [(0, 30), (1025, 30), (256, 0), (256, 301)] {
-            let config = Config {
-                authn: AuthnConfig::OidcIntrospection {
-                    issuer: "https://issuer.example.test".to_owned(),
-                    audience: service_config::Audiences::try_from(vec!["api".to_owned()])
-                        .expect("nonempty audience"),
-                    introspection_endpoint: "https://issuer.example.test/introspect?tenant=private"
-                        .to_owned(),
-                    introspection_client_id: "service".to_owned(),
-                    introspection_client_secret: "fixture-secret".into(),
-                    provider_concurrency: std::num::NonZeroU32::MIN,
-                    cache_enabled: false,
-                    cache_capacity: capacity,
-                    cache_ttl: std::time::Duration::from_secs(ttl),
-                },
-                ..Config::default()
-            };
-            let mut background = Background::new(CancellationToken::new());
-            let result = prepare(&config, &mut background).await;
-            assert!(matches!(
-                result,
-                Err(BootstrapError::AuthenticationPreparation {
-                    key: "authn.cache_capacity/authn.cache_ttl",
-                    ..
-                })
-            ));
-            assert!(background.is_empty());
-        }
-    }
-}
-// template:end oidc-introspection:bootstrap-introspection-cache-tests
-
 // template:begin oidc-jwt:bootstrap-auth-jwt-key-test
 #[cfg(test)]
 mod jwt_tests {

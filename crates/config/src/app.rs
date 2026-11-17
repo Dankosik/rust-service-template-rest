@@ -69,7 +69,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            env: "local".to_owned(),
+            env: "unspecified".to_owned(),
             version: String::new(),
             commit: String::new(),
             instance_id: None,

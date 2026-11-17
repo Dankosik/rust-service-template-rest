@@ -9,10 +9,11 @@ mod shutdown;
 mod signals;
 
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use clap::Parser;
-use service_config::{BuildInfo, LoadOptions, process_failure};
+use service_config::{BuildInfo, LoadOptions};
 use tokio_util::sync::CancellationToken;
 
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -81,6 +82,14 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the worker owns its terminal failure diagnostics"
+)]
+fn report_failure(message: impl std::fmt::Display) {
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
 pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
@@ -92,7 +101,7 @@ where
             let result = if error.kind() == clap::error::ErrorKind::DisplayHelp {
                 ProcessResult::Reported(error.print().is_ok())
             } else {
-                let _ = process_failure("invalid command arguments; use --help for usage");
+                report_failure("invalid command arguments; use --help for usage");
                 ProcessResult::Usage
             };
             return ExitCode::from(exit_code(&result));
@@ -103,7 +112,7 @@ where
         let request = match operator::Request::try_new(command) {
             Ok(request) => request,
             Err(error) => {
-                let _ = process_failure(error);
+                report_failure(error);
                 return ExitCode::from(exit_code(&ProcessResult::Usage));
             }
         };
@@ -137,7 +146,7 @@ fn start(
     register: Register<'_>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
     let (config, runtime) = load_config_and_runtime(options).inspect_err(|error| {
-        let _ = process_failure(error);
+        report_failure(error);
     })?;
     let grace = config.http.grace_period;
     let signals = {
@@ -149,7 +158,7 @@ fn start(
         Err(error) => {
             runtime.shutdown_timeout(shutdown::RUNTIME_SHUTDOWN_TIMEOUT);
             let error = bootstrap::WorkerError::Signals(error);
-            let _ = process_failure(&error);
+            report_failure(&error);
             return Err(error);
         }
     };

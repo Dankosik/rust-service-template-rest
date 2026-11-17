@@ -27,10 +27,9 @@ pub enum PostgresSessionBudgets {
     Server,
 }
 
-/// What the operator supplied for PostgreSQL, before admission.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct PostgresInput {
+pub(crate) struct PostgresFields<Session, Capacity, Deadline> {
     #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
@@ -45,32 +44,49 @@ pub(crate) struct PostgresInput {
     /// the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     password_file: Option<PathBuf>,
-    #[serde(deserialize_with = "crate::de::string_enum")]
-    session_budgets: PostgresSessionBudgets,
+    session_budgets: Session,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
-    max_connections: NonZeroU32,
+    max_connections: Capacity,
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds
     /// an index concurrently on a large table. Only `migrate` checks the range.
-    #[serde(deserialize_with = "crate::de::duration")]
-    migration_deadline: Duration,
+    migration_deadline: Deadline,
 }
 
-impl Default for PostgresInput {
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct SessionBudgetsInput(
+    #[serde(deserialize_with = "crate::de::string_enum")] PostgresSessionBudgets,
+);
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct PoolCapacity(#[serde(deserialize_with = "crate::de::unsigned_count")] NonZeroU32);
+
+impl Default for PoolCapacity {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            dsn: None,
-            password_file: None,
-            session_budgets: PostgresSessionBudgets::Startup,
-            max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
-            migration_deadline: Duration::from_mins(5),
-        }
+        Self(const { NonZeroU32::new(4).expect("4 is nonzero") })
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct MigrationDeadline(#[serde(deserialize_with = "crate::de::duration")] Duration);
+
+impl Default for MigrationDeadline {
+    fn default() -> Self {
+        Self(Duration::from_mins(5))
+    }
+}
+
+pub(crate) type PostgresInput = PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredSection>;
+type MigrationPostgresInput = PostgresFields<IgnoredSection, IgnoredSection, MigrationDeadline>;
+// template:begin jobs:postgres-operator-input
+pub(crate) type OperatorPostgresInput =
+    PostgresFields<SessionBudgetsInput, IgnoredSection, IgnoredSection>;
+// template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]
 pub struct PostgresConfig {
@@ -78,7 +94,20 @@ pub struct PostgresConfig {
     pub password_file: Option<PathBuf>,
     pub session_budgets: PostgresSessionBudgets,
     pub max_connections: NonZeroU32,
-    pub migration_deadline: Duration,
+}
+
+fn admit_dsn(
+    enabled: bool,
+    dsn: Option<SecretString>,
+    violations: &mut Violations,
+) -> Result<Option<SecretString>, Rejected> {
+    if enabled {
+        violations
+            .take(required("postgres.dsn", dsn, "postgres.enabled = true"))
+            .map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 impl PostgresInput {
@@ -86,30 +115,69 @@ impl PostgresInput {
         self,
         violations: &mut Violations,
     ) -> Result<Option<PostgresConfig>, Rejected> {
-        let dsn = if self.enabled {
-            Some(violations.take(required(
-                "postgres.dsn",
-                self.dsn,
-                "postgres.enabled = true",
-            )))
-        } else {
-            None
-        };
+        let dsn = admit_dsn(self.enabled, self.dsn, violations);
         violations.check(int_range(
             "postgres.max_connections",
-            self.max_connections.get(),
+            self.max_connections.0.get(),
             1..=500,
         ));
-        let Some(dsn) = dsn else {
-            return Ok(None);
-        };
-        Ok(Some(PostgresConfig {
-            dsn: dsn?,
+        Ok(dsn?.map(|dsn| PostgresConfig {
+            dsn,
             password_file: self.password_file,
-            session_budgets: self.session_budgets,
-            max_connections: self.max_connections,
-            migration_deadline: self.migration_deadline,
+            session_budgets: self.session_budgets.0,
+            max_connections: self.max_connections.0,
         }))
+    }
+}
+
+// template:begin jobs:postgres-operator-admission
+#[derive(Clone, Debug)]
+pub struct OperatorPostgresConfig {
+    pub dsn: SecretString,
+    pub password_file: Option<PathBuf>,
+    pub session_budgets: PostgresSessionBudgets,
+}
+
+impl OperatorPostgresInput {
+    pub(crate) fn admit(
+        self,
+        violations: &mut Violations,
+    ) -> Result<Option<OperatorPostgresConfig>, Rejected> {
+        Ok(
+            admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| OperatorPostgresConfig {
+                dsn,
+                password_file: self.password_file,
+                session_budgets: self.session_budgets.0,
+            }),
+        )
+    }
+}
+// template:end jobs:postgres-operator-admission
+
+#[derive(Clone, Debug)]
+pub struct MigrationPostgresConfig {
+    pub dsn: SecretString,
+    pub password_file: Option<PathBuf>,
+    pub migration_deadline: Duration,
+}
+
+impl MigrationPostgresInput {
+    fn admit(
+        self,
+        violations: &mut Violations,
+    ) -> Result<Option<MigrationPostgresConfig>, Rejected> {
+        violations.check(duration_range(
+            "postgres.migration_deadline",
+            self.migration_deadline.0,
+            Duration::from_secs(1)..=Duration::from_hours(24),
+        ));
+        Ok(
+            admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| MigrationPostgresConfig {
+                dsn,
+                password_file: self.password_file,
+                migration_deadline: self.migration_deadline.0,
+            }),
+        )
     }
 }
 
@@ -145,7 +213,7 @@ pub(crate) struct MigrationInput {
     object_storage: IgnoredSection,
     // template:end object-storage:migration-input-object-storage
     observability: MigrationObservabilityInput,
-    postgres: PostgresInput,
+    postgres: MigrationPostgresInput,
     runtime: IgnoredSection,
     // template:begin service-auth:migration-input-service-auth
     service_auth: IgnoredSection,
@@ -174,20 +242,27 @@ struct MigrationOtelInput {
 
 #[derive(Clone, Debug)]
 pub struct MigrationConfig {
-    pub app: AppConfig,
-    pub log: LogConfig,
-    pub service_name: String,
-    pub postgres: Option<PostgresConfig>,
+    app: AppConfig,
+    log: LogConfig,
+    service_name: String,
+    postgres: Option<MigrationPostgresConfig>,
 }
 
-impl Default for MigrationConfig {
-    fn default() -> Self {
-        Self {
-            app: AppConfig::default(),
-            log: LogConfig::default(),
-            service_name: OtelConfig::default().service_name,
-            postgres: None,
-        }
+impl MigrationConfig {
+    pub fn app(&self) -> &AppConfig {
+        &self.app
+    }
+
+    pub fn log(&self) -> &LogConfig {
+        &self.log
+    }
+
+    pub fn service_name(&self) -> &str {
+        &self.service_name
+    }
+
+    pub fn postgres(&self) -> Option<&MigrationPostgresConfig> {
+        self.postgres.as_ref()
     }
 }
 
@@ -203,11 +278,6 @@ impl MigrationInput {
             .service_name
             .unwrap_or_else(|| OtelConfig::default().service_name);
         v.check(validate_service_name(&service_name));
-        v.check(duration_range(
-            "postgres.migration_deadline",
-            self.postgres.migration_deadline,
-            Duration::from_secs(1)..=Duration::from_hours(24),
-        ));
         let postgres = self.postgres.admit(v);
         let admitted = postgres.map(|postgres| MigrationConfig {
             app: self.app,

@@ -100,6 +100,7 @@ impl Example {
     ) -> Self {
         fixture.verify_tls_material();
         baseline_env(&mut command)
+            .env("APP__APP__ENV", "local")
             .env("APP__HTTP__DRAIN_TIMEOUT", "10s")
             .env("APP__GRPC__ENABLED", "true")
             .env("APP__GRPC__ADDR", "127.0.0.1:0")

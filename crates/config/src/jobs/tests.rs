@@ -16,10 +16,6 @@ fn workers(max_workers: u32) -> JobsConfig {
     }
 }
 
-fn connections(max_connections: u32) -> NonZeroU32 {
-    NonZeroU32::new(max_connections).unwrap()
-}
-
 #[test]
 fn default_is_one_and_validates() {
     let config = JobsConfig::default();
@@ -58,83 +54,6 @@ fn toml_sets_max_workers() {
 fn unknown_keys_in_the_section_fail() {
     assert!(parse("max_workers = 8\nbogus = 1").is_err());
 }
-
-#[test]
-fn one_worker_needs_three_connections() {
-    let err = workers(1)
-        .validate_pool_capacity(connections(2))
-        .unwrap_err();
-    assert_eq!(err.key, "postgres.max_connections");
-    assert_eq!(
-        err.message,
-        "must be at least jobs.max_workers + 2 (3) for the jobs worker, got 2"
-    );
-    assert_eq!(
-        err.to_string(),
-        "postgres.max_connections: must be at least jobs.max_workers + 2 (3) for the jobs worker, got 2"
-    );
-}
-
-#[test]
-fn one_worker_accepts_three_connections() {
-    workers(1).validate_pool_capacity(connections(3)).unwrap();
-}
-
-#[test]
-fn eight_workers_need_ten_connections() {
-    let jobs = workers(8);
-    let err = jobs.validate_pool_capacity(connections(9)).unwrap_err();
-    assert_eq!(err.key, "postgres.max_connections");
-    assert!(err.message.contains("(10)"), "{err}");
-    jobs.validate_pool_capacity(connections(10)).unwrap();
-}
-
-#[test]
-fn defaults_satisfy_the_pool_bound() {
-    JobsConfig::default()
-        .validate_pool_capacity(connections(4))
-        .unwrap();
-}
-
-#[test]
-fn five_hundred_workers_refuse_five_hundred_connections() {
-    let err = workers(500)
-        .validate_pool_capacity(connections(500))
-        .unwrap_err();
-    assert_eq!(err.key, "postgres.max_connections");
-}
-
-// template:begin outbox:jobs-outbox-capacity-tests
-#[rstest::rstest]
-#[case::outbox_only(500, false, 3, "must be at least 3 (3) for the outbox worker, got 2")]
-#[case::combined_one(
-    1,
-    true,
-    6,
-    "must be at least jobs.max_workers + 5 (6) for the outbox worker, got 5"
-)]
-#[case::combined_eight(
-    8,
-    true,
-    13,
-    "must be at least jobs.max_workers + 5 (13) for the outbox worker, got 12"
-)]
-fn publisher_capacity_is_reserved_from_ordinary_slots(
-    #[case] max_workers: u32,
-    #[case] ordinary_jobs: bool,
-    #[case] required: u32,
-    #[case] message: &str,
-) {
-    let jobs = workers(max_workers);
-    let error = jobs
-        .validate_pool_capacity_with_outbox(connections(required - 1), ordinary_jobs)
-        .unwrap_err();
-    assert_eq!(error.key, "postgres.max_connections");
-    assert_eq!(error.message, message);
-    jobs.validate_pool_capacity_with_outbox(connections(required), ordinary_jobs)
-        .unwrap();
-}
-// template:end outbox:jobs-outbox-capacity-tests
 
 #[test]
 fn jobs_max_workers_is_not_secret() {
@@ -195,7 +114,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
     let file = write(
         &dir,
         "operator.toml",
-        "[postgres]\nenabled = true\nmax_connections = 1\n\
+        "[postgres]\nenabled = true\nmax_connections = \"bad pool size\"\nmigration_deadline = false\n\
          [http]\nrequest_timeout = \"invalid\"\n\
          [jobs]\nmax_workers = 0\n",
     );
@@ -206,6 +125,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         },
         env(&[
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            ("APP__POSTGRES__SESSION_BUDGETS", "server"),
             // template:begin authn:jobs-operator-test-authn-env
             ("APP__AUTHN__MODE", "invalid"),
             // template:end authn:jobs-operator-test-authn-env
@@ -223,14 +143,20 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         ]),
     )
     .unwrap();
-    assert_eq!(cfg.postgres.unwrap().max_connections.get(), 1);
+    assert_eq!(
+        cfg.postgres().unwrap().session_budgets,
+        crate::PostgresSessionBudgets::Server
+    );
 }
 
 #[test]
 fn jobs_operator_uses_the_shared_source_precedence() {
-    fn connections(config: crate::JobsOperatorConfig) -> u32 {
-        config.postgres.unwrap().max_connections.get()
+    use std::path::Path;
+
+    fn password_file(config: &crate::JobsOperatorConfig) -> Option<&Path> {
+        config.postgres().unwrap().password_file.as_deref()
     }
+
     let enabled = [
         ("APP__POSTGRES__ENABLED", "true"),
         ("APP__POSTGRES__DSN", "postgres://localhost/app"),
@@ -239,35 +165,37 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     let secrets = tempfile::tempdir().unwrap();
     let mut options = LoadOptions::default();
     let defaults = load_jobs_operator_from(&options, env(&enabled)).unwrap();
-    assert_eq!(connections(defaults), 4);
+    assert_eq!(password_file(&defaults), None);
 
     options.config = Some(write(
         &dir,
         "base.toml",
-        "[postgres]\nmax_connections = 5\n",
+        "[postgres]\npassword_file = '/base'\n",
     ));
     let base = load_jobs_operator_from(&options, env(&enabled)).unwrap();
-    assert_eq!(connections(base), 5);
-    for expected in [6, 7] {
+    assert_eq!(password_file(&base), Some(Path::new("/base")));
+    for expected in ["first", "second"] {
         options.config_overlay.push(write(
             &dir,
             &format!("overlay-{expected}.toml"),
-            &format!("[postgres]\nmax_connections = {expected}\n"),
+            &format!("[postgres]\npassword_file = '/{expected}'\n"),
         ));
         let overlay = load_jobs_operator_from(&options, env(&enabled)).unwrap();
-        assert_eq!(connections(overlay), expected);
+        assert_eq!(
+            password_file(&overlay),
+            Some(Path::new(&format!("/{expected}")))
+        );
     }
-    write(&secrets, "APP__POSTGRES__MAX_CONNECTIONS", "8");
+    write(&secrets, "APP__POSTGRES__PASSWORD_FILE", "/mounted");
     write(&secrets, "APP__POSTGRES__DSN", "postgres://localhost/app");
     options.secrets_dir = Some(secrets.path().to_owned());
     let secret =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "true")])).unwrap();
-    assert_eq!(connections(secret), 8);
+    assert_eq!(password_file(&secret), Some(Path::new("/mounted")));
     let blanked = load_jobs_operator_from(
         &options,
         env(&[
             ("APP__POSTGRES__ENABLED", "true"),
-            ("APP__POSTGRES__MAX_CONNECTIONS", "9"),
             ("APP__POSTGRES__DSN", ""),
         ]),
     )
@@ -281,17 +209,15 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     let unknown =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
     assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
-    for (name, value, key) in [
-        (
-            "APP__POSTGRES__MAX_CONNECTIONS",
-            "501",
-            "postgres.max_connections",
-        ),
-        ("APP__POSTGRES__ENABLED", "true", "postgres.dsn"),
-    ] {
-        let error = load_jobs_operator_from(&options, env(&[(name, value)])).unwrap_err();
-        assert_matches!(&error, Error::Validate(errors) if errors.names(key), "{error}");
-    }
+    let missing =
+        load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "true")])).unwrap_err();
+    assert_matches!(&missing, Error::Validate(errors) if errors.names("postgres.dsn"), "{missing}");
+    let budgets = load_jobs_operator_from(
+        &options,
+        env(&[("APP__POSTGRES__SESSION_BUDGETS", "invalid")]),
+    )
+    .unwrap_err();
+    assert_matches!(&budgets, Error::Deserialize(_), "{budgets}");
     let secret = "fixture-private-value";
     let error =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", secret)])).unwrap_err();

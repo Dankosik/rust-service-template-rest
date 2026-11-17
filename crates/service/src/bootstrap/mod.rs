@@ -28,6 +28,7 @@ mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
 
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -40,7 +41,7 @@ use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
     install_subscriber, install_tracer_provider, runtime_metrics,
 };
-use service_config::{BuildInfo, Config, LoadOptions, LogFormat, process_failure};
+use service_config::{BuildInfo, Config, LoadOptions, LogFormat};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -112,8 +113,6 @@ pub(crate) enum BootstrapError {
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
     #[error("inbound webhook endpoints are configured but no PostgreSQL pool was opened")]
     InboundWebhooksWithoutPostgres,
-    #[error("inbound webhook endpoint {endpoint} references unavailable key {key}")]
-    InboundWebhookKeyReference { endpoint: String, key: String },
     #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
     InboundWebhookKey {
         endpoint: String,
@@ -158,6 +157,15 @@ where
         .map_err(Into::into)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "terminal diagnostic before tracing is available"
+)]
+fn process_failure(message: impl std::fmt::Display) -> ExitCode {
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+    ExitCode::FAILURE
+}
+
 pub(crate) fn run<I>(
     args: I,
     // template:begin grpc:bootstrap-run-registration-parameter
@@ -167,7 +175,16 @@ pub(crate) fn run<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
-    let options = LoadOptions::parse_from(args);
+    let options = match LoadOptions::try_parse_from(args) {
+        Ok(options) => options,
+        Err(error) => {
+            return if error.print().is_ok() {
+                ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+    };
     let config = match service_config::load(&options, BUILD_INFO, shutdown::TAIL) {
         Ok(config) => config,
         Err(err) => return process_failure(&err),
@@ -578,6 +595,11 @@ enum PreparedAuth {
 }
 
 #[cfg(test)]
+fn test_config(environment: &[(&str, &str)]) -> Config {
+    service_config::fixtures::service(environment, BUILD_INFO, shutdown::TAIL).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -633,10 +655,15 @@ mod tests {
     #[tokio::test]
     async fn a_later_bind_failure_never_publishes_readiness() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut config = Config::default();
-        config.http.addr = "127.0.0.1:0".parse().unwrap();
-        config.observability.metrics.addr = Some(occupied.local_addr().unwrap());
-        config.http.readiness_propagation_delay = Duration::from_secs(20);
+        let config = test_config(&[
+            ("APP__HTTP__ADDR", "127.0.0.1:0"),
+            (
+                "APP__OBSERVABILITY__METRICS__ADDR",
+                &occupied.local_addr().unwrap().to_string(),
+            ),
+            ("APP__HTTP__READINESS_PROPAGATION_DELAY", "20s"),
+            ("APP__HTTP__REQUEST_TIMEOUT", "3s"),
+        ]);
         let metrics = shared_metrics();
         let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();
@@ -759,23 +786,21 @@ mod tests {
         use infra_serviceauth::test_support::{TestKey, registry};
 
         let key = TestKey::new("orders/1");
-        let mut config = Config::default();
-        config.http.addr = "127.0.0.1:0".parse().unwrap();
-        config.grpc = Some(service_config::GrpcConfig {
-            addr: "127.0.0.1:0".parse().unwrap(),
-            security: service_config::GrpcListenerSecurity::Plaintext,
-            request_timeout: Duration::from_secs(8),
-            max_in_flight: 256,
-            admission_wait: Duration::from_secs(1),
-            max_connections: 4096,
-            max_connection_age: Duration::from_mins(30),
-        });
-        config.service_auth = service_config::ServiceAuthConfig::Jwt {
-            name: "catalog".to_owned(),
-            jwt_type: "example-svc+jwt".to_owned(),
-            trust: registry(&[("orders", &[&key])]),
-            signing_key: None,
-        };
+        let config = test_config(&[
+            ("APP__APP__ENV", "local"),
+            ("APP__HTTP__ADDR", "127.0.0.1:0"),
+            ("APP__GRPC__ENABLED", "true"),
+            ("APP__GRPC__ADDR", "127.0.0.1:0"),
+            ("APP__GRPC__SECURITY", "plaintext"),
+            ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+            ("APP__SERVICE_AUTH__MODE", "jwt"),
+            ("APP__SERVICE_AUTH__NAME", "catalog"),
+            ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
+            (
+                "APP__SERVICE_AUTH__TRUST",
+                &registry(&[("orders", &[&key])]),
+            ),
+        ]);
         let metrics = shared_metrics();
         let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();

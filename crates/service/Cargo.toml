@@ -95,6 +95,7 @@ utoipa-axum = { workspace = true }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+service-config = { workspace = true, features = ["test-support"] }
 tower = { workspace = true, features = ["util"] }
 similar = { workspace = true, features = ["text"] }
 # template:begin grpc:service-grpc-example-dependencies

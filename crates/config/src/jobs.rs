@@ -2,15 +2,13 @@ use std::num::NonZeroU32;
 
 use serde::Deserialize;
 
-use crate::postgres::{PostgresConfig, PostgresInput};
-use crate::validate::{ValidationError, ValidationErrors, Violations, int_range};
-
-const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
+use crate::postgres::{OperatorPostgresConfig, OperatorPostgresInput};
+use crate::validate::{ValidationErrors, Violations, int_range};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct JobsOperatorInput {
-    postgres: PostgresInput,
+    postgres: OperatorPostgresInput,
     jobs: serde::de::IgnoredAny,
     // template:begin webhooks:jobs-operator-input-webhooks
     webhooks: serde::de::IgnoredAny,
@@ -47,9 +45,15 @@ pub(crate) struct JobsOperatorInput {
     app: serde::de::IgnoredAny,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct JobsOperatorConfig {
-    pub postgres: Option<PostgresConfig>,
+    postgres: Option<OperatorPostgresConfig>,
+}
+
+impl JobsOperatorConfig {
+    pub fn postgres(&self) -> Option<&OperatorPostgresConfig> {
+        self.postgres.as_ref()
+    }
 }
 
 impl JobsOperatorInput {
@@ -80,54 +84,6 @@ impl Default for JobsConfig {
 }
 
 impl JobsConfig {
-    pub fn validate_pool_capacity(
-        &self,
-        postgres_max_connections: NonZeroU32,
-    ) -> Result<(), ValidationError> {
-        let required = self.ordinary_pool_requirement();
-        if u64::from(postgres_max_connections.get()) < required {
-            return Err(ValidationError::new(
-                "postgres.max_connections",
-                format!(
-                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker, got {postgres_max_connections}"
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    fn ordinary_pool_requirement(&self) -> u64 {
-        u64::from(self.max_workers.get()) + WORKER_MANAGEMENT_CONNECTIONS
-    }
-
-    // template:begin outbox:jobs-outbox-capacity
-    pub fn validate_pool_capacity_with_outbox(
-        &self,
-        postgres_max_connections: NonZeroU32,
-        ordinary_jobs: bool,
-    ) -> Result<(), ValidationError> {
-        const PUBLISHER_CONNECTIONS: u64 = 3;
-        let (required, formula) = if ordinary_jobs {
-            let reserve = WORKER_MANAGEMENT_CONNECTIONS + PUBLISHER_CONNECTIONS;
-            (
-                self.ordinary_pool_requirement() + PUBLISHER_CONNECTIONS,
-                format!("jobs.max_workers + {reserve}"),
-            )
-        } else {
-            (PUBLISHER_CONNECTIONS, PUBLISHER_CONNECTIONS.to_string())
-        };
-        if u64::from(postgres_max_connections.get()) < required {
-            return Err(ValidationError::new(
-                "postgres.max_connections",
-                format!(
-                    "must be at least {formula} ({required}) for the outbox worker, got {postgres_max_connections}"
-                ),
-            ));
-        }
-        Ok(())
-    }
-    // template:end outbox:jobs-outbox-capacity
-
     pub(crate) fn validate(&self, violations: &mut Violations) {
         violations.check(int_range(
             "jobs.max_workers",

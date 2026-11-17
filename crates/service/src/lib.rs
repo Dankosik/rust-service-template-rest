@@ -31,3 +31,18 @@ where
     bootstrap::run(args, Some(registration))
 }
 // template:end grpc:service-run-with-grpc
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_returns_control_to_its_caller_for_invalid_arguments_and_help() {
+        for (argument, code) in [("--unknown", 2), ("--help", 0)] {
+            assert_eq!(
+                run(["service", argument].map(OsString::from)),
+                ExitCode::from(code)
+            );
+        }
+    }
+}

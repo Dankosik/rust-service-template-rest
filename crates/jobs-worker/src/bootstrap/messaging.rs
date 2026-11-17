@@ -25,7 +25,12 @@ pub(super) struct RetainedMessages {
     // template:end outbox:worker-bootstrap-postgres-messages-field
 }
 
-impl RetainedMessages {
+pub(super) struct MessagingPlan {
+    options: MessagingOptions,
+    consumer: Option<RetainedMessages>,
+}
+
+impl MessagingPlan {
     pub(super) fn retain(
         config: &WorkerConfig,
         registration: Registration<'_>,
@@ -37,34 +42,49 @@ impl RetainedMessages {
         if !consumes_messages {
             return Ok(None);
         }
-        config.messaging.validate_consumer()?;
+        let keys = config.messaging.consumer_keys()?;
+        let consumer = ConsumerOptions {
+            durable_name: keys.durable.to_owned(),
+            filter_subject: keys.filter_subject.to_owned(),
+            dlq_subject: keys.dlq_subject.to_owned(),
+            dlq_stream: None,
+            concurrency: std::num::NonZeroUsize::try_from(config.messaging.consumer_concurrency)
+                .map_err(|_| WorkerError::MessagingConcurrency)?,
+        };
         Ok(Some(Self {
-            registry: registration.messages,
-            // template:begin outbox:worker-bootstrap-postgres-messages-value
-            postgres_messages: registration.postgres_messages,
-            // template:end outbox:worker-bootstrap-postgres-messages-value
+            options: messaging_options(config, keys.source_stream, Some(consumer))?,
+            consumer: Some(RetainedMessages {
+                registry: registration.messages,
+                // template:begin outbox:worker-bootstrap-postgres-messages-value
+                postgres_messages: registration.postgres_messages,
+                // template:end outbox:worker-bootstrap-postgres-messages-value
+            }),
         }))
     }
+
+    // template:begin outbox:worker-bootstrap-outbox-messaging
+    pub(super) fn producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
+        let source_stream = config.messaging.producer_source_stream()?;
+        Ok(Self {
+            options: messaging_options(config, source_stream, None)?,
+            consumer: None,
+        })
+    }
+    // template:end outbox:worker-bootstrap-outbox-messaging
 }
 
 pub(super) async fn connect_messaging(
-    config: &WorkerConfig,
-    messages: Option<MessagingRegistry>,
+    plan: MessagingPlan,
     cancel: &CancellationToken,
     resources: &mut Resources,
 ) -> Result<Option<Consumer>, WorkerError> {
-    #[allow(
-        unused_variables,
-        reason = "retained outbox also requires broker admission"
-    )]
-    let needs_messaging = messages.is_some();
-    // template:begin outbox:worker-bootstrap-outbox-messaging
-    let needs_messaging = true;
-    // template:end outbox:worker-bootstrap-outbox-messaging
-    if !needs_messaging {
-        return Ok(None);
+    let MessagingPlan { options, consumer } = plan;
+    // template:begin outbox:worker-bootstrap-activate-postgres-messages
+    let mut consumer = consumer;
+    if let Some(messages) = &mut consumer {
+        messages.activate_postgres_messages(resources)?;
     }
-    let options = messaging_options(config, messages.is_some())?;
+    // template:end outbox:worker-bootstrap-activate-postgres-messages
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
     let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
     let BrokerResource::Starting(startup) = resources
@@ -79,11 +99,11 @@ pub(super) async fn connect_messaging(
             .broker
             .replace(BrokerResource::Admitted(messaging)),
     );
-    if let Some(registry) = messages {
+    if let Some(registration) = consumer {
         let messaging = resources
             .admitted_messaging()
             .ok_or(MessagingError::Connection)?;
-        Ok(Some(messaging.consumer(registry).await?))
+        Ok(Some(messaging.consumer(registration.registry).await?))
     } else {
         Ok(None)
     }
@@ -91,23 +111,10 @@ pub(super) async fn connect_messaging(
 
 fn messaging_options(
     config: &WorkerConfig,
-    needs_subscription: bool,
+    source_stream: &str,
+    consumer: Option<ConsumerOptions>,
 ) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;
-    let source_stream = messaging.required_source_stream()?.to_owned();
-    let consumer = if needs_subscription {
-        let keys = messaging.required_consumer_keys()?;
-        Some(ConsumerOptions {
-            durable_name: keys.durable.to_owned(),
-            filter_subject: keys.filter_subject.to_owned(),
-            dlq_subject: keys.dlq_subject.to_owned(),
-            dlq_stream: None,
-            concurrency: std::num::NonZeroUsize::try_from(messaging.consumer_concurrency)
-                .map_err(|_| WorkerError::MessagingConcurrency)?,
-        })
-    } else {
-        None
-    };
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
@@ -118,7 +125,7 @@ fn messaging_options(
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.plaintext_admitted(),
         tls_first: messaging.tls_first,
-        source_stream,
+        source_stream: source_stream.to_owned(),
         max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
             .map_err(|_| WorkerError::MessagingPayloadBound)?,
         consumer,

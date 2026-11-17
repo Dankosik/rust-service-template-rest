@@ -1,20 +1,20 @@
 pub(super) fn describe_rejection(
     error: &config::ConfigError,
-    variable_keys: &[String],
-    carrier: &str,
+    variable_sources: &[(String, &'static str)],
 ) -> String {
     let (key, rejection) = classify(error);
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
-    let hide_value = value_key.is_none_or(|key| {
-        variable_keys
-            .iter()
-            .any(|variable_key| is_at_or_under(variable_key, key))
-    });
+    let mut sources = variable_sources
+        .iter()
+        .filter(|(path, _)| value_key.is_none_or(|key| is_at_or_under(path, key)))
+        .map(|(_, source)| *source);
+    let first = sources.next();
+    let hide_value = value_key.is_none() || first.is_some();
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
-    let origin = if hide_value {
-        format!(" in {carrier}")
-    } else {
-        String::new()
+    let origin = match first {
+        Some(source) if sources.all(|other| other == source) => format!(" in {source}"),
+        Some(_) => " in the environment or the secrets directory".to_owned(),
+        None => String::new(),
     };
     match rejection {
         Rejection::Expected(expected) if hide_value => {
@@ -77,7 +77,7 @@ mod tests {
     const VALUE: &str = "hunter2";
 
     fn describe(error: &config::ConfigError) -> String {
-        describe_rejection(error, &["http.addr".to_owned()], "the environment")
+        describe_rejection(error, &[("http.addr".to_owned(), "the environment")])
     }
 
     #[test]

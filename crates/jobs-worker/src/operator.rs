@@ -14,7 +14,9 @@ use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use serde_with::{DisplayFromStr, serde_as, skip_serializing_none};
-use service_config::{LoadOptions, PostgresConfig, process_failure};
+use service_config::{LoadOptions, OperatorPostgresConfig};
+
+use crate::report_failure;
 
 use crate::cli::{OperatorCommand, RecoveryArgs};
 use crate::shutdown::{DEPENDENCY_CLOSE, RUNTIME_SHUTDOWN_TIMEOUT};
@@ -371,12 +373,12 @@ struct FailureFields<'a> {
 )]
 pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
-        Ok(config) => match &config.postgres {
+        Ok(config) => match config.postgres() {
             Some(postgres) => run_configured(postgres, request),
             None => request.failed_before_start(Cause::PostgresDisabled).into(),
         },
         Err(error) => {
-            let _ = process_failure(&error);
+            report_failure(&error);
             request.failed_before_start(Cause::Configuration).into()
         }
     };
@@ -387,7 +389,7 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         || writeln!(stdout).is_err()
         || stdout.flush().is_err()
     {
-        let _ = process_failure(
+        report_failure(
             "operator receipt could not be written; inspect the same identity before retrying",
         );
         return false;
@@ -395,14 +397,14 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     success
 }
 
-fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
+fn run_configured(config: &OperatorPostgresConfig, request: &Request) -> Report {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            let _ = process_failure(&error);
+            report_failure(&error);
             return request.failed_before_start(Cause::Runtime).into();
         }
     };
@@ -411,11 +413,11 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     report
 }
 
-async fn serve(config: &PostgresConfig, request: &Request) -> Report {
+async fn serve(config: &OperatorPostgresConfig, request: &Request) -> Report {
     let mut signals = match Signals::install() {
         Ok(signals) => signals,
         Err(error) => {
-            let _ = process_failure(&error);
+            report_failure(&error);
             return request.failed_before_start(Cause::Signals).into();
         }
     };
@@ -423,8 +425,11 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     else {
         return request.failed_before_start(Cause::Dsn).into();
     };
-    let options =
-        crate::bootstrap::postgres::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
+    let options = crate::bootstrap::postgres::pool_options(
+        config.session_budgets,
+        NonZeroU32::MIN,
+        "jobs-worker-operator",
+    );
     let pool = match bounded(
         &mut signals,
         jobs::STARTUP_TIMEOUT,

@@ -19,9 +19,16 @@ pub(crate) struct WorkerInput {
     health: HealthConfig,
     observability: ObservabilityConfig,
     http: WorkerHttpConfig,
-    // template:begin postgres:worker-input-postgres-field
+    // template:begin jobs:worker-skip-service-postgres
+    #[serde(skip)]
+    // template:end jobs:worker-skip-service-postgres
+    // template:begin postgres:worker-input-service-postgres
+    #[serde(rename = "postgres")]
+    service_postgres: serde::de::IgnoredAny,
+    // template:end postgres:worker-input-service-postgres
+    // template:begin jobs:worker-input-postgres-field
     postgres: crate::postgres::PostgresInput,
-    // template:end postgres:worker-input-postgres-field
+    // template:end jobs:worker-input-postgres-field
     // template:begin jobs:worker-input-jobs-field
     jobs: crate::JobsConfig,
     // template:end jobs:worker-input-jobs-field
@@ -32,7 +39,7 @@ pub(crate) struct WorkerInput {
     webhooks: crate::WebhooksConfig,
     // template:end webhooks:worker-input-webhooks-field
     // template:begin inbound-webhooks:worker-input-inbound-webhooks-field
-    inbound_webhooks: crate::WorkerInboundWebhooksConfig,
+    inbound_webhooks: crate::inbound_webhooks::WorkerInboundWebhooksInput,
     // template:end inbound-webhooks:worker-input-inbound-webhooks-field
     // template:begin authn:worker-input-authn-field
     authn: serde::de::IgnoredAny,
@@ -64,7 +71,7 @@ impl WorkerInput {
         self.app.validate(v);
         self.http.validate(shutdown_tail, v);
         // template:begin inbound-webhooks:worker-inbound-webhooks-validate
-        self.inbound_webhooks.validate(self.postgres.enabled, v);
+        let inbound_webhook_endpoints = self.inbound_webhooks.admit(self.postgres.enabled, v);
         // template:end inbound-webhooks:worker-inbound-webhooks-validate
         self.health.validate(v);
         self.log.validate(v);
@@ -73,9 +80,9 @@ impl WorkerInput {
         // template:begin messaging:worker-messaging-admit
         let messaging = self.messaging.admit(&self.app.env, v);
         // template:end messaging:worker-messaging-admit
-        // template:begin postgres:worker-postgres-admit
+        // template:begin jobs:worker-postgres-admit
         let postgres = self.postgres.admit(v);
-        // template:end postgres:worker-postgres-admit
+        // template:end jobs:worker-postgres-admit
         // template:begin jobs:worker-jobs-validate
         self.jobs.validate(v);
         // template:end jobs:worker-jobs-validate
@@ -87,16 +94,16 @@ impl WorkerInput {
             reason = "the closure scopes `?` on admitted sections; jobs-only or messaging-only subsets vary"
         )]
         let admitted: Result<WorkerConfig, Rejected> = (|| {
-            Ok(WorkerConfig {
+            Ok(WorkerConfig(WorkerSections {
                 app: self.app,
                 log: self.log,
                 runtime: self.runtime,
                 health: self.health,
                 observability: self.observability,
                 http: self.http,
-                // template:begin postgres:worker-postgres-admitted-field
+                // template:begin jobs:worker-postgres-admitted-field
                 postgres: postgres?,
-                // template:end postgres:worker-postgres-admitted-field
+                // template:end jobs:worker-postgres-admitted-field
                 // template:begin jobs:worker-jobs-admitted-field
                 jobs: self.jobs,
                 // template:end jobs:worker-jobs-admitted-field
@@ -107,25 +114,36 @@ impl WorkerInput {
                 webhooks: self.webhooks,
                 // template:end webhooks:worker-webhooks-admitted-field
                 // template:begin inbound-webhooks:worker-inbound-webhooks-admitted-field
-                inbound_webhooks: self.inbound_webhooks,
+                inbound_webhook_endpoints,
                 // template:end inbound-webhooks:worker-inbound-webhooks-admitted-field
-            })
+            }))
         })();
         violations.finish(admitted)
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct WorkerConfig {
+#[derive(Clone, Debug)]
+pub struct WorkerConfig(WorkerSections);
+
+impl std::ops::Deref for WorkerConfig {
+    type Target = WorkerSections;
+
+    fn deref(&self) -> &WorkerSections {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkerSections {
     pub app: AppConfig,
     pub log: LogConfig,
     pub runtime: RuntimeConfig,
     pub health: HealthConfig,
     pub observability: ObservabilityConfig,
     pub http: WorkerHttpConfig,
-    // template:begin postgres:worker-config-postgres-field
+    // template:begin jobs:worker-config-postgres-field
     pub postgres: Option<crate::PostgresConfig>,
-    // template:end postgres:worker-config-postgres-field
+    // template:end jobs:worker-config-postgres-field
     // template:begin jobs:worker-config-jobs-field
     pub jobs: crate::JobsConfig,
     // template:end jobs:worker-config-jobs-field
@@ -136,6 +154,6 @@ pub struct WorkerConfig {
     pub webhooks: crate::WebhooksConfig,
     // template:end webhooks:worker-config-webhooks-field
     // template:begin inbound-webhooks:worker-config-inbound-webhooks-field
-    pub inbound_webhooks: crate::WorkerInboundWebhooksConfig,
+    pub inbound_webhook_endpoints: std::collections::BTreeSet<String>,
     // template:end inbound-webhooks:worker-config-inbound-webhooks-field
 }

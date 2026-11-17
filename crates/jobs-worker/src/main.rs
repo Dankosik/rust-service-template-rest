@@ -78,9 +78,8 @@ fn register(
     consumers.require(
         registration
             .config()
-            .inbound_webhooks
-            .endpoints
-            .keys()
+            .inbound_webhook_endpoints
+            .iter()
             .map(String::as_str),
     )?;
     Processor::new(consumers).register(&mut registration.jobs);

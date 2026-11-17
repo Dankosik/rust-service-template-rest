@@ -54,30 +54,30 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::test_config;
     use infra_serviceauth::test_support::{TestKey, registry};
-    use service_config::ServiceSigningKey;
 
-    fn jwt(trust: String, signing: Option<(&str, String)>) -> Config {
-        let signing_key = signing.map(|(key_id, pem)| ServiceSigningKey {
-            key_id: key_id.to_owned(),
-            private_key: pem.into(),
-        });
-        Config {
-            service_auth: ServiceAuthConfig::Jwt {
-                name: "catalog".to_owned(),
-                jwt_type: "example-svc+jwt".to_owned(),
-                trust,
-                signing_key,
-            },
-            ..Config::default()
+    fn jwt(trust: &str, signing: Option<(&str, &str)>) -> Config {
+        let mut environment = vec![
+            ("APP__SERVICE_AUTH__MODE", "jwt"),
+            ("APP__SERVICE_AUTH__NAME", "catalog"),
+            ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
+            ("APP__SERVICE_AUTH__TRUST", trust),
+        ];
+        if let Some((key_id, pem)) = signing {
+            environment.extend([
+                ("APP__SERVICE_AUTH__KEY_ID", key_id),
+                ("APP__SERVICE_AUTH__PRIVATE_KEY", pem),
+            ]);
         }
+        test_config(&environment)
     }
 
     #[test]
     fn jwt_mode_verifies_and_signs_only_with_admitted_inputs() {
         let key = TestKey::new("catalog/1");
         let trust = registry(&[("orders", &[&key])]);
-        let prepared = prepare(&jwt(trust.clone(), Some(("catalog/1", key.pem())))).unwrap();
+        let prepared = prepare(&jwt(&trust, Some(("catalog/1", &key.pem())))).unwrap();
         let issued_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -106,23 +106,23 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let receiving_only = prepare(&jwt(trust.clone(), None)).unwrap();
+        let receiving_only = prepare(&jwt(&trust, None)).unwrap();
         assert!(receiving_only.verifier.is_some());
         assert!(receiving_only.tokens.receiver("orders").is_err());
-        let off = prepare(&Config::default()).unwrap();
+        let off = prepare(&test_config(&[])).unwrap();
         assert!(off.verifier.is_none());
         assert_eq!(
             off.tokens.receiver("orders").unwrap().authorization(),
             Ok(None)
         );
         for (config, key) in [
-            (jwt("{}".to_owned(), None), "service_auth.trust"),
+            (jwt("{}", None), "service_auth.trust"),
             (
-                jwt(trust.clone(), Some(("two words", key.pem()))),
+                jwt(&trust, Some(("two words", &key.pem()))),
                 "service_auth.key_id",
             ),
             (
-                jwt(trust, Some(("catalog/1", "not a key".to_owned()))),
+                jwt(&trust, Some(("catalog/1", "not a key"))),
                 "service_auth.private_key",
             ),
         ] {

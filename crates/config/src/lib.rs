@@ -41,8 +41,9 @@ mod webhooks;
 
 mod cli;
 mod de;
+#[cfg(feature = "test-support")]
+pub mod fixtures;
 mod load;
-mod process;
 mod secret_policy;
 #[cfg(test)]
 mod test_support;
@@ -64,16 +65,13 @@ pub use load::load_worker;
 pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity, GrpcTlsMaterial};
 // template:end grpc:config-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
-pub use inbound_webhooks::{
-    InboundWebhookEndpointConfig, InboundWebhooksConfig, WorkerInboundWebhooksConfig,
-};
+pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhookKey};
 // template:end inbound-webhooks:config-inbound-webhooks-export
 pub use load::{Error, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
 };
-pub use process::process_failure;
 pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
 pub use messaging::{ConsumerKeys, MessagingConfig, MessagingCredentials};
@@ -95,7 +93,9 @@ pub use service_auth::{ServiceAuthConfig, ServiceSigningKey};
 // template:end service-auth:config-service-auth-export
 // template:begin postgres:config-export
 pub use load::load_migration;
-pub use postgres::{MigrationConfig, PostgresConfig, PostgresSessionBudgets};
+pub use postgres::{
+    MigrationConfig, MigrationPostgresConfig, PostgresConfig, PostgresSessionBudgets,
+};
 // template:end postgres:config-export
 // template:begin http-idempotency:config-http-idempotency-export
 pub use http_idempotency::HttpIdempotencyConfig;
@@ -103,6 +103,7 @@ pub use http_idempotency::HttpIdempotencyConfig;
 // template:begin jobs:config-jobs-export
 pub use jobs::{JobsConfig, JobsOperatorConfig};
 pub use load::load_jobs_operator;
+pub use postgres::OperatorPostgresConfig;
 // template:end jobs:config-jobs-export
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
@@ -118,7 +119,7 @@ pub(crate) struct ConfigInput {
     grpc: grpc::GrpcInput,
     // template:end grpc:config-input-field
     // template:begin inbound-webhooks:config-inbound-webhooks-input-field
-    inbound_webhooks: InboundWebhooksConfig,
+    inbound_webhooks: inbound_webhooks::InboundWebhooksInput,
     // template:end inbound-webhooks:config-inbound-webhooks-input-field
     health: HealthConfig,
     log: LogConfig,
@@ -170,8 +171,7 @@ impl ConfigInput {
         let grpc = self.grpc.admit(http_timings.drain_budget, v);
         // template:end grpc:config-admit
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
-        self.inbound_webhooks
-            .validate_service(self.postgres.enabled, v);
+        let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
         // template:end inbound-webhooks:config-inbound-webhooks-validate
         self.health.validate(v);
         self.log.validate(v);
@@ -203,14 +203,14 @@ impl ConfigInput {
             reason = "the closure scopes `?` on admitted sections; without those profiles it has none"
         )]
         let admitted: Result<Config, validate::Rejected> = (|| {
-            Ok(Config {
+            Ok(Config(ServiceSections {
                 app: self.app,
                 http: self.http,
                 // template:begin grpc:config-admitted-field
                 grpc: grpc?,
                 // template:end grpc:config-admitted-field
                 // template:begin inbound-webhooks:config-inbound-webhooks-admitted-field
-                inbound_webhooks: self.inbound_webhooks,
+                inbound_webhooks,
                 // template:end inbound-webhooks:config-inbound-webhooks-admitted-field
                 health: self.health,
                 log: self.log,
@@ -234,21 +234,32 @@ impl ConfigInput {
                 // template:begin http-idempotency:config-http-idempotency-admitted-field
                 http_idempotency: self.http_idempotency,
                 // template:end http-idempotency:config-http-idempotency-admitted-field
-            })
+            }))
         })();
         violations.finish(admitted)
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Config {
+#[derive(Clone, Debug)]
+pub struct Config(ServiceSections);
+
+impl std::ops::Deref for Config {
+    type Target = ServiceSections;
+
+    fn deref(&self) -> &ServiceSections {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceSections {
     pub app: AppConfig,
     pub http: HttpConfig,
     // template:begin grpc:config-field
     pub grpc: Option<GrpcConfig>,
     // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
-    pub inbound_webhooks: InboundWebhooksConfig,
+    pub inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
     // template:end inbound-webhooks:config-inbound-webhooks-field
     pub health: HealthConfig,
     pub log: LogConfig,
@@ -276,6 +287,6 @@ pub struct Config {
 
 // template:begin worker:worker-config
 mod worker;
-pub use worker::WorkerConfig;
 use worker::WorkerInput;
+pub use worker::{WorkerConfig, WorkerSections};
 // template:end worker:worker-config
