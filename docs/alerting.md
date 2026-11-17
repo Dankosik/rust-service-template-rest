@@ -152,17 +152,19 @@ out-of-memory kill or a failed liveness probe each look different there.
 
 ### ServiceNotReady
 
-A running instance has withheld readiness for 15 minutes, so the platform
-routes no traffic to it. `readiness_probe_checks_total{outcome!="ok"}` names
-the failing probe, and the `readiness_lost` log event carries the first cause.
-Fix that dependency; restarting the instance does not.
+The instance has reported unready on every scrape for 15 minutes. Check
+whether it is draining. If `readiness_checks_total` has stopped advancing,
+the last check can expire even while the diagnostics listener answers.
+Inspect runtime progress and look for `readiness_refresh_late` when checks
+resume. If checks continue, use `readiness_probe_checks_total` by probe and
+outcome and the `readiness_lost` log event to identify the failing dependency.
 
 ### ServiceReadinessFlapping
 
-Readiness changed at least four times in 30 minutes. A dependency fails
-intermittently around the readiness threshold. Look at
-`readiness_probe_checks_total` by `probe` and `outcome`, and at the dependency's
-own latency against the probe timeout.
+Scrapes observed at least four readiness changes in 30 minutes. Compare the
+timing with `readiness_refresh_late` events for gaps between checks. For
+repeated probe failures, compare the dependency's latency with the probe
+timeout and inspect `readiness_probe_checks_total` by probe and outcome.
 
 ### RuntimeSchedulerLagging
 

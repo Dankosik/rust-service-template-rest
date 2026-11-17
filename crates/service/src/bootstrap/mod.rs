@@ -548,7 +548,9 @@ async fn start(
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
     if let Some(listener) = diagnostics_listener {
-        let diagnostics = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+        let reader = readiness.reader();
+        let diagnostics = diagnostics_router(metrics.clone(), move || reader.is_ready())
+            .merge(infra_http::liveness_router());
         let server = serving
             .diagnostics
             .insert(listener.serve(diagnostics, server_options));
@@ -584,6 +586,48 @@ mod tests {
         METRICS
             .get_or_init(|| telemetry::install_metrics().unwrap())
             .clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn diagnostics_scrapes_report_readiness_expiry_without_another_check() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let metrics = shared_metrics();
+        let policy = RefreshPolicy::try_new(
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+        let readiness = Readiness::new(Vec::new(), policy);
+        let reader = readiness.reader();
+        let diagnostics = diagnostics_router(metrics, move || reader.is_ready());
+        let scrape = async |sample: &str| {
+            let request = Request::get("/metrics").body(Body::empty()).unwrap();
+            let response = diagnostics.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            assert_eq!(
+                body.lines()
+                    .filter(|line| line.starts_with("readiness_ready "))
+                    .collect::<Vec<_>>(),
+                [sample]
+            );
+        };
+
+        scrape("readiness_ready 0").await;
+        readiness.refresh().await;
+        tokio::time::advance(policy.stale_after()).await;
+        scrape("readiness_ready 1").await;
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        scrape("readiness_ready 0").await;
+        readiness.refresh().await;
+        scrape("readiness_ready 1").await;
+        readiness.start_drain();
+        scrape("readiness_ready 0").await;
     }
 
     #[tokio::test]

@@ -212,7 +212,7 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: A running process has withheld readiness for 15 minutes
-          description: '{{ $labels.instance }} of {{ $labels.job }} is out of rotation; its readiness probes or a dependency fail.'
+          description: '{{ $labels.instance }} of {{ $labels.job }} is unready. Check for drain, stale checks, or a failing dependency.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicenotready
       - alert: ServiceReadinessFlapping
         expr: changes(readiness_ready{job=~"service|jobs-worker"}[30m]) >= 4

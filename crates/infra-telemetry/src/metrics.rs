@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
-use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{
+    BuildError, LabelSet, Matcher, PrometheusBuilder, PrometheusHandle, formatting,
+};
 use parking_lot::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -225,18 +225,39 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
 )]
-pub fn diagnostics_router(metrics: Metrics) -> Router {
-    Router::new()
-        .route("/metrics", get(render))
-        .with_state(metrics)
-}
-
-async fn render(State(metrics): State<Metrics>) -> Response {
-    (
-        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        metrics.render(),
+pub fn diagnostics_router(
+    metrics: Metrics,
+    is_ready: impl Fn() -> bool + Clone + Send + Sync + 'static,
+) -> Router {
+    const READY: &str = "readiness_ready";
+    let labels = LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY), &[].into());
+    Router::new().route(
+        "/metrics",
+        get(async move || {
+            let mut body = metrics.render();
+            formatting::write_help_line(
+                &mut body,
+                READY,
+                None,
+                None,
+                "1 if ready at scrape time, 0 otherwise.",
+            );
+            formatting::write_type_line(&mut body, READY, None, None, "gauge");
+            formatting::write_metric_line(
+                &mut body,
+                READY,
+                None,
+                &labels,
+                None::<(&str, &str)>,
+                u8::from(is_ready()),
+                None,
+            );
+            (
+                [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                body,
+            )
+        }),
     )
-        .into_response()
 }
 
 #[cfg(test)]
