@@ -27,11 +27,21 @@ const REPLAYABLE: [HeaderName; 7] = [
 
 type StoredHeaders = SmallVec<[(HeaderName, HeaderValue); 4]>;
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct ReplayableResponse {
     status: StatusCode,
     headers: StoredHeaders,
     body: Bytes,
+}
+
+impl std::fmt::Debug for ReplayableResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplayableResponse")
+            .field("status", &self.status)
+            .field("body_bytes", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

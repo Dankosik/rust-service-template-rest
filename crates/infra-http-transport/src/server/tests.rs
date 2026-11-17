@@ -245,7 +245,7 @@ async fn accept_panic_after_stop_is_still_observed() {
         connection_builder(options()),
         move |stream| {
             let _ = &marker;
-            async move { Some((stream, ListenerScheme::Http)) }
+            async move { Some((stream, "http")) }
         },
     );
     stop.set(server.connection_shutdown.finish.clone()).unwrap();

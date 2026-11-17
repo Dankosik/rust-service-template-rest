@@ -744,6 +744,26 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
 
 #[tokio::test]
 async fn probes_are_answered_while_every_in_flight_permit_is_held() {
+    #[utoipa::path(get, path = "/hold", responses((status = 200)))]
+    async fn hold(
+        axum::Extension(gates): axum::Extension<(
+            Arc<tokio::sync::Notify>,
+            Arc<tokio::sync::Notify>,
+        )>,
+    ) -> &'static str {
+        let (started, gate) = gates;
+        started.notify_one();
+        gate.notified().await;
+        "released"
+    }
+    #[utoipa::path(get, path = "/business/health/live", responses((status = 204)))]
+    async fn business() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+    #[utoipa::path(head, path = "/health/live", responses((status = 204)))]
+    async fn explicit_head() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
     let readiness = health::Readiness::new(
         Vec::new(),
         health::RefreshPolicy::try_new(
@@ -756,23 +776,14 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     readiness.refresh().await;
     let started = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
-    #[utoipa::path(get, path = "/business/health/live", responses((status = 200)))]
-    async fn hold(
-        axum::Extension(gates): axum::Extension<(
-            Arc<tokio::sync::Notify>,
-            Arc<tokio::sync::Notify>,
-        )>,
-    ) -> &'static str {
-        let (started, gate) = gates;
-        started.notify_one();
-        gate.notified().await;
-        "released"
-    }
     let routes = utoipa_axum::router::OpenApiRouter::new()
+        .routes(utoipa_axum::routes!(business))
+        .routes(utoipa_axum::routes!(explicit_head))
         .routes(utoipa_axum::routes!(hold))
         .layer(axum::Extension((Arc::clone(&started), Arc::clone(&gate))));
     let mut options = options();
     options.max_in_flight = NonZeroU32::new(1);
+    options.admission_wait = Duration::ZERO;
     options.request_timeout = Duration::from_secs(30);
     let app = crate::HttpContract::new(routes)
         .with_probes("/")
@@ -782,24 +793,18 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
 
     let holder = tokio::spawn({
         let app = app.clone();
-        async move {
-            app.oneshot(request(Method::GET, "/business/health/live"))
-                .await
-                .unwrap()
-        }
+        async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }
     });
     started.notified().await;
 
-    let waiting = tokio::spawn({
-        let app = app.clone();
-        async move {
-            app.oneshot(request(Method::GET, "/business/health/live"))
-                .await
-                .unwrap()
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!waiting.is_finished());
+    for (method, path) in [
+        (Method::GET, "/business/health/live"),
+        (Method::HEAD, "/health/live"),
+        (Method::POST, "/health/live"),
+    ] {
+        let refused = app.clone().oneshot(request(method, path)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
     for probe in [
         "/health/live",
         "/health/ready",
@@ -836,9 +841,17 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
 
     gate.notify_one();
     assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
-    started.notified().await;
-    gate.notify_one();
-    assert_eq!(waiting.await.unwrap().status(), StatusCode::OK);
+    let head = app
+        .clone()
+        .oneshot(request(Method::HEAD, "/health/live"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NO_CONTENT);
+    let unsupported = app
+        .oneshot(request(Method::POST, "/health/live"))
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]

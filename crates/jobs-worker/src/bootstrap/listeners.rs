@@ -28,13 +28,11 @@ pub(super) fn bind_listeners(
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
     let options = server_options(config);
-    let app = HttpContract::new(Default::default())
-        .with_probes("/")
-        .build(
-            readiness.reader(),
-            Authentication::Public,
-            &harden_options(config, readiness),
-        )?;
+    let app = HttpContract::default().with_probes("/").build(
+        readiness.reader(),
+        Authentication::Public,
+        &harden_options(config, readiness),
+    )?;
     let health = resources
         .listeners
         .health

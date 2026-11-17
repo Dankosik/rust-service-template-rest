@@ -143,7 +143,7 @@ mod tests {
     }
 
     fn app(reader: ReadinessReader) -> (Application, serde_json::Value) {
-        let contract = HttpContract::new(OpenApiRouter::new()).with_probes("/");
+        let contract = HttpContract::default().with_probes("/");
         let document = serde_json::to_value(contract.get_openapi()).unwrap();
         (
             contract

@@ -1534,8 +1534,8 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
 
 #[tokio::test]
 async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
-    use infra_http::{Authentication, HttpContract};
-    use tower::ServiceExt as _;
+    use hyper::service::Service as _;
+    use hyper_util::service::TowerToHyperService;
 
     let provider = Provider::start().await;
     let verifier = provider.verifier_with_cache(Some(
@@ -1578,7 +1578,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .body(upload)
         .unwrap();
     tokio::time::pause();
-    let response = app.oneshot(request).await.unwrap();
+    let response = TowerToHyperService::new(app).call(request).await.unwrap();
     tokio::time::resume();
     assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     let media = response.headers()[axum::http::header::CONTENT_TYPE]

@@ -48,6 +48,12 @@ pub struct HttpContract<S> {
     probes: Vec<(Box<str>, bool)>,
 }
 
+impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
+    fn default() -> Self {
+        Self::new(OpenApiRouter::default())
+    }
+}
+
 impl<S: Clone + Send + Sync + 'static> std::fmt::Debug for HttpContract<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpContract")
