@@ -150,6 +150,32 @@ fn document_has_the_probe_operations() {
     }
 }
 
+#[test]
+fn security_gate_checks_query_and_extension_methods() {
+    let fixture = json!({"paths": {"/v": {
+        "description": "versioned resource",
+        "query": {"security": []},
+        "additionalOperations": {"COPY": {"security": [{"otherBearer": []}]}}
+    }}, "components":{"securitySchemes":{"otherBearer":{"type":"http","scheme":"bearer"}}}});
+    let checked: Vec<_> = operations(&fixture)
+        .into_iter()
+        .map(|(method, _, operation)| {
+            (
+                method,
+                is_public(&fixture, operation),
+                uses_bearer_only(&fixture, operation),
+            )
+        })
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            ("QUERY".to_owned(), true, false),
+            ("COPY".to_owned(), false, false)
+        ]
+    );
+}
+
 // template:begin inbound-webhooks:service-webhooks-contract-test
 #[test]
 fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_contracts() {

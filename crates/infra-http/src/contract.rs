@@ -27,6 +27,10 @@ pub enum FinalizeError {
     #[error("mounted HTTP idempotency operations require an active idempotency store")]
     MissingIdempotencyStore,
     // template:end http-idempotency:http-store-finalization-error
+    #[error(
+        "HTTP contract finalization failed: components.{kind}.{name} conflicts with the shared HTTP contract"
+    )]
+    ConflictingComponent { kind: &'static str, name: String },
     #[error("HTTP contract finalization failed: {method} {path} response {status}: {fault}")]
     InvalidResponse {
         method: String,
@@ -120,7 +124,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         for (path, item) in &routes.get_openapi().paths.paths {
             for (method, op) in self::fixed_path_operations!(item, as_ref) {
                 if op.is_some() {
-                    idempotency.0.push((path.as_str().into(), method));
+                    let path = if path.is_empty() { "/" } else { path.as_str() };
+                    idempotency.0.push((path.into(), method));
                 }
             }
         }
@@ -148,7 +153,9 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     #[must_use]
     pub fn nest(mut self, prefix: &str, other: Self) -> Self {
-        self.routes = self.routes.nest(prefix, other.routes);
+        self.routes = self
+            .routes
+            .merge(OpenApiRouter::default().nest(prefix, other.routes));
         self.probes.extend(
             other
                 .probes
@@ -684,7 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn public_query_and_additional_method_reach_the_registered_service() {
-        let document = serde_json::from_value(serde_json::json!({
+        let document: utoipa::openapi::OpenApi = serde_json::from_value(serde_json::json!({
             "openapi": "3.2.0",
             "info": {"title": "method fixture", "version": "1"},
             "paths": {"/_test/method": {
@@ -813,6 +820,35 @@ mod tests {
                 fault: "fixed_method_in_additional_operations",
             })
         );
+    }
+
+    #[test]
+    fn nesting_a_get_preserves_the_parent_head_policy() {
+        #[utoipa::path(head, path = "/api/_test/method", security(("bearerAuth" = [])), responses((status = 204)))]
+        async fn protected_head() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.0", "info": {"title": "fixture", "version": "1"}, "paths": {},
+            "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}
+        }))
+        .unwrap();
+        let parent = HttpContract::<()>::new(
+            OpenApiRouter::with_openapi(document).routes(utoipa_axum::routes!(protected_head)),
+        );
+        let child = HttpContract::new(
+            OpenApiRouter::default().routes(utoipa_axum::routes!(documented_get)),
+        );
+        let contract = parent.nest("/api", child);
+        let document = contract.into_openapi().unwrap();
+        let path = &document.paths.paths["/api/_test/method"];
+        assert!(path.get.is_some());
+        assert!(path.head.as_ref().is_some_and(|operation| {
+            operation
+                .security
+                .as_ref()
+                .is_some_and(|rules| !rules.is_empty())
+        }));
     }
 
     fn protected() -> FinalizeError {

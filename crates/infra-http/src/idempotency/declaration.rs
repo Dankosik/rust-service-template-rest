@@ -374,7 +374,7 @@ mod tests {
             let contract: crate::HttpContract<()> =
                 crate::idempotency::route(document, |(): ()| async { Ok(TestCommand) }).unwrap();
 
-            let result = contract.into_openapi();
+            let result = contract.into_openapi().map(|_| ());
             if protected {
                 result.expect("protected operations can be exported offline");
             } else {

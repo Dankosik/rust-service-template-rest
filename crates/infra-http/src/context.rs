@@ -260,7 +260,6 @@ pub(crate) fn cancelled_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, Bytes};
     use axum::routing::get;
     use tower::ServiceExt as _;
 

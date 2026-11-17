@@ -21,7 +21,12 @@ pub(super) fn compose(
     policy: &Policy,
     // template:end authn:http-outcomes-policy-parameter
 ) -> Result<(), FinalizeError> {
-    document.merge(responses::ProblemComponents::openapi());
+    let shared = responses::ProblemComponents::openapi();
+    if let (Some(existing), Some(shared)) = (&document.components, &shared.components) {
+        check_components("schemas", &existing.schemas, &shared.schemas)?;
+        check_components("responses", &existing.responses, &shared.responses)?;
+    }
+    document.merge(shared);
     let components = document.components.get_or_insert_default();
     for (path, item) in &mut document.paths.paths {
         let path = if path.is_empty() { "/" } else { path.as_str() };
@@ -55,6 +60,24 @@ pub(super) fn compose(
                 fault,
             })?;
         }
+    }
+    Ok(())
+}
+
+fn check_components<T: PartialEq>(
+    kind: &'static str,
+    existing: &BTreeMap<String, T>,
+    shared: &BTreeMap<String, T>,
+) -> Result<(), FinalizeError> {
+    if let Some((name, _)) = shared.iter().find(|(name, value)| {
+        existing
+            .get(*name)
+            .is_some_and(|existing| existing != *value)
+    }) {
+        return Err(FinalizeError::ConflictingComponent {
+            kind,
+            name: name.clone(),
+        });
     }
     Ok(())
 }
@@ -144,7 +167,7 @@ fn merge_response(
             .clone();
         let other = resolve(content, &components.media_types, "#/components/mediaTypes/")
             .ok_or("shared media type could not be resolved")?;
-        union_schema(&mut existing.schema, &other.schema);
+        union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }
     for (name, header) in &common.headers {
@@ -164,7 +187,7 @@ fn merge_response(
             .clone();
         let other = resolve(header, &components.headers, "#/components/headers/")
             .ok_or("shared header could not be resolved")?;
-        union_schema(&mut existing.schema, &other.schema);
+        union_schema(&mut existing.schema, other.schema.as_ref());
         if let Some(description) = &other.description {
             append_description(existing.description.get_or_insert_default(), description);
         }
@@ -184,7 +207,7 @@ fn append_description(text: &mut String, addition: &str) {
     text.push_str(addition);
 }
 
-fn union_schema(existing: &mut Option<RefOr<Schema>>, addition: &Option<RefOr<Schema>>) {
+fn union_schema(existing: &mut Option<RefOr<Schema>>, addition: Option<&RefOr<Schema>>) {
     if let (Some(old), Some(new)) = (existing.as_ref(), addition)
         && old != new
         && !matches!(old, RefOr::T(Schema::AnyOf(any)) if any.items.contains(new))
@@ -207,7 +230,7 @@ pub(super) fn resolve<'a, T>(
         match value {
             RefOr::T(resolved) => return Some(resolved),
             RefOr::Ref(reference) => {
-                value = components.get(reference.ref_location.strip_prefix(prefix)?)?
+                value = components.get(reference.ref_location.strip_prefix(prefix)?)?;
             }
         }
     }

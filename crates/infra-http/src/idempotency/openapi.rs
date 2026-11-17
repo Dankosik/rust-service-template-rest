@@ -8,7 +8,7 @@ use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
 use super::identity::{KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
-use super::{KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
+use super::{KEY_HEADER, REPLAYED_VALUE};
 use crate::authn::{AuthenticationMalformed, AuthenticationUnavailable};
 use crate::problem::{Code, Problem, http_status, responses};
 

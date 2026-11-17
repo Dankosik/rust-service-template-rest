@@ -239,7 +239,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 }
 
 pub mod responses {
-    use utoipa::{IntoResponses, OpenApi, ToResponse};
+    use utoipa::{OpenApi, ToResponse};
 
     use super::Problem;
 
@@ -272,16 +272,6 @@ pub mod responses {
     #[derive(Debug, ToResponse)]
     #[response(content_type = "application/problem+json", headers(("Retry-After" = u64, description = "seconds to wait before retrying when admission rejects the request at capacity")))]
     pub struct AdmissionUnavailable(pub Problem);
-
-    #[derive(Debug, IntoResponses)]
-    pub enum TransportProblemResponses {
-        #[response(status = 400)]
-        BadRequest(#[ref_response] BadRequest),
-        #[response(status = 413)]
-        RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-        #[response(status = 500)]
-        InternalServerError(#[ref_response] InternalServerError),
-    }
 
     #[derive(OpenApi)]
     #[openapi(components(

@@ -20,7 +20,7 @@ const GENERATED_HEADER: &str =
 #[openapi(
     info(
         title = "rust-service-template-rest",
-        description = "Platform probes and feature operations served by the service. An unknown path returns a 404 Problem. An unsupported method returns a 405 Problem with Allow. The HTTP listener can reject oversized request headers with 431 before routing."
+        description = "HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog. An unknown path returns a 404 Problem. An unsupported method returns a 405 Problem with Allow. The HTTP listener can reject oversized request headers with 431 before routing."
     ),
     servers((url = "/", description = "current service origin")),
     tags(

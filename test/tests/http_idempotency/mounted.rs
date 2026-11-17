@@ -1810,6 +1810,10 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     );
     assert_eq!(body["detail"], "widget handler deadline expired");
     tokio::time::resume();
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    let (stored, retry_conflicts) =
+        until_free(|| mounted.create(ALICE, "k-handler", &input, "req-recovered")).await;
+    created(&stored, "req-recovered");
     let mut connections = Vec::new();
     for _ in 0..mounted.store_pool.options().get_max_connections() {
         connections.push(
@@ -1829,16 +1833,25 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         "req-acquiring",
     );
     assert_eq!(body["detail"], "widget handler deadline expired");
+    let replay = mounted
+        .create(ALICE, "k-handler", &input, "req-replay")
+        .await;
+    assert_eq!(replay.as_bytes(), stored.as_bytes());
+    assert_eq!(
+        replay.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true"))
+    );
     assert_eq!(
         outcomes(&captured),
         counts(&[
             ("unavailable", 1),
-            ("in_progress", conflicts),
-            ("executed", 1),
+            ("in_progress", conflicts + retry_conflicts),
+            ("executed", 2),
+            ("replayed", 1),
             ("abandoned", 2)
         ])
     );
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 2);
     mounted.finish().await;
 }
 
