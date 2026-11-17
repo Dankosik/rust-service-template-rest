@@ -44,7 +44,7 @@ const CODE_NAMES: [(&str, &str); 17] = [
     ("UNAUTHENTICATED", "Unauthenticated"),
 ];
 
-const fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
+fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
     match CODE_NAMES.get(code as usize) {
         Some(&names) => names,
         None => ("UNKNOWN", "Unknown"),

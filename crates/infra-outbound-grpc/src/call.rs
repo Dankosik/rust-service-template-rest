@@ -502,7 +502,8 @@ impl Body for Upload {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut state = self.0.lock();
+        let mut guard = self.0.lock();
+        let state = &mut *guard;
         let polled = match &mut state.phase {
             UploadPhase::Open(body) => {
                 store_waker(&mut state.waker, context.waker());
@@ -523,7 +524,7 @@ impl Body for Upload {
         } else {
             None
         };
-        drop(state);
+        drop(guard);
         drop(released);
         match polled {
             Ok(polled) => polled,

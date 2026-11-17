@@ -86,9 +86,9 @@ impl Methods {
 
     fn resolve(&self, path: &str) -> Arc<MethodMetrics> {
         if let Some((registered_path, (call_type, slot))) = self.registered.get_key_value(path) {
-            return Arc::clone(
-                slot.get_or_init(|| Arc::new(MethodMetrics::build(registered_path, Some(*call_type)))),
-            );
+            return Arc::clone(slot.get_or_init(|| {
+                Arc::new(MethodMetrics::build(registered_path, Some(*call_type)))
+            }));
         }
         Arc::clone(
             self.unknown
@@ -191,8 +191,7 @@ impl Call {
             self.span.set_attribute("error.type", span_code);
             self.span.set_status(SpanStatus::error(""));
         }
-        self.metrics
-            .record_handled(code, self.started_at.elapsed());
+        self.metrics.record_handled(code, self.started_at.elapsed());
     }
 }
 

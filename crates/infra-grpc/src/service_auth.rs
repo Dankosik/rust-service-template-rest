@@ -225,7 +225,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            admitted.extensions().get::<Caller>().unwrap().name().as_str(),
+            admitted
+                .extensions()
+                .get::<Caller>()
+                .unwrap()
+                .name()
+                .as_str(),
             "orders"
         );
         assert!(!admitted.headers().contains_key(AUTHORIZATION));

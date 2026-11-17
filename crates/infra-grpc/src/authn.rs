@@ -2,7 +2,9 @@ use axum::extract::Request;
 use axum::response::Response;
 use foldhash::HashMap;
 use http::header::AUTHORIZATION;
-use infra_bearerauthn::{Actor, ClaimAccessError, Failure as AuthFailure, Principal, Transport, Verifier};
+use infra_bearerauthn::{
+    Actor, ClaimAccessError, Failure as AuthFailure, Principal, Transport, Verifier,
+};
 use operation_context::OperationContext;
 use secrecy::SecretString;
 use serde::de::DeserializeOwned;
@@ -105,9 +107,7 @@ pub(crate) async fn authenticate(
     let principal = match result {
         Ok(principal) => principal,
         Err(failure) => {
-            return Err(
-                reject_with_budget(context, request, authentication_status(failure)).await,
-            );
+            return Err(reject_with_budget(context, request, authentication_status(failure)).await);
         }
     };
     let granted = auth
@@ -125,7 +125,9 @@ pub(crate) async fn authenticate(
         return Err(server_stopped(reason).into_http());
     }
     request.headers_mut().remove(AUTHORIZATION);
-    request.extensions_mut().insert(VerifiedPrincipal(principal));
+    request
+        .extensions_mut()
+        .insert(VerifiedPrincipal(principal));
     Ok(request)
 }
 

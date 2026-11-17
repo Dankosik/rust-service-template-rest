@@ -177,7 +177,9 @@ impl<B: Body> ServerState<B> {
 
     fn pop_terminal(&mut self) -> FramePoll<B::Error> {
         match std::mem::replace(&mut self.stage, StreamStage::Closed) {
-            StreamStage::PendingTrailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            StreamStage::PendingTrailers(trailers) => {
+                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+            }
             stage => {
                 self.stage = stage;
                 Poll::Ready(None)
@@ -357,7 +359,9 @@ where
             let inner = {
                 let _entered = active.call.span().enter();
                 let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
-                std::panic::catch_unwind(AssertUnwindSafe(|| Pin::new(&mut active.body).poll_frame(cx)))
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Pin::new(&mut active.body).poll_frame(cx)
+                }))
             };
             match inner {
                 Ok(polled) => {

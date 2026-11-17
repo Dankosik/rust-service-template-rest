@@ -188,8 +188,10 @@ async fn business_call(
         Some(drain) => drain.child_token(),
         None => CancellationToken::new(),
     };
-    let response_context =
-        ResponseContext(OperationContext::new(response_deadline, response_token.clone()));
+    let response_context = ResponseContext(OperationContext::new(
+        response_deadline,
+        response_token.clone(),
+    ));
     let response_guard = response_token.drop_guard();
     request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context);
@@ -354,8 +356,10 @@ async fn health_call(
     let _opening_guard = opening_token.drop_guard();
 
     let response_token = CancellationToken::new();
-    let response_context =
-        ResponseContext(OperationContext::new(Some(deadline), response_token.clone()));
+    let response_context = ResponseContext(OperationContext::new(
+        Some(deadline),
+        response_token.clone(),
+    ));
     let response_guard = response_token.drop_guard();
     request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context);

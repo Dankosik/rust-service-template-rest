@@ -355,8 +355,9 @@ impl EchoService for Echo {
                     recorded.notify_one();
                 }
             });
-            let stream =
-                futures_util::stream::unfold(rx, |mut rx| async { rx.recv().await.map(|v| (v, rx)) });
+            let stream = futures_util::stream::unfold(rx, |mut rx| async {
+                rx.recv().await.map(|v| (v, rx))
+            });
             return Ok(Response::new(Box::pin(stream)));
         }
         Ok(Response::new(Box::pin(async_stream::stream! {
