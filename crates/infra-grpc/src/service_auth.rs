@@ -45,6 +45,10 @@ impl CallerAdmission {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the call returns"
+)]
 pub(crate) async fn admit_caller(
     admission: &CallerAdmission,
     context: &OperationContext,

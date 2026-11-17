@@ -280,6 +280,10 @@ async fn open_business(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the call returns"
+)]
 async fn acquire_permit(
     permits: Option<&Arc<Semaphore>>,
     remaining_wait: &mut Duration,
@@ -290,18 +294,16 @@ async fn acquire_permit(
         return Ok((None, request));
     };
     let wait = admission_wait(*remaining_wait, opening_context);
-    match infra_http::acquire_within(permits, wait, observe::admission_waiting).await {
-        Ok((permit, waited)) => {
-            *remaining_wait = remaining_wait.saturating_sub(waited.unwrap_or_default());
-            Ok((Some(permit), request))
+    let Ok((permit, waited)) =
+        infra_http::acquire_within(permits, wait, observe::admission_waiting).await
+    else {
+        if let Some(reason) = opening_context.stopped() {
+            return Err(server_stopped(reason).into_http());
         }
-        Err(_) => {
-            if let Some(reason) = opening_context.stopped() {
-                return Err(server_stopped(reason).into_http());
-            }
-            Err(reject_shed(opening_context, request).await)
-        }
-    }
+        return Err(reject_shed(opening_context, request).await);
+    };
+    *remaining_wait = remaining_wait.saturating_sub(waited.unwrap_or_default());
+    Ok((Some(permit), request))
 }
 
 async fn reject_shed(opening_context: &OperationContext, request: Request) -> Response {

@@ -296,11 +296,16 @@ impl EchoService for Echo {
             "drain-aware" => {
                 let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
                 let context = response_context.expect("response context is present");
-                Box::pin(first.chain(async_stream::stream! {
-                    let _dropped = dropped;
-                    let reason = context.operation().wait_stopped().await;
-                    assert_eq!(reason, operation_context::Stopped::Cancelled);
-                }))
+                Box::pin(
+                    first.chain(
+                        futures_util::stream::once(async move {
+                            let _dropped = dropped;
+                            let reason = context.operation().wait_stopped().await;
+                            assert_eq!(reason, operation_context::Stopped::Cancelled);
+                        })
+                        .filter_map(|()| std::future::ready(None)),
+                    ),
+                )
             }
             "flood" => {
                 let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));

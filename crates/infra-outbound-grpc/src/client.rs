@@ -328,15 +328,10 @@ impl Service<http::Uri> for GrpcConnector {
                 match tls {
                     None => Ok(TokioIo::new(Either::Left(tcp))),
                     Some((connector, server_name)) => {
-                        let tls_stream = connector.connect(server_name, tcp).await.map_err(
-                            |error| -> BoxError {
-                                if error.kind() == std::io::ErrorKind::TimedOut {
-                                    Box::new(tonic::TimeoutExpired(()))
-                                } else {
-                                    Box::new(error)
-                                }
-                            },
-                        )?;
+                        let tls_stream = connector
+                            .connect(server_name, tcp)
+                            .await
+                            .map_err(handshake_error)?;
                         if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
                             return Err(Box::new(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -351,6 +346,14 @@ impl Service<http::Uri> for GrpcConnector {
                 .await
                 .unwrap_or_else(|_elapsed| Err(Box::new(tonic::TimeoutExpired(()))))
         })
+    }
+}
+
+fn handshake_error(error: std::io::Error) -> BoxError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        Box::new(tonic::TimeoutExpired(()))
+    } else {
+        Box::new(error)
     }
 }
 
@@ -372,9 +375,8 @@ fn parse_destination(
         return Err(ClientError::InvalidDestination);
     }
     let uri = http::Uri::try_from(raw).map_err(|_| ClientError::InvalidDestination)?;
-    let scheme = match uri.scheme_str() {
-        Some(scheme @ ("http" | "https")) => scheme,
-        _ => return Err(ClientError::InvalidDestination),
+    let Some(scheme @ ("http" | "https")) = uri.scheme_str() else {
+        return Err(ClientError::InvalidDestination);
     };
     let Some(host) = uri
         .authority()
