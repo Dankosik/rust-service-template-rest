@@ -225,7 +225,6 @@ impl ProviderClient {
         form: &[(&str, &str)],
         context: &OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        context.check().map_err(|_| ProviderFailure::Timeout)?;
         let client_id = form_encode(client_id);
         let client_secret = form_encode(client_secret);
         let request = self
@@ -233,11 +232,9 @@ impl ProviderClient {
             .post(url.clone())
             .basic_auth(&client_id, Some(&client_secret))
             .form(form);
-        let result = Exchange::start("introspection", "POST", url)
+        Exchange::start("introspection", "POST", url)
             .run(request, ExchangeMode::Introspection(context))
-            .await;
-        context.check().map_err(|_| ProviderFailure::Timeout)?;
-        result
+            .await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
 }
@@ -330,22 +327,14 @@ impl Exchange {
         let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
         let receive = receive(request, require_json_content_type, &span).instrument(span.clone());
         let result = match mode {
-            ExchangeMode::Introspection(context) => {
-                tokio::select! {
-                    biased;
-                    stopped = context.wait_stopped() => {
-                        std::mem::DropGuard::dismiss(guard).record(&span, Some(stopped_label(stopped)));
-                        return Err(ProviderFailure::Timeout);
-                    }
-                    result = receive => result,
-                }
+            ExchangeMode::Introspection(_) | ExchangeMode::Document { deadline: None } => {
+                receive.await
             }
             ExchangeMode::Document {
                 deadline: Some(deadline),
             } => tokio::time::timeout_at(deadline, receive)
                 .await
                 .unwrap_or(Err(ProviderFailure::Timeout)),
-            ExchangeMode::Document { deadline: None } => receive.await,
         };
         std::mem::DropGuard::dismiss(guard).record(
             &span,

@@ -676,6 +676,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_blank_audience_is_an_invalid_option_as_in_configuration() {
+        let fixture = Fixture::new().await;
+        let mut options = fixture.options(None);
+        options.audiences = vec![" \t".to_owned()];
+        let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
+            panic!("a blank audience was accepted");
+        };
+        assert_eq!(error.reason(), crate::PreparationReason::InvalidOption);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
     async fn uncached_introspection_expires_at_the_parent_cutoff_and_releases_capacity() {
         let fixture = Fixture::new().await;
         let verifier = fixture.prepared(None);
