@@ -18,9 +18,8 @@ use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
 use crate::{
-    BearerToken, PreparationError, Principal, VerificationError, VerificationReason, Verifier,
+    PreparationError, PresentedToken, Principal, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    principal::VerifiedIdentity,
     provider::{CallerStop, ProviderClient},
 };
 
@@ -140,7 +139,7 @@ impl PositiveCache {
     }
 }
 
-fn token_digest(token: &BearerToken<'_>) -> TokenDigest {
+fn token_digest(token: &PresentedToken<'_>) -> TokenDigest {
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
     let mut key = [0_u8; 32];
     key.copy_from_slice(digest.as_ref());
@@ -181,7 +180,7 @@ impl IntrospectionVerifier {
 
     pub(crate) async fn verify(
         self: &Arc<Self>,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
         self.verify_with_now(token, context, || {
@@ -192,7 +191,7 @@ impl IntrospectionVerifier {
 
     async fn verify_with_now(
         self: &Arc<Self>,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
         context: &OperationContext,
         now: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
@@ -205,14 +204,14 @@ impl IntrospectionVerifier {
             return self
                 .introspect(token.to_secret(), &|| context.stopped(), &now)
                 .await?
-                .deliver(now()?, token);
+                .deliver(now()?);
         };
         let key = token_digest(token);
         loop {
             if let Some(value) = cache.retained.get(&key).await
                 && value.reusable_at(now()?)
             {
-                return Ok(value.identity.presented_as(token));
+                return Ok(value.identity);
             }
             let filled = cache
                 .join_fill(key, context, |last_waiter_stop| {
@@ -235,7 +234,7 @@ impl IntrospectionVerifier {
                 })
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.deliver(now()?, token);
+                return value.deliver(now()?);
             }
         }
     }
@@ -296,7 +295,7 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     }
 }
 
-fn retention(identity: &VerifiedIdentity, ttl: Duration, now: SystemTime) -> Duration {
+fn retention(identity: &Principal, ttl: Duration, now: SystemTime) -> Duration {
     match now.duration_since(UNIX_EPOCH) {
         Ok(now) if identity.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
             Duration::from_secs(identity.expires_at())
@@ -640,16 +639,6 @@ mod tests {
             );
         }
         assert_eq!(fixture.calls(), 0);
-        fixture.finish().await;
-    }
-
-    #[tokio::test]
-    async fn access_token_equals_the_presented_bearer_text() {
-        use secrecy::ExposeSecret;
-        let fixture = Fixture::new().await;
-        let uncached = fixture.verifier(None);
-        let principal = verify(&uncached, b"Bearer first").await.unwrap();
-        assert_eq!(principal.access_token().expose_secret(), "first");
         fixture.finish().await;
     }
 

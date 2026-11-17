@@ -155,9 +155,7 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
     messaging
         .producer()
         .publish(
-            &registry(&fixture)
-                .prepare(&event("publisher-no-dlq"), 1024)
-                .unwrap(),
+            &fixture.prepare(&event("publisher-no-dlq"), 1024).unwrap(),
             &context(deadline(), &CancellationToken::new()),
         )
         .await
@@ -215,12 +213,14 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
         ))
         .await
         .unwrap();
-        let mut registered = registry(&fixture);
+        let mut registered = fixture.registry.clone();
         registered
-            .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
+            .register(&fixture.route, |_, _| async {
+                Err(HandlerError::Permanent)
+            })
             .unwrap();
         let (_guard, logged) = capture_logs();
-        let consumer = messaging.consumer(registered).await;
+        let consumer = messaging.consumer(registered, deadline(), &cancel).await;
         if short {
             std::assert_matches!(consumer, Err(infra_messaging::MessagingError::Bounds));
             assert_eq!(
@@ -244,7 +244,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
             );
         } else {
             let mut handle = consumer.unwrap().start(&cancel);
-            let prepared = registry(&fixture)
+            let prepared = fixture
                 .prepare(&event_with_value("full-transfer", &"x".repeat(1012)), 1024)
                 .unwrap();
             assert_eq!(prepared.payload().len(), 1024);
@@ -291,10 +291,13 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
     source.subjects = vec![filter.clone()];
     fixture.jetstream.update_stream(source).await.unwrap();
 
-    let mut registered = Registry::try_new([Route::new::<ExampleEvent>(registered_subject)])
+    let route = Route::<ExampleEvent>::new(registered_subject);
+    let mut registered = Registry::default();
+    registered
+        .declare(&route)
         .expect("the handled subject belongs to the wildcard filter");
     registered
-        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .register(&route, |_, _| async { Ok(()) })
         .unwrap();
     let mut consumer = consumer_options(&fixture);
     consumer.filter_subject = filter;
@@ -306,9 +309,13 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
     ))
     .await
     .unwrap();
-    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+    let mut handle = messaging
+        .consumer(registered, deadline(), &cancel)
+        .await
+        .unwrap()
+        .start(&cancel);
 
-    let prepared = infra_messaging::PreparedEvent::prepare(
+    let prepared = infra_messaging::PreparedEvent::prepare_for_subject(
         subject.clone(),
         &event_with_value("wildcard-transfer", &"x".repeat(1012)),
         1024,
@@ -378,13 +385,15 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
     ))
     .await
     .unwrap();
-    let mut registered = registry(&fixture);
+    let mut registered = fixture.registry.clone();
     registered
-        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .register(&fixture.route, |_, _| async { Ok(()) })
         .unwrap();
     let (_guard, logged) = capture_logs();
     std::assert_matches!(
-        messaging.consumer(registered).await,
+        messaging
+            .consumer(registered, deadline(), &CancellationToken::new())
+            .await,
         Err(infra_messaging::MessagingError::Bounds)
     );
     assert_eq!(
@@ -447,13 +456,14 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         };
         let subject_bytes = 65_535 + excess - 8192 - transfer_additions("", &fixture.dlq_stream);
         let subject = format!("{prefix}{}", "x".repeat(subject_bytes - prefix.len()));
-        let mut registered = Registry::try_new([
-            Route::new::<ExampleEvent>(handled_subject),
-            Route::new::<UnhandledEvent>(subject),
-        ])
-        .unwrap();
+        let route = Route::<ExampleEvent>::new(handled_subject);
+        let mut registered = Registry::default();
+        registered.declare(&route).unwrap();
         registered
-            .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+            .declare(&Route::<UnhandledEvent>::new(subject))
+            .unwrap();
+        registered
+            .register(&route, |_, _| async { Ok(()) })
             .unwrap();
         let messaging = Box::pin(Messaging::connect(
             options,
@@ -463,7 +473,9 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         .await
         .unwrap();
         let (_guard, logged) = capture_logs();
-        let admitted = messaging.consumer(registered).await;
+        let admitted = messaging
+            .consumer(registered, deadline(), &CancellationToken::new())
+            .await;
         if selected && excess > 0 {
             std::assert_matches!(admitted, Err(infra_messaging::MessagingError::Bounds));
             assert_eq!(

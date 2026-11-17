@@ -18,6 +18,9 @@ pub(crate) async fn bounded_operation<T>(
 ) -> Result<T, MessagingError> {
     let deadline = within_operation_budget(deadline);
     let budget = deadline.saturating_duration_since(Instant::now());
+    if budget.is_zero() {
+        return Err(MessagingError::TimedOut { budget });
+    }
     tokio::select! {
         biased;
         () = cancel.cancelled() => {

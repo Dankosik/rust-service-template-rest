@@ -2,38 +2,65 @@ use super::*;
 use std::assert_matches;
 
 #[tokio::test]
-async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_io() {
+async fn each_identity_mode_requires_its_own_subject_policy_before_any_io() {
     let fixture = Fixture::new().await;
     let credentials = fixture.credentials(&[], None);
-    credentials
-        .http(fixture.resource_client())
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
-        .await
-        .unwrap();
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert_eq!(fixture.resource_requests().len(), 1);
+    let resource = fixture.resource_client();
+    let service = credentials.http(resource.clone(), IdentityMode::Service);
+    let delegated = credentials.http(resource, IdentityMode::OnBehalfOf);
+    assert_matches!(
+        fixture
+            .send_request(&service, fixture.on_behalf_of_request("alice"))
+            .await,
+        Err(Error::UnexpectedSubject)
+    );
+    assert_matches!(fixture.send(&delegated).await, Err(Error::SubjectRequired));
+    assert!(fixture.token_requests().is_empty());
+    assert!(fixture.resource_requests().is_empty());
 
-    let client = credentials
-        .http(fixture.resource_client())
-        .require_on_behalf_of();
-    let error = fixture.send(&client).await.unwrap_err();
-    assert_matches!(error, Error::SubjectRequired);
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert_eq!(fixture.resource_requests().len(), 1);
-
+    fixture.send(&service).await.unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
-        .send_request(&client, fixture.on_behalf_of_request("alice"))
+        .send_request(&delegated, fixture.on_behalf_of_request("alice"))
         .await
         .unwrap();
+    assert_eq!(
+        form_value(&form_pairs(&fixture.token_requests()[0].body), "grant_type"),
+        "client_credentials"
+    );
     assert_eq!(
         form_value(&form_pairs(&fixture.token_requests()[1].body), "grant_type"),
         GRANT_TYPE_TOKEN_EXCHANGE
     );
     assert_eq!(
+        fixture.resource_requests()[0].header("authorization"),
+        Some("Bearer fixture-token")
+    );
+    assert_eq!(
         fixture.resource_requests()[1].header("authorization"),
         Some("Bearer exchanged")
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invalid_resource_target_refuses_before_acquiring_credentials() {
+    let fixture = Fixture::new().await;
+    let client = fixture.client(IdentityMode::Service);
+    let mut foreign = fixture.request();
+    *foreign.uri_mut() = "https://other.example/resource".parse().unwrap();
+    let mut spoofed = fixture.request();
+    spoofed
+        .headers_mut()
+        .insert(header::HOST, "other.example".parse().unwrap());
+    for request in [foreign, spoofed] {
+        assert_matches!(
+            fixture.send_request(&client, request).await,
+            Err(Error::Resource(infra_outbound_http::Error::InvalidTarget))
+        );
+    }
+    assert!(fixture.token_requests().is_empty());
+    assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }
 
@@ -50,7 +77,7 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder = metrics::set_default_local_recorder(&recorder);
-        let client = fixture.client();
+        let client = fixture.client(IdentityMode::Service);
         let budget = Duration::from_secs(2);
         let context = OperationContext::with_timeout(budget);
         let mut exchange = Box::pin(client.execute_with_context(fixture.request(), &context));
@@ -104,7 +131,7 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
 async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
-    let client = fixture.client();
+    let client = fixture.client(IdentityMode::Service);
     let operation = OperationContext::with_timeout(Duration::from_secs(1));
     let request_context = OperationContext::unbounded();
     let mut request = fixture.request();
@@ -127,7 +154,7 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() 
 #[tokio::test]
 async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() {
     let fixture = Fixture::new().await;
-    let client = fixture.client();
+    let client = fixture.client(IdentityMode::Service);
     let operation = OperationContext::with_timeout(Duration::ZERO);
     let request_context = OperationContext::unbounded();
     request_context.cancel();
@@ -157,6 +184,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
             },
         )
         .unwrap(),
+        IdentityMode::Service,
     );
     let context = OperationContext::with_timeout(Duration::from_secs(30));
     let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
@@ -264,7 +292,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         ),
     ] {
         fixture.token_raw(response);
-        let error = fixture.client()
+        let error = fixture.client(IdentityMode::Service)
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
@@ -280,7 +308,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
 async fn token_acquisition_stops_at_the_fetch_deadline_without_dispatching_the_resource() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
-    let client = fixture.client();
+    let client = fixture.client(IdentityMode::Service);
     let mut timed = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
@@ -298,14 +326,20 @@ async fn token_acquisition_stops_at_the_fetch_deadline_without_dispatching_the_r
 #[tokio::test]
 async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
     let fixture = Fixture::new().await;
-    for mut conflicting in [fixture.request(), fixture.on_behalf_of_request("subject")] {
+    for (mode, mut conflicting) in [
+        (IdentityMode::Service, fixture.request()),
+        (
+            IdentityMode::OnBehalfOf,
+            fixture.on_behalf_of_request("subject"),
+        ),
+    ] {
         conflicting.headers_mut().insert(
             header::AUTHORIZATION,
             "Bearer caller-token".parse().unwrap(),
         );
         assert_matches!(
             fixture
-                .client()
+                .client(mode)
                 .execute(conflicting, deadline(Duration::from_secs(10)))
                 .await,
             Err(Error::AuthorizationConflict)
@@ -321,7 +355,7 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
     let fixture = Fixture::new().await;
     for (status, follow_up_fetches) in [(StatusCode::UNAUTHORIZED, 1), (StatusCode::FORBIDDEN, 0)] {
         fixture.resource_status(StatusCode::OK);
-        let client = fixture.client();
+        let client = fixture.client(IdentityMode::Service);
         let before_tokens = fixture.token_requests().len();
         let before_resources = fixture.resource_requests().len();
         fixture.send(&client).await.unwrap();
@@ -355,6 +389,7 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
             },
         )
         .unwrap(),
+        IdentityMode::Service,
     );
     let call = || fixture.send(&client);
     call().await.unwrap();
@@ -392,7 +427,7 @@ async fn a_resource_that_refuses_every_token_costs_one_token_request_per_evictio
         &serde_json::json!({"access_token": "refused", "token_type": "Bearer", "expires_in": 3600}),
     );
     fixture.resource_status(StatusCode::UNAUTHORIZED);
-    let client = fixture.client();
+    let client = fixture.client(IdentityMode::Service);
     for token_requests in [1, 2] {
         for _ in 0..3 {
             let response = fixture.send(&client).await.unwrap();
@@ -413,9 +448,9 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let credentials = fixture.credentials(&[], None);
-    let client = credentials.http(fixture.resource_client());
+    let client = credentials.http(fixture.resource_client(), IdentityMode::Service);
     credentials
-        .service_token(acquisition_deadline(&token_context(), None))
+        .service_token(acquisition_deadline(&token_context()))
         .await
         .unwrap();
     advance(EVICTION_MIN_AGE).await;
@@ -430,7 +465,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .service_token(acquisition_deadline(&token_context(), None))
+        .service_token(acquisition_deadline(&token_context()))
         .await
         .unwrap();
 

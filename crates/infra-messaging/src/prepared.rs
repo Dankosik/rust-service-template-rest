@@ -8,7 +8,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::error::EnvelopeError;
-use crate::registry::{Registry, route_key};
+use crate::registry::{Registry, Route, route_key};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
@@ -33,12 +33,13 @@ pub(crate) struct PreparedEventParts {
 }
 
 impl Registry {
-    pub fn prepare<T: EventPayload + Serialize>(
+    pub fn prepare<T: EventPayload + Serialize + 'static>(
         &self,
+        route: &Route<T>,
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<PreparedEvent, EnvelopeError> {
-        let subject = self.subject_for::<T>().ok_or(EnvelopeError::MissingRoute {
+        let subject = self.subject_for(route).ok_or(EnvelopeError::MissingRoute {
             event_type: T::EVENT_TYPE,
             schema_version: T::SCHEMA_VERSION,
         })?;
@@ -47,7 +48,7 @@ impl Registry {
 }
 
 impl PreparedEvent {
-    pub fn prepare<T: EventPayload + Serialize>(
+    pub fn prepare_for_subject<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
         max_payload_bytes: usize,
@@ -163,7 +164,7 @@ impl PreparedEvent {
     }
 }
 
-fn payload_depth_allowed(bytes: &[u8]) -> bool {
+pub(crate) fn payload_depth_allowed(bytes: &[u8]) -> bool {
     let mut depth = 0_usize;
     let mut in_string = false;
     let mut escaped = false;
@@ -318,11 +319,11 @@ mod tests {
             items: [true, false],
         });
         let expected = r#"{"text":"a\"\\\n\u0000Ж","amount":1.0,"items":[true,false]}"#;
-        let prepared = PreparedEvent::prepare("events.created", &event, expected.len())
+        let prepared = PreparedEvent::prepare_for_subject("events.created", &event, expected.len())
             .expect("payload at the exact ceiling is admitted");
         assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
         std::assert_matches!(
-            PreparedEvent::prepare("events.created", &event, expected.len() - 1),
+            PreparedEvent::prepare_for_subject("events.created", &event, expected.len() - 1),
             Err(EnvelopeError::PayloadTooLarge)
         );
     }
@@ -347,7 +348,7 @@ mod tests {
                 value: vec![Numbers { required, optional }],
                 calls: Cell::new(0),
             });
-            let error = PreparedEvent::prepare("events.created", &event, 0)
+            let error = PreparedEvent::prepare_for_subject("events.created", &event, 0)
                 .expect_err("non-finite numbers cannot become publishable intent");
             assert_eq!(error, EnvelopeError::Serialization);
             assert_eq!(error.to_string(), "event payload cannot be serialized");
@@ -365,8 +366,9 @@ mod tests {
                 }],
                 calls: Cell::new(0),
             });
-            let prepared = PreparedEvent::prepare("events.created", &event, expected.len())
-                .expect("intentional null and finite numbers remain valid");
+            let prepared =
+                PreparedEvent::prepare_for_subject("events.created", &event, expected.len())
+                    .expect("intentional null and finite numbers remain valid");
             assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
             assert_eq!(event.payload.calls.get(), 1);
         }
@@ -391,7 +393,8 @@ mod tests {
                     value,
                     calls: Cell::new(0),
                 });
-                let prepared = PreparedEvent::prepare("events.created", &event, bytes.len());
+                let prepared =
+                    PreparedEvent::prepare_for_subject("events.created", &event, bytes.len());
                 if readable {
                     assert_eq!(
                         prepared
@@ -430,7 +433,8 @@ mod tests {
                 .expect("Go zero time is representable")
                 .to_utc();
             assert_eq!(
-                PreparedEvent::prepare(subject, &event, limit).expect_err("invalid event"),
+                PreparedEvent::prepare_for_subject(subject, &event, limit)
+                    .expect_err("invalid event"),
                 expected
             );
             assert_eq!(event.payload.calls.get(), calls);
@@ -447,7 +451,7 @@ mod tests {
         for id in [" event-id", "event-id ", "event-id\u{a0}"] {
             event.id = id.to_owned();
             std::assert_matches!(
-                PreparedEvent::prepare("events.created", &event, 1024),
+                PreparedEvent::prepare_for_subject("events.created", &event, 1024),
                 Err(EnvelopeError::Identity)
             );
         }
@@ -516,7 +520,7 @@ mod tests {
                     .expect("Go zero time is representable")
                     .to_utc();
             }
-            let error = PreparedEvent::prepare(subject, &event, limit)
+            let error = PreparedEvent::prepare_for_subject(subject, &event, limit)
                 .expect_err("invalid event must be refused");
             assert_eq!(error, reason);
             assert_eq!(event.payload.calls.get(), calls);
@@ -526,7 +530,7 @@ mod tests {
             elements: 1,
             fail_at_end: false,
         });
-        let prepared = PreparedEvent::prepare("events.created", &event, 3)
+        let prepared = PreparedEvent::prepare_for_subject("events.created", &event, 3)
             .expect("small output ignores the untrusted size hint");
         assert_eq!(prepared.payload().as_ref(), b"[0]");
         assert_eq!(event.payload.calls.get(), 1);
@@ -576,7 +580,7 @@ mod tests {
                 occurred_at,
                 ..event(payload())
             };
-            let result = PreparedEvent::prepare("events.created", &event, 1_024);
+            let result = PreparedEvent::prepare_for_subject("events.created", &event, 1_024);
             if accepted {
                 let prepared = result.expect("the time is in range");
                 crate::wire::encode_prepared(&prepared).expect("an accepted time encodes");

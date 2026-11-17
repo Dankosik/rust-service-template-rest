@@ -109,11 +109,13 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         .unwrap()
         .serve_h2(
             app,
-            infra_http_transport::ServerOptions {
-                header_read_timeout: WAIT,
-                max_header_bytes: 16 * 1024,
-                max_connections: None,
-                max_connection_age: None,
+            infra_http_transport::Http2Options {
+                preface_timeout: WAIT,
+                max_header_list_size: 16 * 1024,
+                connections: infra_http_transport::ConnectionLimits {
+                    max_connections: None,
+                    max_connection_age: None,
+                },
             },
             None,
         );

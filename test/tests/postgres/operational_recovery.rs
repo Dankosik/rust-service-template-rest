@@ -3,7 +3,7 @@ use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
 use health::{Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
-use infra_http_transport::{Drained, Server, ServerOptions};
+use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
 use integration_tests::poll_until;
 use tokio::{
@@ -102,11 +102,13 @@ impl Instance {
         });
         let server = http_router(pool.clone(), &readiness).serve(
             infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap(),
-            ServerOptions {
+            Http1Options {
                 header_read_timeout: Duration::from_secs(5),
-                max_header_bytes: 16 * 1024,
-                max_connections: NonZeroU32::new(HTTP_CONNECTIONS),
-                max_connection_age: None,
+                max_read_buffer_bytes: 16 * 1024,
+                connections: ConnectionLimits {
+                    max_connections: NonZeroU32::new(HTTP_CONNECTIONS),
+                    max_connection_age: None,
+                },
             },
         );
         let address = server.local_addr();
@@ -693,7 +695,7 @@ mod grpc {
             EndpointUrl, IntrospectionOptions, IssuerUrl,
             test_support::{FixtureTransport, prepare_introspection_with_fixture},
         };
-        use infra_http_transport::BoundListener;
+        use infra_http_transport::{BoundListener, TlsOptions};
         use std::{num::NonZeroUsize, sync::Arc};
         use tokio_rustls::rustls::{
             self,
@@ -718,13 +720,18 @@ mod grpc {
         let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let server = listener.serve_tls(
             router,
-            ServerOptions {
+            Http1Options {
                 header_read_timeout: Duration::from_secs(5),
-                max_header_bytes: 16 * 1024,
-                max_connections: NonZeroU32::new(16),
-                max_connection_age: None,
+                max_read_buffer_bytes: 16 * 1024,
+                connections: ConnectionLimits {
+                    max_connections: NonZeroU32::new(16),
+                    max_connection_age: None,
+                },
             },
-            Arc::new(config),
+            TlsOptions {
+                config: Arc::new(config),
+                handshake_timeout: Duration::from_secs(5),
+            },
         );
         let cancel = CancellationToken::new();
         let fixture = FixtureTransport::try_new(

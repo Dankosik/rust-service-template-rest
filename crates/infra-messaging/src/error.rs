@@ -50,19 +50,35 @@ pub enum EnvelopeError {
     DeadLetterCreatedAtRequired,
     #[error("dead-letter record has no verifiable original message ID")]
     DeadLetterMessageIdMissing,
-    #[error("event route is not registered for {event_type} v{schema_version}")]
+    #[error("typed route is not registered for {event_type} v{schema_version}")]
     MissingRoute {
         event_type: &'static str,
         schema_version: u16,
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PublishError {
-    #[error("messaging publication was rejected")]
-    Rejected,
+    #[error("messaging publication was rejected: {0}")]
+    Rejected(#[from] PublishRejection),
     #[error("messaging publication acknowledgement is ambiguous")]
     Ambiguous,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PublishRejection {
+    #[error("invalid publication envelope: {0}")]
+    InvalidEnvelope(#[source] EnvelopeError),
+    #[error("messaging resource is draining or its consumer failed")]
+    Unavailable,
+    #[error("publication context stopped before dispatch")]
+    ContextStopped,
+    #[error("publication acknowledgement window is full")]
+    WindowFull,
+    #[error("message exceeds the broker's current size limit")]
+    BrokerSizeLimit,
+    #[error("broker refused publication")]
+    BrokerRefused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

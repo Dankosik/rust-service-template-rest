@@ -103,7 +103,11 @@ pub(super) async fn connect_messaging(
         let messaging = resources
             .admitted_messaging()
             .ok_or(MessagingError::Connection)?;
-        Ok(Some(messaging.consumer(registration.registry).await?))
+        Ok(Some(
+            messaging
+                .consumer(registration.registry, deadline, cancel)
+                .await?,
+        ))
     } else {
         Ok(None)
     }
@@ -174,7 +178,7 @@ mod tests {
     fn refusal_texts_name_the_failed_check() {
         assert_eq!(
             WorkerError::ConsumerStopped(infra_messaging::ConsumerError::ConsumerLost).to_string(),
-            "the messaging consumer stopped without a stop signal: messaging durable consumer was deleted or replaced"
+            "the messaging consumer stopped without a stop signal: messaging durable consumer was deleted, replaced, or reconfigured incompatibly"
         );
     }
 }

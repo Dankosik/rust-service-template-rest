@@ -21,12 +21,14 @@ This source patches `src/{lib,client,connector,options,tls}.rs`,
   loading, and runner close-lease custody restricted to live clients and
   subscribers so detached `UNSUB` cleanup cannot pin a full reconnect queue;
 - non-terminal `409 Batch Completed` handling in `pull::Batch` when NATS
-  allocates the full count before replicated deliveries arrive.
+  allocates the full count before replicated deliveries arrive, and typed
+  status and description on terminal batch errors so a consumer can recognize
+  a refused byte budget independently of the diagnostic text.
 
 Retire this vendor directory, root Cargo patch/exclusion, `messaging`
 profile/Docker/classifier carriers, and vendor fixture `.gitleaks.toml` rules
 together when a published `async-nats` release provides equivalent request
 pruning, ACK/permit custody, passive occupancy observation (never replaced with
 permit acquisition or `wait_for_acks`), bounded transport/close-lease recovery,
-and reordered `Batch Completed` handling, passing
+reordered `Batch Completed` handling and structured terminal pull statuses, passing
 `make native-transport-regressions` and messaging integration proofs.

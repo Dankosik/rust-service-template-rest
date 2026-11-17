@@ -171,7 +171,7 @@ mod outbox {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
     use domain_events::{Event, EventPayload};
-    use infra_messaging::{PreparedEvent, outbox::OutboxEnqueued};
+    use infra_messaging::{Registry, Route, outbox::OutboxEnqueued};
 
     use super::*;
 
@@ -190,7 +190,10 @@ mod outbox {
                 text: "literal \\u0000 and 1.0".into(),
             },
         };
-        let prepared = PreparedEvent::prepare("events.operator.created", &event, 1024).unwrap();
+        let route = Route::<Note>::new("events.operator.created");
+        let mut registry = Registry::default();
+        registry.declare(&route).unwrap();
+        let prepared = registry.prepare(&route, &event, 1024).unwrap();
         in_tx(&jobs, async |tx| {
             assert_eq!(prepared.enqueue(tx).await.unwrap(), OutboxEnqueued::Created);
             Ok::<_, OperatorError>(())

@@ -13,10 +13,10 @@ use tracing::Instrument as _;
 
 use super::ConsumerError;
 use crate::budget::BROKER_OPERATION_BUDGET;
-use crate::error::HandlerError;
+use crate::error::{HandlerError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
-use crate::producer::{PublicationFailure, send_publication};
+use crate::producer::send_publication;
 use crate::registry::{DispatchError, Registry};
 use crate::wire;
 
@@ -321,8 +321,8 @@ impl DeliveryHandler {
         .await;
         let outcome = match &result {
             Ok(_) => "accepted",
-            Err(PublicationFailure::Ambiguous) => "ambiguous",
-            Err(PublicationFailure::Rejected | PublicationFailure::SizeLimit) => "rejected",
+            Err(PublishError::Ambiguous) => "ambiguous",
+            Err(PublishError::Rejected(_)) => "rejected",
         };
         metrics::counter!(
             DEAD_LETTER_TOTAL,
@@ -343,10 +343,12 @@ impl DeliveryHandler {
             "messaging_dead_letter_transfer_failed"
         );
         match failure {
-            PublicationFailure::SizeLimit => Err(ConsumerError::DeadLetterTooLarge {
-                sequence: info.stream_sequence,
-            }),
-            PublicationFailure::Rejected | PublicationFailure::Ambiguous => {
+            PublishError::Rejected(PublishRejection::BrokerSizeLimit) => {
+                Err(ConsumerError::DeadLetterTooLarge {
+                    sequence: info.stream_sequence,
+                })
+            }
+            PublishError::Rejected(_) | PublishError::Ambiguous => {
                 redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
                 Ok(())
             }
@@ -477,13 +479,14 @@ mod tests {
     fn handler_metrics_carry_handled_event_types_and_no_publisher_chosen_text() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let mut registry = Registry::try_new([
-                Route::new::<Created>("orders.created"),
-                Route::new::<Shipped>("orders.shipped"),
-            ])
-            .unwrap();
+            let created = Route::<Created>::new("orders.created");
+            let mut registry = Registry::default();
+            registry.declare(&created).unwrap();
             registry
-                .register::<Created, _, _>(|_, _| async { Ok(()) })
+                .declare(&Route::<Shipped>::new("orders.shipped"))
+                .unwrap();
+            registry
+                .register(&created, |_, _| async { Ok(()) })
                 .unwrap();
             let metrics = HandlerMetrics::register(&registry);
 
@@ -530,10 +533,11 @@ mod tests {
         for expected in ["timeout", "success", "panic"] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
             let token_tx = std::sync::Mutex::new(Some(token_tx));
-            let mut registry =
-                Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
+            let created = Route::<Created>::new("orders.created");
+            let mut registry = Registry::default();
+            registry.declare(&created).unwrap();
             registry
-                .register::<Created, _, _>(move |_, context| {
+                .register(&created, move |_, context| {
                     let token_tx = token_tx.lock().unwrap().take();
                     async move {
                         assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
@@ -568,10 +572,11 @@ mod tests {
             ("timeout", Err(HandlerError::Permanent)),
             ("retryable", Ok(())),
         ] {
-            let mut registry =
-                Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
+            let created = Route::<Created>::new("orders.created");
+            let mut registry = Registry::default();
+            registry.declare(&created).unwrap();
             registry
-                .register::<Created, _, _>(move |_, context| async move {
+                .register(&created, move |_, context| async move {
                     if expected == "timeout" {
                         let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
                         assert_eq!(context.remaining(), Some(Duration::ZERO));
@@ -594,9 +599,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_delivery_never_invokes_the_handler() {
-        let mut registry = Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
+        let created = Route::<Created>::new("orders.created");
+        let mut registry = Registry::default();
+        registry.declare(&created).unwrap();
         registry
-            .register::<Created, _, _>(|_, _| async {
+            .register(&created, |_, _| async {
                 panic!("cancelled delivery reached the handler");
             })
             .unwrap();

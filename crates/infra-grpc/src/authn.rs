@@ -3,10 +3,10 @@ use axum::response::Response;
 use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_bearerauthn::{
-    Actor, ClaimAccessError, Failure as AuthFailure, Principal, Transport, Verifier,
+    Actor, ClaimAccessError, DelegationCredential, Failure as AuthFailure, Principal, Transport,
+    Verifier,
 };
 use operation_context::OperationContext;
-use secrecy::SecretString;
 use serde::de::DeserializeOwned;
 
 use crate::Failure;
@@ -34,11 +34,6 @@ impl VerifiedPrincipal {
     #[must_use]
     pub fn actor(&self) -> Option<&Actor> {
         self.0.actor()
-    }
-
-    #[must_use]
-    pub fn access_token(&self) -> &SecretString {
-        self.0.access_token()
     }
 
     #[must_use]
@@ -70,9 +65,16 @@ impl VerifiedPrincipal {
 pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
     extensions.remove::<VerifiedPrincipal>();
     extensions.remove::<Principal>();
+    extensions.remove::<DelegationCredential>();
 }
 
-pub(crate) type Scopes = HashMap<String, Box<[String]>>;
+#[derive(Debug)]
+pub(crate) struct ScopeRequirement {
+    pub(crate) scopes: Box<[String]>,
+    pub(crate) delegate: bool,
+}
+
+pub(crate) type Scopes = HashMap<String, ScopeRequirement>;
 
 #[expect(
     clippy::result_large_err,
@@ -94,22 +96,20 @@ pub(crate) async fn authenticate(
             .iter()
             .map(http::HeaderValue::as_bytes);
         verifier
-            .authenticate_with_context(authorization, Transport::Grpc, context)
+            .authenticate_presented_with_context(authorization, Transport::Grpc, context)
             .await
     };
     if let Some(reason) = context.stopped() {
         return Err(server_stopped(reason).into_http());
     }
-    let principal = match result {
-        Ok(principal) => principal,
+    let (principal, token) = match result {
+        Ok(presentation) => presentation,
         Err(failure) => {
             return Err(reject_with_budget(context, request, authentication_status(failure)).await);
         }
     };
-    let granted = scopes
-        .get(request.uri().path())
-        .is_none_or(|required| principal.has_scopes(required));
-    if !granted {
+    let requirement = scopes.get(request.uri().path());
+    if requirement.is_some_and(|rule| !principal.has_scopes(&rule.scopes)) {
         let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
@@ -119,7 +119,13 @@ pub(crate) async fn authenticate(
     if let Some(reason) = context.stopped() {
         return Err(server_stopped(reason).into_http());
     }
+    let delegation = requirement
+        .filter(|rule| rule.delegate)
+        .map(|_| token.into_delegation_credential());
     request.headers_mut().remove(AUTHORIZATION);
+    if let Some(credential) = delegation {
+        request.extensions_mut().insert(credential);
+    }
     request
         .extensions_mut()
         .insert(VerifiedPrincipal(principal));

@@ -314,7 +314,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         let credentials = realm.caller(algorithm, &key, &[], Some(TARGET)).await;
 
         let service = credentials
-            .service_token(acquisition_deadline(&token_context(), None))
+            .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
         let service = claims(&service);
@@ -322,7 +322,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         assert_eq!(service.azp, caller(algorithm));
         *credentials.cached() = super::Cached::default();
         credentials
-            .service_token(acquisition_deadline(&token_context(), None))
+            .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
 
@@ -333,7 +333,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         .unwrap()
         .claims;
         let exchanged = credentials
-            .exchange(&subject, acquisition_deadline(&token_context(), None))
+            .exchange(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
@@ -354,7 +354,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let stranger = realm.credentials(algorithm, &key_pair(algorithm), &[], None);
     assert_eq!(
         stranger
-            .service_token(acquisition_deadline(&token_context(), None))
+            .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidClient)
@@ -363,7 +363,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let unknown_scope = realm.credentials(algorithm, &key, &["not-a-scope"], None);
     assert_eq!(
         unknown_scope
-            .service_token(acquisition_deadline(&token_context(), None))
+            .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidScope)
@@ -373,7 +373,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let subject = SecretString::from("not-a-token");
     assert_eq!(
         registered
-            .exchange(&subject, acquisition_deadline(&token_context(), None))
+            .exchange(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)

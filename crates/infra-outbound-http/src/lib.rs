@@ -136,17 +136,11 @@ impl Client {
         request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        let operation = OperationContext::from_deadline(
-            Deadline::at(deadline)
-                .earlier(Deadline::new(Instant::now(), self.limits.operation_timeout)),
-        );
-        self.execute_within(request, &operation, || true, |_| {})
-            .await
-    }
-
-    #[must_use]
-    pub fn begin_operation(&self, parent: &OperationContext) -> OperationContext {
-        parent.child(self.limits.operation_timeout)
+        self.execute_with_context(
+            request,
+            &OperationContext::from_deadline(Deadline::at(deadline)),
+        )
+        .await
     }
 
     pub async fn execute_with_context(
@@ -164,59 +158,41 @@ impl Client {
         context: &OperationContext,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_dispatch_check(request, context, || true, on_status)
+        self.prepare(request, context)?
+            .send(|| true, on_status)
             .await
     }
 
-    pub async fn execute_with_dispatch_check(
-        &self,
-        request: Request<Bytes>,
-        context: &OperationContext,
-        check: impl FnOnce() -> bool + Send,
-        on_status: impl FnOnce(StatusCode) + Send,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_within(request, &self.begin_operation(context), check, on_status)
-            .await
-    }
-
-    async fn execute_within(
+    pub fn prepare(
         &self,
         mut request: Request<Bytes>,
-        operation: &OperationContext,
-        check: impl FnOnce() -> bool + Send,
-        on_status: impl FnOnce(StatusCode) + Send,
-    ) -> Result<Response<Bytes>, Error> {
+        context: &OperationContext,
+    ) -> Result<PreparedRequest<'_>, Error> {
         let request_context = request.extensions_mut().remove::<OperationContext>();
+        let mut ceiling = Deadline::new(Instant::now(), self.limits.operation_timeout);
+        if let Some(other) = request_context
+            .as_ref()
+            .and_then(OperationContext::deadline)
+        {
+            ceiling = ceiling.earlier(other);
+        }
         let stops = StopScopes {
-            operation,
-            request: request_context.as_ref(),
+            operation: context.child_until(ceiling),
+            request: request_context,
         };
         stops.check()?;
-        let mut request = policy::admit_request(&self.origin, request)?;
-
-        let template = request.extensions_mut().remove::<UrlTemplate>();
-        let mut attempt = observe::Attempt::start(
-            request.method(),
-            template,
-            &self.server,
-            self.origin.port(),
-            &stops,
-        );
-        if self.propagate_trace_context {
-            attempt.inject_trace_context(request.headers_mut());
-        }
-        let result = self
-            .exchange(request, &stops, &mut attempt, check, on_status)
-            .await
-            .and_then(|response| stops.check().map(|()| response));
-        std::mem::DropGuard::dismiss(attempt).finish(&result);
-        result
+        let request = policy::admit_request(&self.origin, request)?;
+        Ok(PreparedRequest {
+            client: self,
+            request,
+            stops,
+        })
     }
 
     async fn exchange(
         &self,
         request: Request<Bytes>,
-        stops: &StopScopes<'_>,
+        stops: &StopScopes,
         attempt: &mut observe::Attempt,
         check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
@@ -243,36 +219,100 @@ impl Client {
         };
         tokio::select! {
             biased;
-            error = stops.stopped() => Err(error),
+            reason = stops.wait_stopped() => Err(stopped_error(reason)),
             result = exchange.instrument(span) => result,
         }
     }
 }
 
-struct StopScopes<'a> {
-    operation: &'a OperationContext,
-    request: Option<&'a OperationContext>,
+#[derive(derive_more::Debug)]
+#[debug("PreparedRequest([REDACTED])")]
+pub struct PreparedRequest<'a> {
+    client: &'a Client,
+    request: Request<Bytes>,
+    stops: StopScopes,
 }
 
-impl StopScopes<'_> {
-    fn check(&self) -> Result<(), Error> {
-        self.operation
-            .check()
-            .and_then(|()| self.request.map_or(Ok(()), OperationContext::check))
-            .map_err(stopped_error)
+impl PreparedRequest<'_> {
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Deadline> {
+        self.stops.operation.deadline()
     }
 
-    async fn stopped(&self) -> Error {
+    #[must_use]
+    pub fn stopped(&self) -> Option<Stopped> {
+        self.stops.stopped()
+    }
+
+    pub async fn wait_stopped(&self) -> Stopped {
+        self.stops.wait_stopped().await
+    }
+
+    pub fn set_authorization(&mut self, value: http::HeaderValue) {
+        self.request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, value);
+    }
+
+    pub async fn send(
+        self,
+        check: impl FnOnce() -> bool + Send,
+        on_status: impl FnOnce(StatusCode) + Send,
+    ) -> Result<Response<Bytes>, Error> {
+        let Self {
+            client,
+            mut request,
+            stops,
+        } = self;
+        stops.check()?;
+        let template = request.extensions_mut().remove::<UrlTemplate>();
+        let mut attempt = observe::Attempt::start(
+            request.method(),
+            template,
+            &client.server,
+            client.origin.port(),
+            &stops,
+        );
+        if client.propagate_trace_context {
+            attempt.inject_trace_context(request.headers_mut());
+        }
+        let result = client
+            .exchange(request, &stops, &mut attempt, check, on_status)
+            .await
+            .and_then(|response| stops.check().map(|()| response));
+        std::mem::DropGuard::dismiss(attempt).finish(&result);
+        result
+    }
+}
+
+struct StopScopes {
+    operation: OperationContext,
+    request: Option<OperationContext>,
+}
+
+impl StopScopes {
+    fn stopped(&self) -> Option<Stopped> {
+        self.operation
+            .stopped()
+            .or_else(|| self.request.as_ref().and_then(OperationContext::stopped))
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        self.stopped()
+            .map_or(Ok(()), |reason| Err(stopped_error(reason)))
+    }
+
+    async fn wait_stopped(&self) -> Stopped {
         let request = async {
-            match self.request {
+            match &self.request {
                 Some(request) => request.wait_stopped().await,
                 None => std::future::pending().await,
             }
         };
         tokio::select! {
             biased;
-            stopped = self.operation.wait_stopped() => stopped_error(stopped),
-            stopped = request => stopped_error(stopped),
+            stopped = self.operation.wait_stopped() => stopped,
+            stopped = request => stopped,
         }
     }
 }
@@ -280,7 +320,7 @@ impl StopScopes<'_> {
 async fn buffer_response(
     response: Response<hyper::body::Incoming>,
     limit: usize,
-    stops: &StopScopes<'_>,
+    stops: &StopScopes,
 ) -> Result<Response<Bytes>, Error> {
     if hyper::body::Body::size_hint(response.body())
         .exact()

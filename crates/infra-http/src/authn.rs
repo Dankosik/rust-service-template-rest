@@ -5,7 +5,9 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
+use infra_bearerauthn::{
+    DelegationCredential, Failure, PresentedToken, Principal, Transport, Verifier,
+};
 use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
@@ -54,11 +56,6 @@ impl VerifiedPrincipal {
     }
 
     #[must_use]
-    pub fn access_token(&self) -> &secrecy::SecretString {
-        self.0.access_token()
-    }
-
-    #[must_use]
     pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
         self.0.actor()
     }
@@ -104,7 +101,7 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    request.extensions_mut().remove::<Principal>();
+    strip_identity(request.extensions_mut());
     let AuthState { verifier, policy } = state;
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure("path_missing");
@@ -112,16 +109,23 @@ async fn authenticate(
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
         None => policy.unregistered(Some(path), request.method()).await,
-        Some(Access::Protected(alternatives)) => {
-            authenticate_protected(&verifier, alternatives, request, next).await
+        Some(Access::Protected(alternatives, delegate)) => {
+            authenticate_protected(&verifier, alternatives, *delegate, request, next).await
         }
     }
+}
+
+pub(crate) fn strip_identity(extensions: &mut Extensions) {
+    extensions.remove::<Principal>();
+    extensions.remove::<VerifiedPrincipal>();
+    extensions.remove::<DelegationCredential>();
 }
 
 async fn authenticate_protected(
     verifier: &Verifier,
     alternatives: &[Box<[String]>],
-    request: Request,
+    delegate: bool,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let Some(context) = request.extensions().get::<crate::RequestContext>().cloned() else {
@@ -134,35 +138,53 @@ async fn authenticate_protected(
             .iter()
             .map(axum::http::HeaderValue::as_bytes);
         verifier
-            .authenticate_with_context(authorization, Transport::Http, context.operation())
+            .authenticate_presented_with_context(
+                authorization,
+                Transport::Http,
+                context.operation(),
+            )
             .await
     };
-    settle_protected(context.operation(), result, alternatives, request, next).await
-}
-
-async fn settle_protected(
-    operation: &OperationContext,
-    result: Result<Principal, Failure>,
-    alternatives: &[Box<[String]>],
-    mut request: Request,
-    next: Next,
-) -> Response {
-    if let Some(stopped) = operation.stopped() {
-        return stopped_response(stopped);
-    }
-    let principal = match result {
-        Ok(principal) => principal,
-        Err(failure) => return failure_response(failure),
-    };
-    if !grants_any(alternatives, &principal) {
-        return insufficient_scope_response();
-    }
-    if let Some(stopped) = operation.stopped() {
-        return stopped_response(stopped);
-    }
+    let (principal, delegation) =
+        match authorize(context.operation(), result, alternatives, delegate) {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
     request.headers_mut().remove(AUTHORIZATION);
+    if let Some(credential) = delegation {
+        request.extensions_mut().insert(credential);
+    }
     request.extensions_mut().insert(principal);
     next.run(request).await
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response returned by the route"
+)]
+fn authorize(
+    operation: &OperationContext,
+    result: Result<(Principal, PresentedToken<'_>), Failure>,
+    alternatives: &[Box<[String]>],
+    delegate: bool,
+) -> Result<(Principal, Option<DelegationCredential>), Response> {
+    if let Some(stopped) = operation.stopped() {
+        return Err(stopped_response(stopped));
+    }
+    let (principal, token) = result.map_err(failure_response)?;
+    if !alternatives
+        .iter()
+        .any(|scopes| principal.has_scopes(scopes))
+    {
+        return Err(insufficient_scope_response());
+    }
+    if let Some(stopped) = operation.stopped() {
+        return Err(stopped_response(stopped));
+    }
+    Ok((
+        principal,
+        delegate.then(|| token.into_delegation_credential()),
+    ))
 }
 
 fn stopped_response(stopped: Stopped) -> Response {
@@ -170,12 +192,6 @@ fn stopped_response(stopped: Stopped) -> Response {
         Stopped::Deadline => crate::context::budget_expired_response(),
         Stopped::Cancelled => crate::context::cancelled_response(),
     }
-}
-
-fn grants_any(alternatives: &[Box<[String]>], principal: &Principal) -> bool {
-    alternatives
-        .iter()
-        .any(|scopes| principal.has_scopes(scopes))
 }
 
 fn insufficient_scope_response() -> Response {
@@ -255,13 +271,8 @@ pub enum ProtectedOperationProblemResponses {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use axum::body::Body;
     use axum::http::StatusCode;
     use axum::http::header::CONTENT_TYPE;
-    use tower::ServiceExt as _;
 
     use super::*;
     use crate::test_support::body_json;
@@ -269,32 +280,10 @@ mod tests {
     #[tokio::test]
     async fn cancelled_operation_context_answers_service_unavailable_not_authentication_unavailable()
      {
-        let reached_handler = Arc::new(AtomicBool::new(false));
-        let handler_flag = Arc::clone(&reached_handler);
         let context = OperationContext::unbounded();
         context.cancellation().cancel();
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
-        )]
-        let app = Router::new()
-            .route(
-                "/",
-                axum::routing::get(move || async move {
-                    handler_flag.store(true, Ordering::SeqCst);
-                    StatusCode::OK
-                }),
-            )
-            .layer(middleware::from_fn(move |request, next| {
-                let context = context.clone();
-                async move {
-                    settle_protected(&context, Err(Failure::Unavailable), &[], request, next).await
-                }
-            }));
-
-        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
-        assert!(!reached_handler.load(Ordering::SeqCst));
+        let response = authorize(&context, Err(Failure::Unavailable), &[], false).unwrap_err();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");

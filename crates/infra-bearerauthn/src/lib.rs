@@ -51,7 +51,8 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> 
 }
 
 pub use authenticate::Transport;
-pub(crate) use bearer::{BearerToken, parse_bearer};
+pub(crate) use bearer::parse_bearer;
+pub use bearer::{DelegationCredential, PresentedToken};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
 // template:end oidc-introspection:authn-introspection-prepare-export
@@ -163,6 +164,8 @@ pub(crate) enum VerificationReason {
     Profile,
     Signature,
     UnknownKey,
+    StaleJwks,
+    RefreshWorkerLost,
     // template:end oidc-jwt:authn-jwt-reasons
     // template:begin oidc-introspection:authn-introspection-reasons
     Provider(provider::ProviderReason),
@@ -188,6 +191,8 @@ impl VerificationReason {
             Self::Profile => "profile",
             Self::Signature => "signature",
             Self::UnknownKey => "unknown_key",
+            Self::StaleJwks => "stale_jwks",
+            Self::RefreshWorkerLost => "refresh_worker_lost",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
             Self::Provider(failure) => failure.label(),
@@ -373,7 +378,7 @@ impl Verifier {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
+    async fn verify(&self, token: &PresentedToken<'_>) -> Result<Principal, Failure> {
         self.verify_with_context(
             token,
             &OperationContext::with_timeout(provider::PROVIDER_TIMEOUT),
@@ -383,7 +388,7 @@ impl Verifier {
 
     pub(crate) async fn verify_with_context(
         &self,
-        token: &BearerToken<'_>,
+        token: &PresentedToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
         context.check().map_err(|_| Failure::Unavailable)?;
