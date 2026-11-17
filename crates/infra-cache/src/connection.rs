@@ -467,16 +467,28 @@ impl Link {
 
     fn claim_slot(
         &self,
-    ) -> Result<std::mem::DropGuard<SemaphorePermit<'_>, impl FnOnce(SemaphorePermit<'_>)>, ErrorType>
+    ) -> Result<SlotGuard<'_>, ErrorType>
     {
         let permit = self.application_slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
         })?;
         self.commands_in_flight.increment(1.0);
-        Ok(std::mem::DropGuard::new(permit, |_permit| {
-            self.commands_in_flight.decrement(1.0);
-        }))
+        Ok(SlotGuard {
+            permit,
+            gauge: self.commands_in_flight.clone(),
+        })
+    }
+}
+
+struct SlotGuard<'a> {
+    permit: SemaphorePermit<'a>,
+    gauge: Gauge,
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.gauge.decrement(1.0);
     }
 }
 
