@@ -591,9 +591,11 @@ fn unary(message: &str) -> UnaryRequest {
     }
 }
 
+// template:begin authn:grpc-transport-test-status-helper
 fn grpc_status<B>(response: &http::Response<B>) -> Option<Status> {
     Status::from_header_map(response.headers())
 }
+// template:end authn:grpc-transport-test-status-helper
 
 fn request<T>(message: T) -> Request<T> {
     let metadata = tonic::metadata::MetadataMap::new();
