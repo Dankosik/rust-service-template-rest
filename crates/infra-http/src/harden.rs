@@ -89,7 +89,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             options.max_body_bytes,
             limit_body,
         ))
-        .layer(DefaultBodyLimit::max(options.max_body_bytes));
+        .layer(DefaultBodyLimit::disable());
 
     #[expect(
         clippy::disallowed_methods,

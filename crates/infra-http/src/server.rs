@@ -142,9 +142,12 @@ impl BoundListener {
         self,
         app: Router,
         options: ServerOptions,
-        tls: Arc<rustls::ServerConfig>,
+        mut tls: Arc<rustls::ServerConfig>,
     ) -> Server {
-        let builder = connection_builder(options);
+        if tls.alpn_protocols.iter().any(|alpn| alpn != b"http/1.1") {
+            Arc::make_mut(&mut tls).alpn_protocols = vec![b"http/1.1".to_vec()];
+        }
+        let builder = connection_builder(options).http1_only();
         serve_tls(self, app, options, builder, tls)
     }
 
