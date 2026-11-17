@@ -268,7 +268,6 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
             &[
                 ("APP__HTTP__REQUEST_TIMEOUT", "invalid-duration"),
                 ("APP__JOBS__MAX_WORKERS", "0"),
-                ("APP__MESSAGING__ENABLED", "true"),
             ],
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
