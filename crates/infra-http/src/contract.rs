@@ -219,6 +219,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     fn finalize(&mut self, probes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
         let document = self.routes.get_openapi_mut();
+        normalize_root(&mut document.paths)?;
         let policy = Policy::compile(
             document,
             // template:begin http-idempotency:http-policy-compile-mounts
@@ -506,6 +507,12 @@ fn check_path_merge(
         return Err(FinalizeError::ConflictingPathItem {
             path: path.to_owned(),
             field: "parameters",
+        });
+    }
+    if existing.servers != incoming.servers {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "servers",
         });
     }
     Ok(())
@@ -875,6 +882,24 @@ mod tests {
                 path: "/_test/method".to_owned(),
                 method: "POST".to_owned(),
                 fault: "fixed_method_in_additional_operations",
+            })
+        );
+    }
+
+    #[test]
+    fn static_export_rejects_two_declarations_for_the_root_operation() {
+        let operation = serde_json::json!({"get": {"responses": {"200": {"description": "ok"}}}});
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.0", "info": {"title":"fixture","version":"1"},
+            "paths": {"": operation, "/": operation}
+        }))
+        .unwrap();
+        let contract = HttpContract::<()>::new(OpenApiRouter::with_openapi(document));
+        assert_eq!(
+            contract.into_openapi().map(|_| ()),
+            Err(FinalizeError::DuplicateOperation {
+                path: "/".to_owned(),
+                method: "GET".to_owned()
             })
         );
     }
