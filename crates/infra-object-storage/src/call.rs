@@ -64,6 +64,19 @@ pub(crate) async fn within<T>(
     .await
 }
 
+pub(crate) async fn within_mutation<T>(
+    context: &CallContext,
+    future: impl std::future::Future<Output = T>,
+) -> Result<(T, Option<CallStop>), Interrupted> {
+    let mut future = std::pin::pin!(future);
+    within(context, async {
+        let reply = future.as_mut().await;
+        (reply, context.stopped())
+    })
+    .await
+}
+
+#[derive(Debug)]
 pub(crate) struct Interrupted {
     pub(crate) stopped: CallStop,
     pub(crate) polled: bool,

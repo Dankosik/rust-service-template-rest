@@ -27,7 +27,7 @@ use aws_smithy_http_client::tls;
 use operation_context::OperationContext;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use self::call::{CallContext, call_policy, within};
+use self::call::{CallContext, call_policy, within, within_mutation};
 pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
@@ -240,7 +240,10 @@ impl ObjectStorage {
         let body = within(&context, body.normalize_empty_stream())
             .await
             .map_err(|interrupted| {
-                guard.fail_mutation(&Failure::mutation_stopped(interrupted.stopped, false))
+                guard.fail_mutation(&Failure::mutation_stopped(
+                    interrupted.stopped,
+                    MutationError::NotApplied,
+                ))
             })?
             .map_err(|failure| guard.fail_mutation(&failure.into()))?;
         let checksum = self
@@ -274,27 +277,29 @@ impl ObjectStorage {
             .config_override(call_config)
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let result = within(&context, request).await;
-        if let Ok(answer) = &result {
+        let result = within_mutation(&context, request).await;
+        if let Ok((answer, _)) = &result {
             guard.answered_by(answer);
         }
         match result {
-            Ok(Ok(_)) => {
+            Ok((Ok(_), _)) => {
                 guard.succeed();
                 Ok(())
             }
-            Ok(Err(sdk_error)) => Err(guard.fail_mutation(&error::from_sdk_mutation(
-                &sdk_error,
-                call,
-                body.source.mismatched(),
-            ))),
+            Ok((Err(sdk_error), stopped_on_reply)) => {
+                Err(guard.fail_mutation(&error::from_sdk_mutation(
+                    &sdk_error,
+                    call,
+                    body.source.mismatched(),
+                    stopped_on_reply,
+                )))
+            }
             Err(_) if body.source.mismatched() => {
                 Err(guard.fail_mutation(&UploadFailure::Length.into()))
             }
-            Err(interrupted) => Err(guard.fail_mutation(&Failure::mutation_stopped(
-                interrupted.stopped,
-                interrupted.polled,
-            ))),
+            Err(interrupted) => {
+                Err(guard.fail_mutation(&Failure::mutation_interrupted(interrupted)))
+            }
         }
     }
 
@@ -397,14 +402,15 @@ impl ObjectStorage {
             .config_override(self.operation_config(&context, call))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let result = within(&context, request).await.map_err(|interrupted| {
-            guard.fail_mutation(&Failure::mutation_stopped(
-                interrupted.stopped,
-                interrupted.polled,
-            ))
-        })?;
+        let (result, stopped_on_reply) =
+            within_mutation(&context, request)
+                .await
+                .map_err(|interrupted| {
+                    guard.fail_mutation(&Failure::mutation_interrupted(interrupted))
+                })?;
         guard.answered_by(&result);
-        error::interpret_delete_result(&result).map_err(|failure| guard.fail_mutation(&failure))?;
+        error::interpret_delete_result(&result, stopped_on_reply)
+            .map_err(|failure| guard.fail_mutation(&failure))?;
         guard.succeed();
         Ok(())
     }
@@ -494,7 +500,10 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(operation);
         if let Some(stopped) = context.stopped() {
-            return Err(guard.fail_mutation(&Failure::mutation_stopped(stopped, false)));
+            return Err(guard.fail_mutation(&Failure::mutation_stopped(
+                stopped,
+                MutationError::NotApplied,
+            )));
         }
         Ok((context, guard))
     }

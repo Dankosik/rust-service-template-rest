@@ -10,7 +10,7 @@ use compact_str::CompactString;
 use operation_context::Stopped;
 use shared_rules::error_chain::causes;
 
-use crate::call::CallStop;
+use crate::call::{CallStop, Interrupted};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ObjectStorageError {
@@ -88,6 +88,7 @@ enum FailureKind<'a> {
     NotSent,
     NoCredentials,
     Lost,
+    Timeout,
     Status { status: u16, code: Option<&'a str> },
 }
 
@@ -121,17 +122,26 @@ impl Failure<MutationError> {
         Self::with_label(MutationError::NotApplied(reason), error_type)
     }
 
-    pub(crate) fn mutation_stopped(stopped: CallStop, polled: bool) -> Self {
+    pub(crate) fn mutation_stopped(
+        stopped: CallStop,
+        outcome: fn(MutationFailure) -> MutationError,
+    ) -> Self {
         let reason = match stopped {
             CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
             CallStop::Timeout => MutationFailure::Unavailable,
         };
-        let error = if polled {
-            MutationError::OutcomeUnknown(reason)
-        } else {
-            MutationError::NotApplied(reason)
-        };
-        Self::with_label(error, stop_label(stopped))
+        Self::with_label(outcome(reason), stop_label(stopped))
+    }
+
+    pub(crate) fn mutation_interrupted(interrupted: Interrupted) -> Self {
+        Self::mutation_stopped(
+            interrupted.stopped,
+            if interrupted.polled {
+                MutationError::OutcomeUnknown
+            } else {
+                MutationError::NotApplied
+            },
+        )
     }
 }
 
@@ -195,11 +205,17 @@ type SdkFailure<E> = SdkError<E, HttpResponse>;
 
 pub(crate) fn interpret_delete_result(
     result: &Result<DeleteObjectOutput, SdkFailure<DeleteObjectError>>,
+    stopped_on_reply: Option<CallStop>,
 ) -> Result<(), Failure<MutationError>> {
     match result {
         Ok(_) => Ok(()),
         Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
-        Err(error) => Err(from_sdk_mutation(error, Call::UnconditionalMutation, false)),
+        Err(error) => Err(from_sdk_mutation(
+            error,
+            Call::UnconditionalMutation,
+            false,
+            stopped_on_reply,
+        )),
     }
 }
 
@@ -218,13 +234,19 @@ pub(crate) fn from_sdk_mutation<E>(
     error: &SdkFailure<E>,
     call: Call,
     length_mismatch: bool,
+    stopped_on_reply: Option<CallStop>,
 ) -> Failure<MutationError>
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
     let (kind, error_type) = sdk_failure(error);
-    if length_mismatch && kind == FailureKind::Lost {
+    if length_mismatch && matches!(kind, FailureKind::Lost | FailureKind::Timeout) {
         return UploadFailure::Length.into();
+    }
+    if kind == FailureKind::Timeout
+        && let Some(stopped @ CallStop::Parent(Stopped::Deadline)) = stopped_on_reply
+    {
+        return Failure::mutation_stopped(stopped, MutationError::OutcomeUnknown);
     }
     Failure {
         error: classify_mutation(kind, call),
@@ -262,9 +284,9 @@ where
                 CompactString::const_new("credentials"),
             )
         }
-        SdkError::TimeoutError(_) => (FailureKind::Lost, CompactString::const_new("timeout")),
+        SdkError::TimeoutError(_) => (FailureKind::Timeout, CompactString::const_new("timeout")),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Lost, CompactString::const_new("timeout"))
+            (FailureKind::Timeout, CompactString::const_new("timeout"))
         }
         SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
         _ => (FailureKind::Lost, CompactString::const_new("response")),
@@ -310,7 +332,7 @@ impl FailureKind<'_> {
         match self {
             Self::NotSent => Reply::Rejected,
             Self::NoCredentials => Reply::Unavailable,
-            Self::Lost => Reply::Lost,
+            Self::Lost | Self::Timeout => Reply::Lost,
             Self::Status { status, code } => match (classification_status(status, code), code) {
                 (_, Some("NoSuchBucket")) => Reply::Rejected,
                 (404, _) if call == Call::Read => Reply::NotFound,
@@ -349,11 +371,19 @@ pub(crate) fn from_download_body(error: &ByteStreamError) -> Failure {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use aws_smithy_runtime_api::client::result::ConnectorError;
+    use operation_context::{OperationContext, Stopped};
+
     use super::Call::UnconditionalMutation as Unconditional;
     use super::MutationError::{NotApplied, OutcomeUnknown};
     use super::{
-        Call, FailureKind, MutationFailure, ObjectStorageError, classify_mutation, classify_read,
+        Call, DeleteObjectError, FailureKind, MutationFailure, ObjectStorageError, SdkFailure,
+        classify_mutation, classify_read, from_sdk_mutation,
     };
+    use crate::call::CallContext;
 
     #[test]
     fn classification_separates_not_applied_from_unknown() {
@@ -472,6 +502,42 @@ mod tests {
                 classify_mutation(reply, call),
                 expected,
                 "{call:?} {reply:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sdk_mutation_timeout_preserves_the_effective_parent_deadline() {
+        let budget = Duration::from_secs(1);
+        let parent = OperationContext::with_timeout(budget);
+        let parent_limited = CallContext::new(&parent, 2 * budget);
+        let locally_limited = CallContext::new(&OperationContext::unbounded(), budget);
+        let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
+        let errors: [SdkFailure<DeleteObjectError>; 2] = [
+            SdkFailure::timeout_error(timed_out()),
+            SdkFailure::dispatch_failure(ConnectorError::timeout(Box::new(timed_out()))),
+        ];
+        for error in &errors {
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Unavailable)
+            );
+        }
+
+        tokio::time::advance(budget).await;
+
+        for error in &errors {
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Stopped(Stopped::Deadline))
+            );
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, false, locally_limited.stopped()).error,
+                OutcomeUnknown(MutationFailure::Unavailable)
+            );
+            assert_eq!(
+                from_sdk_mutation(error, Unconditional, true, parent_limited.stopped()).error,
+                NotApplied(MutationFailure::Rejected)
             );
         }
     }
