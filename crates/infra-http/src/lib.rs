@@ -1,3 +1,4 @@
+mod admission;
 mod body;
 mod contract;
 pub mod extract;
@@ -21,6 +22,7 @@ mod server;
 #[cfg(test)]
 mod test_support;
 
+pub use admission::acquire_within;
 pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};
 pub use harden::{HardenOptions, harden};

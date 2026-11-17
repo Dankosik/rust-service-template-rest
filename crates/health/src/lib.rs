@@ -312,18 +312,32 @@ impl Readiness {
         }
     }
 
-    pub fn start_drain(&self) {
+    fn modify_state(
+        &self,
+        edit: impl FnOnce(&mut State, Duration) -> (bool, Option<ProgressLoss>),
+    ) {
+        let stale_after = self.policy.stale_after();
         let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
-            let changed = !state.draining;
-            newly_expired = state.stop_progress(self.policy.stale_after());
-            state.draining = true;
-            metrics::gauge!(READY_METRIC).set(0.0);
-            changed || newly_expired.is_some()
+            let (changed, expired) = edit(state, stale_after);
+            newly_expired = expired;
+            changed || expired.is_some()
         });
         if let Some(loss) = newly_expired {
             loss.log();
         }
+    }
+
+    pub fn start_drain(&self) {
+        self.modify_state(|state, stale_after| {
+            if state.draining {
+                return (false, None);
+            }
+            let expired = state.stop_progress(stale_after);
+            state.draining = true;
+            metrics::gauge!(READY_METRIC).set(0.0);
+            (true, expired)
+        });
     }
 
     pub async fn admit(&self) -> Result<(), NotReady> {
@@ -335,67 +349,55 @@ impl Readiness {
 
     pub fn arm_progress(&self) -> Result<(), ArmError> {
         let mut result = Ok(());
-        let mut newly_expired = None;
-        self.tx.send_if_modified(|state| {
+        self.modify_state(|state, stale_after| {
             if state.progress_loss().is_some() {
                 result = Err(ArmError::ProgressLost);
-                return false;
+                return (false, None);
             }
             if state.draining || matches!(state.progress, Progress::Stopped) {
                 result = Err(ArmError::Refused(NotReady::Draining));
-                return false;
+                return (false, None);
             }
             let Some(check) = &state.last_check else {
                 result = Err(ArmError::Refused(NotReady::NotEvaluated));
-                return false;
+                return (false, None);
             };
             if let Err(reason) = &check.verdict {
                 result = Err(ArmError::Refused(reason.clone().into()));
-                return false;
+                return (false, None);
             }
             let changed = matches!(state.progress, Progress::Unarmed);
             state.progress = Progress::Armed;
-            newly_expired = state.expire_progress(Instant::now(), self.policy.stale_after());
-            if newly_expired.is_some() {
+            let expired = state.expire_progress(Instant::now(), stale_after);
+            if expired.is_some() {
                 result = Err(ArmError::ProgressLost);
             }
-            changed || newly_expired.is_some()
+            (changed, expired)
         });
-        if let Some(loss) = newly_expired {
-            loss.log();
-        }
         result
     }
 
     #[must_use]
     pub fn progress_lost(&self) -> bool {
-        self.progress_loss().is_some()
+        self.observe_progress_loss().is_some()
     }
 
-    fn progress_loss(&self) -> Option<ProgressLoss> {
+    fn observe_progress_loss(&self) -> Option<ProgressLoss> {
         let mut loss = None;
-        let mut newly_expired = None;
-        self.tx.send_if_modified(|state| {
-            newly_expired = state.expire_progress(Instant::now(), self.policy.stale_after());
+        self.modify_state(|state, stale_after| {
+            let expired = state.expire_progress(Instant::now(), stale_after);
             loss = state.progress_loss();
-            newly_expired.is_some()
+            (false, expired)
         });
-        if let Some(loss) = newly_expired {
-            loss.log();
-        }
         loss
     }
 
     pub fn stop_progress(&self) {
-        let mut newly_expired = None;
-        self.tx.send_if_modified(|state| {
+        self.modify_state(|state, stale_after| {
             let changed = matches!(state.progress, Progress::Unarmed | Progress::Armed);
-            newly_expired = state.stop_progress(self.policy.stale_after());
-            changed
+            let expired = state.stop_progress(stale_after);
+            (changed, expired)
         });
-        if let Some(loss) = newly_expired {
-            loss.log();
-        }
     }
 
     pub async fn observe_progress(&self, cancel: CancellationToken, on_loss: impl FnOnce()) {
@@ -408,20 +410,18 @@ impl Readiness {
     async fn wait_for_progress_loss(&self, cancel: &CancellationToken) -> Option<ProgressLoss> {
         let mut changed = self.tx.subscribe();
         loop {
-            if let Some(loss) = self.progress_loss() {
+            if let Some(loss) = self.observe_progress_loss() {
                 return Some(loss);
             }
             let deadline = {
                 let state = changed.borrow_and_update();
-                if let Some(loss) = state.progress_loss() {
-                    return Some(loss);
-                }
                 match state.progress {
+                    Progress::Expired(loss) => return Some(loss),
                     Progress::Armed => state
                         .last_check
                         .as_ref()
                         .and_then(|check| stale_deadline(check.at, self.policy.stale_after())),
-                    _ => None,
+                    Progress::Unarmed | Progress::Stopped => None,
                 }
             };
             let wait_for_event = async {
@@ -447,36 +447,31 @@ impl Readiness {
             .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64());
         metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         let failure_threshold = self.policy.failure_threshold;
-        let stale_after = self.policy.stale_after();
         let mut transition_to_log = None;
         let mut absorbed_failure = None;
         let mut late_by = None;
-        let mut newly_expired = None;
-        self.tx.send_modify(|state| {
+        self.modify_state(|state, stale_after| {
             let at = Instant::now();
-            newly_expired = state.expire_progress(at, stale_after);
+            let expired = state.expire_progress(at, stale_after);
             let previous = state.last_check.as_ref();
-            let failure = observed.as_ref().err().cloned();
-            let next =
+            let (next, absorbed) =
                 apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
-            if !state.draining && state.progress_loss().is_none() {
+            let active = !state.draining && state.progress_loss().is_none();
+            if active {
                 transition_to_log = readiness_transition(previous, &next);
-                if next.verdict.is_ok() {
-                    absorbed_failure = failure.map(|reason| (reason, next.consecutive_failures));
-                }
+                absorbed_failure = absorbed.map(|reason| (reason, next.consecutive_failures));
                 late_by = previous
                     .filter(|previous| !previous.is_fresh_at(at, stale_after))
                     .map(|previous| at.duration_since(previous.at));
             }
-            let ready = !state.draining && state.progress_loss().is_none() && next.verdict.is_ok();
+            let ready = active && next.verdict.is_ok();
             metrics::gauge!(READY_METRIC).set(f64::from(ready));
             metrics::gauge!(LAST_COMPLETED_METRIC).set(completed_at);
             state.last_check = Some(next);
+            (true, expired)
         });
-        if let Some(loss) = newly_expired {
-            loss.log();
-        }
         if let Some(age) = late_by {
+            let stale_after = self.policy.stale_after();
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
         if let Some((reason, consecutive_failures)) = absorbed_failure {
@@ -525,21 +520,27 @@ impl Readiness {
                 Some(deadline) => tokio::time::timeout_at(deadline, probe.check()).await.ok(),
                 None => Some(probe.check().await),
             };
-            let outcome = match reply {
-                Some(Ok(())) => Ok(()),
-                Some(Err(error)) => Err(ProbeFailure::Failed {
-                    probe: probe_name,
-                    error,
-                }),
-                None => Err(ProbeFailure::TimedOut {
-                    probe: probe_name,
-                    budget,
-                }),
+            let (outcome, label) = match reply {
+                Some(Ok(())) => (Ok(()), "ok"),
+                Some(Err(error)) => (
+                    Err(ProbeFailure::Failed {
+                        probe: probe_name,
+                        error,
+                    }),
+                    "failed",
+                ),
+                None => (
+                    Err(ProbeFailure::TimedOut {
+                        probe: probe_name,
+                        budget,
+                    }),
+                    "timed_out",
+                ),
             };
             metrics::counter!(
                 PROBE_CHECKS_METRIC,
                 "probe" => probe_name,
-                "outcome" => outcome_label(&outcome)
+                "outcome" => label
             )
             .increment(1);
             outcome
@@ -568,20 +569,37 @@ fn apply_failure_threshold(
     failure_threshold: NonZeroU32,
     at: Instant,
     stale_after: Duration,
-) -> Check {
-    let consecutive_failures = match (&observed, previous) {
-        (Ok(()), _) => 0,
-        (Err(_), Some(previous)) => previous.consecutive_failures.saturating_add(1),
-        (Err(_), None) => 1,
-    };
-    let was_published_ready = previous
-        .is_some_and(|previous| previous.verdict.is_ok() && previous.is_fresh_at(at, stale_after));
-    let hold_ready =
-        was_published_ready && observed.is_err() && consecutive_failures < failure_threshold.get();
-    Check {
-        at,
-        verdict: if hold_ready { Ok(()) } else { observed },
-        consecutive_failures,
+) -> (Check, Option<ProbeFailure>) {
+    match observed {
+        Ok(()) => (
+            Check {
+                at,
+                verdict: Ok(()),
+                consecutive_failures: 0,
+            },
+            None,
+        ),
+        Err(reason) => {
+            let consecutive_failures = previous
+                .map_or(0, |p| p.consecutive_failures)
+                .saturating_add(1);
+            let was_published_ready =
+                previous.is_some_and(|p| p.verdict.is_ok() && p.is_fresh_at(at, stale_after));
+            let (verdict, absorbed) =
+                if was_published_ready && consecutive_failures < failure_threshold.get() {
+                    (Ok(()), Some(reason))
+                } else {
+                    (Err(reason), None)
+                };
+            (
+                Check {
+                    at,
+                    verdict,
+                    consecutive_failures,
+                },
+                absorbed,
+            )
+        }
     }
 }
 

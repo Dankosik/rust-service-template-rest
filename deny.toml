@@ -17,6 +17,13 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
+# chrono reaches only tests (axum-test's non-optional expect-json) and the
+# opt-in hotpath profiler's MCP server (rmcp, directly and through schemars `chrono04`);
+# `[bans]` refuses it on every other path, so service code cannot adopt it
+# under this waiver. Remove when those parents drop chrono.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono reaches only tests and the opt-in hotpath MCP server; bans deny every other path" },
+]
 
 [licenses]
 include-dev = true
@@ -55,6 +62,7 @@ multiple-versions = "deny"
 deny = [
     { crate = "opentelemetry", deny-multiple-versions = true },
     { crate = "opentelemetry_sdk", deny-multiple-versions = true },
+    { crate = "chrono", wrappers = ["expect-json", "rmcp", "schemars"], reason = "unmaintained (RUSTSEC-2026-0543); only axum-test assertions and the hotpath MCP schema may bring it" },
 ]
 skip = [
     { crate = "base64@0.22", reason = "async-nats, headers, jsonwebtoken, and metrics-exporter-prometheus have not moved to 0.23" },

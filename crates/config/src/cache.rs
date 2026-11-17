@@ -42,7 +42,7 @@ pub(crate) struct CacheInput {
     /// Permit a DSN with no password. Local and development only.
     allow_unauthenticated: bool,
     /// Bound for one cache command, including a reconnect wait.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     command_timeout: Duration,
 }
 
@@ -139,8 +139,8 @@ impl CacheInput {
                     "cache.command_timeout",
                     format!(
                         "must be at most half of http.request_timeout ({}), got {}",
-                        humantime::format_duration(limit / 2),
-                        humantime::format_duration(self.command_timeout)
+                        crate::de::display_duration(limit / 2),
+                        crate::de::display_duration(self.command_timeout)
                     ),
                 )))
             }

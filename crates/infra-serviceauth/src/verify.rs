@@ -143,10 +143,6 @@ impl Verifier {
         }))
     }
 
-    pub fn callers(&self) -> impl Iterator<Item = &ServiceName> {
-        self.0.trust.callers()
-    }
-
     pub fn authenticate<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,

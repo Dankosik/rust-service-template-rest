@@ -13,8 +13,6 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::{Client, Failure};
 
-const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
-
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
@@ -25,12 +23,6 @@ const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this m
 pub(crate) struct CallerAdmission {
     verifier: Option<Verifier>,
     caller_rules: HashMap<String, Box<[ServiceName]>>,
-    outcomes: HashMap<ServiceName, Outcomes>,
-}
-
-struct Outcomes {
-    admitted: metrics::Counter,
-    not_admitted: metrics::Counter,
 }
 
 impl CallerAdmission {
@@ -38,29 +30,9 @@ impl CallerAdmission {
         verifier: Option<Verifier>,
         caller_rules: HashMap<String, Box<[ServiceName]>>,
     ) -> Self {
-        metrics::describe_counter!(
-            SERVICE_AUTH_CALLS_METRIC,
-            metrics::Unit::Count,
-            "gRPC calls of verified callers by caller and admission outcome."
-        );
-        let outcomes = verifier
-            .iter()
-            .flat_map(Verifier::callers)
-            .map(|caller| {
-                let counter = |outcome: &'static str| {
-                    metrics::counter!(SERVICE_AUTH_CALLS_METRIC, "caller" => caller.to_string(), "outcome" => outcome)
-                };
-                let outcomes = Outcomes {
-                    admitted: counter("admitted"),
-                    not_admitted: counter("not_admitted"),
-                };
-                (caller.clone(), outcomes)
-            })
-            .collect();
         Self {
             verifier,
             caller_rules,
-            outcomes,
         }
     }
 
@@ -99,11 +71,7 @@ pub(crate) async fn admit_caller(
     };
     let path = request.uri().path();
     let rule = admission.caller_rules.get(path);
-    let outcomes = admission.outcomes.get(caller.name());
     if !rule.is_some_and(|callers| callers.contains(caller.name())) {
-        if let Some(outcomes) = outcomes {
-            outcomes.not_admitted.increment(1);
-        }
         let method = if rule.is_some() { path } else { "unknown" };
         tracing::warn!(
             caller = %caller.name(),
@@ -116,9 +84,6 @@ pub(crate) async fn admit_caller(
     }
     if let Some(reason) = context.stopped() {
         return crate::call::Side::Server.stopped(reason).into_http();
-    }
-    if let Some(outcomes) = outcomes {
-        outcomes.admitted.increment(1);
     }
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.extensions_mut().insert::<Caller>(caller);
@@ -263,10 +228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_context_returns_stopped_status_without_counting_not_admitted() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
+    async fn a_stopped_context_answers_before_caller_admission() {
         let (app, bearer, reached_handler) = orders_only_router();
 
         let body_polls = Arc::new(AtomicUsize::new(0));
@@ -318,12 +280,6 @@ mod tests {
 
         assert!(!reached_handler.load(Ordering::SeqCst));
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
-        let rendered = handle.render();
-        assert!(
-            rendered
-                .contains(r#"service_auth_calls_total{caller="billing",outcome="not_admitted"} 0"#),
-            "{rendered}"
-        );
 
         let live = app
             .oneshot(make_request(
@@ -337,12 +293,6 @@ mod tests {
                 .unwrap()
                 .code(),
             tonic::Code::PermissionDenied
-        );
-        let rendered = handle.render();
-        assert!(
-            rendered
-                .contains(r#"service_auth_calls_total{caller="billing",outcome="not_admitted"} 1"#),
-            "{rendered}"
         );
     }
 }
