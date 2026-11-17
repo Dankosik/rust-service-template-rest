@@ -42,7 +42,8 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-consumer"), 1024)
+        .publication
+        .prepare(&event("event-consumer"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -106,7 +107,8 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-traced"), 1024)
+        .publication
+        .prepare(&event("event-traced"))
         .expect("fixture event is prepared");
     let request = tracing::info_span!("request");
     messaging
@@ -204,7 +206,8 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-retry"), 1024)
+        .publication
+        .prepare(&event("event-retry"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -278,7 +281,8 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-panic"), 1024)
+        .publication
+        .prepare(&event("event-panic"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -326,7 +330,8 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-drain"), 1024)
+        .publication
+        .prepare(&event("event-drain"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -375,7 +380,8 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
     std::assert_matches!(outcome, Err(ConsumerError::DrainTimedOut), "{outcome:?}");
 
     let prepared = fixture
-        .prepare(&event("event-after-abort"), 1024)
+        .publication
+        .prepare(&event("event-after-abort"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -456,7 +462,8 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         "event-unadmitted",
     ] {
         let prepared = fixture
-            .prepare(&event(id), 1024)
+            .publication
+            .prepare(&event(id))
             .expect("fixture event is prepared");
         messaging
             .producer()

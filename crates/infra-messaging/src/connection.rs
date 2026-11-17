@@ -205,6 +205,10 @@ fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> Messag
             (MessagingError::Authentication, "authorization_violation")
         }
         ConnectErrorKind::TimedOut => (MessagingError::TimedOut { budget }, "timeout"),
+        ConnectErrorKind::Configuration => (
+            MessagingError::Configuration("broker TLS configuration is incompatible"),
+            "configuration",
+        ),
         ConnectErrorKind::ServerParse => (
             MessagingError::Configuration("server URL is invalid"),
             "server_parse",

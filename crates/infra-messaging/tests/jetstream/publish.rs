@@ -14,7 +14,8 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     .expect("fixture source stream is admitted");
     let original = event("event-publication");
     let prepared = fixture
-        .prepare(&original, 1024)
+        .publication
+        .prepare(&original)
         .expect("registered event is prepared once");
 
     let producer = messaging.producer();
@@ -42,7 +43,8 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     assert_eq!(duplicate.sequence, first.sequence);
 
     let rejected = fixture
-        .prepare(&event("event-refused"), 1024)
+        .publication
+        .prepare(&event("event-refused"))
         .expect("second registered event is prepared");
     let result = producer
         .publish(&rejected, &context(deadline(), &cancel))
@@ -64,7 +66,8 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
     let prepared = fixture
-        .prepare(&event("event-receiving-limit"), 1024)
+        .publication
+        .prepare(&event("event-receiving-limit"))
         .expect("event fits the preparing resource");
     let receiving_limit = prepared.payload().len() - 1;
     let messaging = Box::pin(Messaging::connect(
@@ -135,7 +138,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     ))
     .await
     .unwrap();
-    let prepared = fixture.prepare(&event("event-window"), 1024).unwrap();
+    let prepared = fixture.publication.prepare(&event("event-window")).unwrap();
     let mut publications = tokio::task::JoinSet::new();
     for _ in 0..capacity {
         let (producer, prepared, cancel) = (messaging.producer(), prepared.clone(), cancel.clone());
@@ -195,7 +198,8 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     .await
     .expect("fixture source stream is admitted through the transparent relay");
     let prepared = fixture
-        .prepare(&event("event-ambiguous"), 1024)
+        .publication
+        .prepare(&event("event-ambiguous"))
         .expect("fixture event is prepared once before its ambiguous publication");
 
     let result = messaging

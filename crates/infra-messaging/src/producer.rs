@@ -313,7 +313,10 @@ mod tests {
                 .expect("fixed timestamp is valid"),
             payload: Created,
         };
-        let prepared = PreparedEvent::prepare_for_subject("orders.created", &event, 4)
+        let prepared = crate::Registry::default()
+            .declare_publication(&crate::Route::new("orders.created"), 4)
+            .unwrap()
+            .prepare(&event)
             .expect("null fits four payload bytes");
         let fixed = concat!(
             "NATS/1.0\r\n",

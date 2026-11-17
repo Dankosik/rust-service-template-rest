@@ -54,7 +54,6 @@ domain-events = { workspace = true }
 foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
-itertools = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }
 nkeys = { workspace = true }

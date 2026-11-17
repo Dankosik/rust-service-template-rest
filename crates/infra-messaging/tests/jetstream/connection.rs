@@ -198,16 +198,19 @@ fn replace_ca(path: &std::path::Path, pem: &str) {
     std::fs::rename(replacement, path).expect("CA file is replaced");
 }
 
-fn tls_fixture() -> (tempfile::NamedTempFile, tokio_rustls::TlsAcceptor) {
+fn tls_fixture(name: &str) -> (tempfile::NamedTempFile, tokio_rustls::TlsAcceptor) {
     use std::io::Write as _;
 
-    let (pem, acceptor) = tls_identity("127.0.0.1");
+    let (pem, acceptor) = tls_identity(name);
     let mut root = tempfile::NamedTempFile::new().expect("CA file");
     root.write_all(pem.as_bytes()).expect("write CA PEM");
     (root, acceptor)
 }
 
-async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin) {
+async fn serve_until_topology(
+    socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    mut post_pong_info: Option<Vec<u8>>,
+) {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     let mut socket = tokio::io::BufReader::new(socket);
@@ -217,18 +220,25 @@ async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::Asy
         assert!(socket.read_line(&mut line).await.expect("NATS client line") > 0);
         if line == "PING\r\n" {
             socket.get_mut().write_all(b"PONG\r\n").await.expect("PONG");
+            if let Some(info) = post_pong_info.take() {
+                socket
+                    .get_mut()
+                    .write_all(&info)
+                    .await
+                    .expect("authenticated INFO");
+            }
         } else if line.starts_with("PUB $JS.API.") || line.starts_with("HPUB $JS.API.") {
             return;
         }
     }
 }
 
-fn info(discovered: &str) -> Vec<u8> {
+fn info(discovered: &str, max_payload: usize) -> Vec<u8> {
     format!(
         "INFO {}\r\n",
         serde_json::json!({
             "server_id": "fixture", "version": "2.12.3", "headers": true,
-            "jetstream": true, "max_payload": 1_048_576, "proto": 1,
+            "jetstream": true, "max_payload": max_payload, "proto": 1, "tls_available": true,
             "connect_urls": [discovered],
         })
     )
@@ -262,7 +272,7 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
     use tokio::io::AsyncWriteExt as _;
 
     for mixed in [false, true] {
-        let (root, tls) = tls_fixture();
+        let (root, tls) = tls_fixture("127.0.0.1");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("seed listener");
@@ -276,11 +286,11 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
         let mut server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("seed connection");
             socket
-                .write_all(&info("http://untrusted.invalid"))
+                .write_all(&info("http://untrusted.invalid", 32))
                 .await
                 .expect("INFO");
             let socket = tls.accept(socket).await.expect("ordinary TLS handshake");
-            serve_until_topology(socket).await;
+            serve_until_topology(socket, Some(info("http://untrusted.invalid", 1_048_576))).await;
         });
         let mut options = trust_options(seeds);
         options.allow_plaintext = mixed;
@@ -313,11 +323,53 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
 }
 
 #[tokio::test]
+async fn negotiated_tls_requires_the_account_info_before_reporting_connected() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    let (root, tls) = tls_fixture("127.0.0.1");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("tls://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(&info("127.0.0.1:4222", 1_048_576))
+            .await
+            .unwrap();
+        let mut socket = BufReader::new(tls.accept(socket).await.unwrap());
+        let mut line = String::new();
+        loop {
+            assert!(socket.read_line(&mut line).await.unwrap() > 0);
+            if line == "PING\r\n" {
+                break;
+            }
+            line.clear();
+        }
+        socket.get_mut().write_all(b"PONG\r\n").await.unwrap();
+        line.clear();
+        assert_eq!(socket.read_line(&mut line).await.unwrap_or(0), 0);
+    });
+    let result = async_nats::ConnectOptions::new()
+        .add_root_certificates(root.path().to_owned())
+        .ignore_discovered_servers()
+        .connection_timeout(Duration::from_secs(2))
+        .connect(url)
+        .await;
+    assert_eq!(
+        result.unwrap_err().kind(),
+        async_nats::ConnectErrorKind::TimedOut
+    );
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
     use tokio::io::AsyncWriteExt as _;
 
     for tls_first in [false, true] {
-        let (root, tls) = tls_fixture();
+        let (root, tls) = tls_fixture("localhost");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("seed listener");
@@ -329,9 +381,9 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             .expect("discovered address")
             .to_string();
         let seed = format!(
-            "{}://{}",
+            "{}://localhost:{}",
             if tls_first { "tls" } else { "nats" },
-            listener.local_addr().expect("seed address")
+            listener.local_addr().expect("seed address").port()
         );
         let seed_tls = tls.clone();
         let mut server = tokio::spawn(async move {
@@ -340,22 +392,22 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             if tls_first {
                 let mut socket = seed_tls.accept(socket).await.expect("TLS precedes INFO");
                 socket
-                    .write_all(&info(&advertised))
+                    .write_all(&info(&advertised, 1_048_576))
                     .await
                     .expect("authenticated INFO");
-                serve_until_topology(socket).await;
+                serve_until_topology(socket, None).await;
             } else {
                 socket
-                    .write_all(&info(&advertised))
+                    .write_all(&info(&advertised, 1_048_576))
                     .await
                     .expect("trusted network INFO");
-                serve_until_topology(socket).await;
+                serve_until_topology(socket, None).await;
             }
         });
         let mut options = trust_options(vec![seed]);
         options.allow_plaintext = !tls_first;
         options.tls_first = tls_first;
-        options.root_ca_path = Some(root.path().to_owned());
+        options.root_ca_path = tls_first.then(|| root.path().to_owned());
         let cancel = CancellationToken::new();
         let mut connect = tokio::spawn(Messaging::connect(
             options,
@@ -430,7 +482,8 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
     )
     .await;
     let prepared = fixture
-        .prepare(&event("after-root-ca-rotation"), 1024)
+        .publication
+        .prepare(&event("after-root-ca-rotation"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -687,7 +740,10 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .await
         .unwrap()
         .start(&cancel);
-    let before = fixture.prepare(&event("before-outage"), 1024).unwrap();
+    let before = fixture
+        .publication
+        .prepare(&event("before-outage"))
+        .unwrap();
     messaging
         .producer()
         .publish(&before, &context(deadline(), &cancel))
@@ -710,7 +766,8 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     .await
     .expect("the disconnected dependency becomes unready");
     let contending = fixture
-        .prepare(&event("concurrent-silent-publication"), 1024)
+        .publication
+        .prepare(&event("concurrent-silent-publication"))
         .unwrap();
     std::assert_matches!(
         messaging
@@ -722,7 +779,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
             .await,
         Err(PublishError::Ambiguous)
     );
-    let after = fixture.prepare(&event("after-outage"), 1024).unwrap();
+    let after = fixture.publication.prepare(&event("after-outage")).unwrap();
     fixture
         .jetstream
         .publish_with_headers(
@@ -745,7 +802,8 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     .await
     .expect("the same consumer recovers and handles retained work after a bounded contending publication");
     let recovered = fixture
-        .prepare(&event("after-recovery-publication"), 1024)
+        .publication
+        .prepare(&event("after-recovery-publication"))
         .unwrap();
     messaging
         .producer()

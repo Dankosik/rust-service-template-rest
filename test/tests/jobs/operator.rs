@@ -192,8 +192,8 @@ mod outbox {
         };
         let route = Route::<Note>::new("events.operator.created");
         let mut registry = Registry::default();
-        registry.declare(&route).unwrap();
-        let prepared = registry.prepare(&route, &event, 1024).unwrap();
+        let publication = registry.declare_publication(&route, 1024).unwrap();
+        let prepared = publication.prepare(&event).unwrap();
         in_tx(&jobs, async |tx| {
             assert_eq!(prepared.enqueue(tx).await.unwrap(), OutboxEnqueued::Created);
             Ok::<_, OperatorError>(())

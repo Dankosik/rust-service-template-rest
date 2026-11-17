@@ -2,7 +2,6 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use itertools::Itertools;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
@@ -145,24 +144,9 @@ fn read_file(path: &Path) -> io::Result<SecretString> {
 }
 
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
-    let mut values =
-        content
-            .lines()
-            .map(str::trim)
-            .tuple_windows()
-            .filter_map(|(opening, value, closing)| {
-                (is_marker(opening) && !value.is_empty() && !is_marker(value) && is_marker(closing))
-                    .then_some(value)
-            });
-    let (Some(jwt), Some(seed)) = (values.next(), values.next()) else {
-        return Err(CredentialsFileError::Malformed);
-    };
-    let key = nkeys::KeyPair::from_seed(seed).map_err(|_| CredentialsFileError::Malformed)?;
-    Ok((jwt.to_owned(), key))
-}
-
-fn is_marker(line: &str) -> bool {
-    line.len() >= 6 && line.starts_with("---") && line.ends_with("---")
+    async_nats::parse_jwt_and_key_from_creds(content)
+        .map(|(jwt, key)| (jwt.to_owned(), key))
+        .map_err(|_| CredentialsFileError::Malformed)
 }
 
 #[cfg(test)]
@@ -195,12 +179,22 @@ mod tests {
                 .is_ok()
         );
 
-        let (jwt, key) = parse(content.replace('\n', "\r\n").trim_end()).unwrap();
+        let crlf = content.replace('\n', "\r\n");
+        let at_eof = crlf.trim_end_matches(['\r', '\n', '*']);
+        assert!(at_eof.ends_with("------END USER NKEY SEED------"));
+        let (jwt, key) = parse(at_eof).unwrap();
+        assert!(
+            async_nats::ConnectOptions::new()
+                .credentials(at_eof)
+                .is_ok()
+        );
         assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
 
+        let padded = creds(" user.jwt.value", &user);
         for malformed in [
             "",
+            &padded,
             "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln",
             "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n",
             "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n\

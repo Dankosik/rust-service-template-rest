@@ -26,18 +26,24 @@ use bytes::Bytes;
 use futures_util::future::TryFutureExt;
 use futures_util::{Sink, SinkExt as _, StreamExt};
 use portable_atomic::AtomicU64;
-use regex::Regex;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
-static VERSION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\Av?([0-9]+)\.?([0-9]+)?\.?([0-9]+)?").unwrap());
+pub(crate) fn version_at_least(version: &str, expected: (i64, i64, i64)) -> bool {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.').map(str::parse::<i64>);
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None)
+            if (major, minor, patch) >= expected
+    )
+}
 
 /// An error returned from the [`Client::publish`], [`Client::publish_with_headers`],
 /// [`Client::publish_with_reply`] or [`Client::publish_with_reply_and_headers`] functions.
@@ -420,35 +426,7 @@ impl Client {
     /// # }
     /// ```
     pub fn is_server_compatible(&self, major: i64, minor: i64, patch: i64) -> bool {
-        let info = self.server_info();
-
-        let server_version_captures = match VERSION_RE.captures(&info.version) {
-            Some(captures) => captures,
-            None => return false,
-        };
-
-        let server_major = server_version_captures
-            .get(1)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        let server_minor = server_version_captures
-            .get(2)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        let server_patch = server_version_captures
-            .get(3)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        if server_major < major
-            || (server_major == major && server_minor < minor)
-            || (server_major == major && server_minor == minor && server_patch < patch)
-        {
-            return false;
-        }
-        true
+        version_at_least(&self.server_info().version, (major, minor, patch))
     }
 
     /// Publish a [Message] to a given subject.
@@ -1001,9 +979,33 @@ impl Client {
     /// Per-server state (failed attempt count, connection history) is preserved
     /// for servers that appear in both the old and new pools.
     ///
+    /// A server given in the pool is a configured server, also when the client discovered
+    /// it from the cluster: its certificate is verified as configured, not against a name
+    /// learned through discovery. One the client learned over TLS keeps TLS as long as
+    /// every pool given since lists it, unless
+    /// [`ConnectOptions::tls_optional`](crate::ConnectOptions::tls_optional) is set: each
+    /// URL is then dialed with its own scheme. A pool that leaves a server out drops what
+    /// the client learned about it, and so does a list from the cluster that leaves out a
+    /// discovered server other than the one the client is connected to.
+    /// [`Client::server_pool`] lists a discovered server the client learned over TLS with a
+    /// `tls://` or `wss://` URL, so a pool made from that list keeps TLS for it; without
+    /// `tls_optional`, that URL then asks for TLS, as below.
+    ///
     /// This also resets the global reconnection attempt counter, so any
     /// progress toward [`ConnectOptions::max_reconnects`](crate::ConnectOptions::max_reconnects)
     /// is cleared.
+    ///
+    /// A `tls://` or `wss://` URL in the pool makes the client ask for TLS, as the same URL
+    /// does at connect: from the next attempt on, every server is dialed with TLS, the
+    /// other URLs of the pool and the servers discovered from the cluster included. The
+    /// current connection is not closed. A later pool without such a URL does not turn TLS
+    /// off. With [`ConnectOptions::tls_optional`](crate::ConnectOptions::tls_optional) set,
+    /// such a URL gets TLS for itself only, as at connect.
+    ///
+    /// The pool is checked as the server list at connect is. When the client asks for TLS,
+    /// or would with the new pool, a `ws://` URL is refused with
+    /// [`SetServerPoolErrorKind::Configuration`]; the pool and whether the client asks for
+    /// TLS are left as they were.
     ///
     /// # Examples
     /// ```no_run
@@ -1044,9 +1046,6 @@ impl Client {
 
         rx.await
             .map_err(|err| SetServerPoolError::with_source(SetServerPoolErrorKind::Send, err))?
-            .map_err(|err| {
-                SetServerPoolError::with_source(SetServerPoolErrorKind::MixedSchemes, err)
-            })
     }
 
     /// Returns a snapshot of the current server pool.
@@ -1054,6 +1053,10 @@ impl Client {
     /// The returned list includes both explicitly configured and discovered
     /// servers, along with per-server metadata such as reconnect count and
     /// connection history.
+    ///
+    /// A discovered server is listed with the transport it was learned on, `nats://` or
+    /// `ws://`, and with `tls://` or `wss://` when the client learned it over TLS, so that the
+    /// list given back to [`Client::set_server_pool`] keeps TLS for it.
     ///
     /// # Examples
     /// ```no_run
@@ -1224,6 +1227,10 @@ pub enum SetServerPoolErrorKind {
     MixedSchemes,
     /// The server pool cannot be empty.
     EmptyPool,
+    /// The pool holds a server URL this build or the client's settings cannot connect
+    /// to, as [`ConnectErrorKind::Configuration`](crate::ConnectErrorKind::Configuration)
+    /// would refuse it at connect. The pool is unchanged.
+    Configuration,
 }
 
 impl Display for SetServerPoolErrorKind {
@@ -1236,6 +1243,7 @@ impl Display for SetServerPoolErrorKind {
                 f,
                 "cannot mix websocket and non-websocket URLs in server pool"
             ),
+            Self::Configuration => write!(f, "configuration error"),
         }
     }
 }

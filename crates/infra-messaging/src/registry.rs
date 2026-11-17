@@ -6,6 +6,7 @@ use std::sync::Arc;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
 use operation_context::OperationContext;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::contract::{PayloadSchema, payload_schema};
@@ -98,6 +99,40 @@ impl<T: EventPayload> Route<T> {
     }
 }
 
+pub struct PublicationRoute<T> {
+    route: Route<T>,
+    max_payload_bytes: usize,
+}
+
+impl<T> Clone for PublicationRoute<T> {
+    fn clone(&self) -> Self {
+        Self {
+            route: self.route.clone(),
+            max_payload_bytes: self.max_payload_bytes,
+        }
+    }
+}
+
+impl<T: EventPayload> std::fmt::Debug for PublicationRoute<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublicationRoute")
+            .field("route", &self.route)
+            .field("max_payload_bytes", &self.max_payload_bytes)
+            .finish()
+    }
+}
+
+impl<T: EventPayload + Serialize> PublicationRoute<T> {
+    pub fn prepare(&self, event: &Event<T>) -> Result<crate::PreparedEvent, crate::EnvelopeError> {
+        crate::PreparedEvent::prepare_with_valid_subject(
+            self.route.subject.clone(),
+            event,
+            self.max_payload_bytes,
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("route event type {event_type:?} v{schema_version} is invalid")]
@@ -125,6 +160,10 @@ pub enum RegistryError {
         event_type: String,
         schema_version: u16,
     },
+    #[error(
+        "declared publication limit {declared} bytes exceeds the publisher limit {available} bytes"
+    )]
+    PublicationLimit { declared: usize, available: usize },
     #[error("no typed event handlers are registered")]
     Empty,
 }
@@ -132,6 +171,7 @@ pub enum RegistryError {
 #[derive(Clone, Default)]
 pub struct Registry {
     routes: HashMap<RouteKey<'static>, RegisteredRoute>,
+    max_publication_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -161,6 +201,7 @@ impl std::fmt::Debug for Registry {
         formatter
             .debug_struct("Registry")
             .field("routes", &subjects)
+            .field("max_publication_bytes", &self.max_publication_bytes)
             .field(
                 "documented_count",
                 &self
@@ -263,14 +304,27 @@ impl Registry {
         self.has_handlers().ok_or(RegistryError::Empty)
     }
 
-    pub(crate) fn subject_for<T: EventPayload + 'static>(
-        &self,
+    pub fn declare_publication<T: EventPayload + 'static>(
+        &mut self,
         route: &Route<T>,
-    ) -> Option<&async_nats::Subject> {
-        self.routes
-            .get(&route_key::<T>())
-            .filter(|entry| entry.matches(route))
-            .map(|entry| &entry.subject)
+        max_payload_bytes: usize,
+    ) -> Result<PublicationRoute<T>, RegistryError> {
+        self.declare(route)?;
+        self.max_publication_bytes = self.max_publication_bytes.max(max_payload_bytes);
+        Ok(PublicationRoute {
+            route: route.clone(),
+            max_payload_bytes,
+        })
+    }
+
+    pub fn check_publication_limit(&self, available: usize) -> Result<(), RegistryError> {
+        if self.max_publication_bytes > available {
+            return Err(RegistryError::PublicationLimit {
+                declared: self.max_publication_bytes,
+                available,
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn routes(&self) -> impl Iterator<Item = &RegisteredRoute> {
@@ -312,8 +366,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::EnvelopeError;
-    use crate::prepared::PreparedEvent;
 
     #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
     struct Created {
@@ -343,31 +395,29 @@ mod tests {
         }
 
         let route = Route::<Alias>::documented("orders.created");
-        let publication_route = route.clone();
         let collision = Route::<Created>::documented("orders.created");
         let mut registry = Registry::default();
-        registry.declare(&route).unwrap();
+        let publication = registry.declare_publication(&route, 1024).unwrap();
         std::assert_matches!(
-            registry.declare(&collision),
+            registry.declare_publication(&collision, 1025),
             Err(RegistryError::DuplicateRoute { .. })
         );
-        let aliased_event = Event {
-            id: "event-1".to_owned(),
-            occurred_at: time::UtcDateTime::UNIX_EPOCH,
-            payload: Created { quantity: 2 },
-        };
         std::assert_matches!(
             registry.register(&collision, |_, _| async { Ok(()) }),
             Err(RegistryError::MissingRoute { .. })
         );
+        assert!(registry.check_publication_limit(1024).is_ok());
         std::assert_matches!(
-            registry.prepare(&collision, &aliased_event, 1024),
-            Err(EnvelopeError::MissingRoute { .. })
+            registry.check_publication_limit(1023),
+            Err(RegistryError::PublicationLimit {
+                declared: 1024,
+                available: 1023
+            })
         );
 
         let event = Event {
-            id: aliased_event.id,
-            occurred_at: aliased_event.occurred_at,
+            id: "event-1".to_owned(),
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
             payload: Alias("accepted".to_owned()),
         };
         for undeclared in [
@@ -375,15 +425,11 @@ mod tests {
             Route::<Alias>::new("orders.created"),
         ] {
             std::assert_matches!(
-                registry.prepare(&undeclared, &event, 1024),
-                Err(EnvelopeError::MissingRoute { .. })
-            );
-            std::assert_matches!(
                 registry.register(&undeclared, |_, _| async { Ok(()) }),
                 Err(RegistryError::MissingRoute { .. })
             );
         }
-        let prepared = registry.prepare(&publication_route, &event, 1024).unwrap();
+        let prepared = publication.prepare(&event).unwrap();
         assert_eq!(prepared.subject(), "orders.created");
         assert_eq!(prepared.payload().as_ref(), br#""accepted""#);
         registry.register(&route, |_, _| async { Ok(()) }).unwrap();
@@ -400,45 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn routed_preparation_checks_route_before_non_finite_payload() {
-        struct Measured(std::cell::Cell<usize>);
-
-        impl EventPayload for Measured {
-            const EVENT_TYPE: &'static str = "order.measured";
-            const SCHEMA_VERSION: u16 = 1;
-        }
-
-        impl serde::Serialize for Measured {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.0.set(self.0.get() + 1);
-                serializer.serialize_f64(f64::NAN)
-            }
-        }
-
-        let event = Event {
-            id: "event-1".to_owned(),
-            occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
-            payload: Measured(std::cell::Cell::new(0)),
-        };
-        let route = Route::<Measured>::new("orders.measured");
-        let mut registry = Registry::default();
-        std::assert_matches!(
-            registry.prepare(&route, &event, 1024),
-            Err(EnvelopeError::MissingRoute { .. })
-        );
-        assert_eq!(event.payload.0.get(), 0);
-        registry.declare(&route).expect("publication route");
-        std::assert_matches!(
-            registry.prepare(&route, &event, 1024),
-            Err(EnvelopeError::Serialization)
-        );
-        assert_eq!(event.payload.0.get(), 1);
-    }
-
-    #[test]
     fn admission_refuses_a_type_that_nats_would_trim() {
         #[derive(serde::Serialize)]
-        struct Padded(f64);
+        struct Padded;
 
         impl EventPayload for Padded {
             const EVENT_TYPE: &'static str = "order.shipped\u{a0}";
@@ -450,21 +460,6 @@ mod tests {
             Registry::default().declare(&route),
             Err(RegistryError::InvalidEventType { .. })
         );
-        for (value, limit, expected) in [
-            (f64::NAN, 0, EnvelopeError::Serialization),
-            (1.0, 0, EnvelopeError::PayloadTooLarge),
-            (1.0, 1024, EnvelopeError::Identity),
-        ] {
-            let event = Event {
-                id: "event-1".to_owned(),
-                occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
-                payload: Padded(value),
-            };
-            assert_eq!(
-                PreparedEvent::prepare_for_subject("orders.shipped", &event, limit),
-                Err(expected)
-            );
-        }
     }
 
     fn registry() -> Registry {

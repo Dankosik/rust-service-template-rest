@@ -303,11 +303,20 @@ struct Echo {
 }
 
 #[derive(Serialize)]
-struct PrimitivePayload<'a> {
-    value: &'a str,
+struct PrimitivePayload {
+    value: String,
 }
 
-impl EventPayload for PrimitivePayload<'_> {
+static PUBLICATION: std::sync::LazyLock<
+    Result<infra_messaging::PublicationRoute<PrimitivePayload>, infra_messaging::RegistryError>,
+> = std::sync::LazyLock::new(|| {
+    infra_messaging::Registry::default().declare_publication(
+        &infra_messaging::Route::new("runtime.progress"),
+        PAYLOAD_LIMIT,
+    )
+});
+
+impl EventPayload for PrimitivePayload {
     const EVENT_TYPE: &'static str = "runtime.progress";
     const SCHEMA_VERSION: u16 = 1;
 }
@@ -376,14 +385,13 @@ impl Echo {
         let event = Event {
             id: "runtime-progress".to_owned(),
             occurred_at: time::UtcDateTime::now(),
-            payload: PrimitivePayload { value: &source },
+            payload: PrimitivePayload { value: source },
         };
-        let prepared = infra_messaging::PreparedEvent::prepare_for_subject(
-            "runtime.progress",
-            &event,
-            PAYLOAD_LIMIT,
-        )
-        .map_err(|_| Status::internal("bounded preparation failed"))?;
+        let prepared = PUBLICATION
+            .as_ref()
+            .map_err(|_| Status::internal("invalid publication route"))?
+            .prepare(&event)
+            .map_err(|_| Status::internal("bounded preparation failed"))?;
         std::hint::black_box(prepared);
         self.counts.prepared.fetch_add(1, Ordering::SeqCst);
         Ok("ok".to_owned())
@@ -539,8 +547,9 @@ fn register(
     }))
 }
 
-fn main() -> ExitCode {
-    service::run_with_grpc(std::env::args_os(), register)
+fn main() -> Result<ExitCode, &'static infra_messaging::RegistryError> {
+    PUBLICATION.as_ref()?;
+    Ok(service::run_with_grpc(std::env::args_os(), register))
 }
 
 #[cfg(test)]

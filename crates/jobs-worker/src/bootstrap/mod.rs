@@ -358,8 +358,15 @@ async fn prepare(
     // template:begin jobs:worker-bootstrap-build-engines
     let engine = jobs::build_engine(config, capabilities.jobs.take(), resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
+    #[allow(unused_mut, reason = "the messaging profile adds the durable probe")]
+    let mut probes = listeners::readiness_probes(resources);
+    // template:begin messaging:worker-bootstrap-durable-readiness
+    if let Some(consumer) = &consumer {
+        probes.push(Box::new(consumer.probe()));
+    }
+    // template:end messaging:worker-bootstrap-durable-readiness
     Ok(Prepared {
-        readiness: prepare_readiness(config, &metrics, background, resources).await?,
+        readiness: prepare_readiness(config, &metrics, background, resources, probes).await?,
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
         engine,
         // template:end jobs:worker-bootstrap-prepared-jobs-value
@@ -374,8 +381,8 @@ async fn prepare_readiness(
     metrics: &infra_telemetry::Metrics,
     background: &Background,
     resources: &mut Resources,
+    probes: Vec<Box<dyn health::Probe>>,
 ) -> Result<PreparedReadiness, WorkerError> {
-    let probes = listeners::readiness_probes(resources);
     let readiness = Readiness::new(probes, listeners::refresh_policy(config)?);
     let reader = resources.readiness.insert(readiness.control()).reader();
     listeners::bind_listeners(config, metrics, reader, background, resources)?;
@@ -486,9 +493,10 @@ mod tests {
         )
         .unwrap();
         let metrics = infra_telemetry::Metrics::install(&[]).unwrap();
-        let prepared = super::prepare_readiness(&config, &metrics, background, resources)
-            .await
-            .unwrap();
+        let prepared =
+            super::prepare_readiness(&config, &metrics, background, resources, Vec::new())
+                .await
+                .unwrap();
         let address = resources.listeners.health.as_ref().unwrap().local_addr();
         let response = tokio::time::timeout(Duration::from_secs(2), async {
             let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();

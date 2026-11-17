@@ -101,8 +101,8 @@ enum Command {
 
 #[derive(Debug, clap::Args)]
 struct AcceptArgs {
-    #[arg(long, default_value = "reading.accepted")]
-    subject: String,
+    #[arg(long)]
+    subject: Option<String>,
     #[arg(long, default_value = ENDPOINT)]
     endpoint: String,
     #[arg(
@@ -191,10 +191,10 @@ fn error_receipt(error: &Error) -> Value {
 async fn accept_one(
     pool: &PgPool,
     operation: Operation,
-    subject: &str,
+    publication: &infra_messaging::PublicationRoute<Operation>,
     endpoint: &str,
 ) -> Result<bool, ReceiverError> {
-    let prepared = PreparedRequest::try_new(operation, subject)?;
+    let prepared = PreparedRequest::try_new(operation, publication)?;
     let outbound = Producer::new([endpoint.to_owned()]);
     match reading_counter::accept(pool, &prepared, &outbound, endpoint).await {
         Ok(accepted) => {
@@ -245,8 +245,14 @@ async fn accept(pool: &PgPool, args: AcceptArgs) -> Result<bool, ReceiverError> 
         let raw = args.operation_json.ok_or("missing --operation-json")?;
         vec![operation(&raw)?]
     };
+    let subject = args
+        .subject
+        .or_else(|| std::env::var("READING_EVENT_SUBJECT").ok())
+        .unwrap_or_else(|| reading_counter::SUBJECT.to_owned());
+    let publication =
+        reading_counter::publication(&mut infra_messaging::Registry::default(), &subject)?;
     for operation in operations {
-        if !accept_one(pool, operation, &args.subject, &args.endpoint).await? {
+        if !accept_one(pool, operation, &publication, &args.endpoint).await? {
             return Ok(false);
         }
     }

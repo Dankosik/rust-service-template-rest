@@ -50,11 +50,6 @@ pub enum EnvelopeError {
     DeadLetterCreatedAtRequired,
     #[error("dead-letter record has no verifiable original message ID")]
     DeadLetterMessageIdMissing,
-    #[error("typed route is not registered for {event_type} v{schema_version}")]
-    MissingRoute {
-        event_type: &'static str,
-        schema_version: u16,
-    },
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]

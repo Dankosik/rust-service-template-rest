@@ -1,7 +1,8 @@
 mod delivery;
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::pull;
@@ -63,6 +64,30 @@ pub struct Consumer {
     pull_delivery_bytes: usize,
     retained_pull_bytes: usize,
     handler: Arc<DeliveryHandler>,
+    durable_ready: Arc<AtomicBool>,
+}
+
+struct ConsumerProbe(Weak<AtomicBool>);
+
+#[async_trait::async_trait]
+impl health::Probe for ConsumerProbe {
+    fn name(&self) -> &'static str {
+        "messaging_consumer"
+    }
+
+    async fn check(&self) -> Result<(), health::ProbeError> {
+        let ready = self
+            .0
+            .upgrade()
+            .ok_or_else(|| health::ProbeError::from_static("messaging consumer stopped"))?;
+        if ready.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(health::ProbeError::from_static(
+                "messaging durable is unavailable",
+            ))
+        }
+    }
 }
 
 struct PullLimits {
@@ -169,6 +194,7 @@ impl Consumer {
         let config = async_nats::jetstream::consumer::pull::Config {
             durable_name: Some(options.durable_name.clone()),
             filter_subject: options.filter_subject.clone(),
+            metadata: registry.durable_metadata(&dead_letter.stream, &options.dlq_subject),
             deliver_policy: DeliverPolicy::All,
             ack_policy: AckPolicy::Explicit,
             ack_wait: ACK_WAIT,
@@ -204,7 +230,13 @@ impl Consumer {
             concurrency: options.concurrency,
             pull_delivery_bytes: delivery_bytes,
             retained_pull_bytes,
+            durable_ready: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    #[must_use]
+    pub fn probe(&self) -> impl health::Probe + use<> {
+        ConsumerProbe(Arc::downgrade(&self.durable_ready))
     }
 
     #[must_use]
@@ -421,8 +453,8 @@ impl Consumer {
     async fn durable_pull_limits(&self) -> Result<Option<PullLimits>, ConsumerInfoError> {
         let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, self.pull.get_info())
             .await
-            .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
-        match result {
+            .unwrap_or_else(|_| Err(ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut)));
+        let limits = match result {
             Ok(info)
                 if info.created == self.pull.cached_info().created
                     && same_durable_contract(&self.pull.cached_info().config, &info.config) =>
@@ -442,7 +474,10 @@ impl Consumer {
                 Ok(None)
             }
             Err(error) => Err(error),
-        }
+        };
+        self.durable_ready
+            .store(matches!(limits, Ok(Some(_))), Ordering::Release);
+        limits
     }
 
     fn pull_budget(

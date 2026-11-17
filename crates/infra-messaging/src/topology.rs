@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
@@ -10,6 +11,7 @@ use async_nats::jetstream::stream::{
     StorageType, Stream,
 };
 use async_nats::jetstream::{Context, ErrorCode};
+use sha2::{Digest as _, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,41 @@ use crate::wire;
 const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
 const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
+const DURABLE_CONTRACT: &str = "service.delivery-contract.v1";
+
+impl Registry {
+    #[must_use]
+    pub fn durable_metadata(&self, dlq_stream: &str, dlq_subject: &str) -> HashMap<String, String> {
+        fn hash_text(hash: &mut Sha256, text: &str) {
+            hash.update((text.len() as u64).to_be_bytes());
+            hash.update(text.as_bytes());
+        }
+
+        let mut routes: Vec<_> = self
+            .handled_routes()
+            .map(|route| {
+                (
+                    route.subject.as_str(),
+                    route.key.event_type,
+                    route.key.schema_version,
+                )
+            })
+            .collect();
+        routes.sort_unstable();
+        let mut hash = Sha256::new();
+        hash_text(&mut hash, dlq_stream);
+        hash_text(&mut hash, dlq_subject);
+        for (subject, event_type, version) in routes {
+            hash_text(&mut hash, subject);
+            hash_text(&mut hash, event_type);
+            hash.update(version.to_be_bytes());
+        }
+        HashMap::from([(
+            DURABLE_CONTRACT.to_owned(),
+            wire::prefixed_digest_hex("sha256-", &hash.finalize().into()),
+        )])
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConsumerAdmission {
@@ -314,8 +351,9 @@ pub(crate) async fn bind_durable(
             },
         },
     };
-    if !same_durable_contract(&config.into_consumer_config(), &pull.cached_info().config) {
-        tracing::warn!(operation = "bind_consumer", error.type = "durable_configuration", reason = %MessagingError::Topology, "messaging_admission_failed");
+    let expected = config.into_consumer_config();
+    if !same_durable_contract(&expected, &pull.cached_info().config) {
+        tracing::warn!(operation = "bind_consumer", error.type = "durable_configuration", expected_contract = expected.metadata.get(DURABLE_CONTRACT).map(String::as_str), reason = %MessagingError::Topology, "messaging_admission_failed");
         return Err(MessagingError::Topology);
     }
     Ok(pull)
@@ -328,6 +366,10 @@ pub(crate) fn same_durable_contract(expected: &ConsumerConfig, actual: &Consumer
             .chain(config.filter_subjects.iter().map(String::as_str))
     }
     expected.durable_name == actual.durable_name
+        && expected
+            .metadata
+            .get(DURABLE_CONTRACT)
+            .is_some_and(|digest| actual.metadata.get(DURABLE_CONTRACT) == Some(digest))
         && expected.deliver_subject == actual.deliver_subject
         && filters(expected).eq(filters(actual))
         && expected.deliver_policy == actual.deliver_policy
