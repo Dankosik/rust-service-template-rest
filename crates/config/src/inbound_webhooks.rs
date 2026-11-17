@@ -108,6 +108,10 @@ fn resolve_key(
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct WorkerInboundWebhooksInput {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "Serde validates endpoint table fields before the worker retains their names"
+    )]
     endpoints: BTreeMap<String, WorkerEndpointInput>,
     #[serde(rename = "secrets")]
     _secrets: serde::de::IgnoredAny,
