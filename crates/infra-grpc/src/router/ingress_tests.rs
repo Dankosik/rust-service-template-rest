@@ -89,6 +89,7 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
     for media in [
         "application/grpc",
         "application/grpc+proto",
+        "application/grpc+proto; profile=vendor~v2|next",
         "Application/GRPC+vendor.v2 ; version=2 ; profile=\"custom;v2, test\"",
         r#"application/grpc+custom+v2; label="x\"y"; empty="""#,
     ] {

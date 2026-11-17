@@ -14,6 +14,7 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")
 }
 
+/// gRPC over HTTP/2 §Requests and RFC 9110 §§5.6.2, 5.6.4, 5.6.6.
 pub(crate) fn native_content_type(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all(http::header::CONTENT_TYPE).iter();
     let Some(value) = values.next() else {
@@ -25,21 +26,20 @@ pub(crate) fn native_content_type(headers: &HeaderMap) -> bool {
     if *value == tonic::metadata::GRPC_CONTENT_TYPE {
         return true;
     }
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    mediatype::MediaType::parse(value.trim_matches([' ', '\t'])).is_ok_and(|media| {
-        let subtype = media.subty.as_str();
-        let family = subtype
-            .split_once('+')
-            .map_or(subtype, |(family, _)| family);
-        media.ty == "application"
-            && family.eq_ignore_ascii_case("grpc")
-            && media
-                .params
-                .iter()
-                .all(|(_, value)| !value.as_str().is_empty())
-    })
+    let native_media_type = regex::bytes::regex!(
+        r#"(?ix-u)
+        \A [\t\x20]* application/grpc (?: \+ [a-z0-9!\x23$%&'*+.^_`|~-]+ )?
+        (?:
+            [\t\x20]* ; [\t\x20]*
+            (?: [a-z0-9!\x23$%&'*+.^_`|~-]+ =
+                (?: [a-z0-9!\x23$%&'*+.^_`|~-]+
+                  | " (?: [\t\x20-\x21\x23-\x5b\x5d-\x7e\x80-\xff] | \\ [\t\x20-\x7e\x80-\xff] )* "
+                )
+            )?
+        )*
+        [\t\x20]* \z"#
+    );
+    native_media_type.is_match(value.as_bytes())
 }
 
 #[must_use]
