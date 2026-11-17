@@ -75,7 +75,7 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
-    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let cache = admitted(&format!("redis://{}", server.address), true, true).await;
     let namespace = cache.namespace(namespace!("ttl"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
@@ -160,6 +160,7 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
         command_timeout: Duration::from_secs(30),
         ..options(&format!("redis://{address}"), true, true, None)
     })
+    .await
     .expect("start connect admits without a server");
     let namespace = cache.namespace(namespace!("obs"));
     {
@@ -197,6 +198,7 @@ async fn a_silent_server_records_timeout() {
         command_timeout: Duration::from_millis(200),
         ..options(&format!("redis://{address}"), true, true, None)
     })
+    .await
     .expect("start connect");
     let namespace = cache.namespace(namespace!("obs"));
     let started = std::time::Instant::now();
@@ -222,6 +224,7 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
         command_timeout: Duration::from_secs(1),
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
+    .await
     .expect("start connect");
 
     assert_eq!(
@@ -239,7 +242,7 @@ async fn each_outcome_records_into_its_own_series() {
     let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
-    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let cache = admitted(&format!("redis://{}", server.address), true, true).await;
     let namespace = cache.namespace(namespace!("series"));
     assert_eq!(namespace.get("key").await, Ok(None));
     assert_eq!(namespace.get("key").await, Ok(None));

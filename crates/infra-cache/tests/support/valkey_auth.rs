@@ -392,6 +392,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
                 None,
             )
         })
+        .await
         .expect("admit authenticated password-file cache");
         let namespace = cache.namespace(namespace!("rotation_auth"));
         let first = next_exchange(&mut events).await;
