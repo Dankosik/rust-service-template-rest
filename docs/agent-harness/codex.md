@@ -39,44 +39,38 @@ role authority.
 
 ## Models
 
-When assigning models natively, use `gpt-6-astra` for decision-owning roles:
-Ledger Orchestrator, phase owner, Acceptance-Unit Lead, `specialist-agent`,
-`reviewer-agent`, and `adjudicator-agent`. Preserve explicit user-selected
-models and effort (including a non-Astra root); never rewrite root settings.
+Preserve the root session settings and honor explicit user choices within their
+requested scope. When asked to recommend a root model, use the same criteria as
+for a subagent. Select for the work's judgment, risk, and proof requirements.
 
-Astra supports `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` (prefer
-`high` when assigning effort):
-
-| Effort | Use when |
+| Work | Starting model and effort |
 | --- | --- |
-| `low` | Mechanical retrieval or readback without new judgment; prefer a bounded helper if worthwhile. |
-| `medium` | Coordination only applies closed ledger decisions or routes known results. |
-| `high` | Default for phase decisions, implementation ownership, acceptance, domain judgment, and review. |
-| `xhigh` | Interacting invariants, ambiguous recovery, weak proof, material reviewer conflict, or failed causal attempt. |
-| `max` | Unresolved reasoning gap remains after `xhigh` and depth justifies cost. |
-| `ultra` | Maximum reasoning with auto-delegation, only if harness preserves topology, authority, and capacity (never auto-select). |
+| Routine coordination, implementation within an accepted contract, local diagnosis, or routine review | `gpt-6.2-sol` at `medium`. Use `high` for multiple execution paths or substantial edge-case analysis. |
+| Architecture decisions, material risks to authorization, money, or data integrity, disputed acceptance, or independent review of a high-risk change | `gpt-6.2-astra` at `high` when available, otherwise `gpt-6-astra` at `high`. Use `xhigh` for interacting invariants, conflicting evidence, or a failed attempt that exposed a material gap. |
+| Bounded fact collection or mechanical checks | Work locally when short. For a useful parallel subtask, use `gpt-6-luna` at `high` when supported, or `gpt-6.2-sol` at `low` for simple retrieval. |
 
-Raise effort before the affected decision or repair, and choose afresh after a
-unit closes; missing facts or broken tools require owner recovery.
+Use `max` when a reasoning gap remains after `xhigh` and more depth justifies
+the cost. Resolve missing facts or tool failures through owner recovery. Use
+`ultra` only on explicit user choice and when its automatic delegation fits
+the workflow's authority, topology, and capacity.
 
-Override natively only for bounded execution/evidence work: `gpt-5.6-luna`
-(`low`) for closed mechanical work, `gpt-5.6-terra` (`medium`, or `high`/`xhigh`
-for harder implementation inside an accepted contract). Astra keeps decision
-and acceptance authority; unresolved judgment returns to Astra and raises
-Astra's effort. Use `evidence-agent` for advisory research, not a lower-model
-`specialist-agent` or `reviewer-agent`. Never select `gpt-5.6-sol` for any
-role, execution, evidence, escalation, or fallback.
+If a helper model is unavailable, the parent may complete the work within its
+role and the review's independence requirements. If Astra is required and no
+supported Astra can take the assignment, report the capability gap, stop the
+dependent decision or acceptance, and continue independent work.
 
-If Astra is unavailable or rejected, retain the failure and stop the dependent
-decision/acceptance—never fall back to an execution model. Verify effective
-models natively; prose names are not native selections.
+See OpenAI's [model guide](https://developers.openai.com/codex/models) and
+[subagent guidance](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning)
+for model-specific starting points.
 
 ## Dispatch And Coordination
 
-Pass `model` and `reasoning_effort` on the initial `collaboration.spawn_agent`
-call (`fork_turns: "none"` for execution lanes, evidence lanes, and independent
-review; `"all"` inherits parent settings and rejects overrides). Never use a
-bootstrap turn or follow-up to bypass initial selection.
+Check the chosen model and effort against the callable schema. For an explicit
+override, pass both `model` and `reasoning_effort` on the initial
+`collaboration.spawn_agent` call with `fork_turns: "none"`. Use fresh history for
+execution lanes, evidence lanes, and independent review. Full-history forks
+inherit parent settings. Verify the effective pair natively before relying on
+it for dependent work.
 
 Use `collaboration.list_agents` to inspect the tree and `collaboration.wait_agent`
 only on lanes with returned identities. `collaboration.send_message` steers an
