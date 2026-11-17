@@ -209,10 +209,6 @@ fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
 
 pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeError> {
     validate_identity(value)?;
-    validate_outbound_whitespace(value)
-}
-
-pub(crate) fn validate_outbound_whitespace(value: &str) -> Result<(), EnvelopeError> {
     (value.trim().len() == value.len()).ok_or(EnvelopeError::Identity)
 }
 

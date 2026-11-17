@@ -82,11 +82,12 @@ impl Producer {
         };
         let label = outcome.label();
         record_span_outcome(&span, label, result.is_err());
-        if result.is_err() {
+        if let Err(error) = &result {
             span.in_scope(|| {
                 tracing::warn!(
                     subject = event.subject(),
                     outcome = label,
+                    reason = %error,
                     "messaging_publish_failed"
                 );
             });
