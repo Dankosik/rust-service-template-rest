@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
-use infra_postgres::{SqlError, failure_cause, is_transient, sqlstate};
+use infra_postgres::{SqlError, failure_cause, sqlstate};
 use tokio::time::Instant;
 
 use super::stored::ReplayableResponse;
@@ -219,11 +219,7 @@ fn map_attempted(
             Answer::operation_response(refusal(*response), Outcome::NotStored)
         }
         Ok(Attempted::RolledBack(Rollback::Database(error))) => {
-            let class = if is_transient(&error) {
-                AttemptError::Unavailable
-            } else {
-                AttemptError::Internal
-            };
+            let class = AttemptError::classify_sql(&error);
             tracing::warn!(
                 operation = operation_id,
                 failure_class = %class,
