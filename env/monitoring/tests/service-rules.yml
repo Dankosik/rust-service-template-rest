@@ -263,7 +263,7 @@ tests:
   # template:end postgres:monitoring-postgres-fixture
 
   # template:begin jobs:monitoring-jobs-fixture
-  - name: "A stalled job kind, a stale queue sample and terminal job failures open tickets"
+  - name: "A stalled job kind and a stale queue sample open tickets"
     interval: 1m
     input_series:
       - *service_up
@@ -277,8 +277,6 @@ tests:
         values: "0x20"
       - series: 'jobs_oldest_available_age_seconds{job="jobs-worker",instance="w1",kind="report"}'
         values: "100x20"
-      - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="email",outcome="exhausted"}'
-        values: "0 0 0 1x17"
       - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="report",outcome="retry"}'
         values: "0+5x20"
     promql_expr_test:
@@ -289,23 +287,94 @@ tests:
             value: 1
           - labels: 'ALERTS{alertname="JobsObservationStale",alertstate="firing",job="jobs-worker",instance="w2",severity="ticket"}'
             value: 1
+
+  - name: "First and later terminal job failures open tickets for 15 minutes without counting old or restarted series"
+    interval: 1m
+    input_series:
+      - series: 'up{job="jobs-worker",instance="w1"}'
+        values: "1x18 0 _x3 1x20"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w1",kind="email",outcome="exhausted"}'
+        values: "_x3 1x15 stale _x3 1x1 2x18"
+      - series: 'jobs_last_terminal_attempt_timestamp_seconds{job="jobs-worker",instance="w1",kind="email"}'
+        values: "_x3 150x15 stale _x3 150x1 1470x18"
+      - series: 'up{job="jobs-worker",instance="w2"}'
+        values: "_x23 1x20"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w2",kind="import",outcome="exhausted"}'
+        values: "_x23 1x20"
+      - series: 'up{job="jobs-worker",instance="w3"}'
+        values: "1x43"
+      - series: 'process_start_time_seconds{job="jobs-worker",instance="w3"}'
+        values: "1x22 1350x20"
+      - series: 'jobs_attempts_total{job="jobs-worker",instance="w3",kind="export",outcome="permanent"}'
+        values: "2x22 1x20"
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 2m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 17m
+        exp_samples:
+          - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 18m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 23m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing"}'
+        eval_time: 25m
+        exp_samples:
           - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
             value: 1
   # template:end jobs:monitoring-jobs-fixture
 
   # template:begin messaging:monitoring-messaging-fixture
-  - name: "A dead-lettered event opens a ticket naming its type, reason and publication outcome"
+  - name: "First and later dead-letter publication attempts open timed tickets naming the reason and outcome"
     interval: 1m
     input_series:
-      - *service_up
+      - series: 'up{job="jobs-worker",instance="w1"}'
+        values: "1x3 0 _x19 1x20"
       - series: 'messaging_dead_letter_total{job="jobs-worker",instance="w1",event_type="order.created",reason="permanent",outcome="accepted"}'
-        values: "0 0 1x10"
-      - series: 'messaging_handler_total{job="jobs-worker",instance="w1",event_type="order.created",outcome="retryable"}'
-        values: "0+3x12"
+        values: "_x3 1 stale _x19 1 2x19"
+      - series: 'messaging_last_dead_letter_timestamp_seconds{job="jobs-worker",instance="w1",event_type="order.created",reason="permanent",outcome="accepted"}'
+        values: "_x3 150 stale _x19 150 1470x19"
+      - series: 'messaging_last_dead_letter_timestamp_seconds{job="jobs-worker",instance="w1",event_type="order.shipped",reason="malformed",outcome="rejected"}'
+        values: "_x25 1470x19"
+      - series: 'messaging_last_dead_letter_timestamp_seconds{job="jobs-worker",instance="w1",event_type="order.cancelled",reason="exhausted",outcome="ambiguous"}'
+        values: "_x25 1470x19"
     promql_expr_test:
-      - expr: 'ALERTS{alertstate="firing"}'
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 2m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 3m
+        exp_samples:
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.created",outcome="accepted",reason="permanent",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
         eval_time: 5m
         exp_samples:
           - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.created",outcome="accepted",reason="permanent",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 18m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 24m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing"}'
+        eval_time: 25m
+        exp_samples:
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.created",outcome="accepted",reason="permanent",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.shipped",outcome="rejected",reason="malformed",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.cancelled",outcome="ambiguous",reason="exhausted",severity="ticket"}'
             value: 1
   # template:end messaging:monitoring-messaging-fixture

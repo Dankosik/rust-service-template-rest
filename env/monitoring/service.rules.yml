@@ -196,7 +196,7 @@ groups:
         for: 15m
         labels: {severity: ticket}
         annotations:
-          summary: One scrape target stays unreachable while the job still runs elsewhere
+          summary: One scrape target stays unreachable for 15 minutes
           description: '{{ $labels.instance }} of {{ $labels.job }} has not answered a scrape for 15 minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicetargetdown
       - alert: ServiceRestarting
@@ -488,11 +488,13 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsobservationstale
       - alert: JobsDeadLettered
         expr: |
-          sum by(kind) (increase(jobs_attempts_total{job=~"service|jobs-worker",outcome=~"exhausted|permanent"}[15m])) > 0
+          max by(kind) (
+            max_over_time(jobs_last_terminal_attempt_timestamp_seconds{job=~"service|jobs-worker"}[15m])
+          ) > time() - 15 * 60
         labels: {severity: ticket}
         annotations:
           summary: Jobs failed for good and wait for operator recovery
-          description: '{{ $value | humanize }} {{ $labels.kind }} jobs failed permanently or exhausted their attempts in 15 minutes.'
+          description: 'A {{ $labels.kind }} job failed permanently or exhausted its attempts in the last 15 minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#jobsdeadlettered
   # template:end jobs:monitoring-jobs
   # template:begin messaging:monitoring-messaging
@@ -500,10 +502,12 @@ groups:
     rules:
       - alert: MessagingDeadLettered
         expr: |
-          sum by(event_type,reason,outcome) (increase(messaging_dead_letter_total{job=~"service|jobs-worker"}[15m])) > 0
+          max by(event_type,reason,outcome) (
+            max_over_time(messaging_last_dead_letter_timestamp_seconds{job=~"service|jobs-worker"}[15m])
+          ) > time() - 15 * 60
         labels: {severity: ticket}
         annotations:
-          summary: Consumed events were dead-lettered
-          description: '{{ $value | humanize }} {{ $labels.event_type }} events dead-lettered for {{ $labels.reason }} in 15 minutes; publication {{ $labels.outcome }}.'
+          summary: A dead-letter publication was attempted
+          description: 'A dead-letter publication for {{ $labels.event_type }} with reason {{ $labels.reason }} in the last 15 minutes had outcome {{ $labels.outcome }}.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
   # template:end messaging:monitoring-messaging

@@ -1,7 +1,11 @@
+use std::time::UNIX_EPOCH;
+
 use super::*;
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_identity() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let _local_recorder = metrics::set_default_local_recorder(&recorder);
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -35,6 +39,15 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .publication
         .prepare(&event("event-permanent"))
         .expect("fixture event is prepared");
+    let dead_letter_timestamp = "messaging_last_dead_letter_timestamp_seconds{";
+    assert!(
+        !recorder
+            .handle()
+            .render()
+            .lines()
+            .any(|line| line.starts_with(dead_letter_timestamp))
+    );
+    let before = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -64,6 +77,22 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .finish(deadline())
         .await
         .expect("terminal transfer worker can drain after source settlement");
+
+    let scrape = recorder.handle().render();
+    let observed = scrape
+        .lines()
+        .find(|line| {
+            line.starts_with(dead_letter_timestamp)
+                && line.contains(r#"event_type="test.example.created""#)
+                && line.contains(r#"reason="permanent""#)
+                && line.contains(r#"outcome="accepted""#)
+        })
+        .and_then(|line| line.split_ascii_whitespace().last())
+        .expect("an acknowledged DLQ publication publishes its timestamp")
+        .parse::<f64>()
+        .expect("DLQ publication timestamp is a number");
+    let after = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
+    assert!((before.as_secs_f64()..=after.as_secs_f64()).contains(&observed));
 
     fixture
         .jetstream
