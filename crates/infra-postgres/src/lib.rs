@@ -25,6 +25,7 @@ pub use pool::{
     connect_session, format_pg_duration, prepare_pool,
 };
 pub use probe::PostgresProbe;
+pub use sqlx::Error as SqlError;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{
     Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline,
