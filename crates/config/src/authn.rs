@@ -94,7 +94,7 @@ where
     };
     let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
     let items = Vec::<StrictString>::deserialize(value).map_err(|_| invalid())?;
-    let values = items.into_iter().map(|item| item.0).collect();
+    let values: Vec<String> = items.into_iter().map(|item| item.0).collect();
     Audiences::try_from(values).map(Some).map_err(|_| invalid())
 }
 
@@ -387,7 +387,7 @@ impl AuthnInput {
             AuthnMode::OidcJwt => {
                 self.reject_introspection_fields(v);
                 let condition = "authn.mode = oidc-jwt";
-                let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+                let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
                 let audience = self.take_audience(condition, v);
                 let token_profile = self.token_profile.unwrap_or_default();
                 let algorithms = self.algorithms.unwrap_or_else(default_algorithms);
@@ -422,7 +422,7 @@ impl AuthnInput {
 
                 self.reject_jwt_fields(v);
                 let condition = "authn.mode = oidc-introspection";
-                let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+                let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
                 let audience = self.take_audience(condition, v);
                 let introspection_endpoint = v.take(required_when(
                     "authn.introspection_endpoint",
