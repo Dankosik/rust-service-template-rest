@@ -20,6 +20,48 @@ const ENV_SEPARATOR: &str = "__";
 
 const NAME_FORM: &str = "each segment between `__` separators must be letters, digits, `_`, or `-`";
 
+const RETAINED_SECTIONS: &[&str] = &[
+    "app",
+    "http",
+    // template:begin grpc:config-section
+    "grpc",
+    // template:end grpc:config-section
+    // template:begin inbound-webhooks:config-section
+    "inbound_webhooks",
+    // template:end inbound-webhooks:config-section
+    "health",
+    "log",
+    "runtime",
+    "observability",
+    // template:begin messaging:config-section
+    "messaging",
+    // template:end messaging:config-section
+    // template:begin cache:config-section
+    "cache",
+    // template:end cache:config-section
+    // template:begin object-storage:config-section
+    "object_storage",
+    // template:end object-storage:config-section
+    // template:begin authn:config-section
+    "authn",
+    // template:end authn:config-section
+    // template:begin service-auth:config-section
+    "service_auth",
+    // template:end service-auth:config-section
+    // template:begin postgres:config-section
+    "postgres",
+    // template:end postgres:config-section
+    // template:begin http-idempotency:config-section
+    "http_idempotency",
+    // template:end http-idempotency:config-section
+    // template:begin jobs:config-section
+    "jobs",
+    // template:end jobs:config-section
+    // template:begin webhooks:config-section
+    "webhooks",
+    // template:end webhooks:config-section
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("environment variable {name} is malformed: {NAME_FORM}")]
@@ -258,9 +300,18 @@ where
         .build()
         .map_err(|error| Error::Merge(error.to_string()))?;
 
-    merged
-        .try_deserialize()
-        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_sources)))
+    let rejection = |error| Error::Deserialize(describe_rejection(&error, &variable_sources));
+    if let config::ValueKind::Table(sections) = &merged.cache.kind
+        && let Some(key) = sections
+            .keys()
+            .find(|key| !RETAINED_SECTIONS.contains(&key.as_str()))
+    {
+        return Err(rejection(serde::de::Error::unknown_field(
+            key,
+            RETAINED_SECTIONS,
+        )));
+    }
+    merged.try_deserialize().map_err(rejection)
 }
 
 #[derive(Clone, derive_more::Debug)]

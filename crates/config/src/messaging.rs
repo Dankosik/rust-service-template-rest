@@ -25,10 +25,11 @@ const DEFAULT_MAX_PAYLOAD: ByteSize = ByteSize::kib(256);
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
-#[derive(Debug, Deserialize)]
+#[derive(derive_more::Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct MessagingInput {
     #[serde(deserialize_with = "url_list")]
+    #[debug("{} servers", urls.len())]
     urls: Vec<String>,
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     credentials: Option<SecretString>,
@@ -110,8 +111,9 @@ impl Default for MessagingInput {
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct MessagingConfig {
+    #[debug("{} servers", urls.len())]
     pub urls: Vec<String>,
     pub credentials: Option<MessagingCredentials>,
     pub root_ca_path: Option<PathBuf>,

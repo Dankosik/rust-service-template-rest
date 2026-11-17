@@ -7,11 +7,7 @@ use crate::{
 };
 
 #[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[allow(
-    dead_code,
-    reason = "retained service-only sibling sections are decoded as IgnoredAny and never read by the worker"
-)]
+#[serde(default)]
 pub(crate) struct WorkerInput {
     pub(crate) app: AppConfig,
     log: LogConfig,
@@ -19,13 +15,6 @@ pub(crate) struct WorkerInput {
     health: HealthConfig,
     observability: ObservabilityConfig,
     http: crate::http::WorkerHttpInput,
-    // template:begin jobs:worker-skip-service-postgres
-    #[serde(skip)]
-    // template:end jobs:worker-skip-service-postgres
-    // template:begin postgres:worker-input-service-postgres
-    #[serde(rename = "postgres")]
-    service_postgres: serde::de::IgnoredAny,
-    // template:end postgres:worker-input-service-postgres
     // template:begin jobs:worker-input-postgres-field
     postgres: crate::postgres::PostgresInput,
     // template:end jobs:worker-input-postgres-field
@@ -41,24 +30,6 @@ pub(crate) struct WorkerInput {
     // template:begin inbound-webhooks:worker-input-inbound-webhooks-field
     inbound_webhooks: crate::inbound_webhooks::WorkerInboundWebhooksInput,
     // template:end inbound-webhooks:worker-input-inbound-webhooks-field
-    // template:begin authn:worker-input-authn-field
-    authn: serde::de::IgnoredAny,
-    // template:end authn:worker-input-authn-field
-    // template:begin cache:worker-input-cache-field
-    cache: serde::de::IgnoredAny,
-    // template:end cache:worker-input-cache-field
-    // template:begin grpc:worker-input-grpc-field
-    grpc: serde::de::IgnoredAny,
-    // template:end grpc:worker-input-grpc-field
-    // template:begin http-idempotency:worker-input-http-idempotency-field
-    http_idempotency: serde::de::IgnoredAny,
-    // template:end http-idempotency:worker-input-http-idempotency-field
-    // template:begin object-storage:worker-input-object-storage-field
-    object_storage: serde::de::IgnoredAny,
-    // template:end object-storage:worker-input-object-storage-field
-    // template:begin service-auth:worker-input-service-auth-field
-    service_auth: serde::de::IgnoredAny,
-    // template:end service-auth:worker-input-service-auth-field
 }
 
 impl WorkerInput {
