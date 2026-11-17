@@ -466,10 +466,7 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 response: Arc::new(Mutex::new((
                     StatusCode::OK,
-                    Bytes::from(active_response(
-                        "subject",
-                        unix_seconds() + 600,
-                    )),
+                    Bytes::from(active_response("subject", unix_seconds() + 600)),
                 ))),
                 gate: Arc::clone(&gate),
             };
@@ -826,10 +823,7 @@ mod tests {
             (br#"{"active":false}"#.to_vec(), Some(Failure::Invalid)),
             (br#"{"active":true}"#.to_vec(), Some(Failure::Invalid)),
             (b"{".to_vec(), Some(Failure::Unavailable)),
-            (
-                active_response("subject", unix_seconds() - 1),
-                None,
-            ),
+            (active_response("subject", unix_seconds() - 1), None),
         ] {
             fixture.respond(StatusCode::OK, &response);
             let before = fixture.calls();
