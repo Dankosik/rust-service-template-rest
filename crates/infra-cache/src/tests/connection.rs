@@ -390,6 +390,25 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     ] {
         assert!(scrape.contains(series), "{series} missing from {scrape}");
     }
+
+    let during_build = OperationContext::unbounded();
+    let write = cache.link.command::<()>(
+        || {
+            let mut command = redis::cmd("DEL");
+            command.arg("stop:during_build");
+            during_build.cancel();
+            command
+        },
+        &during_build,
+    );
+    assert!(matches!(
+        write.await,
+        Err(crate::connection::CommandError::Stopped(
+            operation_context::Stopped::Cancelled
+        ))
+    ));
+    assert_eq!(namespace.get("after").await, Ok(None));
+    assert_eq!(server.command_count("DEL", Some("stop:during_build")), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -612,6 +631,8 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
+    use crate::connection::{CommandError, ErrorType};
+
     let server = FakeServer::start().await;
     *server
         .observed
@@ -643,15 +664,23 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    assert_work_metrics(&metrics, 256, 1, 0);
+    let context = operation_context::OperationContext::unbounded();
+    let refused = cache
+        .link
+        .command::<()>(|| panic!("a refused command must not be built"), &context);
+    assert!(matches!(
+        futures_util::poll!(std::pin::pin!(refused)),
+        Poll::Ready(Err(CommandError::Failed(ErrorType::Other)))
+    ));
+    assert_work_metrics(&metrics, 256, 2, 0);
     drop(waiting.pop());
-    assert_work_metrics(&metrics, 255, 1, 0);
+    assert_work_metrics(&metrics, 255, 2, 0);
     let mut replacement = Box::pin(namespace.get("replacement"));
     assert!(futures_util::poll!(replacement.as_mut()).is_pending());
     drop(waiting);
-    assert_work_metrics(&metrics, 1, 1, 0);
+    assert_work_metrics(&metrics, 1, 2, 0);
     assert_eq!(replacement.await, Ok(None));
-    assert_work_metrics(&metrics, 0, 1, 0);
+    assert_work_metrics(&metrics, 0, 2, 0);
     assert_eq!(server.connections(), 1);
     assert_eq!(server.command_count("GET", Some("waiting:pending")), 0);
     assert_eq!(server.command_count("GET", Some("waiting:refused")), 0);
@@ -715,12 +744,12 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
             || server.connections() > old,
         )
         .await;
-    drop(pending);
     server
         .wait_for(Duration::from_secs(1), "old socket stayed open", || {
             server.closed_through(old)
         })
         .await;
+    drop(pending);
     assert_eq!(namespace.get("recovered").await, Ok(None));
 }
 

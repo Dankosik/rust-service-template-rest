@@ -63,14 +63,19 @@ impl CacheNamespace {
         scope: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let operation = Operation::Get;
-        let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
-        self.run(scope, operation, command, |value: &Option<Vec<u8>>| {
-            if value.is_some() {
-                Outcome::Hit
-            } else {
-                Outcome::Miss
-            }
-        })
+        let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
+        self.run(
+            scope,
+            operation,
+            build_command,
+            |value: &Option<Vec<u8>>| {
+                if value.is_some() {
+                    Outcome::Hit
+                } else {
+                    Outcome::Miss
+                }
+            },
+        )
         .await
     }
 
@@ -102,18 +107,21 @@ impl CacheNamespace {
             .filter(|milliseconds| *milliseconds > 0)
             .ok_or(SetError::InvalidTtl)?;
         let operation = Operation::Set;
-        let options =
-            SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
-        let mut command = self.keyed_command(
-            operation,
-            key,
-            ExtraCommandCapacity {
-                extra_args: 3,
-                extra_bytes: value.len() + 2 + 20,
-            },
-        );
-        command.arg(value).arg(options);
-        self.run(scope, operation, command, |(): &()| Outcome::Ok)
+        let build_command = || {
+            let options =
+                SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
+            let mut command = self.keyed_command(
+                operation,
+                key,
+                ExtraCommandCapacity {
+                    extra_args: 3,
+                    extra_bytes: value.len() + 2 + 20,
+                },
+            );
+            command.arg(value).arg(options);
+            command
+        };
+        self.run(scope, operation, build_command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -133,8 +141,8 @@ impl CacheNamespace {
 
     async fn delete_bounded(&self, key: &str, scope: &OperationContext) -> Result<(), Unavailable> {
         let operation = Operation::Delete;
-        let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
-        self.run(scope, operation, command, |(): &()| Outcome::Ok)
+        let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
+        self.run(scope, operation, build_command, |(): &()| Outcome::Ok)
             .await
     }
 
@@ -150,7 +158,7 @@ impl CacheNamespace {
         &self,
         scope: &OperationContext,
         operation: Operation,
-        command: redis::Cmd,
+        build_command: impl FnOnce() -> redis::Cmd,
         outcome: fn(&T) -> Outcome,
     ) -> Result<T, Unavailable> {
         let guard = OperationGuard::start(
@@ -159,7 +167,7 @@ impl CacheNamespace {
             operation,
             &self.cache.link.server,
         );
-        match self.cache.link.command(command, scope).await {
+        match self.cache.link.command(build_command, scope).await {
             Ok(value) => {
                 if operation.is_read()
                     && let Some(stopped) = scope.stopped()
