@@ -340,10 +340,7 @@ impl Echo {
     }
 
     async fn upload(&self, request: &Request<UnaryRequest>) -> Result<String, Status> {
-        let context = request
-            .extensions()
-            .get()
-            .ok_or_else(|| Status::internal("missing operation context"))?;
+        let context = infra_grpc::request_operation(request)?;
         self.counts.upload_started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.upload_active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts

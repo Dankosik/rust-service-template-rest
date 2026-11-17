@@ -14,6 +14,18 @@ use crate::call::server_stopped;
 use crate::router::reject_with_budget;
 use crate::status::internal_status;
 
+pub(super) const VERIFIER_SETTINGS: &[&str] = &[
+    // template:begin oidc-jwt:grpc-verifier-setting-jwt
+    "authn.mode = oidc-jwt",
+    // template:end oidc-jwt:grpc-verifier-setting-jwt
+    // template:begin oidc-introspection:grpc-verifier-setting-introspection
+    "authn.mode = oidc-introspection",
+    // template:end oidc-introspection:grpc-verifier-setting-introspection
+    // template:begin service-auth:grpc-verifier-setting-service-tokens
+    "service_auth.mode = jwt",
+    // template:end service-auth:grpc-verifier-setting-service-tokens
+];
+
 #[derive(Clone, Debug)]
 pub struct VerifiedPrincipal(Principal);
 

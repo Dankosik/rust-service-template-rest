@@ -186,7 +186,7 @@ def _is_ci_owned(*, requires_heavy: bool, display: str, ci_mode: str) -> bool:
         return False
     if requires_heavy:
         return os.environ.get("ALLOW_HEAVY") != "1"
-    return display == "make template-init-check" and os.environ.get("ALLOW_FULL") != "1"
+    return display in {"make template-init-check", "make template-init-source-checks"} and os.environ.get("ALLOW_FULL") != "1"
 
 
 def _select_artifact_graphs(repo: Path, merge_base_sha: str, files: Sequence[str]) -> str:
@@ -276,8 +276,6 @@ def _build_plan(
         add_command("make", "tools-check", "tool manifest changed", "cheap")
 
     if is_true("validation_system"):
-        add_command("make", "changed-surfaces-check", "validation routing changed", "cheap")
-        add_command("make", "affected-crates-check", "validation routing changed", "cpu")
         add_command("make", "validation-lock-self-test", "validation routing changed", "cheap")
         add_command("make", "verify-check", "validation routing changed", "cpu")
 
@@ -289,8 +287,11 @@ def _build_plan(
 
     if is_true("initializer_runtime"):
         add_command("make", "template-init-check", "canonical projections and the initializer runtime graph inventory", "cpu", docker=True)
-    elif is_true("module_initializer"):
-        add_command("make", "template-init-projections", "projected text changed and no runtime input did", "cpu")
+    else:
+        if is_true("initializer_source"):
+            add_command("make", "template-init-source-checks", "source template and sync behavior changed", "cpu")
+        if is_true("module_initializer"):
+            add_command("make", "template-init-projections", "projected text changed and no runtime input did", "cpu")
 
     # template:begin grpc:verify-grpc-schema
     if is_true("grpc_schema"):
@@ -533,7 +534,7 @@ def _preflight_environment(
         is_true(s)
         for s in (
             "rust_source", "cargo_dependencies", "dependency_policy", "lint_config",
-            "openapi", "validation_system", "module_initializer", "tool_manifest",
+            "openapi", "validation_system", "initializer_source", "initializer_runtime", "tool_manifest",
             "duplication", "architecture", "quality_tooling", "template_engine",
         )
     ):

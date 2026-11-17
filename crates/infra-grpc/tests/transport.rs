@@ -217,9 +217,7 @@ impl Echo {
     }
 
     fn observe<T>(&self, request: &Request<T>, seen: Seen) {
-        let opening = request
-            .extensions()
-            .get::<operation_context::OperationContext>()
+        let opening = infra_grpc::request_operation(request)
             .expect("admitted tonic handlers receive the opening context");
         assert!(opening.deadline().is_some());
         let response = request

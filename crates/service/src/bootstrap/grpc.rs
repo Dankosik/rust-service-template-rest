@@ -48,21 +48,15 @@ pub(super) fn prepare(
         .clone()
         .map_or(authentication, GrpcAuthentication::ServiceTokens);
     // template:end service-auth:bootstrap-grpc-service-tokens
-    let bearer_modes: &[&str] = &[
-        // template:begin oidc-jwt:bootstrap-grpc-verifier-jwt
-        "authn.mode = oidc-jwt",
-        // template:end oidc-jwt:bootstrap-grpc-verifier-jwt
-        // template:begin oidc-introspection:bootstrap-grpc-verifier-introspection
-        "authn.mode = oidc-introspection",
-        // template:end oidc-introspection:bootstrap-grpc-verifier-introspection
-    ];
-    if !bearer_modes.is_empty() && matches!(authentication, GrpcAuthentication::None) {
-        let modes = bearer_modes.join(" or ");
-        // template:begin service-auth:bootstrap-grpc-verifier-service-tokens
-        let modes = format!("{modes} or service_auth.mode = jwt");
-        // template:end service-auth:bootstrap-grpc-verifier-service-tokens
-        return Err(ValidationError::new("grpc.enabled", format!("requires {modes}")).into());
+    // template:begin grpc-authn:bootstrap-grpc-verifier
+    if matches!(authentication, GrpcAuthentication::None) {
+        return Err(ValidationError::new(
+            "grpc.enabled",
+            infra_grpc::Error::UnauthenticatedBusinessCalls.to_string(),
+        )
+        .into());
     }
+    // template:end grpc-authn:bootstrap-grpc-verifier
     let limits = limits(grpc);
     let mut services = infra_grpc::Services::new();
     if let Some(registration) = registration {

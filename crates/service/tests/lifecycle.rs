@@ -332,7 +332,10 @@ fn missing_grpc_verifier_lists_only_the_supported_modes() {
     let modes = expected_grpc_verifier_modes();
     assert_eq!(
         failure["error"].as_str(),
-        Some(format!("configuration is invalid: grpc.enabled: requires {modes}").as_str())
+        Some(
+            format!("configuration is invalid: grpc.enabled: gRPC business calls require {modes}")
+                .as_str()
+        )
     );
 }
 
