@@ -1011,7 +1011,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .method(axum::http::Method::HEAD, "/_test/inherited")
         .await;
     assert_eq!(implicit.status_code(), StatusCode::UNAUTHORIZED);
-    assert_eq!(implicit.header(WWW_AUTHENTICATE), "Bearer");
+    assert_eq!(implicit.header(WWW_AUTHENTICATE), "Bearer realm=\"api\"");
     assert_eq!(
         implicit.header(axum::http::header::CONTENT_TYPE),
         "application/problem+json"
@@ -1161,24 +1161,31 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     let server = TestServer::new(app.into_make_service());
     let mut responses = Vec::new();
     let mut verification_counts = Vec::new();
+    let no_scope = format!("Bearer {NO_SCOPE}");
+    let alice = format!("Bearer {ALICE}");
     for authorization in [
         None,
+        Some("Basic Zm9vOmJhcg=="),
         Some("Bearer token token"),
-        Some(NO_SCOPE),
-        Some(ALICE),
+        Some(&no_scope),
+        Some(&alice),
     ] {
         let mut request = server.get("/_test/authorization");
         if let Some(value) = authorization {
-            request = request.authorization(if value.starts_with("Bearer ") {
-                value.to_owned()
-            } else {
-                format!("Bearer {value}")
-            });
+            request = request.authorization(value);
         }
         responses.push(request.await);
         verification_counts.push((
             captured.counter("authn_verifications_total", &[]),
             captured.counter("authn_token_verifications_total", &[]),
+            captured.counter(
+                "authn_verifications_total",
+                &[
+                    ("transport", "http"),
+                    ("result", "success"),
+                    ("failure", "none"),
+                ],
+            ),
         ));
     }
     provider.stop().await;
@@ -1188,16 +1195,22 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
             &responses[0],
             StatusCode::UNAUTHORIZED,
             "authentication_required",
-            "Bearer",
+            "Bearer realm=\"api\"",
         ),
         (
             &responses[1],
+            StatusCode::UNAUTHORIZED,
+            "authentication_required",
+            "Bearer realm=\"api\"",
+        ),
+        (
+            &responses[2],
             StatusCode::BAD_REQUEST,
             "authentication_malformed",
             "Bearer error=\"invalid_request\"",
         ),
         (
-            &responses[2],
+            &responses[3],
             StatusCode::FORBIDDEN,
             "forbidden",
             "Bearer error=\"insufficient_scope\"",
@@ -1209,12 +1222,12 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
             HeaderValue::from_static(challenge)
         );
     }
-    assert_eq!(responses[3].status_code(), StatusCode::OK);
-    assert_eq!(responses[3].text(), "alice");
+    assert_eq!(responses[4].status_code(), StatusCode::OK);
+    assert_eq!(responses[4].text(), "alice");
     assert_eq!(
         verification_counts,
-        [(1, 0), (2, 0), (3, 1), (4, 2)],
-        "each request records one HTTP outcome; only a parsed token reaches engine verification"
+        [(1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 1, 1), (5, 2, 2)],
+        "each request records one HTTP outcome and both parsed tokens verify successfully"
     );
 }
 
@@ -1312,13 +1325,13 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             None,
             StatusCode::UNAUTHORIZED,
             "authentication_required",
-            Some("Bearer"),
+            Some("Bearer realm=\"api\""),
         ),
         (
             Some("Basic Zm9vOmJhcg=="),
             StatusCode::UNAUTHORIZED,
             "authentication_required",
-            Some("Bearer"),
+            Some("Bearer realm=\"api\""),
         ),
         (
             Some("Bearer token token"),

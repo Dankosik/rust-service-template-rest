@@ -10,6 +10,7 @@ use infra_bearerauthn::{
 };
 use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use utoipa::{IntoResponses, ToResponse};
 
 use crate::contract::{Access, Policy, layer_routes};
@@ -176,6 +177,7 @@ fn authorize(
         .iter()
         .any(|scopes| principal.has_scopes(scopes))
     {
+        tracing::Span::current().set_attribute("authz.reason", "insufficient_scope");
         return Err(insufficient_scope_response());
     }
     if let Some(stopped) = operation.stopped() {
@@ -212,7 +214,7 @@ fn wiring_failure(failure: &'static str) -> Response {
 
 fn failure_response(failure: Failure) -> Response {
     let (code, challenge) = match failure {
-        Failure::Missing => (Code::AuthenticationRequired, Some("Bearer")),
+        Failure::Missing => (Code::AuthenticationRequired, Some("Bearer realm=\"api\"")),
         Failure::Malformed => (
             Code::AuthenticationMalformed,
             Some("Bearer error=\"invalid_request\""),

@@ -2618,6 +2618,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
+ "infra-http",
  "infra-http-transport",
  "infra-outbound-grpc",
  "infra-serviceauth",
@@ -2652,6 +2653,7 @@ dependencies = [
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
  "url",
+ "utoipa",
 ]
 
 [[package]]

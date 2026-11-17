@@ -312,6 +312,60 @@ fn invalid_configuration_exits_one_with_the_key_named() {
     assert!(stderr.contains("request_timeout"), "stderr: {stderr}");
 }
 
+// template:begin grpc-authn:service-grpc-verifier-lifecycle
+#[test]
+fn missing_grpc_verifier_lists_only_the_supported_modes() {
+    let (code, stdout, stderr) = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__GRPC__ENABLED", "true"),
+        ("APP__GRPC__ADDR", "127.0.0.1:0"),
+        ("APP__GRPC__SECURITY", "plaintext"),
+        ("APP__GRPC__REQUEST_TIMEOUT", "2s"),
+    ])
+    .wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}\nstderr: {stderr}");
+    let records = records(&stdout);
+    let failure = records
+        .iter()
+        .find(|record| record["message"] == "service failed")
+        .expect("missing verifier must be logged as a startup failure");
+    let modes = expected_grpc_verifier_modes();
+    assert_eq!(
+        failure["error"].as_str(),
+        Some(format!("configuration is invalid: grpc.enabled: requires {modes}").as_str())
+    );
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the local template projection lock in a synchronous process test"
+)]
+fn expected_grpc_verifier_modes() -> String {
+    let lock = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../template.lock");
+    match std::fs::read(&lock) {
+        Ok(contents) => {
+            let lock: serde_json::Value = serde_json::from_slice(&contents).expect("template lock");
+            let profiles = &lock["profiles"];
+            let authn = profiles["authn"].as_str().expect("authn profile");
+            let service_auth = profiles["service_auth"]
+                .as_str()
+                .expect("service auth profile");
+            assert!(matches!(authn, "oidc-jwt" | "oidc-introspection"));
+            if service_auth == "jwt" {
+                format!("authn.mode = {authn} or service_auth.mode = jwt")
+            } else {
+                format!("authn.mode = {authn}")
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "authn.mode = oidc-jwt or authn.mode = oidc-introspection or service_auth.mode = jwt"
+                .to_owned()
+        }
+        Err(error) => panic!("read template lock {}: {error}", lock.display()),
+    }
+}
+// template:end grpc-authn:service-grpc-verifier-lifecycle
+
 #[test]
 #[expect(
     clippy::disallowed_methods,
