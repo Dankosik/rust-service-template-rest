@@ -58,4 +58,4 @@ tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
 service-config = { workspace = true, features = ["test-support"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["io-util", "test-util"] }

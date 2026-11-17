@@ -23,7 +23,6 @@ use tokio_util::task::AbortOnDropHandle;
 
 const RECORD_BOUND: Duration = Duration::from_secs(20);
 const EXIT_BOUND: Duration = Duration::from_secs(20);
-const READY_BOUND: Duration = Duration::from_secs(5);
 const METRICS_BOUND: Duration = Duration::from_secs(5);
 const JOB_BOUND: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(20);
@@ -708,19 +707,13 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     );
     let api = listener_addr(&mut worker, "http listener bound").await;
     let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_claiming_started").await;
     worker.await_record("jobs_worker_ready").await;
 
-    let ready = format!("http://{api}/health/ready");
-    poll_until(
-        &format!("worker becomes ready at {ready}"),
-        READY_BOUND,
-        POLL,
-        async || {
-            let (status, _) = get(&ready).await.ok()?;
-            (status == 200).then_some(())
-        },
-    )
-    .await;
+    let (status, _) = get(&format!("http://{api}/health/ready"))
+        .await
+        .expect("GET /health/ready");
+    assert_eq!(status, 200);
     let (status, body) = get(&format!("http://{api}/health/live"))
         .await
         .expect("GET /health/live");

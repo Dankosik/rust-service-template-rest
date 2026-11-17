@@ -19,7 +19,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio::time::Instant;
 
-use health::Readiness;
+use health::{PreparedReadiness, Readiness};
 use infra_telemetry::install_panic_hook;
 use service_config::WorkerConfig;
 
@@ -108,6 +108,7 @@ enum Ended {
 }
 
 struct Prepared {
+    readiness: PreparedReadiness,
     // template:begin jobs:worker-bootstrap-prepared-jobs
     engines: Vec<infra_jobs::Engine>,
     // template:end jobs:worker-bootstrap-prepared-jobs
@@ -210,11 +211,35 @@ async fn run_worker(
         return ended;
     }
     // template:end messaging:worker-bootstrap-start-admitted-consumer
-    if let Some(ended) = pending_end(resources, background, signals) {
+    if let Err(ended) = activate_readiness(prepared.readiness, resources, background, signals).await
+    {
         return ended;
     }
     tracing::info!("jobs_worker_ready");
     wait_for_stop(resources, background, signals).await
+}
+
+async fn activate_readiness(
+    mut readiness: PreparedReadiness,
+    resources: &Resources,
+    background: &Background,
+    signals: &mut Signals,
+) -> Result<(), Ended> {
+    let fresh = tokio::select! {
+        biased;
+        ended = wait_for_stop(resources, background, signals) => return Err(ended),
+        result = readiness.ensure_fresh() => result,
+    };
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return Err(ended);
+    }
+    let refresher = fresh
+        .and_then(|()| readiness.activate())
+        .map_err(|error| Ended::Failure(WorkerError::Admission(error)))?;
+    background.spawn("readiness_refresher", |cancel| {
+        refresher.refresh_until(cancel)
+    });
+    Ok(())
 }
 
 fn signal_ended(result: Result<(), SignalError>, background: &Background) -> Ended {
@@ -319,15 +344,8 @@ async fn prepare(
     // template:begin jobs:worker-bootstrap-build-engines
     let engines = jobs::build_engines(config, capabilities.jobs.take(), resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
-    let probes = listeners::readiness_probes(resources);
-    let readiness = resources
-        .readiness
-        .insert(Readiness::new(probes, listeners::refresh_policy(config)?))
-        .clone();
-    listeners::bind_listeners(config, &metrics, &readiness, background, resources)?;
-    readiness.admit().await.map_err(WorkerError::Admission)?;
-    listeners::start_refresher(&readiness, background);
     Ok(Prepared {
+        readiness: prepare_readiness(config, &metrics, background, resources).await?,
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
         engines,
         // template:end jobs:worker-bootstrap-prepared-jobs-value
@@ -335,6 +353,19 @@ async fn prepare(
         consumer,
         // template:end messaging:worker-bootstrap-prepared-consumer-value
     })
+}
+
+async fn prepare_readiness(
+    config: &WorkerConfig,
+    metrics: &infra_telemetry::Metrics,
+    background: &Background,
+    resources: &mut Resources,
+) -> Result<PreparedReadiness, WorkerError> {
+    let probes = listeners::readiness_probes(resources);
+    let readiness = Readiness::new(probes, listeners::refresh_policy(config)?);
+    let reader = resources.readiness.insert(readiness.control()).reader();
+    listeners::bind_listeners(config, metrics, reader, background, resources)?;
+    readiness.prepare().await.map_err(WorkerError::Admission)
 }
 
 struct RetainedCapabilities {
@@ -437,6 +468,48 @@ mod tests {
     use super::WorkerError;
 
     #[cfg(unix)]
+    async fn prepare_worker_and_check_http(
+        background: &super::Background,
+        resources: &mut super::Resources,
+    ) -> super::PreparedReadiness {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let config = service_config::fixtures::worker(
+            &[
+                ("APP__HTTP__ADDR", "127.0.0.1:0"),
+                ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+            ],
+            crate::BUILD_INFO,
+            crate::shutdown::TAIL,
+        )
+        .unwrap();
+        let metrics = infra_telemetry::Metrics::install(&[]).unwrap();
+        let prepared = super::prepare_readiness(&config, &metrics, background, resources)
+            .await
+            .unwrap();
+        let address = resources.listeners.health.as_ref().unwrap().local_addr();
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket
+                .write_all(
+                    b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            BufReader::new(socket)
+                .lines()
+                .next_line()
+                .await
+                .unwrap()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
+        prepared
+    }
+
+    #[cfg(unix)]
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -490,6 +563,9 @@ mod tests {
                 let mut signals = super::Signals::install().unwrap();
                 let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
                 let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
+                let background = super::Background::new();
+                let mut resources = super::Resources::default();
+                let prepared = prepare_worker_and_check_http(&background, &mut resources).await;
                 let process = std::process::id().to_string();
                 for signal in ["-TERM", "-INT"] {
                     assert!(
@@ -506,15 +582,17 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                let background = super::Background::new();
-                let resources = super::Resources::default();
                 let ended = tokio::time::timeout(
                     Duration::from_secs(2),
-                    super::wait_for_stop(&resources, &background, &mut signals),
+                    super::activate_readiness(prepared, &resources, &background, &mut signals),
                 )
                 .await
                 .unwrap();
-                std::assert_matches!(ended, super::Ended::Signal);
+                std::assert_matches!(ended, Err(super::Ended::Signal));
+                assert!(
+                    !resources.readiness.as_ref().unwrap().reader().is_ready(),
+                    "a pending stop must withhold worker readiness"
+                );
                 let first_stop = signals.first_stop();
                 assert!(first_stop.is_some());
                 std::assert_matches!(
@@ -527,6 +605,16 @@ mod tests {
                     first_stop,
                     "the second stop must not restart the deadline"
                 );
+                background.cancel.cancel();
+                background.tracker.close();
+                background.tracker.wait().await;
+                resources
+                    .listeners
+                    .health
+                    .unwrap()
+                    .drain(Duration::from_secs(2))
+                    .await
+                    .unwrap();
             });
     }
 

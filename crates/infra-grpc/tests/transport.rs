@@ -399,7 +399,8 @@ fn notify_on_drop(notify: Arc<Notify>) -> impl Drop {
 
 struct Fixture {
     server: Option<Server>,
-    readiness: Readiness,
+    readiness: health::ReadinessControl,
+    pending_activation: Option<health::PreparedReadiness>,
     echo: Echo,
     address: SocketAddr,
     // template:begin authn:grpc-transport-test-auth-provider-field
@@ -473,9 +474,14 @@ impl Fixture {
             )
             .unwrap(),
         );
-        if seed {
-            seed_ready(&readiness).await;
-        }
+        let control = readiness.control();
+        let prepared = readiness.prepare().await.unwrap();
+        let pending_activation = if seed {
+            prepared.activate().unwrap();
+            None
+        } else {
+            Some(prepared)
+        };
         let echo = Echo::new();
         let mut services = Services::new();
         services
@@ -494,7 +500,7 @@ impl Fixture {
         // template:end authn:grpc-transport-test-scope-requirement
         let app = infra_grpc::router(
             services,
-            readiness.reader(),
+            control.reader(),
             // template:begin authn:grpc-transport-test-router-verifier
             Some(verifier),
             // template:end authn:grpc-transport-test-router-verifier
@@ -518,7 +524,8 @@ impl Fixture {
         let address = bound.local_addr();
         Self {
             server: Some(bound),
-            readiness,
+            readiness: control,
+            pending_activation,
             echo,
             address,
             // template:begin authn:grpc-transport-test-auth-provider-init
@@ -641,10 +648,6 @@ fn watch_request(service: &str) -> Request<HealthCheckRequest> {
     request(HealthCheckRequest {
         service: service.to_owned(),
     })
-}
-
-async fn seed_ready(readiness: &Readiness) {
-    readiness.refresh().await;
 }
 
 fn assert_seen(echo: &Echo, expected: &[Seen]) {
@@ -1046,7 +1049,7 @@ fn opening_app_waiting(
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
     infra_grpc::router(
         services,
-        readiness.reader(),
+        readiness.control().reader(),
         Some(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
@@ -2194,7 +2197,12 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
     .unwrap_err();
     assert_eq!(unknown.code(), Code::NotFound);
 
-    seed_ready(&fixture.readiness).await;
+    fixture
+        .pending_activation
+        .take()
+        .unwrap()
+        .activate()
+        .unwrap();
     let mut known = timeout(WAIT, health.watch(watch_request(ECHO_SERVICE)))
         .await
         .expect("known watch")
