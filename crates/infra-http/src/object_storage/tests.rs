@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Bytes, to_bytes};
+use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::http::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};

@@ -230,7 +230,6 @@ impl Body for ExactLength {
 mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
-    use std::sync::atomic::AtomicUsize;
     use std::task::{Wake, Waker};
 
     use futures_util::stream;
