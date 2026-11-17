@@ -14,6 +14,8 @@ use super::{Access, Policy};
 use crate::probes::ProbeRoutes;
 use crate::problem::responses;
 
+const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
+
 pub(super) fn compose(
     document: &mut OpenApi,
     probes: &ProbeRoutes,
@@ -26,7 +28,7 @@ pub(super) fn compose(
         super::components::merge(components, shared)?;
     }
     for (path, item) in &mut document.paths.paths {
-        let path = if path.is_empty() { "/" } else { path.as_str() };
+        let path = path.as_str();
         let fixed = fixed_path_operations!(item, as_mut)
             .into_iter()
             .filter_map(|(method, operation)| operation.map(|operation| (method, operation)));
@@ -70,14 +72,40 @@ fn add_outcomes(
     probe: bool,
 ) -> Result<(), (&'static str, &'static str)> {
     let reads_body = operation.request_body.is_some();
-    let mut add = |status, common| {
-        merge_response(
-            &mut operation.responses.responses,
-            components,
-            status,
-            common,
-        )
-        .map_err(|fault| (status, fault))
+    let declares_json_body = operation
+        .request_body
+        .as_ref()
+        .and_then(|body| {
+            resolve(
+                body,
+                &components.request_bodies,
+                "#/components/requestBodies/",
+            )
+        })
+        .is_some_and(|body| {
+            !body.content.is_empty()
+                && body.content.keys().all(|key| {
+                    key.parse::<mime::Mime>().is_ok_and(|media_type| {
+                        media_type.essence_str() == mime::APPLICATION_JSON.essence_str()
+                            || (media_type.type_() == mime::APPLICATION
+                                && media_type.suffix() == Some(mime::JSON))
+                    })
+                })
+        });
+    let responses = &mut operation.responses.responses;
+    if declares_json_body
+        && responses.get("415").is_none_or(|response| {
+            resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some()
+        })
+    {
+        let (_, common) = responses::UnsupportedMediaType::response();
+        merge_response(responses, components, "415", common.clone(), &common)
+            .map_err(|fault| ("415", fault))?;
+    }
+    let mut add = |status, (name, common): (&str, RefOr<Response>)| {
+        let reference = Ref::from_response_name(name).into();
+        merge_response(responses, components, status, reference, &common)
+            .map_err(|fault| (status, fault))
     };
     add("413", responses::RequestEntityTooLarge::response())?;
     add("500", responses::InternalServerError::response())?;
@@ -107,21 +135,21 @@ fn merge_response(
     responses: &mut BTreeMap<String, RefOr<Response>>,
     components: &Components,
     status: &str,
-    (name, common): (&str, RefOr<Response>),
+    when_missing: RefOr<Response>,
+    common: &RefOr<Response>,
 ) -> Result<(), &'static str> {
-    let reference = RefOr::Ref(Ref::from_response_name(name));
     let slot = match responses.entry(status.to_owned()) {
         Entry::Vacant(slot) => {
-            slot.insert(reference);
+            slot.insert(when_missing);
             return Ok(());
         }
-        Entry::Occupied(slot) if slot.get() == &reference => return Ok(()),
+        Entry::Occupied(slot) if slot.get() == &when_missing => return Ok(()),
         Entry::Occupied(slot) => slot.into_mut(),
     };
-    let Some(common) = resolve(&common, &components.responses, "#/components/responses/") else {
+    let Some(common) = resolve(common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
         return Err("shared response could not be resolved");
     };
-    let mut merged = resolve(slot, &components.responses, "#/components/responses/")
+    let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)
         .ok_or("existing response must resolve within the service document")?
         .clone();
     if let RefOr::Ref(reference) = slot {

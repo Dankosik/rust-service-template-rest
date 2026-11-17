@@ -23,8 +23,7 @@ use infra_bearerauthn::{
 };
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::idempotency::{
-    self, CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse,
-    Rollback, Tx,
+    CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse, Rollback, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
@@ -202,10 +201,6 @@ async fn create_widget(
     })
 }
 
-#[derive(utoipa::OpenApi)]
-#[openapi(paths(create_widget))]
-struct CreateDocument;
-
 #[utoipa::path(
     put,
     path = "/widgets/{id}",
@@ -244,10 +239,6 @@ async fn replace_widget(
         handler_timeout: false,
     })
 }
-
-#[derive(utoipa::OpenApi)]
-#[openapi(paths(replace_widget))]
-struct ReplaceDocument;
 
 struct CreateWidget {
     widgets: Arc<dyn CreateWidgets>,
@@ -546,22 +537,15 @@ fn options(budget: Duration) -> HardenOptions {
 }
 
 fn widget_contract() -> HttpContract<WidgetState> {
-    use utoipa::OpenApi as _;
-
     HttpContract::default()
-        .merge(
-            idempotency::route(CreateDocument::openapi(), create_widget).expect("create composes"),
-        )
+        .merge(infra_http::idempotent_route!(create_widget).expect("create composes"))
         .unwrap()
-        .merge(
-            idempotency::route(ReplaceDocument::openapi(), replace_widget)
-                .expect("replace composes"),
-        )
+        .merge(infra_http::idempotent_route!(replace_widget).expect("replace composes"))
         .unwrap()
 }
 
 #[test]
-fn widget_contract_declares_supported_protected_security() {
+fn widget_contract_declares_protected_json_operations() {
     let document = serde_json::to_value(
         HttpContract::application(bearer_document())
             .unwrap()
@@ -571,14 +555,22 @@ fn widget_contract_declares_supported_protected_security() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        document["paths"][WIDGETS]["post"]["security"],
-        json!([{ "bearerAuth": ["widgets:write"] }])
-    );
-    assert_eq!(
-        document["paths"]["/widgets/{id}"]["put"]["security"],
-        json!([{ "bearerAuth": [] }])
-    );
+    for (path, method, operation_id, scopes) in [
+        (WIDGETS, "post", "createWidget", json!(["widgets:write"])),
+        ("/widgets/{id}", "put", "replaceWidget", json!([])),
+    ] {
+        let operation = &document["paths"][path][method];
+        assert_eq!(operation["operationId"], operation_id);
+        assert_eq!(operation["security"], json!([{ "bearerAuth": scopes }]));
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/NewWidget"
+        );
+        assert_eq!(
+            operation["responses"]["415"]["content"]["application/problem+json"]["schema"]["$ref"],
+            "#/components/schemas/Problem"
+        );
+    }
 }
 
 impl Mounted {
@@ -1442,13 +1434,28 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
+    let wrong_media_type = mounted
+        .create(ALICE, "k-1", &input, "req-media-type")
+        .content_type("text/plain")
+        .await;
+    let body = problem(
+        &wrong_media_type,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_media_type",
+        "req-media-type",
+    );
+    assert_eq!(body["status"], 415);
+
     let first = mounted.create(ALICE, "k-1", &input, "req-first").await;
     let widget = created(&first, "req-first");
     assert!(
         first.maybe_header("idempotent-replayed").is_none(),
         "a fresh success must not carry handler-supplied replay metadata"
     );
-    assert_eq!(outcomes(&captured), counts(&[("executed", 1)]));
+    assert_eq!(
+        outcomes(&captured),
+        counts(&[("executed", 1), ("not_stored", 1)])
+    );
 
     let reordered = mounted
         .server
@@ -1469,7 +1476,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     );
     assert_eq!(
         outcomes(&captured),
-        counts(&[("executed", 1), ("key_mismatch", 1)])
+        counts(&[("executed", 1), ("key_mismatch", 1), ("not_stored", 1)])
     );
 
     let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
@@ -1503,7 +1510,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
             ("executed", 1),
             ("key_mismatch", 2),
             ("replayed", 1),
-            ("not_stored", 1)
+            ("not_stored", 2)
         ])
     );
 
@@ -1531,7 +1538,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
             ("executed", 2),
             ("replayed", 2),
             ("key_mismatch", 3),
-            ("not_stored", 1)
+            ("not_stored", 2)
         ])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 2);

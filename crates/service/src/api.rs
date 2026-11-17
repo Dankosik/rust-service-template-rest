@@ -205,10 +205,6 @@ mod idempotency_tests {
         Ok(Create)
     }
 
-    #[derive(OpenApi)]
-    #[openapi(paths(idempotent))]
-    struct IdempotentDocument;
-
     struct Create;
 
     impl FreshCommand for Create {
@@ -229,7 +225,7 @@ mod idempotency_tests {
     }
 
     fn test_route() -> HttpContract<AppState> {
-        idempotency::route(IdempotentDocument::openapi(), idempotent).expect("test route composes")
+        infra_http::idempotent_route!(idempotent).expect("test route composes")
     }
 
     #[test]
