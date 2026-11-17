@@ -6,23 +6,24 @@ use std::{
 use infra_outbound_http::{Client, PreparedRequest};
 use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::{Mutex, MutexGuard};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     time::Instant,
 };
 
 use crate::{
-    AcquisitionError, ConfigurationError, Options,
+    AcquisitionError, ConfigurationError, Options, TokenTarget,
     assertion::Signer,
     options::{Admitted, admit_options},
+    request_admission::AdmissionRefusal,
     token::Token,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
 };
 
 mod exchange;
 
-use self::exchange::ExchangeState;
+pub use self::exchange::ExchangeTokens;
 
 const FAILURE_WINDOW: Duration = Duration::from_secs(1);
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
@@ -37,14 +38,43 @@ impl OnBehalfOf {
     pub fn new(subject_token: SecretString) -> Self {
         Self(subject_token)
     }
+
+    fn is_empty(&self) -> bool {
+        self.0.expose_secret().is_empty()
+    }
+}
+
+#[must_use = "retain Registration while its token sources are in use"]
+#[derive(derive_more::Debug)]
+#[debug("Registration([REDACTED])")]
+pub struct Registration {
+    shared: Arc<RegistrationState>,
+    _lifetime: watch::Sender<()>,
+}
+
+struct RegistrationState {
+    endpoint: TokenEndpoint,
+    closed: watch::Receiver<()>,
+}
+
+impl RegistrationState {
+    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
+        }
+        if self.closed.is_closed() {
+            return Err(AcquisitionError::Unavailable);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, derive_more::Debug)]
-#[debug("Credentials([REDACTED])")]
-pub struct Credentials(pub(crate) Arc<Owner>);
+#[debug("ServiceTokens([REDACTED])")]
+pub struct ServiceTokens(Arc<ServiceOwner>);
 
-pub(crate) struct Owner {
-    pub(crate) inner: Arc<Inner>,
+struct ServiceOwner {
+    inner: Arc<ServiceState>,
     refresh_requests: mpsc::Sender<RefreshRequest>,
     _owner_release: oneshot::Sender<()>,
 }
@@ -58,7 +88,7 @@ struct RefreshRequest {
 #[derive(derive_more::Debug)]
 #[debug("RefreshDriver([REDACTED])")]
 pub struct RefreshDriver {
-    inner: Arc<Inner>,
+    inner: Arc<ServiceState>,
     requests: mpsc::Receiver<RefreshRequest>,
     owner_gone: oneshot::Receiver<()>,
 }
@@ -66,10 +96,12 @@ pub struct RefreshDriver {
 impl RefreshDriver {
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
+        let mut registration_closed = self.inner.registration.closed.clone();
         loop {
             let request = tokio::select! {
                 biased;
                 () = &mut shutdown => break,
+                _ = registration_closed.changed() => break,
                 _ = &mut self.owner_gone => break,
                 request = self.requests.recv() => {
                     let Some(request) = request else { break };
@@ -79,6 +111,7 @@ impl RefreshDriver {
             tokio::select! {
                 biased;
                 () = &mut shutdown => break,
+                _ = registration_closed.changed() => break,
                 _ = &mut self.owner_gone => break,
                 () = self.inner.refresh_ahead(request) => {}
             }
@@ -94,11 +127,11 @@ impl Drop for RefreshDriver {
     }
 }
 
-pub(crate) struct Inner {
-    endpoint: TokenEndpoint,
+struct ServiceState {
+    registration: Arc<RegistrationState>,
+    target: TokenTarget,
     cached: Mutex<Cached>,
-    pub(crate) service_request: tokio::sync::Mutex<()>,
-    pub(crate) exchange: ExchangeState,
+    service_request: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -134,8 +167,8 @@ struct CompletedFailure {
     until: Instant,
 }
 
-impl Credentials {
-    pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
+impl Registration {
+    pub fn prepare(options: Options) -> Result<Self, ConfigurationError> {
         let admitted = admit_options(options)?;
         let token_http =
             Client::try_new(admitted.endpoint(), TOKEN_LIMITS).map_err(|_| ConfigurationError {
@@ -148,27 +181,28 @@ impl Credentials {
     pub(crate) fn build(
         admitted: Admitted,
         token_http: Client,
-    ) -> Result<(Self, RefreshDriver), ConfigurationError> {
+    ) -> Result<Self, ConfigurationError> {
         let (options, endpoint, permits) = admitted.into_parts();
         let signer = Signer::try_new(&options, SystemTime::now())?;
-        let endpoint = TokenEndpoint::new(
-            endpoint,
-            token_http,
-            &options.scopes,
-            options.audience,
-            signer,
-            permits,
-        )?;
-        let inner = Arc::new(Inner {
-            endpoint,
+        let endpoint = TokenEndpoint::new(endpoint, token_http, signer, permits)?;
+        let (lifetime, closed) = watch::channel(());
+        Ok(Self {
+            shared: Arc::new(RegistrationState { endpoint, closed }),
+            _lifetime: lifetime,
+        })
+    }
+
+    pub fn service_tokens(&self, target: TokenTarget) -> (ServiceTokens, RefreshDriver) {
+        let inner = Arc::new(ServiceState {
+            registration: self.shared.clone(),
+            target,
             cached: Mutex::default(),
             service_request: tokio::sync::Mutex::new(()),
-            exchange: ExchangeState::new(options.exchange_cache_capacity),
         });
         let (refresh_requests, requests) = mpsc::channel(1);
         let (owner_release, owner_gone) = oneshot::channel();
-        Ok((
-            Self(Arc::new(Owner {
+        (
+            ServiceTokens(Arc::new(ServiceOwner {
                 inner: inner.clone(),
                 refresh_requests,
                 _owner_release: owner_release,
@@ -178,51 +212,99 @@ impl Credentials {
                 requests,
                 owner_gone,
             },
-        ))
+        )
     }
 
-    pub(crate) fn check_lifecycle(
+    pub fn exchange_tokens(
         &self,
-        deadline: AcquisitionDeadline<'_>,
-    ) -> Result<(), AcquisitionError> {
-        if self.0.refresh_requests.is_closed() {
-            return Err(deadline
-                .stopped_error()
-                .unwrap_or(AcquisitionError::Unavailable));
+        target: TokenTarget,
+        capacity: u32,
+    ) -> Result<ExchangeTokens, ConfigurationError> {
+        ExchangeTokens::try_new(self.shared.clone(), target, capacity)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum TokenSource<Subject = ()> {
+    Service(ServiceTokens),
+    Exchange(ExchangeTokens, Subject),
+}
+
+impl<Subject> TokenSource<Subject> {
+    fn registration(&self) -> &RegistrationState {
+        match self {
+            Self::Service(service) => &service.0.inner.registration,
+            Self::Exchange(exchange, _) => exchange.registration(),
         }
-        Ok(())
     }
 
     fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        if let Some(error) = deadline.stopped_error() {
-            return Err(error);
+        self.registration().check_admission(deadline)?;
+        if let Self::Service(service) = self {
+            service.check_refresh_driver()?;
         }
-        self.check_lifecycle(deadline)
+        Ok(())
     }
+}
 
+impl TokenSource {
+    pub(crate) fn admit(
+        &self,
+        subject: Result<Option<OnBehalfOf>, AdmissionRefusal>,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<TokenSource<OnBehalfOf>, AdmissionRefusal> {
+        self.check_admission(deadline)
+            .map_err(AdmissionRefusal::Acquisition)?;
+        match (self, subject?) {
+            (Self::Service(service), None) => Ok(TokenSource::Service(service.clone())),
+            (Self::Service(_), Some(_)) => Err(AdmissionRefusal::UnexpectedSubject),
+            (Self::Exchange(exchange, ()), Some(subject)) if !subject.is_empty() => {
+                Ok(TokenSource::Exchange(exchange.clone(), subject))
+            }
+            (Self::Exchange(_, ()), _) => Err(AdmissionRefusal::SubjectRequired),
+        }
+    }
+}
+
+impl TokenSource<OnBehalfOf> {
     pub(crate) async fn acquire_for_request(
         &self,
-        on_behalf_of: Option<OnBehalfOf>,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_admission(deadline)?;
+        let mut registration_closed = self.registration().closed.clone();
         let acquisition = async {
-            match on_behalf_of {
-                Some(OnBehalfOf(subject)) => self.exchange(&subject, deadline).await,
-                None => self.service_token(deadline).await,
+            match self {
+                Self::Service(service) => service.service_token(deadline).await,
+                Self::Exchange(exchange, OnBehalfOf(subject)) => {
+                    exchange.exchange(subject, deadline).await
+                }
             }
         };
         let acquired = tokio::select! {
             biased;
             stopped = deadline.context.wait_stopped() => return Err(acquisition_stopped(stopped)),
+            _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
             result = acquisition => result,
         };
-        if let Some(error) = deadline.stopped_error() {
-            return Err(error);
-        }
+        self.check_admission(deadline)?;
         let acquired = acquired?;
         acquired.check_expiry(Instant::now())?;
         Ok(acquired)
+    }
+}
+
+impl ServiceTokens {
+    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+        self.0.inner.registration.check_admission(deadline)?;
+        self.check_refresh_driver()
+    }
+
+    fn check_refresh_driver(&self) -> Result<(), AcquisitionError> {
+        if self.0.refresh_requests.is_closed() {
+            return Err(AcquisitionError::Unavailable);
+        }
+        Ok(())
     }
 
     pub(crate) async fn service_token(
@@ -256,12 +338,11 @@ impl Credentials {
         }
         let (context, request_context) = deadline.fetch_contexts(now);
         let result = inner
+            .registration
             .endpoint
-            .fetch_service_token(&context, request_context.as_ref())
+            .fetch_service_token(&inner.target, &context, request_context.as_ref())
             .await;
-        if let Some(error) = deadline.stopped_error() {
-            return Err(error);
-        }
+        self.check_admission(deadline)?;
         match result.map_err(provider_timeout) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
@@ -306,9 +387,14 @@ impl Credentials {
     pub(crate) fn cached(&self) -> MutexGuard<'_, Cached> {
         self.0.inner.cached()
     }
+
+    #[cfg(test)]
+    pub(crate) fn service_request(&self) -> &tokio::sync::Mutex<()> {
+        &self.0.inner.service_request
+    }
 }
 
-impl Inner {
+impl ServiceState {
     fn cached(&self) -> MutexGuard<'_, Cached> {
         self.cached.lock()
     }
@@ -356,8 +442,12 @@ impl Inner {
         }) {
             return;
         }
+        let endpoint = &self.registration.endpoint;
         let context = OperationContext::from_deadline(Deadline::at(request.deadline));
-        match self.endpoint.fetch_service_token(&context, None).await {
+        match endpoint
+            .fetch_service_token(&self.target, &context, None)
+            .await
+        {
             Ok(token) => {
                 self.store_service_token(token);
                 self.cached().defer_refresh(Instant::now());
@@ -365,7 +455,7 @@ impl Inner {
             Err(error) => {
                 self.remember_failure(provider_timeout(error));
                 tracing::warn!(
-                    server.address = self.endpoint.host(),
+                    server.address = endpoint.host(),
                     error.type = error.label(),
                     "oauth2_background_refresh_failed"
                 );

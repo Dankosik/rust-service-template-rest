@@ -13,7 +13,7 @@ use tokio::{sync::Semaphore, time::Instant};
 use url::{Url, form_urlencoded::Serializer};
 
 use crate::{
-    AcquisitionError, ConfigurationError, Rejection, assertion::Signer,
+    AcquisitionError, ConfigurationError, Rejection, TokenTarget, assertion::Signer,
     credentials::acquisition_stopped, token::Token,
 };
 
@@ -31,8 +31,6 @@ const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 pub(crate) struct TokenEndpoint {
     uri: Uri,
     http: Client,
-    scope: Option<String>,
-    audience: Option<String>,
     signer: Signer,
     permits: Semaphore,
 }
@@ -41,8 +39,6 @@ impl TokenEndpoint {
     pub(crate) fn new(
         url: Url,
         http: Client,
-        scopes: &[String],
-        audience: Option<String>,
         signer: Signer,
         permits: usize,
     ) -> Result<Self, ConfigurationError> {
@@ -57,8 +53,6 @@ impl TokenEndpoint {
         Ok(Self {
             uri,
             http,
-            scope: joined_scopes(scopes),
-            audience,
             signer,
             permits: Semaphore::new(permits),
         })
@@ -70,26 +64,34 @@ impl TokenEndpoint {
 
     pub(crate) async fn fetch_service_token(
         &self,
+        target: &TokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::ClientCredentials, context, request_context)
+        self.fetch_token(Grant::ClientCredentials, target, context, request_context)
             .await
     }
 
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
+        target: &TokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::TokenExchange { subject }, context, request_context)
-            .await
+        self.fetch_token(
+            Grant::TokenExchange { subject },
+            target,
+            context,
+            request_context,
+        )
+        .await
     }
 
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
+        target: &TokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
@@ -106,7 +108,7 @@ impl TokenEndpoint {
         });
         let result = match check() {
             Ok(()) => {
-                self.request_token(grant, started, context, request_context)
+                self.request_token(grant, target, started, context, request_context)
                     .await
             }
             Err(error) => Err(error),
@@ -127,6 +129,7 @@ impl TokenEndpoint {
     async fn request_token(
         &self,
         grant: Grant<'_>,
+        target: &TokenTarget,
         started: Instant,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
@@ -135,19 +138,23 @@ impl TokenEndpoint {
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
-        let body = self.form_body(grant)?;
+        let body = self.form_body(grant, target)?;
         let response = self.post_form(body, context, request_context).await?;
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
-    fn form_body(&self, grant: Grant<'_>) -> Result<String, AcquisitionError> {
+    fn form_body(
+        &self,
+        grant: Grant<'_>,
+        target: &TokenTarget,
+    ) -> Result<String, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let mut form = Serializer::new(String::new());
         grant.append_fields(&mut form);
-        if let Some(scope) = self.scope.as_deref() {
+        if let Some(scope) = target.scope.as_deref() {
             form.append_pair("scope", scope);
         }
-        if let Some(audience) = self.audience.as_deref() {
+        if let Some(audience) = target.audience.as_deref() {
             form.append_pair("audience", audience);
         }
         Ok(form
@@ -274,14 +281,6 @@ fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
         infra_outbound_http::Error::InvalidTarget
         | infra_outbound_http::Error::DispatchRefused
         | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
-    }
-}
-
-fn joined_scopes(scopes: &[String]) -> Option<String> {
-    if scopes.is_empty() {
-        None
-    } else {
-        Some(scopes.join(" "))
     }
 }
 

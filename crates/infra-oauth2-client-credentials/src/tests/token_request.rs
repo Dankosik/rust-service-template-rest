@@ -42,7 +42,7 @@ fn assert_token_form(body: &[u8], grant_fields: &str) {
 }
 
 #[tokio::test]
-async fn client_credentials_request_has_no_authorization_header_and_expected_fields() {
+async fn each_grant_encodes_its_own_target_in_the_token_request() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         StatusCode::OK,
@@ -53,12 +53,14 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
             "refresh_token": "private-refresh",
         }),
     );
-    let response = fixture
-        .credentials(
-            &["write", "read+all", "write"],
-            Some("https://api.example/é?a=b&c=d"),
-        )
-        .http(fixture.resource_client(), IdentityMode::Service)
+    let registration = fixture.build(fixture.options());
+    let (service_tokens, driver) = registration.service_tokens(token_target(
+        &["write", "read+all", "write"],
+        Some("https://api.example/é?a=b&c=d"),
+    ));
+    fixture.drive(driver);
+    let response = service_tokens
+        .http(fixture.resource_client())
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -75,6 +77,91 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
         fixture.resource_requests()[0].header("authorization"),
         Some("Bearer token+/_~.=")
     );
+
+    fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
+    registration
+        .exchange_tokens(
+            token_target(&["read"], Some("https://api.example/é")),
+            EXCHANGE_CAPACITY,
+        )
+        .unwrap()
+        .http(fixture.resource_client())
+        .execute(
+            fixture.on_behalf_of_request("subject+/="),
+            deadline(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    let token = fixture.token_requests().pop().unwrap();
+    assert_eq!(token.target, TOKEN_PATH);
+    assert!(token.header("authorization").is_none());
+    assert_token_form(
+        &token.body,
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange\
+         &subject_token=subject%2B%2F%3D\
+         &subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
+         &requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
+         &scope=read&audience=https%3A%2F%2Fapi.example%2F%C3%A9",
+    );
+    assert_eq!(
+        fixture.resource_requests()[1].header("authorization"),
+        Some("Bearer exchanged")
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
+    let fixture = Fixture::new().await;
+    let registration = fixture.build(fixture.options());
+    let bindings = ["catalog", "billing"].map(|audience| {
+        let target = token_target(&[], Some(audience));
+        let (service, driver) = registration.service_tokens(target.clone());
+        fixture.drive(driver);
+        let exchange = registration
+            .exchange_tokens(target, EXCHANGE_CAPACITY)
+            .unwrap();
+        (
+            audience,
+            service.http(fixture.resource_client()),
+            exchange.http(fixture.resource_client()),
+        )
+    });
+
+    for (audience, service, exchange) in &bindings {
+        for (grant, client, request) in [
+            ("service", service, fixture.request()),
+            (
+                "exchange",
+                exchange,
+                fixture.on_behalf_of_request("same-subject"),
+            ),
+        ] {
+            let token = format!("{audience}-{grant}");
+            fixture.token_json(StatusCode::OK, &exchange_response(&token));
+            fixture.send_request(client, request).await.unwrap();
+        }
+    }
+    let audiences: Vec<_> = fixture
+        .token_requests()
+        .iter()
+        .map(|request| form_value(&form_pairs(&request.body), "audience").to_owned())
+        .collect();
+    assert_eq!(audiences, ["catalog", "catalog", "billing", "billing"]);
+    let resources = fixture.resource_requests();
+    let headers: Vec<_> = resources
+        .iter()
+        .map(|request| request.header("authorization").unwrap())
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            "Bearer catalog-service",
+            "Bearer catalog-exchange",
+            "Bearer billing-service",
+            "Bearer billing-exchange"
+        ]
+    );
     fixture.finish().await;
 }
 
@@ -82,7 +169,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
 async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
-        .client(IdentityMode::Service)
+        .service_client()
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -98,7 +185,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
     let fixture = Fixture::new().await;
     for _ in 0..2 {
         fixture
-            .client(IdentityMode::Service)
+            .service_client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap();
@@ -127,36 +214,6 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
 }
 
 #[tokio::test]
-async fn token_exchange_request_has_expected_form_fields() {
-    let fixture = Fixture::new().await;
-    fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    fixture
-        .credentials(&["read"], Some("https://api.example/é"))
-        .http(fixture.resource_client(), IdentityMode::OnBehalfOf)
-        .execute(
-            fixture.on_behalf_of_request("subject+/="),
-            deadline(Duration::from_secs(10)),
-        )
-        .await
-        .unwrap();
-    let token = fixture.token_requests().pop().unwrap();
-    assert!(token.header("authorization").is_none());
-    assert_token_form(
-        &token.body,
-        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange\
-         &subject_token=subject%2B%2F%3D\
-         &subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
-         &requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
-         &scope=read&audience=https%3A%2F%2Fapi.example%2F%C3%A9",
-    );
-    assert_eq!(
-        fixture.resource_requests()[0].header("authorization"),
-        Some("Bearer exchanged")
-    );
-    fixture.finish().await;
-}
-
-#[tokio::test]
 async fn exchange_without_the_access_token_issued_type_is_refused() {
     let fixture = Fixture::new().await;
     for issued_token_type in [None, Some("urn:ietf:params:oauth:token-type:jwt")] {
@@ -170,7 +227,7 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
         }
         fixture.token_json(StatusCode::OK, &body);
         let result = fixture
-            .client(IdentityMode::OnBehalfOf)
+            .exchange_client()
             .execute(
                 fixture.on_behalf_of_request("subject"),
                 deadline(Duration::from_secs(10)),
@@ -194,7 +251,7 @@ async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
             &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
         );
         let result = fixture
-            .client(IdentityMode::Service)
+            .service_client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await;
         assert_matches!(
@@ -221,7 +278,7 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
         ),
     ] {
         fixture.token_json(StatusCode::OK, &body);
-        let client = fixture.client(IdentityMode::Service);
+        let client = fixture.service_client();
         let before = fixture.token_requests().len();
         for _ in 0..2 {
             fixture.send(&client).await.unwrap();
@@ -237,15 +294,15 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
 #[tokio::test]
 async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch() {
     let fixture = Fixture::new().await;
-    for (mode, request, lifetime) in [
-        (IdentityMode::Service, fixture.request(), u64::MAX.into()),
+    for (client, request, lifetime) in [
+        (fixture.service_client(), fixture.request(), u64::MAX.into()),
         (
-            IdentityMode::OnBehalfOf,
+            fixture.exchange_client(),
             fixture.on_behalf_of_request("subject"),
             u64::MAX.into(),
         ),
         (
-            IdentityMode::Service,
+            fixture.service_client(),
             fixture.request(),
             serde_json::Value::Null,
         ),
@@ -253,8 +310,7 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
         let mut response = exchange_response("invalid-lifetime");
         response["expires_in"] = lifetime;
         fixture.token_json(StatusCode::OK, &response);
-        let error = fixture
-            .client(mode)
+        let error = client
             .execute(request, deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
@@ -278,8 +334,8 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     )
     .unwrap();
     let client = fixture
-        .credentials(&[], None)
-        .http(resource, IdentityMode::OnBehalfOf);
+        .exchange_tokens(&[], None, EXCHANGE_CAPACITY)
+        .http(resource);
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == infra_outbound_http::REQUEST_DURATION_METRIC
             && key
@@ -316,7 +372,7 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
     let mut response = exchange_response("short-lived");
     response["expires_in"] = 1.into();
     fixture.token_json(StatusCode::OK, &response);
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == "oauth2_token_acquisitions_total"
             && key
@@ -398,17 +454,18 @@ impl<F: Fn(&metrics::Key)> metrics::Recorder for ObserveMetricRegistration<F> {
 
 #[tokio::test]
 async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_scopes() {
-    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
+    for delegated in [false, true] {
         for extension in [false, true] {
             let fixture = Fixture::new().await;
-            let client = fixture.client(mode);
-            let mut request = match mode {
-                IdentityMode::Service => fixture.request(),
-                IdentityMode::OnBehalfOf => fixture.on_behalf_of_request("subject"),
-            };
-            if mode == IdentityMode::OnBehalfOf {
+            let (client, mut request) = if delegated {
                 fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-            }
+                (
+                    fixture.exchange_client(),
+                    fixture.on_behalf_of_request("subject"),
+                )
+            } else {
+                (fixture.service_client(), fixture.request())
+            };
             let caller = OperationContext::with_timeout(Duration::from_secs(10));
             let operation = OperationContext::with_timeout(Duration::from_secs(10));
             let context = if extension {
@@ -440,16 +497,19 @@ async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_s
 
 #[tokio::test]
 async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
-    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
+    for delegated in [false, true] {
         for extension in [false, true] {
             let fixture = Fixture::new().await;
-            let client = fixture.client(mode);
-            let request = || match mode {
-                IdentityMode::Service => fixture.request(),
-                IdentityMode::OnBehalfOf => fixture.on_behalf_of_request("subject"),
+            let (client, request) = if delegated {
+                (
+                    fixture.exchange_client(),
+                    fixture.on_behalf_of_request("subject"),
+                )
+            } else {
+                (fixture.service_client(), fixture.request())
             };
             let caller = OperationContext::with_timeout(Duration::from_secs(10));
-            let mut first = request();
+            let mut first = request.clone();
             let operation = OperationContext::with_timeout(Duration::from_secs(10));
             let context = if extension {
                 first.extensions_mut().insert(caller.clone());
@@ -477,7 +537,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                 () = fixture.token_received() => {}
                 result = &mut first => panic!("provider response must be gated: {result:?}"),
             }
-            let mut survivor = Box::pin(fixture.send_request(&client, request()));
+            let mut survivor = Box::pin(fixture.send_request(&client, request));
             poll_pending(survivor.as_mut()).await;
             gate.add_permits(1);
             assert_matches!(
@@ -542,14 +602,8 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let mut captured = RecordedMetrics::default();
     let fixture = Fixture::new().await;
-    let credentials = || {
-        fixture.prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
-    };
     let far = || deadline(Duration::from_secs(10));
-    let reused = credentials().http(fixture.resource_client(), IdentityMode::Service);
+    let reused = fixture.service_client();
     for _ in 0..2 {
         reused.execute(fixture.request(), far()).await.unwrap();
     }
@@ -557,8 +611,8 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_client"}"#,
     ));
-    credentials()
-        .http(fixture.resource_client(), IdentityMode::Service)
+    fixture
+        .service_client()
         .execute(fixture.request(), far())
         .await
         .unwrap_err();
@@ -566,13 +620,13 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_target"}"#,
     ));
-    credentials()
-        .http(fixture.resource_client(), IdentityMode::OnBehalfOf)
+    fixture
+        .exchange_client()
         .execute(fixture.on_behalf_of_request("subject"), far())
         .await
         .unwrap_err();
     let gate = fixture.block_tokens();
-    let timed = credentials().http(fixture.resource_client(), IdentityMode::Service);
+    let timed = fixture.service_client();
     let mut request = fixture.request();
     request
         .extensions_mut()
@@ -584,9 +638,17 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    let shared = credentials();
-    let dropped_client = shared.http(fixture.resource_client(), IdentityMode::Service);
-    let exchange_client = shared.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+    let registration = fixture.build(Options {
+        provider_concurrency: 1,
+        ..fixture.options()
+    });
+    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    fixture.drive(driver);
+    let dropped_client = service_tokens.http(fixture.resource_client());
+    let exchange_client = registration
+        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .unwrap()
+        .http(fixture.resource_client());
     let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
     tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
     captured.drain(&snapshotter);

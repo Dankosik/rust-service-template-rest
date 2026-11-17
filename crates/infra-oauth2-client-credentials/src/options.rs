@@ -1,10 +1,11 @@
+use std::cell::Cell;
+
 use secrecy::{ExposeSecret as _, SecretString};
+use shared_rules::uri;
 use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::ConfigurationError;
-
-const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
 
 /// RFC 8725bis §3.1
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,11 +34,45 @@ pub struct Options {
     pub key_id: String,
     pub algorithm: Algorithm,
     pub assertion_audience: String,
-    /// RFC 6749 §3.3
-    pub scopes: Vec<String>,
-    pub audience: Option<String>,
-    pub exchange_cache_capacity: u32,
     pub provider_concurrency: u32,
+}
+
+#[derive(Clone, Default, derive_more::Debug)]
+#[debug("TokenTarget([REDACTED])")]
+pub struct TokenTarget {
+    pub(crate) scope: Option<String>,
+    pub(crate) audience: Option<String>,
+}
+
+impl TokenTarget {
+    /// RFC 6749 §3.3
+    pub fn try_new(
+        scopes: &[String],
+        audience: Option<String>,
+    ) -> Result<Self, ConfigurationError> {
+        if !scopes
+            .iter()
+            .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
+        {
+            return Err(ConfigurationError {
+                key: "scopes",
+                reason: "must contain RFC 6749 scope tokens",
+            });
+        }
+        if audience
+            .as_ref()
+            .is_some_and(|audience| audience.trim().is_empty())
+        {
+            return Err(ConfigurationError {
+                key: "audience",
+                reason: "must be nonempty when configured",
+            });
+        }
+        Ok(Self {
+            scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
+            audience,
+        })
+    }
 }
 
 pub(crate) struct Admitted {
@@ -79,6 +114,32 @@ fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError
         })
 }
 
+fn assertion_issuer(raw: &str) -> Result<Url, ConfigurationError> {
+    let invalid_issuer = ConfigurationError {
+        key: "assertion_audience",
+        reason: "must be an HTTPS issuer URL without userinfo, a query, or a fragment",
+    };
+    if uri::has_whitespace_or_control(raw) || uri::authority_has_userinfo(raw) {
+        return Err(invalid_issuer);
+    }
+    let invalid_syntax = Cell::new(false);
+    let issuer = Url::options()
+        .syntax_violation_callback(Some(&|_| invalid_syntax.set(true)))
+        .parse(raw)
+        .map_err(|_| invalid_issuer)?;
+    if invalid_syntax.get()
+        || issuer.scheme() != "https"
+        || issuer.host().is_none()
+        || !issuer.username().is_empty()
+        || issuer.password().is_some()
+        || issuer.query().is_some()
+        || issuer.fragment().is_some()
+    {
+        return Err(invalid_issuer);
+    }
+    Ok(issuer)
+}
+
 pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
@@ -88,30 +149,11 @@ pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationE
     if options.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    if options.assertion_audience.trim().is_empty() {
-        return error("assertion_audience", "must be nonempty");
-    }
+    let issuer = assertion_issuer(&options.assertion_audience)?;
     if options.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    if !options
-        .scopes
-        .iter()
-        .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
-    {
-        return error("scopes", "must contain RFC 6749 scope tokens");
-    }
-    if options
-        .audience
-        .as_ref()
-        .is_some_and(|audience| audience.trim().is_empty())
-    {
-        return error("audience", "must be nonempty when configured");
-    }
-    if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&options.exchange_cache_capacity) {
-        return error("exchange_cache_capacity", "must be from 1 to 65536");
-    }
-    if shared_rules::uri::has_whitespace_or_control(&options.token_url) {
+    if uri::has_whitespace_or_control(&options.token_url) {
         return error("token_url", "must not contain whitespace or controls");
     }
     let Ok(endpoint) = Url::parse(&options.token_url) else {
@@ -125,12 +167,15 @@ pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationE
     }
     if !endpoint.username().is_empty()
         || endpoint.password().is_some()
-        || shared_rules::uri::authority_has_userinfo(&options.token_url)
+        || uri::authority_has_userinfo(&options.token_url)
     {
         return error("token_url", "must not include userinfo");
     }
     if endpoint.fragment().is_some() {
         return error("token_url", "must not include a fragment");
+    }
+    if issuer == endpoint {
+        return error("assertion_audience", "must differ from the token endpoint");
     }
     Ok(Admitted {
         options,

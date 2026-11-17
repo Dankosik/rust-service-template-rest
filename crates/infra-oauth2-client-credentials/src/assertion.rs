@@ -58,7 +58,7 @@ impl Signer {
         ]
     }
 
-    /// RFC 7523bis
+    /// RFC 10070 §4
     pub(crate) fn sign(&self) -> Result<Zeroizing<String>, AcquisitionError> {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
