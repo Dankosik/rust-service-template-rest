@@ -14,21 +14,33 @@ only with that profile.
 
 ## Install
 
-1. Load the file through `rule_files` or a `PrometheusRule`, next to
-   `env/monitoring/postgres-maintenance.rules.yml` when the PostgreSQL profile is kept.
-2. Update the shared scrape-job selector and the exact API job selector in
+<!-- template:begin postgres:docs-alerting-maintenance-inventory -->
+Before loading `env/monitoring/postgres-maintenance.rules.yml`, replace
+its example `pg:expected` rows with the actual database, scrape job,
+instance and population for each expected writer. Add the matching
+`database` label to the scrape targets. Set each
+`pg:writer_set_changed_timestamp_seconds` to the Unix time in seconds of
+the last change to that database's writers for the population.
+<!-- template:end postgres:docs-alerting-maintenance-inventory -->
+
+1. Update the shared scrape-job selector and the exact API job selector in
    `ServiceDown`. For example, if your scrape jobs are named `orders-api`
    and `orders-worker`, run these from the repository root.
 
    ```sh
    sd -F 'job=~"service|jobs-worker"' 'job=~"orders-api|orders-worker"' env/monitoring/service.rules.yml
-   sd -F 'up{job="service"}' 'up{job="orders-api"}' env/monitoring/service.rules.yml
+   sd -F 'job="service"' 'job="orders-api"' env/monitoring/service.rules.yml env/monitoring/tests/service-rules.yml
+   sd -F 'job="jobs-worker"' 'job="orders-worker"' env/monitoring/tests/service-rules.yml
    ```
 
    For an API-only installation, use `job=~"orders-api"` as the first
    replacement. If the worker must always be in service discovery, add
    `or absent(up{job="orders-worker"})` to the `ServiceDown` expression.
-3. Point `runbook_url` at this page in your repository.
+   In that case include a reachable worker in normal fixtures and cover its
+   disappearance with only the API present.
+2. Point `runbook_url` at this page in your repository.
+3. Check the configured files with `make monitoring-rules`, then load them
+   through `rule_files` or a `PrometheusRule`.
 4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
    The example inhibits burn-rate tickets while a page for the same alert
    and job fires. Within each severity, it inhibits the 6-hour page while the
@@ -157,6 +169,12 @@ affected instances during the same period.
   the `webhook_receipt_unavailable` warning by `request_id` to identify the
   failed receipt stage.
 <!-- template:end inbound-webhooks:docs-alerting-http-inbound-webhooks -->
+<!-- template:begin authn:docs-alerting-http-authentication -->
+- For `problem_code="authentication_unavailable"`, break down
+  `authn_token_verifications_total{outcome="failure"}` by `mode` and `reason`.
+  If verification failed on a provider call, check
+  `authn_provider_request_duration_seconds_count` by `operation` and `outcome`.
+<!-- template:end authn:docs-alerting-http-authentication -->
 <!-- template:begin outbound-auth:docs-alerting-http-outbound-auth -->
 - For an outbound OAuth token acquisition, check
   `oauth2_token_acquisitions_total` by `grant` and `outcome` to distinguish
