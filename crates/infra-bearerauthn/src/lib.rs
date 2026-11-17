@@ -163,7 +163,6 @@ pub(crate) enum VerificationReason {
     Profile,
     Signature,
     UnknownKey,
-    Refresh,
     // template:end oidc-jwt:authn-jwt-reasons
     // template:begin oidc-introspection:authn-introspection-reasons
     Provider(provider::ProviderReason),
@@ -189,7 +188,6 @@ impl VerificationReason {
             Self::Profile => "profile",
             Self::Signature => "signature",
             Self::UnknownKey => "unknown_key",
-            Self::Refresh => "refresh",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
             Self::Provider(failure) => failure.label(),

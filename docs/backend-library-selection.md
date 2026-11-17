@@ -38,7 +38,7 @@ Measured on a dedicated 4-vCPU Xeon 8280 DigitalOcean c-4 (`linux/amd64`, Debian
 <!-- template:begin oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 ### Verified bearer JWT memo
 
-Repeated Bearer JWT verification dropped from `21.7 µs` to `216 ns` (RS256) and `100.0 µs` to `248 ns` (ES256) with `moka` bounded by token `exp` and cleared on JWKS refresh. Reopen if tokens are predominantly single-use or verification depends on per-request inputs beyond token, key set, and clock.
+Repeated Bearer JWT verification dropped from `21.7 µs` to `216 ns` (RS256) and `100.0 µs` to `248 ns` (ES256) with `moka` bounded by token `exp` and cleared on JWKS refresh, including a refresh that returns the same document: that costs one full verification per live token per refresh, and refreshes on demand are at least 30 s apart, while comparing documents would add state to guard the same rule. Reopen if tokens are predominantly single-use, verification depends on per-request inputs beyond token, key set, and clock, or re-verification after a refresh shows up in a profile.
 <!-- template:end oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 
 ### Runtime workers
