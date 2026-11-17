@@ -562,7 +562,7 @@ def _assert_dropped_crates_unnamed(
         dropped = names - projected.get(package, names)
         if not dropped:
             continue
-        named = re.compile(rb"(?<![\w:])(" + "|".join(sorted(dropped)).encode() + rb")::")
+        named = re.compile(rb'(?<![\w:"])(' + "|".join(sorted(dropped)).encode() + rb")::")
         for relative, node in nodes.items():
             if not (relative.startswith(f"{package}/") and relative.endswith(".rs")):
                 continue
