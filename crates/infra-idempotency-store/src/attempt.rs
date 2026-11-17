@@ -93,6 +93,17 @@ pub enum AttemptError {
     Integrity,
 }
 
+impl AttemptError {
+    #[must_use]
+    pub fn classify_sql(error: &sqlx::Error) -> Self {
+        if is_transient(error) {
+            Self::Unavailable
+        } else {
+            Self::Internal
+        }
+    }
+}
+
 impl Store {
     pub async fn attempt<W, R>(
         &self,
@@ -267,7 +278,7 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
             failed(err, "decode_record", AttemptError::Integrity, None)
         }
-        _ => failed(err, phase, classify(err), None),
+        _ => failed(err, phase, AttemptError::classify_sql(err), None),
     }
 }
 
@@ -308,7 +319,7 @@ async fn write(
         .execute(tx),
     )
     .await
-    .map_err(|err| failed(&err, "write_record", classify(&err), None))?;
+    .map_err(|err| failed(&err, "write_record", AttemptError::classify_sql(&err), None))?;
     if written.rows_affected() == 1 {
         Ok(())
     } else {
@@ -340,20 +351,16 @@ impl<R> From<TxError> for Stop<R> {
 
 fn classify_tx(err: &TxError) -> AttemptError {
     let (phase, class, commit_outcome) = match err {
-        TxError::Acquire(err) => ("acquire", classify(err), None),
-        TxError::Begin(err) => ("begin", classify(err), None),
-        TxError::CommitFailed(err) => ("commit", classify(err), Some("commit_failed")),
+        TxError::Acquire(err) => ("acquire", AttemptError::classify_sql(err), None),
+        TxError::Begin(err) => ("begin", AttemptError::classify_sql(err), None),
+        TxError::CommitFailed(err) => (
+            "commit",
+            AttemptError::classify_sql(err),
+            Some("commit_failed"),
+        ),
         TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
     };
     failed(err.driver(), phase, class, commit_outcome)
-}
-
-fn classify(err: &sqlx::Error) -> AttemptError {
-    if is_transient(err) {
-        AttemptError::Unavailable
-    } else {
-        AttemptError::Internal
-    }
 }
 
 fn failed(

@@ -348,7 +348,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn panic_is_a_sanitized_500_problem() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(EventFields {
