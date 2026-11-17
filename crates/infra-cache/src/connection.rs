@@ -15,7 +15,6 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
 use zeroize::Zeroizing;
 
 use crate::ServerEndpoint;
@@ -124,7 +123,6 @@ enum State {
 
 struct Generation {
     connection: MultiplexedConnection,
-    _driver: AbortOnDropHandle<()>,
     caller_capacity: Arc<Semaphore>,
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
     retired: CancellationToken,
@@ -374,7 +372,7 @@ impl Link {
 
     pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
         &self,
-        command: redis::Cmd,
+        build_command: impl FnOnce() -> redis::Cmd,
         context: &OperationContext,
     ) -> Result<T, CommandError> {
         context.check().map_err(CommandError::Stopped)?;
@@ -389,10 +387,16 @@ impl Link {
         let exchange = async {
             let reservation = generation.reserve().await?;
             tokio::task::consume_budget().await;
-            context.check().map_err(CommandError::Stopped)?;
-            if generation.retired.is_cancelled() {
-                return Err(ErrorType::Io.into());
-            }
+            let check_dispatch = || {
+                context.check().map_err(CommandError::Stopped)?;
+                if generation.retired.is_cancelled() {
+                    return Err(CommandError::Failed(ErrorType::Io));
+                }
+                Ok(())
+            };
+            check_dispatch()?;
+            let command = build_command();
+            check_dispatch()?;
             let wire_deadline = Deadline::new(Instant::now(), self.command_timeout);
             let mut exchange = Exchange::new(
                 &generation,
@@ -546,9 +550,18 @@ async fn run_supervisor(
         if shared.is_closed() {
             return;
         }
-        let (abandoned, replies) = mpsc::unbounded_channel();
-        match setup_attempt(server, dial, settings, password_file, abandoned).await {
-            Ok((generation, rotation)) => {
+        let retired = CancellationToken::new();
+        match setup_attempt(server, dial, settings, password_file, &retired).await {
+            Ok((dialed, rotation)) => {
+                let _driver = dialed.driver;
+                let (abandoned, replies) = mpsc::unbounded_channel();
+                let generation = Arc::new(Generation {
+                    connection: dialed.connection,
+                    caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
+                    abandoned,
+                    retired,
+                    cooldown_until: Instant::now() + MIN_GENERATION_SPACING,
+                });
                 if !shared.publish(generation.clone()) {
                     return;
                 }
@@ -610,32 +623,18 @@ async fn setup_attempt<'a>(
     dial: &Dial,
     settings: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
-    abandoned: mpsc::UnboundedSender<AbandonedReply>,
-) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
-    let retired = CancellationToken::new();
+    retired: &CancellationToken,
+) -> Result<(Dialed, Option<Rotation<'a>>), ErrorType> {
     let setup = async {
         let (settings, rotation) = credentialed_settings(server, settings, password_file).await?;
         let dialed = connect(dial, &settings, retired.clone()).await?;
         Ok((dialed, rotation))
     };
-    let result = match timeout(SETUP_TIMEOUT, setup).await {
+    match timeout(SETUP_TIMEOUT, setup).await {
         Err(_elapsed) => Err(ErrorType::Timeout),
         Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
         Ok(connected) => connected,
-    };
-    result.map(|(Dialed { connection, driver }, rotation)| {
-        (
-            Arc::new(Generation {
-                connection,
-                _driver: driver,
-                caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
-                abandoned,
-                retired,
-                cooldown_until: Instant::now() + MIN_GENERATION_SPACING,
-            }),
-            rotation,
-        )
-    })
+    }
 }
 
 async fn credentialed_settings<'a>(

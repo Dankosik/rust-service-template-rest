@@ -35,7 +35,6 @@ impl FullPipeline {
         let (abandoned, replies) = mpsc::unbounded_channel();
         let generation = Arc::new(Generation {
             connection,
-            _driver: AbortOnDropHandle::new(tokio::spawn(async {})),
             caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
             abandoned,
             retired: CancellationToken::new(),
