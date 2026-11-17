@@ -203,10 +203,8 @@ async fn contract(context: &OperationContext, storage: &ObjectStorage, object: &
         .into_bytes(body.len())
         .await
         .unwrap();
-    assert!(
-        downloaded == body,
-        "download differs from the written object"
-    );
+    let matches_upload = downloaded == body;
+    assert!(matches_upload, "download differs from the written object");
 
     let http = reqwest::Client::new();
     let url = storage

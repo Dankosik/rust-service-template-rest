@@ -294,9 +294,6 @@ fn fragmented_body(mut bytes: Bytes) -> Body {
 #[tokio::test]
 async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above_it() {
     const LIMIT: usize = 1024 * 1024;
-    let parent = OperationContext::unbounded();
-    let prefix = "<Error><Code>NoSuchBucket</Code><Message>";
-    let suffix = "</Message><RequestId>bounded-response</RequestId></Error>";
     for (method, create_only) in [
         (Method::PUT, false),
         (Method::PUT, true),
@@ -308,60 +305,73 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
                 continue;
             }
             for length in [LIMIT, LIMIT + 1] {
-                let payload = Bytes::from(format!(
-                    "{prefix}{}{suffix}",
-                    "x".repeat(length - prefix.len() - suffix.len())
-                ));
-                let stub = Stub::start(move |_, _| {
-                    Response::builder()
-                        .status(status)
-                        .header("content-type", "application/xml")
-                        .header("x-amz-request-id", "bounded-response")
-                        .body(fragmented_body(payload.clone()))
-                        .unwrap()
-                })
-                .await;
-                let storage = stub.storage(|options| {
-                    options.operation_timeout = Duration::from_secs(10);
-                });
-                let put_options = if create_only {
-                    PutOptions::create_only()
-                } else {
-                    PutOptions::overwrite()
-                };
-                if method == Method::GET {
-                    let expected = if length == LIMIT {
-                        ObjectStorageError::Rejected
-                    } else {
-                        ObjectStorageError::Unavailable
-                    };
-                    assert_eq!(
-                        storage.get(&parent, &key()).await.unwrap_err(),
-                        expected,
-                        "{status} {length}"
-                    );
-                } else {
-                    let result = match method {
-                        Method::PUT => {
-                            storage
-                                .put(&parent, &key(), Bytes::new().into(), put_options)
-                                .await
-                        }
-                        Method::DELETE => storage.delete(&parent, &key()).await,
-                        _ => unreachable!(),
-                    };
-                    let expected = if length == LIMIT {
-                        MutationError::NotApplied(MutationFailure::Rejected)
-                    } else {
-                        MutationError::OutcomeUnknown(MutationFailure::Unavailable)
-                    };
-                    assert_eq!(result, Err(expected), "{method} {status} {length}");
-                    assert_eq!(stub.seen().len(), 1, "mutation must not retry");
-                }
-                stub.stop().await;
+                check_service_reply(&method, create_only, status, length, length == LIMIT).await;
             }
         }
     }
+}
+
+async fn check_service_reply(
+    method: &Method,
+    create_only: bool,
+    status: StatusCode,
+    length: usize,
+    within_limit: bool,
+) {
+    let parent = OperationContext::unbounded();
+    let prefix = "<Error><Code>NoSuchBucket</Code><Message>";
+    let suffix = "</Message><RequestId>bounded-response</RequestId></Error>";
+    let payload = Bytes::from(format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(length - prefix.len() - suffix.len())
+    ));
+    let stub = Stub::start(move |_, _| {
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/xml")
+            .header("x-amz-request-id", "bounded-response")
+            .body(fragmented_body(payload.clone()))
+            .unwrap()
+    })
+    .await;
+    let storage = stub.storage(|options| {
+        options.operation_timeout = Duration::from_secs(10);
+    });
+    let put_options = if create_only {
+        PutOptions::create_only()
+    } else {
+        PutOptions::overwrite()
+    };
+    if *method == Method::GET {
+        let expected = if within_limit {
+            ObjectStorageError::Rejected
+        } else {
+            ObjectStorageError::Unavailable
+        };
+        assert_eq!(
+            storage.get(&parent, &key()).await.unwrap_err(),
+            expected,
+            "{status} {length}"
+        );
+    } else {
+        let result = match *method {
+            Method::PUT => {
+                storage
+                    .put(&parent, &key(), Bytes::new().into(), put_options)
+                    .await
+            }
+            Method::DELETE => storage.delete(&parent, &key()).await,
+            _ => unreachable!(),
+        };
+        let expected = if within_limit {
+            MutationError::NotApplied(MutationFailure::Rejected)
+        } else {
+            MutationError::OutcomeUnknown(MutationFailure::Unavailable)
+        };
+        assert_eq!(result, Err(expected), "{method} {status} {length}");
+        assert_eq!(stub.seen().len(), 1, "mutation must not retry");
+    }
+    stub.stop().await;
 }
 
 #[tokio::test]
@@ -972,7 +982,11 @@ async fn presign_is_bounded_and_redacted() {
     assert!(url.expose().contains("X-Amz-Signature="), "presigned query");
     assert!(url.expose().contains("X-Amz-Expires=60"));
     assert!(url.expose().contains("X-Amz-SignedHeaders=host&"));
-    assert!(format!("{url:?}") == "PresignedUrl([REDACTED])");
+    let redacted = format!("{url:?}") == "PresignedUrl([REDACTED])";
+    assert!(
+        redacted,
+        "presigned URL debug output must redact credentials"
+    );
     for expires_in in [Duration::ZERO, Duration::from_secs(7 * 24 * 60 * 60 + 1)] {
         assert_eq!(
             storage.presign_get(&parent, &key(), expires_in).await.err(),

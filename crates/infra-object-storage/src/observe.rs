@@ -59,7 +59,7 @@ enum Outcome {
     Busy,
     Unavailable,
     Rejected,
-    OutcomeUnknown,
+    Unknown,
     Integrity,
 }
 
@@ -74,7 +74,7 @@ impl Outcome {
             Self::Busy => "busy",
             Self::Unavailable => "unavailable",
             Self::Rejected => "rejected",
-            Self::OutcomeUnknown => "outcome_unknown",
+            Self::Unknown => "outcome_unknown",
             Self::Integrity => "integrity",
         }
     }
@@ -180,7 +180,7 @@ impl OperationGuard {
 
     pub(crate) fn fail_mutation(&mut self, failure: &Failure<MutationError>) -> MutationError {
         let outcome = match failure.error {
-            MutationError::OutcomeUnknown(_) => Outcome::OutcomeUnknown,
+            MutationError::OutcomeUnknown(_) => Outcome::Unknown,
             MutationError::NotApplied(reason) => match reason {
                 MutationFailure::AlreadyExists => Outcome::AlreadyExists,
                 MutationFailure::TooLarge => Outcome::TooLarge,
@@ -217,7 +217,7 @@ impl OperationGuard {
 
             match outcome {
                 Outcome::NotFound | Outcome::AlreadyExists | Outcome::TooLarge | Outcome::Busy => {
-                    emit_failure!(tracing::Level::DEBUG)
+                    emit_failure!(tracing::Level::DEBUG);
                 }
                 _ => emit_failure!(tracing::Level::WARN),
             }

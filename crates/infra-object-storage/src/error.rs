@@ -389,28 +389,15 @@ mod tests {
     fn classification_separates_not_applied_from_unknown() {
         use MutationFailure as F;
         let status = |status, code| FailureKind::Status { status, code };
+        let unknown = OutcomeUnknown(F::Unavailable);
+        let rejected = NotApplied(F::Rejected);
+        let unavailable = NotApplied(F::Unavailable);
         let cases = [
-            (
-                Unconditional,
-                FailureKind::Lost,
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (
-                Call::CreateOnly,
-                FailureKind::Lost,
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (Unconditional, FailureKind::NotSent, NotApplied(F::Rejected)),
-            (
-                Unconditional,
-                FailureKind::NoCredentials,
-                NotApplied(F::Unavailable),
-            ),
-            (
-                Unconditional,
-                status(404, Some("NoSuchBucket")),
-                NotApplied(F::Rejected),
-            ),
+            (Unconditional, FailureKind::Lost, unknown),
+            (Call::CreateOnly, FailureKind::Lost, unknown),
+            (Unconditional, FailureKind::NotSent, rejected),
+            (Unconditional, FailureKind::NoCredentials, unavailable),
+            (Unconditional, status(404, Some("NoSuchBucket")), rejected),
             (
                 Call::CreateOnly,
                 status(412, Some("PreconditionFailed")),
@@ -419,7 +406,7 @@ mod tests {
             (
                 Unconditional,
                 status(412, Some("PreconditionFailed")),
-                NotApplied(F::Rejected),
+                rejected,
             ),
             (
                 Call::CreateOnly,
@@ -429,53 +416,25 @@ mod tests {
             (
                 Unconditional,
                 status(429, Some("TooManyRequests")),
-                NotApplied(F::Unavailable),
+                unavailable,
             ),
-            (
-                Unconditional,
-                status(503, Some("SlowDown")),
-                NotApplied(F::Unavailable),
-            ),
-            (
-                Unconditional,
-                status(500, Some("InternalError")),
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (
-                Call::CreateOnly,
-                status(502, None),
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (
-                Unconditional,
-                status(400, Some("BadDigest")),
-                NotApplied(F::Rejected),
-            ),
+            (Unconditional, status(503, Some("SlowDown")), unavailable),
+            (Unconditional, status(500, Some("InternalError")), unknown),
+            (Call::CreateOnly, status(502, None), unknown),
+            (Unconditional, status(400, Some("BadDigest")), rejected),
             (
                 Unconditional,
                 status(403, Some("SignatureDoesNotMatch")),
-                NotApplied(F::Rejected),
+                rejected,
             ),
             (
                 Unconditional,
                 status(400, Some("RequestTimeout")),
-                NotApplied(F::Unavailable),
+                unavailable,
             ),
-            (
-                Unconditional,
-                status(501, Some("NotImplemented")),
-                NotApplied(F::Rejected),
-            ),
-            (
-                Unconditional,
-                status(200, Some("InternalError")),
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (
-                Unconditional,
-                status(200, Some("SlowDown")),
-                NotApplied(F::Unavailable),
-            ),
+            (Unconditional, status(501, Some("NotImplemented")), rejected),
+            (Unconditional, status(200, Some("InternalError")), unknown),
+            (Unconditional, status(200, Some("SlowDown")), unavailable),
             (
                 Call::CreateOnly,
                 status(200, Some("PreconditionFailed")),
@@ -486,16 +445,8 @@ mod tests {
                 status(200, Some("ConditionalRequestConflict")),
                 NotApplied(F::Conflict),
             ),
-            (
-                Unconditional,
-                status(200, None),
-                OutcomeUnknown(F::Unavailable),
-            ),
-            (
-                Unconditional,
-                status(200, Some("NoSuchBucket")),
-                NotApplied(F::Rejected),
-            ),
+            (Unconditional, status(200, None), unknown),
+            (Unconditional, status(200, Some("NoSuchBucket")), rejected),
         ];
         for (call, reply, expected) in cases {
             assert_eq!(
