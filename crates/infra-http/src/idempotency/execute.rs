@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
+use infra_postgres::{SqlError, failure_cause, is_transient, sqlstate};
 use tokio::time::Instant;
 
 use super::stored::ReplayableResponse;
@@ -135,10 +136,12 @@ impl Attempt {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum Rollback {
     #[error("operation refused")]
     Refused(Box<Response>),
+    #[error("database")]
+    Database(SqlError),
     #[error("status")]
     InvalidStatus,
     #[error("body_limit")]
@@ -151,6 +154,18 @@ pub enum Rollback {
     HeaderLimit,
     #[error("serialization")]
     Serialization,
+}
+
+impl fmt::Debug for Rollback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl From<SqlError> for Rollback {
+    fn from(error: SqlError) -> Self {
+        Self::Database(error)
+    }
 }
 
 impl Rollback {
@@ -199,14 +214,24 @@ fn map_attempted(
     operation_id: &str,
 ) -> Answer {
     match attempted {
-        Err(AttemptError::Unavailable) => {
-            Answer::boundary_problem(unavailable(), Outcome::Unavailable)
-        }
-        Err(AttemptError::Internal) => {
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
-        }
+        Err(error) => attempt_failure(error, scope, operation_id),
         Ok(Attempted::RolledBack(Rollback::Refused(response))) => {
             Answer::operation_response(refusal(*response), Outcome::NotStored)
+        }
+        Ok(Attempted::RolledBack(Rollback::Database(error))) => {
+            let class = if is_transient(&error) {
+                AttemptError::Unavailable
+            } else {
+                AttemptError::Internal
+            };
+            tracing::warn!(
+                operation = operation_id,
+                failure_class = %class,
+                sqlstate = sqlstate(&error).as_deref(),
+                cause = failure_cause(&error),
+                "http_idempotency_command_failed"
+            );
+            attempt_failure(class, scope, operation_id)
         }
         Ok(Attempted::RolledBack(error)) => {
             tracing::warn!(
@@ -215,15 +240,6 @@ fn map_attempted(
                 "http_idempotency_success_not_stored"
             );
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
-        }
-        Err(AttemptError::Integrity) => {
-            tracing::error!(
-                scope_digest = %ScopeDigest(scope.digest()),
-                operation = operation_id,
-                failure = "store_undecodable",
-                "http_idempotency_integrity_failed"
-            );
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
         }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => {
@@ -240,6 +256,24 @@ fn map_attempted(
             ReplayableResponse::from_record(record).into_response(),
             Outcome::Executed,
         ),
+    }
+}
+
+fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) -> Answer {
+    match error {
+        AttemptError::Unavailable => Answer::boundary_problem(unavailable(), Outcome::Unavailable),
+        AttemptError::Internal => {
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
+        }
+        AttemptError::Integrity => {
+            tracing::error!(
+                scope_digest = %ScopeDigest(scope.digest()),
+                operation = operation_id,
+                failure = "store_undecodable",
+                "http_idempotency_integrity_failed"
+            );
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
+        }
     }
 }
 

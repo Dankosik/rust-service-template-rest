@@ -26,7 +26,6 @@ use infra_http::idempotency::{
     self, CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse,
     Rollback, Tx,
 };
-use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
     REQUEST_ID_HEADER, VerifiedPrincipal,
@@ -48,6 +47,7 @@ use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
+use tracing_subscriber::layer::SubscriberExt as _;
 use utoipa::ToSchema;
 
 use crate::commit_proxy::{CommitProxy, Fault, ReadyBoundary};
@@ -114,16 +114,16 @@ impl Widget {
 #[derive(Debug)]
 enum CreateError {
     Reserved,
-    Store,
+    Store(sqlx::Error),
 }
 
-impl CreateError {
-    fn into_problem(self) -> Problem {
-        match self {
-            Self::Reserved => {
-                Problem::new(Code::UnprocessableContent).detail("the widget name is reserved")
-            }
-            Self::Store => Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL),
+impl From<CreateError> for Rollback {
+    fn from(error: CreateError) -> Self {
+        match error {
+            CreateError::Reserved => Self::refuse(
+                Problem::new(Code::UnprocessableContent).detail("the widget name is reserved"),
+            ),
+            CreateError::Store(error) => Self::from(error),
         }
     }
 }
@@ -147,7 +147,7 @@ impl CreateWidgets for SqlWidgets {
                 .bind(&input.color)
                 .fetch_one(tx.connection())
                 .await
-                .map_err(|_| CreateError::Store)?;
+                .map_err(CreateError::Store)?;
         self.hold.pass().await;
         if input.name == RESERVED_NAME {
             return Err(CreateError::Reserved);
@@ -257,11 +257,7 @@ struct CreateWidget {
 
 impl FreshCommand for CreateWidget {
     async fn execute(self, tx: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
-        let widget = self
-            .widgets
-            .create(tx, &self.input)
-            .await
-            .map_err(|err| Rollback::refuse(err.into_problem()))?;
+        let widget = self.widgets.create(tx, &self.input).await?;
         created_response(&widget)
     }
 
@@ -2004,6 +2000,127 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
         assert_eq!(count(&pool, WIDGET_ROWS).await, expected_rows);
         mounted.finish().await;
     }
+}
+
+type EventFields = BTreeMap<String, String>;
+
+#[derive(Clone, Default)]
+struct CommandFailures(Arc<Mutex<Vec<EventFields>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CommandFailures {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().fields().field("failure_class").is_none() {
+            return;
+        }
+        let mut fields = EventFields::new();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                fields.insert(field.name().to_owned(), format!("{value:?}"));
+            },
+        );
+        if fields
+            .get("message")
+            .is_some_and(|message| message == "http_idempotency_command_failed")
+        {
+            self.0.lock().expect("command failure events").push(fields);
+        }
+    }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_business_insert_errors_are_classified_and_release_the_key(pool: PgPool) {
+    create_widgets(&pool).await;
+    pool.execute("ALTER TABLE widgets ADD CONSTRAINT reject_widget_name CHECK (name <> 'gizmo')")
+        .await
+        .expect("an INSERT constraint violation after the lock is released");
+    pool.execute(
+        "DO $$ BEGIN EXECUTE format(\
+         'ALTER DATABASE %I SET lock_timeout = %L', current_database(), '1s'); END $$",
+    )
+    .await
+    .expect("set the lock timeout for writer sessions");
+    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET).await;
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
+    let _local = metrics::set_default_local_recorder(&recorder);
+    let failures = CommandFailures::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(failures.clone()));
+    let input = json!({"name": "gizmo", "color": "red"});
+    let key = "k-business-insert";
+    let records = "SELECT count(*) FROM http_idempotency_records";
+
+    let mut connection = infra_postgres::acquire(&pool, "hold the widget table lock")
+        .await
+        .expect("a lock-holder connection");
+    let mut holder = sqlx::Connection::begin(&mut *connection)
+        .await
+        .expect("a table-lock holder");
+    (&mut *holder)
+        .execute("LOCK TABLE widgets IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("block the widget INSERT");
+    let unavailable = mounted.create(ALICE, key, &input, "req-locked").await;
+    holder.rollback().await.expect("release the widget lock");
+
+    problem(
+        &unavailable,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "idempotency_unavailable",
+        "req-locked",
+    );
+    assert_eq!(retry_after(&unavailable).as_deref(), Some("1"));
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(count(&pool, records).await, 0);
+
+    let internal = mounted.create(ALICE, key, &input, "req-constraint").await;
+    let body = problem(
+        &internal,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "req-constraint",
+    );
+    assert_eq!(body["detail"], "request failed");
+    assert!(retry_after(&internal).is_none());
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(count(&pool, records).await, 0);
+    let recorded = std::mem::take(&mut *failures.0.lock().expect("command failure events"));
+    assert_eq!(
+        recorded,
+        [("unavailable", "55P03"), ("internal", "23514")].map(|(class, sqlstate)| {
+            [
+                ("message", "http_idempotency_command_failed"),
+                ("operation", "\"createWidget\""),
+                ("failure_class", class),
+                ("sqlstate", &format!("{sqlstate:?}")),
+                ("cause", "\"database\""),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect::<EventFields>()
+        })
+    );
+
+    pool.execute("ALTER TABLE widgets DROP CONSTRAINT reject_widget_name")
+        .await
+        .expect("remove the permanent insert fault");
+    let retry = mounted.create(ALICE, key, &input, "req-retry").await;
+    let replay = mounted.create(ALICE, key, &input, "req-replay").await;
+    assert_eq!(created(&retry, "req-retry"), created(&replay, "req-replay"));
+    assert!(retry.maybe_header("idempotent-replayed").is_none());
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(count(&pool, records).await, 1);
+    assert_eq!(
+        outcomes(&captured),
+        counts(&[
+            ("unavailable", 1),
+            ("internal", 1),
+            ("executed", 1),
+            ("replayed", 1)
+        ])
+    );
+    mounted.finish().await;
 }
 
 async fn uncertain_commit(pool: PgPool, fault: Fault) {
