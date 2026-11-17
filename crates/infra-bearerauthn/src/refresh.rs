@@ -31,7 +31,6 @@ pub(crate) enum SignatureRefresh {
 struct State {
     requested_ticket: u64,
     finished_ticket: u64,
-    last_successful_ticket: u64,
     cooldown_started_at: Instant,
     stopped: bool,
 }
@@ -67,7 +66,6 @@ impl KeyStore {
         let state = watch::Sender::new(State {
             requested_ticket: 0,
             finished_ticket: 0,
-            last_successful_ticket: 0,
             cooldown_started_at: Instant::now(),
             stopped: false,
         });
@@ -93,17 +91,21 @@ impl KeyStore {
         self.keys.load().generation()
     }
 
+    fn newer_set(&self, checked: &Arc<KeySet>) -> Option<Arc<KeySet>> {
+        let installed = self.keys.load();
+        (!Arc::ptr_eq(&installed, checked)).then(|| Arc::clone(&installed))
+    }
+
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
         let mut admission = Admission::Answer(SignatureRefresh::NoNewerSet);
         self.state.send_if_modified(|state| {
-            let installed = self.keys.load();
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::NoNewerSet)
-            } else if !Arc::ptr_eq(&installed, checked) {
-                Admission::Answer(SignatureRefresh::NewerSet(Arc::clone(&installed)))
+            } else if let Some(keys) = self.newer_set(checked) {
+                Admission::Answer(SignatureRefresh::NewerSet(keys))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
@@ -122,10 +124,9 @@ impl KeyStore {
             .wait_for(|state| state.stopped || state.finished_ticket >= ticket)
             .await
         {
-            Ok(state) if !state.stopped && state.last_successful_ticket >= ticket => {
-                drop(state);
-                SignatureRefresh::NewerSet(self.keys.load_full())
-            }
+            Ok(state) if !state.stopped => self
+                .newer_set(checked)
+                .map_or(SignatureRefresh::NoNewerSet, SignatureRefresh::NewerSet),
             _ => SignatureRefresh::NoNewerSet,
         }
     }
@@ -160,7 +161,6 @@ impl KeyStore {
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
                 self.keys.store(keys);
-                state.last_successful_ticket = ticket;
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));
             }
