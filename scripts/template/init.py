@@ -470,8 +470,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or inputs.grpc == "enabled"
         or inputs.cache == "redis"
         or inputs.database == "postgres"
-        or inputs.object_storage == "s3"
-        or inputs.messaging == "nats-jetstream"
     ):
         selected.add("tls-fixtures")
     if inputs.outbound_http == "bounded":

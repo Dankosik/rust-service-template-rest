@@ -416,6 +416,7 @@
   "worker": {
     "remove_when_unselected": [
       "crates/config/src/worker.rs",
+      "crates/json-payload/",
       "crates/jobs-worker/"
     ]
   },
