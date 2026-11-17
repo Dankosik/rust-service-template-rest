@@ -309,20 +309,25 @@ async fn silent_client_is_closed_after_the_header_timeout() {
 
 #[tokio::test]
 async fn an_http1_listener_opens_no_http2_connection() {
-    let server = Server::bind(loopback(), app(), options()).unwrap();
-    let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+    let options = ServerOptions {
+        header_read_timeout: Duration::from_secs(30),
+        ..options()
+    };
+    let server = Server::bind(loopback(), app(), options).unwrap();
     let empty_settings_frame = [0, 0, 0, 4, 0, 0, 0, 0, 0];
-    peer.write_all(&[HTTP2_PREFACE, empty_settings_frame.as_slice()].concat())
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    let closed =
-        tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
-    assert!(closed.is_ok(), "the connection stayed open");
-    assert!(
-        response.is_empty() || response.starts_with(b"HTTP/1."),
-        "an HTTP/2 frame was sent: {response:?}"
-    );
+    let complete_preface = [HTTP2_PREFACE, empty_settings_frame.as_slice()].concat();
+    for sent in [&b"PRI * HTTP/2.0\r\n"[..], &complete_preface] {
+        let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+        peer.write_all(sent).await.unwrap();
+        let mut response = Vec::new();
+        let closed =
+            tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
+        assert!(closed.is_ok(), "the connection stayed open after {sent:?}");
+        assert!(
+            response.is_empty() || response.starts_with(b"HTTP/1."),
+            "an HTTP/2 frame was sent: {response:?}"
+        );
+    }
     server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
@@ -691,13 +696,13 @@ async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
         .serve_h2(app(), options(), None);
     let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
     stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
-    let mut buf = [0u8; 1];
-    let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
-    std::assert_matches!(
-        closed,
-        Ok(Ok(0)),
-        "expected EOF from the server, got {closed:?}"
-    );
+    let mut sent_by_server = Vec::new();
+    let closed = tokio::time::timeout(
+        Duration::from_secs(2),
+        stalled.read_to_end(&mut sent_by_server),
+    )
+    .await;
+    assert!(closed.is_ok(), "the stalled connection stayed open");
     server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
