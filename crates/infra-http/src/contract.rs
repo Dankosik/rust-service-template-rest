@@ -101,6 +101,21 @@ pub struct HttpContract<S> {
 #[derive(Clone)]
 struct RegisteredRequest(axum::http::Extensions);
 
+async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Response {
+    let Some(service) = service else {
+        return sanitized_internal_error();
+    };
+    let extensions = std::mem::take(request.extensions_mut());
+    if let Some(nested) = extensions.get::<NestedPath>() {
+        request.extensions_mut().insert(nested.clone());
+    }
+    request
+        .extensions_mut()
+        .insert(RegisteredRequest(extensions));
+    let Ok(response) = service.oneshot(request).await;
+    response
+}
+
 // template:begin http-idempotency:http-mounted-operations
 #[derive(Clone, Default)]
 pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
@@ -509,23 +524,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                     .map(|(method, router)| (method, router.with_state::<()>(state.clone())))
                     .collect::<HashMap<_, _>>(),
             );
-            let dispatch = move |mut request: Request| {
-                let router = handlers.get(request.method()).cloned();
-                async move {
-                    if let Some(router) = router {
-                        let extensions = std::mem::take(request.extensions_mut());
-                        if let Some(nested) = extensions.get::<NestedPath>() {
-                            request.extensions_mut().insert(nested.clone());
-                        }
-                        request
-                            .extensions_mut()
-                            .insert(RegisteredRequest(extensions));
-                        let Ok(response) = router.oneshot(request).await;
-                        response
-                    } else {
-                        sanitized_internal_error()
-                    }
-                }
+            let dispatch = move |request: Request| {
+                dispatch_extension(handlers.get(request.method()).cloned(), request)
             };
             #[expect(
                 clippy::disallowed_methods,
