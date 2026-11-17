@@ -64,16 +64,12 @@ fn watch(
             reader.wait_for_drain_or_owner_drop().await;
             return;
         }
-        let mut sent = None;
+        let mut ready = reader.is_ready();
         loop {
-            let draining = reader.is_draining();
-            let status = serving(reader.is_ready());
-            if sent != Some(status) {
-                sent = Some(status);
-                yield Ok(response(status));
-            }
-            if draining || reader.wait_for_verdict_event().await.is_err() {
-                break;
+            yield Ok(response(serving(ready)));
+            match reader.wait_until_ready_is_not(ready).await {
+                Some(next) => ready = next,
+                None => break,
             }
         }
     }
