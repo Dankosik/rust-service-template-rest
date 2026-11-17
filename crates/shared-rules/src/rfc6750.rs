@@ -1,3 +1,5 @@
+use crate::rfc9110::is_tchar;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoBearer {
     Missing,
@@ -31,11 +33,6 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
         return Err(NoBearer::Malformed);
     }
     std::str::from_utf8(token).map_err(|_| NoBearer::Malformed)
-}
-
-/// RFC 9110 §5.6.2
-fn is_tchar(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 fn is_b64token(token: &[u8]) -> bool {

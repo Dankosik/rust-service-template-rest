@@ -294,14 +294,45 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
 
 #[tokio::test(start_paused = true)]
 async fn stopped_context_releases_unpolled_custody_and_observes_once() {
-    for cancelled in [false, true] {
+    if !in_tracing_child(
+        "download::tests::stopped_context_releases_unpolled_custody_and_observes_once",
+    ) {
+        return;
+    }
+    let records = Records::default();
+    let _subscriber = tracing::subscriber::set_default(records.clone());
+    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let cases = [
+        (
+            Some(Duration::from_secs(2)),
+            Duration::from_mins(1),
+            ObjectStorageError::Stopped(Stopped::Deadline),
+            Some("parent_deadline"),
+        ),
+        (
+            None,
+            Duration::from_secs(2),
+            ObjectStorageError::Unavailable,
+            Some("storage_timeout"),
+        ),
+        (
+            None,
+            Duration::from_mins(1),
+            ObjectStorageError::Stopped(Stopped::Cancelled),
+            None,
+        ),
+    ];
+    for (index, (parent_timeout, storage_timeout, expected, timeout_source)) in
+        cases.into_iter().enumerate()
+    {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let admission = Arc::new(Semaphore::new(1));
         let guard = OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None);
         let (body, body_dropped) = body(None);
-        let context = OperationContext::with_timeout(Duration::from_secs(2));
+        let context =
+            parent_timeout.map_or_else(OperationContext::unbounded, OperationContext::with_timeout);
         let mut download = Download::open(
             ObjectMetadata {
                 size: 1,
@@ -312,31 +343,42 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
             ByteStream::from_body_1_x(body),
             guard,
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            CallContext::new(&context, Duration::from_mins(1)),
+            CallContext::new(&context, storage_timeout),
         );
-        let stopped = if cancelled {
+        if expected == ObjectStorageError::Stopped(Stopped::Cancelled) {
             context.cancel();
-            Stopped::Cancelled
         } else {
             tokio::time::advance(Duration::from_secs(2)).await;
-            Stopped::Deadline
-        };
+        }
         joined(&mut download.timer).await;
         tokio::time::timeout(Duration::from_secs(1), body_dropped)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(admission.available_permits(), 1);
-        assert_eq!(
-            download.next_chunk().await,
-            Err(ObjectStorageError::Stopped(stopped))
-        );
+        assert_eq!(download.next_chunk().await, Err(expected));
         drop(download);
         let rendered = handle.render();
         assert!(rendered.contains(
             r#"object_storage_operation_duration_seconds_count{operation="get",outcome="unavailable"} 1"#
         ), "{rendered}");
         assert!(!rendered.contains("cancelled"), "{rendered}");
+
+        let failures = records.matching("event", "object_storage_operation_failed");
+        assert_eq!(failures.len(), index + 1);
+        let event = &failures[index];
+        if let Some(source) = timeout_source {
+            let field = format!(" object_storage.timeout_source={source}");
+            assert!(event.contains(&field), "{event}");
+            assert!(event.contains(" error.type=timeout"), "{event}");
+            assert_eq!(records.matching("span", &field).len(), 1);
+        } else {
+            assert!(event.contains(" error.type=cancelled"), "{event}");
+            assert!(
+                !event.contains(" object_storage.timeout_source="),
+                "{event}"
+            );
+        }
     }
 }
 
