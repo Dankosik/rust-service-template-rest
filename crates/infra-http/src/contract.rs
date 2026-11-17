@@ -567,6 +567,11 @@ pub struct Application(Router);
 
 impl Application {
     #[must_use]
+    pub fn with_extension<T: Clone + Send + Sync + 'static>(self, value: T) -> Self {
+        Self(self.0.layer(axum::Extension(value)))
+    }
+
+    #[must_use]
     pub fn serve(
         self,
         listener: infra_http_transport::BoundListener,

@@ -17,6 +17,12 @@ pub struct AuthenticatedClient {
     resource: Client,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RequestClient<'a> {
+    client: &'a AuthenticatedClient,
+    context: &'a OperationContext,
+}
+
 impl ServiceTokens {
     #[must_use]
     pub fn http(&self, resource: Client) -> AuthenticatedClient {
@@ -38,6 +44,14 @@ impl ExchangeTokens {
 }
 
 impl AuthenticatedClient {
+    #[must_use]
+    pub const fn with_context<'a>(&'a self, context: &'a OperationContext) -> RequestClient<'a> {
+        RequestClient {
+            client: self,
+            context,
+        }
+    }
+
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -96,5 +110,13 @@ impl AuthenticatedClient {
                 }
                 other => Error::from(other),
             })
+    }
+}
+
+impl RequestClient<'_> {
+    pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
+        self.client
+            .execute_with_context(request, self.context)
+            .await
     }
 }

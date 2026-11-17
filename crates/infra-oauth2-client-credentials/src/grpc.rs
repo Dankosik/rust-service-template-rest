@@ -6,6 +6,7 @@ use std::{
 
 use http::{Request, Response};
 use infra_outbound_grpc::Client;
+use operation_context::OperationContext;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
@@ -21,6 +22,7 @@ use crate::{
 pub struct AuthenticatedClient {
     tokens: TokenSource,
     resource: Client,
+    context: Option<OperationContext>,
 }
 
 impl ServiceTokens {
@@ -43,7 +45,20 @@ impl AuthenticatedClient {
                 reason: "must use TLS to carry OAuth2 bearer tokens",
             });
         }
-        Ok(Self { tokens, resource })
+        Ok(Self {
+            tokens,
+            resource,
+            context: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_context(&self, context: &OperationContext) -> Self {
+        Self {
+            tokens: self.tokens.clone(),
+            resource: self.resource.clone(),
+            context: Some(context.clone()),
+        }
     }
 }
 
@@ -57,6 +72,15 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        if let Some(context) = &self.context {
+            if request.extensions().get::<OperationContext>().is_some() {
+                let status = self.resource.prepare_call(request).refuse(Status::internal(
+                    "request operation context conflicts with client context",
+                ));
+                return Box::pin(std::future::ready(Err(status)));
+            }
+            request.extensions_mut().insert(context.clone());
+        }
         let subject = take_request_subject(&mut request);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();

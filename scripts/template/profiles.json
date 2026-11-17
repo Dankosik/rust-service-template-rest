@@ -317,6 +317,7 @@
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
+      "crates/service/src/bootstrap/outbound_tests.rs",
       "docs/decisions/outbound-machine-authentication-decisions.md"
     ]
   },
