@@ -254,9 +254,10 @@ impl Credentials {
         if let Some(error) = inner.completed_failure(now) {
             return Err(error);
         }
+        let (context, request_context) = deadline.fetch_contexts(now);
         let result = inner
             .endpoint
-            .fetch_service_token(&deadline.fetch_context(now), deadline.request_context)
+            .fetch_service_token(&context, request_context.as_ref())
             .await;
         if let Some(error) = deadline.stopped_error() {
             return Err(error);
@@ -395,9 +396,12 @@ pub(crate) struct AcquisitionDeadline<'a> {
 }
 
 impl AcquisitionDeadline<'_> {
-    fn fetch_context(self, now: Instant) -> OperationContext {
-        self.context
-            .child_until(Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT)))
+    fn fetch_contexts(self, now: Instant) -> (OperationContext, Option<OperationContext>) {
+        let ceiling = Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT));
+        match self.context {
+            AcquisitionContext::Operation(context) => (context.child_until(ceiling), None),
+            AcquisitionContext::Http(request) => request.child_contexts(ceiling),
+        }
     }
 
     fn expired_error(self) -> Option<AcquisitionError> {

@@ -397,6 +397,48 @@ impl<F: Fn(&metrics::Key)> metrics::Recorder for ObserveMetricRegistration<F> {
 }
 
 #[tokio::test]
+async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_scopes() {
+    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
+        for extension in [false, true] {
+            let fixture = Fixture::new().await;
+            let client = fixture.client(mode);
+            let mut request = match mode {
+                IdentityMode::Service => fixture.request(),
+                IdentityMode::OnBehalfOf => fixture.on_behalf_of_request("subject"),
+            };
+            if mode == IdentityMode::OnBehalfOf {
+                fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
+            }
+            let caller = OperationContext::with_timeout(Duration::from_secs(10));
+            let operation = OperationContext::with_timeout(Duration::from_secs(10));
+            let context = if extension {
+                request.extensions_mut().insert(caller.clone());
+                &operation
+            } else {
+                &caller
+            };
+            let outcomes = Mutex::new(Vec::new());
+            let recorder = ObserveMetricRegistration(|key: &metrics::Key| match key.name() {
+                "http_client_request_duration_seconds" => caller.cancel(),
+                "oauth2_token_acquisitions_total" => {
+                    let outcome = key.labels().find(|label| label.key() == "outcome").unwrap();
+                    outcomes.lock().unwrap().push(outcome.value().to_owned());
+                }
+                _ => {}
+            });
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            assert_matches!(
+                client.execute_with_context(request, context).await,
+                Err(Error::Acquisition(AcquisitionError::Cancelled))
+            );
+            assert_eq!(*outcomes.lock().unwrap(), ["cancelled"]);
+            assert!(fixture.resource_requests().is_empty());
+            fixture.finish().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
     for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
         for extension in [false, true] {
