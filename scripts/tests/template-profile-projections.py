@@ -553,6 +553,9 @@ def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
     return declared
 
 
+_USE_STATEMENT = re.compile(rb"\buse\s+(?:::)?(\w+)[^;]*;")
+
+
 def _assert_dropped_crates_unnamed(
     initializer, nodes: dict[str, Node], source: dict[str, frozenset[str]], projected: dict[str, frozenset[str]],
 ) -> None:
@@ -567,7 +570,9 @@ def _assert_dropped_crates_unnamed(
             if not (relative.startswith(f"{package}/") and relative.endswith(".rs")):
                 continue
             assert isinstance(node.payload, bytes)
-            found = named.search(node.payload)
+            # Only the root of a `use` tree can name a crate; its nested
+            # segments (`std::{time::Duration}`) are modules.
+            found = named.search(_USE_STATEMENT.sub(rb"use \1::;", node.payload))
             if found:
                 raise initializer.Refusal(
                     f"{relative} names `{found[1].decode()}`, which this projection drops from {package}/Cargo.toml"
