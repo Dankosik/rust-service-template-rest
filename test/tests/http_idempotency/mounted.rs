@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::ServiceExt as _;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{FromRef, State};
 use axum::http::header::{
@@ -14,7 +15,6 @@ use axum::http::header::{
 };
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, ServiceExt as _};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::{Readiness, RefreshPolicy};
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
@@ -22,9 +22,9 @@ use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
 use infra_http::authn::ProtectedOperationProblemResponses;
-use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
-    self, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse, Rollback, Tx,
+    self, CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse,
+    Rollback, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
@@ -49,7 +49,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 use utoipa::ToSchema;
-use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::commit_proxy::{CommitProxy, Fault};
 use crate::{
@@ -179,29 +178,26 @@ impl CreateWidgets for SqlWidgets {
         ProtectedOperationProblemResponses
     )
 )]
-async fn create_widget(input: CreateInput) -> Result<CreateWidget, Box<Problem>> {
-    let (principal, State(widgets), headers, Json(mut input)) = input;
+async fn create_widget(
+    request: CommandInput,
+    principal: VerifiedPrincipal,
+    state: WidgetState,
+) -> Result<CreateWidget, Box<Problem>> {
+    let mut input: NewWidget = request.json()?;
     if !may_create(&principal) {
         return Err(Box::new(forbidden()));
     }
-    if let Some(name) = headers.get("x-widget-name") {
+    if let Some(name) = request.headers().get("x-widget-name") {
         let name = name.to_str().map_err(|_| Problem::new(Code::BadRequest))?;
         name.clone_into(&mut input.name);
     }
     let handler_timeout = input.color == HANDLER_TIMEOUT_COLOR;
     Ok(CreateWidget {
-        widgets,
+        widgets: state.widgets,
         input,
         handler_timeout,
     })
 }
-
-type CreateInput = (
-    VerifiedPrincipal,
-    State<Arc<dyn CreateWidgets>>,
-    axum::http::HeaderMap,
-    Json<NewWidget>,
-);
 
 #[derive(utoipa::OpenApi)]
 #[openapi(paths(create_widget))]
@@ -226,24 +222,22 @@ struct CreateDocument;
         ProtectedOperationProblemResponses
     )
 )]
-async fn replace_widget(input: ReplaceInput) -> Result<CreateWidget, Box<Problem>> {
-    let (Path(_id), principal, State(widgets), Json(input)) = input;
+async fn replace_widget(
+    mut request: CommandInput,
+    principal: VerifiedPrincipal,
+    state: WidgetState,
+) -> Result<CreateWidget, Box<Problem>> {
+    let _id: i64 = request.path().await?;
+    let input = request.json()?;
     if !may_create(&principal) {
         return Err(Box::new(forbidden()));
     }
     Ok(CreateWidget {
-        widgets,
+        widgets: state.widgets,
         input,
         handler_timeout: false,
     })
 }
-
-type ReplaceInput = (
-    Path<i64>,
-    VerifiedPrincipal,
-    State<Arc<dyn CreateWidgets>>,
-    Json<NewWidget>,
-);
 
 #[derive(utoipa::OpenApi)]
 #[openapi(paths(replace_widget))]
@@ -540,12 +534,6 @@ impl FromRef<WidgetState> for health::ReadinessReader {
     }
 }
 
-impl FromRef<WidgetState> for Arc<dyn CreateWidgets> {
-    fn from_ref(state: &WidgetState) -> Self {
-        Arc::clone(&state.widgets)
-    }
-}
-
 fn options(budget: Duration) -> HardenOptions {
     HardenOptions {
         max_body_bytes: MAX_BODY_BYTES,
@@ -560,7 +548,7 @@ fn options(budget: Duration) -> HardenOptions {
 fn widget_contract() -> HttpContract<WidgetState> {
     use utoipa::OpenApi as _;
 
-    HttpContract::new(OpenApiRouter::with_openapi(bearer_document()))
+    HttpContract::default()
         .merge(
             idempotency::route(CreateDocument::openapi(), create_widget).expect("create composes"),
         )
@@ -574,7 +562,15 @@ fn widget_contract() -> HttpContract<WidgetState> {
 
 #[test]
 fn widget_contract_declares_supported_protected_security() {
-    let document = serde_json::to_value(widget_contract().into_openapi().unwrap()).unwrap();
+    let document = serde_json::to_value(
+        HttpContract::application(bearer_document())
+            .unwrap()
+            .merge(widget_contract())
+            .unwrap()
+            .into_openapi()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         document["paths"][WIDGETS]["post"]["security"],
         json!([{ "bearerAuth": ["widgets:write"] }])
@@ -600,7 +596,8 @@ impl Mounted {
         });
         let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
         let contract = widget_contract();
-        let mounted = HttpContract::new(OpenApiRouter::with_openapi(bearer_document()))
+        let mounted = HttpContract::application(bearer_document())
+            .unwrap()
             .nest(PRIMARY_PREFIX, contract.clone())
             .unwrap()
             .nest(SECONDARY_PREFIX, contract)
@@ -938,7 +935,7 @@ async fn authorized_without_idempotency(
         infra_http::authn::ProtectedOperationProblemResponses,
     )
 )]
-async fn scoped_alternatives(Extension(calls): Extension<Arc<AtomicUsize>>) -> &'static str {
+async fn scoped_alternatives(State(calls): State<Arc<AtomicUsize>>) -> &'static str {
     calls.fetch_add(1, Ordering::SeqCst);
     "granted"
 }
@@ -967,10 +964,14 @@ async fn inherited_get() -> &'static str {
 #[tokio::test]
 async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
     let provider = Provider::start().await;
-    let contract = OpenApiRouter::with_openapi(bearer_document())
-        .routes(routes!(authorized_without_idempotency, public_head))
-        .routes(routes!(inherited_get));
-    let app = HttpContract::new(contract)
+    let app = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(infra_http::http_route!(authorized_without_idempotency).unwrap())
+        .unwrap()
+        .merge(infra_http::http_route!(public_head).unwrap())
+        .unwrap()
+        .merge(infra_http::http_route!(inherited_get).unwrap())
+        .unwrap()
         .with_probes("/")
         .unwrap()
         .build(
@@ -1027,18 +1028,20 @@ fn timeout_router(
     entered: Arc<tokio::sync::Notify>,
 ) -> Application {
     #[utoipa::path(get, path = "/hold", security(), responses((status = 204)))]
-    async fn hold(Extension(entered): Extension<Arc<tokio::sync::Notify>>) -> StatusCode {
+    async fn hold(State(entered): State<Arc<tokio::sync::Notify>>) -> StatusCode {
         entered.notify_one();
         tokio::time::sleep(Duration::from_millis(150)).await;
         StatusCode::NO_CONTENT
     }
-    let contract = OpenApiRouter::with_openapi(bearer_document())
-        .routes(routes!(inherited_get))
-        .routes(routes!(hold))
-        .layer(Extension(entered));
+    let contract = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(infra_http::http_route!(inherited_get).unwrap())
+        .unwrap()
+        .merge(infra_http::http_route!(hold).unwrap().with_state(entered))
+        .unwrap();
     let mut options = options(timeout);
     options.max_in_flight = Some(NonZeroU32::MIN);
-    HttpContract::new(contract)
+    contract
         .build((), Authentication::Bearer(Box::new(verifier)), &options)
         .unwrap()
 }
@@ -1118,10 +1121,10 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
-    let root_policy = bearer_document();
-    let contract =
-        OpenApiRouter::with_openapi(root_policy).routes(routes!(authorized_without_idempotency));
-    let app = HttpContract::new(contract)
+    let app = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(infra_http::http_route!(authorized_without_idempotency).unwrap())
+        .unwrap()
         .with_probes("/")
         .unwrap()
         .build(
@@ -1194,9 +1197,14 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
 async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
     let provider = Provider::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let contract =
-        OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
-    let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
+    let app = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(
+            infra_http::http_route!(scoped_alternatives)
+                .unwrap()
+                .with_state(Arc::clone(&calls)),
+        )
+        .unwrap()
         .with_probes("/")
         .unwrap()
         .build(
@@ -1573,7 +1581,12 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .unwrap();
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
     let store = Store::new(pool, RETENTION).unwrap();
-    let contract = widget_contract().with_probes("").unwrap();
+    let contract = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(widget_contract())
+        .unwrap()
+        .with_probes("")
+        .unwrap();
     let document = serde_json::to_value(contract.clone().into_openapi().unwrap()).unwrap();
     let app = contract
         .build_with_idempotency_store(

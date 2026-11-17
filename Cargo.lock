@@ -3107,7 +3107,6 @@ dependencies = [
  "tracing",
  "url",
  "utoipa",
- "utoipa-axum",
  "zeroize",
 ]
 
@@ -3202,7 +3201,6 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "utoipa",
- "utoipa-axum",
  "uuid",
  "validator",
  "walkdir",
@@ -5236,7 +5234,6 @@ dependencies = [
  "tracing",
  "ureq",
  "utoipa",
- "utoipa-axum",
 ]
 
 [[package]]

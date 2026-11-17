@@ -66,7 +66,8 @@ async fn unfinished_webhook_upload_returns_the_declared_timeout() {
         .expect("problem body");
     let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
     assert_eq!(problem["code"], "request_timeout");
-    let document = infra_http::HttpContract::new(router::<WebhookState>())
+    let document = router::<WebhookState>()
+        .expect("webhook operation registers")
         .into_openapi()
         .expect("valid webhook contract");
     let document = serde_json::to_value(document).expect("document");
@@ -89,7 +90,8 @@ fn mounted_receiver_with_limit(
     budget: Duration,
     max_body_bytes: usize,
 ) -> infra_http::Application {
-    infra_http::HttpContract::new(infra_webhooks::inbound::route::router())
+    infra_webhooks::inbound::route::router()
+        .expect("webhook operation registers")
         .build(
             infra_webhooks::inbound::route::WebhookState::active(receiver),
             infra_http::Authentication::Public,

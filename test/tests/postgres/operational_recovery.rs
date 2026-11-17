@@ -52,10 +52,9 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
 }
 
 fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
-    let work = utoipa_axum::router::OpenApiRouter::new()
-        .routes(utoipa_axum::routes!(http_value))
-        .with_state(pool);
-    infra_http::HttpContract::new(work)
+    infra_http::http_route!(http_value)
+        .unwrap()
+        .with_state(pool)
         .with_probes("/")
         .unwrap()
         .build(

@@ -1,9 +1,8 @@
+use crate::{FinalizeError, HttpContract};
 use axum::extract::{FromRef, State};
 use axum::http::{Method, StatusCode};
 use health::ReadinessReader;
 use std::sync::Arc;
-use utoipa_axum::router::OpenApiRouter;
-use utoipa_axum::routes;
 
 const LIVE_PATH: &str = "/health/live";
 const READY_PATH: &str = "/health/ready";
@@ -33,14 +32,12 @@ impl ProbeRoutes {
     }
 }
 
-pub(crate) fn router<S>() -> OpenApiRouter<S>
+pub(crate) fn router<S>() -> Result<HttpContract<S>, FinalizeError>
 where
     ReadinessReader: FromRef<S>,
     S: Clone + Send + Sync + 'static,
 {
-    OpenApiRouter::new()
-        .routes(routes!(live))
-        .routes(routes!(ready))
+    crate::http_route!(live)?.merge(crate::http_route!(ready)?)
 }
 
 pub fn liveness_router() -> axum::Router {

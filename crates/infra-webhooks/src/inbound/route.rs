@@ -12,8 +12,6 @@ use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{IntoResponses, OpenApi, ToResponse};
-use utoipa_axum::router::OpenApiRouter;
-use utoipa_axum::routes;
 
 use super::{ReceiptOutcome, ReceiveError, Receiver};
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
@@ -139,8 +137,7 @@ enum WebhookProblemResponses {
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
 struct WebhookComponents;
 
-#[must_use]
-pub fn router<S>() -> OpenApiRouter<S>
+pub fn router<S>() -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
 where
     WebhookState: FromRef<S>,
     S: Clone + Send + Sync + 'static,
@@ -150,7 +147,8 @@ where
         metrics::Unit::Count,
         "Inbound webhook deliveries by admission outcome."
     );
-    OpenApiRouter::with_openapi(WebhookComponents::openapi()).routes(routes!(receive))
+    infra_http::http_route!(receive)?
+        .with_components(WebhookComponents::openapi().components.unwrap_or_default())
 }
 
 #[utoipa::path(
@@ -375,7 +373,8 @@ mod tests {
 
     fn inert_app() -> infra_http::Application {
         use std::time::Duration;
-        infra_http::HttpContract::new(router())
+        router()
+            .unwrap()
             .build(
                 WebhookState::inert(),
                 infra_http::Authentication::Public,

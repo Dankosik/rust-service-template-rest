@@ -1,7 +1,6 @@
 use std::error::Error;
 
 use infra_http::HttpContract;
-use utoipa_axum::router::OpenApiRouter;
 // template:begin authn:service-api-authn-imports
 use utoipa::Modify;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -65,14 +64,11 @@ pub enum ContractError {
 }
 
 pub fn contract() -> Result<HttpContract<AppState>, ContractError> {
-    Ok(HttpContract::new(assemble()).with_probes("/")?)
-}
-
-fn assemble() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
-        // template:begin inbound-webhooks:service-api-webhooks-router
-        .merge(infra_webhooks::inbound::route::router())
+    let contract = HttpContract::application(ApiDoc::openapi())?;
+    // template:begin inbound-webhooks:service-api-webhooks-router
+    let contract = contract.merge(infra_webhooks::inbound::route::router()?)?;
     // template:end inbound-webhooks:service-api-webhooks-router
+    Ok(contract.with_probes("/")?)
 }
 
 pub fn document() -> Result<Document, ContractError> {
@@ -125,11 +121,12 @@ mod tests {
         }
     }
 
-    fn public_check(
-        document: Document,
+    fn public_check<S: Clone + Send + Sync + 'static>(
+        contract: HttpContract<S>,
+        state: S,
     ) -> Result<infra_http::Application, infra_http::FinalizeError> {
-        HttpContract::new(OpenApiRouter::with_openapi(document)).build(
-            (),
+        contract.build(
+            state,
             infra_http::Authentication::Public,
             &infra_http::HardenOptions {
                 max_body_bytes: 1024,
@@ -144,23 +141,32 @@ mod tests {
 
     #[test]
     fn protected_contract_refuses_public_finalization_without_a_composer() {
-        let document = assemble()
-            .routes(utoipa_axum::routes!(protected))
-            .into_openapi();
+        let contract = HttpContract::application(ApiDoc::openapi())
+            .unwrap()
+            .merge(infra_http::http_route!(protected).unwrap())
+            .unwrap();
         assert!(matches!(
-            public_check(document),
+            public_check(contract, ()),
             Err(infra_http::FinalizeError::ProtectedOperation { .. })
         ));
     }
 
     #[test]
     fn public_probe_contract_does_not_depend_on_a_verifier() {
-        let document = HttpContract::new(assemble())
-            .with_probes("/")
+        let probes = HttpContract::application(ApiDoc::openapi())
             .unwrap()
-            .into_openapi()
-            .expect("valid probe contract");
-        assert!(public_check(document).is_ok());
+            .with_probes("/")
+            .unwrap();
+        let readiness = health::Readiness::new(
+            Vec::new(),
+            health::RefreshPolicy::try_new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+                std::num::NonZeroU32::MIN,
+            )
+            .unwrap(),
+        );
+        assert!(public_check(probes, readiness.control().reader()).is_ok());
     }
 }
 // template:end authn:service-api-protected-test-route
@@ -190,7 +196,11 @@ mod idempotency_tests {
             infra_http::authn::ProtectedOperationProblemResponses,
         )
     )]
-    async fn idempotent(_input: ()) -> Result<Create, Box<infra_http::Problem>> {
+    async fn idempotent(
+        _input: idempotency::CommandInput,
+        _principal: infra_http::VerifiedPrincipal,
+        _state: AppState,
+    ) -> Result<Create, Box<infra_http::Problem>> {
         Ok(Create)
     }
 
@@ -277,13 +287,9 @@ mod idempotency_tests {
             }}}
         }))
         .unwrap();
-        let parent = HttpContract::new(OpenApiRouter::with_openapi(stale));
         assert_eq!(
-            parent.nest("/api", test_route()).unwrap_err(),
-            infra_http::FinalizeError::DuplicateOperation {
-                path: "/api/_test/idempotent".into(),
-                method: "POST".into(),
-            }
+            HttpContract::<AppState>::application(stale).unwrap_err(),
+            infra_http::FinalizeError::ApplicationPaths
         );
     }
 

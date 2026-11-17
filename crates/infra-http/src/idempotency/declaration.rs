@@ -29,6 +29,10 @@ impl CompositionError {
         }
     }
 
+    pub(super) fn contract(subject: &str, error: crate::FinalizeError) -> Self {
+        Self::new(subject, Rule::Contract(error))
+    }
+
     #[cfg(test)]
     const fn rule(&self) -> &Rule {
         &self.rule
@@ -37,6 +41,8 @@ impl CompositionError {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 enum Rule {
+    #[error(transparent)]
+    Contract(crate::FinalizeError),
     #[error("a composed route must be one path and one operation with a nonempty operationId")]
     Shape,
     #[error("the method must be POST, PUT, PATCH, or DELETE")]
@@ -47,6 +53,8 @@ enum Rule {
         "request parameters must be inline and header parameters must have valid HTTP field names"
     )]
     FingerprintParameter,
+    #[error("cookie parameters cannot contribute to an idempotent command")]
+    CookieParameter,
     #[error("an idempotent operation must not declare informational or redirect response {status}")]
     InformationalOrRedirectResponse { status: String },
     #[error("an idempotent operation must declare a 2xx response")]
@@ -126,6 +134,9 @@ fn collect_fingerprint_headers(
         let RefOr::T(parameter) = parameter else {
             return Err(invalid());
         };
+        if parameter.parameter_in == ParameterIn::Cookie {
+            return Err(CompositionError::new(subject, Rule::CookieParameter));
+        }
         if parameter.parameter_in == ParameterIn::Header
             && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         {
@@ -369,11 +380,15 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .security = operation_security.map(|value| serde_json::from_value(value).unwrap());
-            let document = OpenApiRouter::with_openapi(serde_json::from_value(document).unwrap())
-                .routes(carrier)
-                .into_openapi();
-            let contract: crate::HttpContract<()> =
-                crate::idempotency::route(document, |(): ()| async { Ok(TestCommand) }).unwrap();
+            let root = crate::HttpContract::application(serde_json::from_value(document).unwrap())
+                .expect("application metadata");
+            let feature = OpenApiRouter::new().routes(carrier).into_openapi();
+            let contract: crate::HttpContract<()> = root
+                .merge(
+                    crate::idempotency::route(feature, |_, _, ()| async { Ok(TestCommand) })
+                        .unwrap(),
+                )
+                .unwrap();
 
             let result = contract.into_openapi().map(|_| ());
             if protected {
@@ -388,6 +403,62 @@ mod tests {
                     }
                 );
             }
+        }
+    }
+
+    #[test]
+    fn command_declarations_refuse_cookie_parameters_at_both_levels() {
+        for at_path in [true, false] {
+            let (_, mut paths, _): UtoipaMethodRouter = route();
+            let item = paths.paths.get_mut(WIDGETS).unwrap();
+            let parameters = if at_path {
+                &mut item.parameters
+            } else {
+                &mut item.post.as_mut().unwrap().parameters
+            };
+            *parameters = Some(vec![
+                serde_json::from_value(serde_json::json!({
+                    "in": "cookie", "name": "variant", "schema": {"type": "string"}
+                }))
+                .unwrap(),
+            ]);
+            assert_eq!(
+                prepare(&mut paths).unwrap_err().rule(),
+                &Rule::CookieParameter
+            );
+        }
+    }
+
+    #[test]
+    fn idempotent_features_reject_root_policy_and_conflicting_shared_components() {
+        for (field, value, expected) in [
+            (
+                "security",
+                serde_json::json!([]),
+                crate::FinalizeError::ApplicationMetadata,
+            ),
+            (
+                "components",
+                serde_json::json!({"securitySchemes": {"featureAuth": {"type": "http", "scheme": "basic"}}}),
+                crate::FinalizeError::ApplicationMetadata,
+            ),
+            (
+                "components",
+                serde_json::json!({"responses": {"IdempotencyBadRequest": {"description": "conflicting feature response"}}}),
+                crate::FinalizeError::ConflictingComponent {
+                    kind: "responses",
+                    name: "IdempotencyBadRequest".to_owned(),
+                },
+            ),
+        ] {
+            let mut document =
+                serde_json::to_value(OpenApiRouter::new().routes(route()).into_openapi()).unwrap();
+            document[field] = value;
+            let result = crate::idempotency::route(
+                serde_json::from_value(document).unwrap(),
+                |_, _, ()| async { Ok(TestCommand) },
+            );
+            assert_eq!(result.unwrap_err().rule(), &Rule::Contract(expected));
         }
     }
 

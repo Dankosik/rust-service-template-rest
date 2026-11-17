@@ -116,15 +116,7 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => {
-            tracing::error!(
-                route = path,
-                method = %request.method(),
-                failure = "policy_missing",
-                "http_auth_wiring_failed"
-            );
-            sanitized_internal_error()
-        }
+        None => policy.unregistered(Some(path), request.method()).await,
         Some(Access::Protected(alternatives)) => {
             authenticate_protected(&verifier, alternatives, request, next).await
         }

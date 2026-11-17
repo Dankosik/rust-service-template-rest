@@ -87,7 +87,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 utoipa = { workspace = true, features = ["macros", "yaml"] }
-utoipa-axum = { workspace = true }
 
 # jemalloc compiles background purging out of Mach-O builds and
 # tikv-jemalloc-sys leaves it off on musl; the feature would bake
