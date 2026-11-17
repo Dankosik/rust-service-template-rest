@@ -477,7 +477,7 @@ fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     }
 }
 
-fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
+pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
     match stopped {
         Stopped::Deadline => AcquisitionError::Timeout,
         Stopped::Cancelled => AcquisitionError::Cancelled,
