@@ -104,8 +104,8 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use axum::http::Request;
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
     use axum::response::Response;
     use health::{Readiness, RefreshPolicy};
     use tower::ServiceExt;
