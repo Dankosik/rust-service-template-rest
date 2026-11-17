@@ -36,6 +36,7 @@ json-payload = { path = "crates/json-payload" }
 operation-context = { path = "crates/operation-context" }
 shared-rules = { path = "crates/shared-rules" }
 infra-http = { path = "crates/infra-http" }
+infra-listener = { path = "crates/infra-listener" }
 service-failure = { path = "crates/service-failure" }
 # template:begin grpc:workspace-grpc-crates
 infra-grpc = { path = "crates/infra-grpc" }

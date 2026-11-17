@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use health::Readiness;
-use infra_grpc::ServerTlsMaterial;
+use infra_grpc::{Authentication, ServerTlsMaterial};
 use infra_http::ServerOptions;
 use rustls::ServerConfig;
 use std::net::SocketAddr;
@@ -32,36 +32,34 @@ pub(super) fn prepare(
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
     readiness: &Readiness,
-    #[allow(unused_variables, reason = "bearer authentication alone reads it")] auth: &PreparedAuth,
+    auth: &PreparedAuth,
     // template:begin service-auth:bootstrap-grpc-service-auth-parameter
     service_auth: &PreparedServiceAuth,
     // template:end service-auth:bootstrap-grpc-service-auth-parameter
     background: &mut Background,
 ) -> Result<Prepared, BootstrapError> {
-    #[allow(
-        unused_variables,
-        reason = "bearer authentication alone reads it; service tokens replace it"
-    )]
-    let service_tokens = false;
-    // template:begin service-auth:bootstrap-grpc-service-tokens
-    #[allow(
-        unused_variables,
-        reason = "bearer authentication alone reads it; without AUTHN nothing does"
-    )]
-    let service_tokens = service_auth.verifier.is_some();
-    // template:end service-auth:bootstrap-grpc-service-tokens
-    // template:begin grpc-authn:bootstrap-grpc-verifier
-    let verifier = match auth {
-        PreparedAuth::Enabled(verifier) => Some((**verifier).clone()),
-        PreparedAuth::None if service_tokens => None,
-        PreparedAuth::None => {
-            return Err(ValidationError::new(
-                "grpc.enabled",
-                "requires authn.mode = oidc-jwt or oidc-introspection",
-            )
-            .into());
-        }
+    let authentication = match (
+        auth,
+        // template:begin service-auth:bootstrap-grpc-service-verifier
+        service_auth.verifier.as_ref(),
+        // template:end service-auth:bootstrap-grpc-service-verifier
+    ) {
+        // template:begin service-auth:bootstrap-grpc-service-tokens
+        (_, Some(verifier)) => Authentication::ServiceTokens(verifier.clone()),
+        // template:end service-auth:bootstrap-grpc-service-tokens
+        // template:begin grpc-authn:bootstrap-grpc-bearer
+        (PreparedAuth::Enabled(verifier), ..) => Authentication::Bearer((**verifier).clone()),
+        // template:end grpc-authn:bootstrap-grpc-bearer
+        (PreparedAuth::None, ..) => Authentication::None,
     };
+    // template:begin grpc-authn:bootstrap-grpc-verifier
+    if matches!(authentication, Authentication::None) {
+        return Err(ValidationError::new(
+            "grpc.enabled",
+            "requires authn.mode = oidc-jwt or oidc-introspection",
+        )
+        .into());
+    }
     // template:end grpc-authn:bootstrap-grpc-verifier
     let limits = limits(grpc);
     let mut services = infra_grpc::Services::new();
@@ -72,19 +70,7 @@ pub(super) fn prepare(
             &mut BackgroundRegistration { background },
         )?;
     }
-    // template:begin service-auth:bootstrap-grpc-service-auth
-    if let Some(verifier) = &service_auth.verifier {
-        services.authenticate_callers(verifier.clone());
-    }
-    // template:end service-auth:bootstrap-grpc-service-auth
-    let router = infra_grpc::router(
-        services,
-        readiness.reader(),
-        // template:begin grpc-authn:bootstrap-grpc-verifier-argument
-        verifier,
-        // template:end grpc-authn:bootstrap-grpc-verifier-argument
-        limits,
-    )?;
+    let router = infra_grpc::router(services, readiness.reader(), authentication, limits)?;
     Ok(Prepared {
         addr: grpc.addr,
         router,

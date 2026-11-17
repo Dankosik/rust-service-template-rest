@@ -10,6 +10,7 @@ use axum::response::Response;
 use compact_str::{CompactString, format_compact};
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
+use infra_listener::{ConnectionInfo, ListenerScheme};
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
@@ -27,7 +28,9 @@ use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
 use crate::problem::{Problem, complete_problem};
 use crate::request_id::REQUEST_ID_HEADER;
-use crate::server::{ConnectionInfo, ListenerScheme};
+
+#[cfg(test)]
+mod listener_tests;
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
 
@@ -251,7 +254,7 @@ fn make_span(
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
     let scheme = match uri.scheme_str() {
         Some("https") => ListenerScheme::Https,
-        None => connection.map_or(ListenerScheme::Http, |connection| connection.scheme),
+        None => connection.map_or(ListenerScheme::Http, ConnectionInfo::scheme),
         Some(_) => ListenerScheme::Http,
     };
     scheme.as_str()

@@ -1,0 +1,38 @@
+[package]
+name = "infra-listener"
+description = "Shared Hyper listener, connection drain and bounded request admission."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { workspace = true }
+hyper-util = { workspace = true, features = ["server-auto", "service", "tokio"] }
+metrics = { workspace = true }
+shared-rules = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tower = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+# template:begin grpc:listener-tls-dependencies
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+# template:end grpc:listener-tls-dependencies
+
+[target.'cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))'.dependencies]
+socket2 = { workspace = true, features = ["all"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "test-util"] }
+# template:begin grpc:listener-tls-test-dependencies
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http2"] }
+tls-test-support = { workspace = true }
+# template:end grpc:listener-tls-test-dependencies

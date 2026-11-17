@@ -14,7 +14,9 @@ for concrete modules, types, and commands.
    architecture-check`) enforces the crate dependency graph: feature HTTP and
    gRPC modules may use `infra-http`'s and `infra-grpc`'s inbound contract
    surfaces, no feature depends on an outbound or persistence provider crate,
-   and no crate a feature depends on may depend on that feature.
+   and no crate a feature depends on may depend on that feature. Both inbound
+   transports use `infra-listener` for socket lifecycle and admission so that
+   gRPC services can run without REST contracts or their persistence providers.
 2. One fact has one canonical writer; generated or projected views (`api/openapi/service.yaml`
    from `utoipa` annotations, `crates/grpc-contracts` from `api/proto/`, `.sqlx/`
    from `migrations/*.sql` + `sqlx::query!`, and materialized harness files from

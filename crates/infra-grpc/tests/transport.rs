@@ -32,7 +32,7 @@ use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
-use infra_http::{BoundListener, Drained, Server};
+use infra_listener::{BoundListener, Drained, Server};
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
@@ -461,8 +461,11 @@ impl Fixture {
         address: SocketAddr,
         descriptor_set: &'static [u8],
     ) -> Self {
+        #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
+        let authentication = infra_grpc::Authentication::None;
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
+        let authentication = infra_grpc::Authentication::Bearer(verifier);
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(
             Vec::new(),
@@ -492,15 +495,8 @@ impl Fixture {
             .require_scopes(UNARY_PATH, &["echo.read"])
             .expect("unary scopes register once");
         // template:end authn:grpc-transport-test-scope-requirement
-        let app = infra_grpc::router(
-            services,
-            readiness.reader(),
-            // template:begin authn:grpc-transport-test-router-verifier
-            Some(verifier),
-            // template:end authn:grpc-transport-test-router-verifier
-            limits,
-        )
-        .expect("router builds");
+        let app = infra_grpc::router(services, readiness.reader(), authentication, limits)
+            .expect("router builds");
         let tls = tls.map(|(pki, mtls)| {
             let certificate = pem(&pki.server_certificate);
             let key = secrecy::SecretString::from(pem(&pki.server_key));
@@ -1047,7 +1043,7 @@ fn opening_app_waiting(
     infra_grpc::router(
         services,
         readiness.reader(),
-        Some(verifier),
+        infra_grpc::Authentication::Bearer(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
             max_admission_wait,

@@ -18,11 +18,14 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tower::ServiceBuilder;
 
+mod admission;
 mod sniff;
+
+pub use admission::acquire_within;
 
 use sniff::SniffDeadline;
 
-pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
+const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 const LISTEN_BACKLOG: u32 = 65_535;
 
@@ -79,13 +82,14 @@ struct ConnectionShutdown {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum ListenerScheme {
+pub enum ListenerScheme {
     Http,
     Https,
 }
 
 impl ListenerScheme {
-    pub(crate) const fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Http => "http",
             Self::Https => "https",
@@ -93,15 +97,21 @@ impl ListenerScheme {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ConnectionInfo {
-    pub(crate) scheme: ListenerScheme,
+#[derive(Clone, Debug)]
+pub struct ConnectionInfo {
+    scheme: ListenerScheme,
     forced: Arc<AtomicBool>,
     drain: CancellationToken,
 }
 
 impl ConnectionInfo {
-    pub(crate) fn was_forced(&self) -> bool {
+    #[must_use]
+    pub const fn scheme(&self) -> ListenerScheme {
+        self.scheme
+    }
+
+    #[must_use]
+    pub fn was_forced(&self) -> bool {
         self.forced.load(Ordering::Relaxed)
     }
 }

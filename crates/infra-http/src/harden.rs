@@ -173,7 +173,7 @@ async fn admit(
     }
     let arrived = tokio::time::Instant::now();
     let acquired =
-        crate::admission::acquire_within(&admission.permits, admission.patience, || ()).await;
+        infra_listener::acquire_within(&admission.permits, admission.patience, || ()).await;
     let waited = match &acquired {
         Ok((_, waited)) => *waited,
         Err(waited) => Some(*waited),

@@ -72,23 +72,15 @@ pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
     extensions.remove::<Principal>();
 }
 
-pub(crate) struct BearerAuth {
-    verifier: Verifier,
-    scopes: HashMap<String, Box<[String]>>,
-}
-
-impl BearerAuth {
-    pub(crate) fn new(verifier: Verifier, scopes: HashMap<String, Box<[String]>>) -> Self {
-        Self { verifier, scopes }
-    }
-}
+pub(crate) type Scopes = HashMap<String, Box<[String]>>;
 
 #[expect(
     clippy::result_large_err,
     reason = "the error is the refusal response the call returns"
 )]
 pub(crate) async fn authenticate(
-    auth: &BearerAuth,
+    verifier: &Verifier,
+    scopes: &Scopes,
     context: &OperationContext,
     mut request: Request,
 ) -> Result<Request, Response> {
@@ -101,7 +93,7 @@ pub(crate) async fn authenticate(
             .get_all(AUTHORIZATION)
             .iter()
             .map(http::HeaderValue::as_bytes);
-        auth.verifier
+        verifier
             .authenticate_with_context(authorization, Transport::Grpc, context)
             .await
     };
@@ -114,8 +106,7 @@ pub(crate) async fn authenticate(
             return Err(reject_with_budget(context, request, authentication_status(failure)).await);
         }
     };
-    let granted = auth
-        .scopes
+    let granted = scopes
         .get(request.uri().path())
         .is_none_or(|required| principal.has_scopes(required));
     if !granted {

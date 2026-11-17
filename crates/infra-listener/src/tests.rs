@@ -2,10 +2,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
 use axum::routing::get;
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing_subscriber::layer::SubscriberExt as _;
 
 use super::sniff::HTTP2_PREFACE;
 use super::*;
@@ -21,38 +18,6 @@ fn options() -> ServerOptions {
         max_connections: NonZeroU32::new(4),
         max_connection_age: None,
     }
-}
-
-fn harden(app: Router) -> Router {
-    crate::harden(
-        app,
-        &crate::HardenOptions {
-            max_body_bytes: 64,
-            request_timeout: Duration::from_secs(30),
-            max_in_flight: None,
-            admission_wait: Duration::from_secs(30),
-            log_health_probes: false,
-            draining: None,
-        },
-    )
-}
-
-fn capture_request_spans() -> (
-    tracing::subscriber::DefaultGuard,
-    SdkTracerProvider,
-    InMemorySpanExporter,
-) {
-    let exporter = InMemorySpanExporter::default();
-    let provider = SdkTracerProvider::builder()
-        .with_simple_exporter(exporter.clone())
-        .build();
-    let subscriber = tracing_subscriber::registry()
-        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    (
-        tracing::subscriber::set_default(subscriber),
-        provider,
-        exporter,
-    )
 }
 
 fn app() -> Router {
@@ -122,35 +87,6 @@ async fn in_flight_request_finishes_during_drain() {
     assert!(slow.await.unwrap().ends_with("late"));
 }
 
-#[tokio::test]
-async fn drain_budget_expiry_forces_an_in_flight_connection() {
-    let (_subscriber, _provider, exporter) = capture_request_spans();
-    let (server, peer) = pending_request().await;
-    let drained = server.drain(Duration::from_millis(50)).await.unwrap();
-    assert_eq!(
-        drained,
-        Drained::TimedOut {
-            remaining_connections: 1
-        }
-    );
-    assert_peer_closed(peer).await;
-    let spans = exporter.get_finished_spans().unwrap();
-    let access = spans
-        .iter()
-        .flat_map(|span| span.events.iter())
-        .find(|event| event.name == "http_request")
-        .expect("the interrupted request has an access event");
-    assert!(
-        access
-            .attributes
-            .contains(&opentelemetry::KeyValue::new("status", "503"))
-    );
-    assert!(access.attributes.contains(&opentelemetry::KeyValue::new(
-        "termination",
-        "server_shutdown"
-    )));
-}
-
 async fn pending_request() -> (Server, TcpStream) {
     let entered = Arc::new(tokio::sync::Notify::new());
     let notify = entered.clone();
@@ -166,7 +102,7 @@ async fn pending_request() -> (Server, TcpStream) {
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
     let app = Router::new().route("/pending", get(handler_1));
-    let server = Server::bind(loopback(), harden(app), options()).unwrap();
+    let server = Server::bind(loopback(), app, options()).unwrap();
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -533,44 +469,9 @@ async fn bind_failure_is_reported() {
 }
 
 // template:begin grpc:http-server-tls-test
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::pki_types::ServerName;
+use tls_test_support::localhost_tls;
 use tokio_rustls::TlsConnector;
-
-fn localhost_tls(alpn: &[u8]) -> (ServerConfig, ClientConfig) {
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
-        KeyPair, KeyUsagePurpose,
-    };
-
-    let mut ca = CertificateParams::default();
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let issuer = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
-    let key = KeyPair::generate().unwrap();
-    let mut leaf = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
-    leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let certificate = leaf.signed_by(&key, &issuer).unwrap();
-    let cert = CertificateDer::from(certificate.der().to_vec());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let mut server = ServerConfig::builder_with_provider(provider.clone().into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key)
-        .unwrap();
-    server.alpn_protocols = vec![alpn.to_vec()];
-    let mut roots = RootCertStore::empty();
-    roots.add(issuer.der().clone()).unwrap();
-    let mut client = ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client.alpn_protocols = vec![alpn.to_vec()];
-    (server, client)
-}
 
 #[tokio::test]
 async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
@@ -652,7 +553,7 @@ async fn http2_listener_serves_http2_over_tls() {
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    let request = http::Request::builder()
+    let request = axum::http::Request::builder()
         .uri(format!("https://localhost:{}/ok", addr.port()))
         .body(axum::body::Body::empty())
         .unwrap();
@@ -660,7 +561,7 @@ async fn http2_listener_serves_http2_over_tls() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
     server.drain(Duration::from_secs(1)).await.unwrap();
@@ -703,46 +604,6 @@ async fn http1_tls_listener_rejects_http2_in_alpn_and_on_the_connection() {
     assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
     assert_http2_rejected(tls, HTTP2_CLIENT_PREFACE).await;
     server.drain(Duration::from_secs(1)).await.unwrap();
-}
-
-#[tokio::test]
-async fn tls_http1_origin_form_reports_https_in_the_server_span() {
-    let (_subscriber, _provider, exporter) = capture_request_spans();
-    let (server_config, client_config) = localhost_tls(b"http/1.1");
-    let opts = ServerOptions {
-        header_read_timeout: Duration::from_secs(2),
-        ..options()
-    };
-    let server = BoundListener::bind(loopback()).unwrap().serve_tls(
-        harden(app()),
-        opts,
-        Arc::new(server_config),
-    );
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let stream = TcpStream::connect(server.local_addr()).await.unwrap();
-        let mut tls = TlsConnector::from(Arc::new(client_config))
-            .connect(ServerName::try_from("localhost").unwrap(), stream)
-            .await
-            .unwrap();
-        tls.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let mut status = [0; 12];
-        tls.read_exact(&mut status).await.unwrap();
-        assert_eq!(&status, b"HTTP/1.1 200");
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        server.drain(Duration::from_secs(1)).await.unwrap(),
-        Drained::Complete
-    );
-    let spans = exporter.get_finished_spans().unwrap();
-    let span = spans.iter().find(|span| span.name == "GET /ok").unwrap();
-    assert!(
-        span.attributes
-            .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
-    );
 }
 
 #[tokio::test]

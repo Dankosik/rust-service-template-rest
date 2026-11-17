@@ -2618,11 +2618,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
- "infra-http",
+ "infra-listener",
  "infra-outbound-grpc",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
+ "mime",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
@@ -2666,13 +2667,11 @@ dependencies = [
  "futures-util",
  "health",
  "hotpath",
- "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "infra-bearerauthn",
  "infra-idempotency-store",
+ "infra-listener",
  "infra-postgres",
  "itertools 0.15.0",
  "metrics",
@@ -2683,9 +2682,7 @@ dependencies = [
  "operation-context",
  "parking_lot",
  "proptest",
- "rcgen",
  "regex",
- "rustls",
  "secrecy",
  "serde",
  "serde_html_form",
@@ -2697,11 +2694,10 @@ dependencies = [
  "sha2 0.11.1",
  "shared-rules",
  "smallvec",
- "socket2",
  "thiserror",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower",
  "tower-http 0.7.1",
  "tracing",
@@ -2757,6 +2753,27 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
+]
+
+[[package]]
+name = "infra-listener"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "rustls",
+ "shared-rules",
+ "socket2",
+ "thiserror",
+ "tls-test-support",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -2897,7 +2914,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper-util",
- "infra-http",
+ "infra-listener",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
@@ -5850,6 +5867,7 @@ name = "tls-test-support"
 version = "0.1.0"
 dependencies = [
  "rcgen",
+ "rustls",
 ]
 
 [[package]]

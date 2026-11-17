@@ -14,6 +14,34 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")
 }
 
+pub(crate) fn native_content_type(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(http::header::CONTENT_TYPE).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    if *value == tonic::metadata::GRPC_CONTENT_TYPE {
+        return true;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let essence = value.split_once(';').map_or(value, |(essence, _)| essence);
+    essence
+        .trim_matches([' ', '\t'])
+        .parse::<mime::Mime>()
+        .ok()
+        .is_some_and(|media| {
+            media.essence_str() == "application/grpc"
+                || media
+                    .essence_str()
+                    .strip_prefix("application/grpc+")
+                    .is_some_and(|codec| !codec.is_empty())
+        })
+}
+
 #[must_use]
 pub(crate) fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
@@ -18,10 +18,11 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::server::NamedService as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, attach_server, server_stopped};
+use crate::call::{ServerCustody, attach_server, deadline_status, server_stopped};
 use crate::health::HealthServer;
-use crate::observe::{self, CallType, Methods};
+use crate::observe;
 use crate::protocol::grpc_timeout;
+use crate::services::{CallType, Methods};
 use crate::status::internal_status;
 use crate::{Error, Failure, Services};
 
@@ -32,6 +33,17 @@ pub struct Limits {
     pub max_admission_wait: Duration,
     pub max_connections: Option<NonZeroU32>,
     pub max_connection_age: Option<Duration>,
+}
+
+#[derive(Debug)]
+pub enum Authentication {
+    None,
+    // template:begin authn:grpc-authentication-bearer
+    Bearer(infra_bearerauthn::Verifier),
+    // template:end authn:grpc-authentication-bearer
+    // template:begin service-auth:grpc-authentication-service-tokens
+    ServiceTokens(infra_serviceauth::Verifier),
+    // template:end service-auth:grpc-authentication-service-tokens
 }
 
 #[derive(Clone, Debug)]
@@ -45,71 +57,60 @@ impl ResponseContext {
 }
 
 struct BusinessState {
+    authentication: Authentication,
     methods: Arc<Methods>,
     limits: Limits,
     opening_permits: Option<Arc<Semaphore>>,
     call_permits: Option<Arc<Semaphore>>,
     // template:begin authn:grpc-router-bearer-field
-    auth: Option<crate::authn::BearerAuth>,
+    scopes: crate::authn::Scopes,
     // template:end authn:grpc-router-bearer-field
     // template:begin service-auth:grpc-router-caller-field
-    caller_auth: crate::service_auth::CallerAdmission,
+    caller_rules: crate::service_auth::CallerRules,
     // template:end service-auth:grpc-router-caller-field
 }
 
 pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
-    // template:begin authn:grpc-router-verifier
-    verifier: Option<infra_bearerauthn::Verifier>,
-    // template:end authn:grpc-router-verifier
+    authentication: Authentication,
     limits: Limits,
 ) -> Result<axum::Router, Error> {
     if services.reflection {
         services.attach_reflection()?;
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
-    #[allow(
-        unused_variables,
-        reason = "bearer authentication alone reads it; service tokens replace it"
-    )]
-    let service_tokens = false;
     // template:begin service-auth:grpc-router-caller-rules
-    let caller_auth = services.take_caller_admission()?;
-    #[allow(
-        unused_variables,
-        reason = "only the authn region reads it, to skip bearer authentication"
-    )]
-    let service_tokens = caller_auth.verifies();
+    if matches!(authentication, Authentication::ServiceTokens(_))
+        || !services.caller_rules.is_empty()
+    {
+        services.validate_caller_rules()?;
+    }
     // template:end service-auth:grpc-router-caller-rules
     // template:begin authn:grpc-router-authenticate
-    let scopes = std::mem::take(&mut services.scopes);
-    let auth = if service_tokens {
-        if !scopes.is_empty() {
-            return Err(Error::ScopesWithServiceTokens);
-        }
-        None
-    } else {
-        match verifier {
-            Some(verifier) => Some(crate::authn::BearerAuth::new(verifier, scopes)),
-            None => return Err(Error::UnauthenticatedBusinessCalls),
-        }
-    };
+    if matches!(authentication, Authentication::None) {
+        return Err(Error::UnauthenticatedBusinessCalls);
+    }
+    if !services.scopes.is_empty() && !matches!(authentication, Authentication::Bearer(_)) {
+        return Err(Error::ScopesWithServiceTokens);
+    }
     // template:end authn:grpc-router-authenticate
     if limits.max_in_flight.is_some() {
         observe::register_shed();
     }
-    let methods = Arc::new(Methods::new(services.method_paths()));
+    observe::describe();
+    let methods = Arc::new(services.methods());
     let state = Arc::new(BusinessState {
+        authentication,
         methods: Arc::clone(&methods),
         limits,
         opening_permits: semaphore(limits.max_in_flight),
         call_permits: semaphore(limits.max_in_flight),
         // template:begin authn:grpc-router-bearer-init
-        auth,
+        scopes: services.scopes,
         // template:end authn:grpc-router-bearer-init
         // template:begin service-auth:grpc-router-caller-init
-        caller_auth,
+        caller_rules: services.caller_rules,
         // template:end service-auth:grpc-router-caller-init
     });
     let business = services
@@ -117,12 +118,18 @@ pub fn router(
         .routes()
         .into_axum_router()
         .layer(axum::middleware::from_fn_with_state(state, business_call));
-    Ok(with_health(business, readiness, services.names, methods))
+    Ok(native_router(
+        business,
+        readiness,
+        services.names,
+        methods,
+        limits.request_timeout,
+    ))
 }
 
 #[must_use]
-pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
-    infra_http::ServerOptions {
+pub fn server_options(limits: Limits) -> infra_listener::ServerOptions {
+    infra_listener::ServerOptions {
         header_read_timeout: Duration::from_secs(5),
         max_header_bytes: 16 * 1024,
         max_connections: limits.max_connections,
@@ -134,11 +141,12 @@ fn semaphore(limit: Option<NonZeroU32>) -> Option<Arc<Semaphore>> {
     limit.map(|count| Arc::new(Semaphore::new(count.get() as usize)))
 }
 
-fn with_health(
+fn native_router(
     router: axum::Router,
     readiness: ::health::ReadinessReader,
     names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
+    request_timeout: Duration,
 ) -> axum::Router {
     let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
     #[expect(
@@ -147,7 +155,28 @@ fn with_health(
     )]
     let health =
         axum::Router::new().route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
-    router.merge(health.layer(axum::middleware::from_fn_with_state(methods, health_call)))
+    router
+        .merge(health.layer(axum::middleware::from_fn_with_state(
+            (methods, request_timeout),
+            health_call,
+        )))
+        .layer(axum::middleware::from_fn(native_grpc))
+}
+
+async fn native_grpc(request: Request, next: Next) -> Response {
+    let response = if request.method() != http::Method::POST {
+        (
+            http::StatusCode::METHOD_NOT_ALLOWED,
+            [(http::header::ALLOW, "POST")],
+        )
+            .into_response()
+    } else if !crate::protocol::native_content_type(request.headers()) {
+        http::StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response()
+    } else {
+        return next.run(request).await;
+    };
+    drain_rejected(request, REJECT_DRAIN).await;
+    response
 }
 
 enum OpeningOutcome {
@@ -163,21 +192,18 @@ async fn business_call(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let listener_drain = infra_http::take_listener_drain_token(request.extensions_mut());
+    let listener_drain = infra_listener::take_listener_drain_token(request.extensions_mut());
     sanitize_extensions(request.extensions_mut());
 
-    let call = observe::Call::start(&state.methods, &request);
+    let path = request.uri().path();
+    let method = state.methods.resolve(path);
+    let call = observe::Call::start(method, path);
     let fallback = observe::propagated_parent(call.span(), request.headers());
-    let origin = tokio::time::Instant::now();
-    let caller_timeout = grpc_timeout(request.headers());
-    let opening_budget = caller_timeout.map_or(state.limits.request_timeout, |caller| {
-        caller.min(state.limits.request_timeout)
-    });
-    let opening_deadline = Deadline::new(origin, opening_budget);
-    let response_deadline = caller_timeout.map(|budget| Deadline::new(origin, budget));
+    let (opening_deadline, response_deadline) =
+        call_deadlines(request.headers(), state.limits.request_timeout);
 
     let is_streaming = matches!(
-        call.call_type(),
+        method.call_type,
         Some(CallType::ServerStream | CallType::BidiStream)
     );
     let response_token = match listener_drain.filter(|_| is_streaming) {
@@ -235,24 +261,35 @@ async fn open_business(
         Ok(acquired) => acquired,
         Err(response) => return OpeningOutcome::Rejected(response),
     };
-    // template:begin authn:grpc-router-run-authn
-    let request = if let Some(auth) = &state.auth {
-        match crate::authn::authenticate(auth, opening_context, request).await {
-            Ok(request) => request,
-            Err(response) => return OpeningOutcome::Rejected(response),
+    let admission = match &state.authentication {
+        // template:begin authn:grpc-router-run-authn
+        Authentication::Bearer(verifier) => {
+            crate::authn::authenticate(verifier, &state.scopes, opening_context, request).await
         }
-    } else {
-        request
+        // template:end authn:grpc-router-run-authn
+        // template:begin service-auth:grpc-router-run-service-auth
+        Authentication::ServiceTokens(verifier) => {
+            crate::service_auth::admit_caller(
+                verifier,
+                &state.caller_rules,
+                opening_context,
+                request,
+            )
+            .await
+        }
+        // template:end service-auth:grpc-router-run-service-auth
+        Authentication::None => {
+            // template:begin service-auth:grpc-router-strip-unverified-authorization
+            let mut request = request;
+            request.headers_mut().remove(http::header::AUTHORIZATION);
+            // template:end service-auth:grpc-router-strip-unverified-authorization
+            Ok(request)
+        }
     };
-    // template:end authn:grpc-router-run-authn
-    // template:begin service-auth:grpc-router-run-service-auth
-    let request =
-        match crate::service_auth::admit_caller(&state.caller_auth, opening_context, request).await
-        {
-            Ok(request) => request,
-            Err(response) => return OpeningOutcome::Rejected(response),
-        };
-    // template:end service-auth:grpc-router-run-service-auth
+    let request = match admission {
+        Ok(request) => request,
+        Err(response) => return OpeningOutcome::Rejected(response),
+    };
     let (call_permit, request) = match acquire_permit(
         state.call_permits.as_ref(),
         &mut remaining_wait,
@@ -264,7 +301,7 @@ async fn open_business(
         Ok(acquired) => acquired,
         Err(response) => return OpeningOutcome::Rejected(response),
     };
-    let response = next.run(request).await;
+    let response = next.run(request.map(without_trailer_credentials)).await;
     OpeningOutcome::Admitted {
         response,
         permit: call_permit,
@@ -286,7 +323,7 @@ async fn acquire_permit(
     };
     let wait = admission_wait(*remaining_wait, opening_context);
     let Ok((permit, waited)) =
-        infra_http::acquire_within(permits, wait, observe::admission_waiting).await
+        infra_listener::acquire_within(permits, wait, observe::admission_waiting).await
     else {
         if let Some(reason) = opening_context.stopped() {
             return Err(server_stopped(reason).into_http());
@@ -321,59 +358,64 @@ fn admission_wait(max_wait: Duration, opening_context: &OperationContext) -> Dur
 }
 
 async fn health_call(
-    State(methods): State<Arc<Methods>>,
+    State((methods, request_timeout)): State<(Arc<Methods>, Duration)>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let _ = infra_http::take_listener_drain_token(request.extensions_mut());
+    let _ = infra_listener::take_listener_drain_token(request.extensions_mut());
     sanitize_extensions(request.extensions_mut());
 
-    let call = observe::Call::start(&methods, &request);
+    let path = request.uri().path();
+    let call = observe::Call::start(methods.resolve(path), path);
     let fallback = observe::propagated_parent(call.span(), request.headers());
-    let Some(budget) = grpc_timeout(request.headers()) else {
-        let response = run_in_span(next.run(request), call.span(), fallback.as_ref(), || {
-            internal_status().into_http()
-        })
-        .await;
-        return attach_server(response, call, fallback, ServerCustody::default())
-            .map(axum::body::Body::new);
-    };
-
-    let deadline = Deadline::new(tokio::time::Instant::now(), budget);
-    let response_token = CancellationToken::new();
-    let opening_context = OperationContext::new(Some(deadline), response_token.child_token());
-    let response_context = ResponseContext(OperationContext::new(
-        Some(deadline),
-        response_token.clone(),
-    ));
-    let response_guard = response_token.drop_guard();
-    request.extensions_mut().insert(opening_context.clone());
-    request.extensions_mut().insert(response_context);
-
-    let outcome = run_in_span(
+    let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
+    let response = run_in_span(
         async {
-            let response = tokio::select! {
+            tokio::select! {
                 biased;
-                reason = opening_context.wait_stopped() => {
-                    return OpeningOutcome::Rejected(server_stopped(reason).into_http());
+                () = opening_deadline.wait() => deadline_status().into_http(),
+                response = next.run(request) => {
+                    if opening_deadline.expired() {
+                        deadline_status().into_http()
+                    } else {
+                        response
+                    }
                 }
-                response = next.run(request) => response,
-            };
-            if let Some(reason) = opening_context.stopped() {
-                return OpeningOutcome::Rejected(server_stopped(reason).into_http());
-            }
-            OpeningOutcome::Admitted {
-                response,
-                permit: None,
             }
         },
         call.span(),
         fallback.as_ref(),
-        || OpeningOutcome::Rejected(internal_status().into_http()),
+        || internal_status().into_http(),
     )
     .await;
 
-    finish_call(outcome, call, fallback, response_guard, Some(deadline))
+    let custody = ServerCustody {
+        deadline: response_deadline,
+        ..ServerCustody::default()
+    };
+    attach_server(response, call, fallback, custody).map(axum::body::Body::new)
+}
+
+fn call_deadlines(
+    headers: &http::HeaderMap,
+    request_timeout: Duration,
+) -> (Deadline, Option<Deadline>) {
+    let origin = tokio::time::Instant::now();
+    let caller = grpc_timeout(headers);
+    let opening = caller.map_or(request_timeout, |budget| budget.min(request_timeout));
+    (
+        Deadline::new(origin, opening),
+        caller.map(|budget| Deadline::new(origin, budget)),
+    )
+}
+
+fn without_trailer_credentials(body: axum::body::Body) -> axum::body::Body {
+    axum::body::Body::new(body.map_frame(|mut frame| {
+        if let Some(trailers) = frame.trailers_mut() {
+            trailers.remove(http::header::AUTHORIZATION);
+        }
+        frame
+    }))
 }
 
 fn sanitize_extensions(extensions: &mut http::Extensions) {
@@ -438,6 +480,11 @@ pub(crate) async fn reject_with_budget(
     let drain = opening_context
         .remaining()
         .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));
+    drain_rejected(request, drain).await;
+    status.into_http()
+}
+
+async fn drain_rejected(request: Request, drain: Duration) {
     let mut body = request.into_body();
     let _ = tokio::time::timeout(drain, async {
         let mut read = 0;
@@ -450,12 +497,32 @@ pub(crate) async fn reject_with_budget(
         }
     })
     .await;
-    status.into_http()
 }
+
+#[cfg(test)]
+mod ingress_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn application_body_preserves_data_and_only_noncredential_trailers() {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert(http::header::AUTHORIZATION, "redacted".parse().unwrap());
+        trailers.insert("x-checksum", "123".parse().unwrap());
+        let data = Bytes::from_static(b"message");
+        let body =
+            http_body_util::Full::new(data.clone()).with_trailers(async { Some(Ok(trailers)) });
+        let body = without_trailer_credentials(axum::body::Body::new(body))
+            .collect()
+            .await
+            .unwrap();
+        let trailers = body.trailers().unwrap();
+        assert_eq!(trailers.len(), 1);
+        assert_eq!(trailers["x-checksum"], "123");
+        assert_eq!(body.to_bytes(), data);
+    }
 
     #[tokio::test]
     async fn rejected_call_reads_at_most_one_frame_past_64_kib() {

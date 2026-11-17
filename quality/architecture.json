@@ -47,6 +47,7 @@
           "crates/infra-grpc/Cargo.toml",
           "crates/infra-http/Cargo.toml",
           "crates/infra-jobs/Cargo.toml",
+          "crates/infra-listener/Cargo.toml",
           "crates/infra-messaging/Cargo.toml",
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
@@ -63,6 +64,7 @@
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
+    "crates/infra-listener/Cargo.toml": {"role": "listener"},
     "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
     "crates/infra-jobs/Cargo.toml": {"role": "postgres-provider"},
     "crates/infra-messaging/Cargo.toml": {"role": "messaging"},
@@ -88,6 +90,7 @@
     },
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
+    "listener": {"rule": "shared-listener-dependencies"},
     "contract": {"rule": "independent-shared-contract"},
     "shared-rules": {"rule": "std-only-shared-rules", "std_only": true},
     "bearer": {"rule": "independent-bearer-provider"},
@@ -144,7 +147,7 @@
     },
     "http": {
       "rule": "http-inbound-contract-dependencies",
-      "allow_roles": ["health", "bearer"],
+      "allow_roles": ["health", "bearer", "listener"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "HTTP projects shared failure codes into Problem responses.",
@@ -162,7 +165,7 @@
     },
     "grpc": {
       "rule": "grpc-transport-dependencies",
-      "allow_roles": ["health", "bearer", "service-auth", "http"],
+      "allow_roles": ["health", "bearer", "service-auth", "listener"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "gRPC projects shared failure codes into tonic Status.",
