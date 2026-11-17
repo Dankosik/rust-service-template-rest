@@ -327,7 +327,9 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     let publication = registry
         .declare_publication(&route, MAX_PAYLOAD_BYTES)
         .expect("bridge route admits");
-    let small = Registry::default().declare_publication(&route, 1).unwrap();
+    let small = Registry::default()
+        .declare_publication(&route, 1)
+        .expect("bridge route admits the one-byte payload limit");
     let event = bridge_event("rust-payload-limit");
     assert!(
         small.prepare(&event).is_err(),
