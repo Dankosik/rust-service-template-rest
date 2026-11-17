@@ -338,10 +338,6 @@ struct WorkerHttpInput {
     grace_period: Duration,
     #[serde(deserialize_with = "crate::de::duration")]
     drain_timeout: Duration,
-    #[expect(
-        dead_code,
-        reason = "shared overlays set readiness_propagation_delay for the service listener"
-    )]
     readiness_propagation_delay: serde::de::IgnoredAny,
 }
 

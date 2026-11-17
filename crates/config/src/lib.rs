@@ -146,17 +146,9 @@ pub(crate) struct ConfigInput {
     http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-input-field
     // template:begin jobs:config-jobs-input-field
-    #[expect(
-        dead_code,
-        reason = "shared configurations carry jobs for the worker binary"
-    )]
     jobs: serde::de::IgnoredAny,
     // template:end jobs:config-jobs-input-field
     // template:begin webhooks:config-webhooks-input-field
-    #[expect(
-        dead_code,
-        reason = "shared configurations carry webhooks for the worker binary"
-    )]
     webhooks: serde::de::IgnoredAny,
     // template:end webhooks:config-webhooks-input-field
 }

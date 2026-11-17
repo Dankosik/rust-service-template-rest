@@ -120,10 +120,6 @@ impl PostgresInput {
 /// variables passed to [`crate::load_migration`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-#[expect(
-    dead_code,
-    reason = "serde decodes and discards sibling sections so unknown keys fail"
-)]
 pub(crate) struct MigrationInput {
     pub(crate) app: AppConfig,
     // template:begin authn:migration-input-authn
