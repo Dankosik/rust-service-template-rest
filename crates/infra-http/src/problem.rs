@@ -255,6 +255,10 @@ pub mod responses {
 
     /// Content-Type is missing or is not `application/json` or an `application/*+json` type
     #[derive(Debug, ToResponse)]
+    #[expect(
+        dead_code,
+        reason = "The response body exists only for the OpenAPI derive"
+    )]
     #[response(content_type = "application/problem+json")]
     pub(crate) struct UnsupportedMediaType(pub Problem);
 
