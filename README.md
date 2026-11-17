@@ -170,8 +170,9 @@ configured.
   [cache profile](docs/decisions/cache-decisions.md).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->
-- `OBJECT_STORAGE=s3`: Amazon S3, Cloudflare R2 or Railway Buckets
-  ([`infra-object-storage`](crates/infra-object-storage)).
+- `OBJECT_STORAGE=s3` supports Amazon S3, Cloudflare R2 and Railway Buckets.
+  File routes use the [HTTP upload and download helpers](crates/infra-http/src/object_storage.rs)
+  with the configured [storage client](crates/infra-object-storage).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
 
 ## Run it

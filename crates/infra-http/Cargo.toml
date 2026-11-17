@@ -28,6 +28,10 @@ health = { workspace = true }
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
+# template:begin object-storage:http-object-storage-dependencies
+futures-util = { workspace = true, features = ["std"] }
+infra-object-storage = { workspace = true }
+# template:end object-storage:http-object-storage-dependencies
 # template:begin http-idempotency:http-idempotency-dependencies
 bytes = { workspace = true, features = ["std"] }
 const-hex = { workspace = true }

@@ -96,6 +96,7 @@ enum FailureKind<'a> {
 pub(crate) struct Failure<E = ObjectStorageError> {
     pub(crate) error: E,
     pub(crate) error_type: CompactString,
+    pub(crate) timeout_source: Option<&'static str>,
 }
 
 impl<E> Failure<E> {
@@ -103,6 +104,20 @@ impl<E> Failure<E> {
         Self {
             error,
             error_type: CompactString::const_new(error_type),
+            timeout_source: None,
+        }
+    }
+
+    const fn with_stop(error: E, stopped: CallStop) -> Self {
+        let (error_type, timeout_source) = match stopped {
+            CallStop::Parent(Stopped::Deadline) => ("timeout", Some("parent_deadline")),
+            CallStop::Timeout => ("timeout", Some("storage_timeout")),
+            CallStop::Parent(Stopped::Cancelled) => ("cancelled", None),
+        };
+        Self {
+            error,
+            error_type: CompactString::const_new(error_type),
+            timeout_source,
         }
     }
 }
@@ -113,7 +128,7 @@ impl Failure {
             CallStop::Parent(stopped) => ObjectStorageError::Stopped(stopped),
             CallStop::Timeout => ObjectStorageError::Unavailable,
         };
-        Self::with_label(error, stop_label(stopped))
+        Self::with_stop(error, stopped)
     }
 }
 
@@ -130,7 +145,7 @@ impl Failure<MutationError> {
             CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
             CallStop::Timeout => MutationFailure::Unavailable,
         };
-        Self::with_label(outcome(reason), stop_label(stopped))
+        Self::with_stop(outcome(reason), stopped)
     }
 
     pub(crate) fn mutation_interrupted(interrupted: Interrupted) -> Self {
@@ -194,13 +209,6 @@ impl From<UploadFailure> for Failure<MutationError> {
     }
 }
 
-fn stop_label(stopped: CallStop) -> &'static str {
-    match stopped {
-        CallStop::Parent(Stopped::Deadline) | CallStop::Timeout => "timeout",
-        CallStop::Parent(Stopped::Cancelled) => "cancelled",
-    }
-}
-
 type SdkFailure<E> = SdkError<E, HttpResponse>;
 
 pub(crate) fn interpret_delete_result(
@@ -227,6 +235,7 @@ where
     Failure {
         error: classify_read(kind),
         error_type,
+        timeout_source: None,
     }
 }
 
@@ -251,6 +260,7 @@ where
     Failure {
         error: classify_mutation(kind, call),
         error_type,
+        timeout_source: None,
     }
 }
 

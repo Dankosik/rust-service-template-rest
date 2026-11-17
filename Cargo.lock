@@ -2674,6 +2674,7 @@ dependencies = [
  "infra-bearerauthn",
  "infra-http-transport",
  "infra-idempotency-store",
+ "infra-object-storage",
  "infra-postgres",
  "itertools 0.15.0",
  "metrics",
