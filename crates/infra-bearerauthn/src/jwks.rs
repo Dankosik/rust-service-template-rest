@@ -413,7 +413,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 pub(crate) mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use jsonwebtoken::{Algorithm, EncodingKey, jwk::Jwk};
+    use jsonwebtoken::{Algorithm, EncodingKey};
 
     pub(crate) use super::fixtures::{
         JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
