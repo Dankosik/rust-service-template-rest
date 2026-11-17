@@ -85,10 +85,11 @@ impl GrpcInput {
             addr: addr?,
             security: security?,
             request_timeout: self.request_timeout,
-            max_in_flight: self.max_in_flight,
-            admission_wait: self.admission_wait,
-            max_connections: self.max_connections,
-            max_connection_age: self.max_connection_age,
+            max_in_flight: NonZeroU32::new(self.max_in_flight),
+            admission_wait: admission_wait_cap(self.admission_wait, self.request_timeout),
+            max_connections: NonZeroU32::new(self.max_connections),
+            max_connection_age: (!self.max_connection_age.is_zero())
+                .then_some(self.max_connection_age),
         }))
     }
 
@@ -168,32 +169,10 @@ pub struct GrpcConfig {
     pub addr: SocketAddr,
     pub security: GrpcListenerSecurity,
     pub request_timeout: Duration,
-    pub max_in_flight: u32,
+    pub max_in_flight: Option<NonZeroU32>,
     pub admission_wait: Duration,
-    pub max_connections: u32,
-    pub max_connection_age: Duration,
-}
-
-impl GrpcConfig {
-    #[must_use]
-    pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_in_flight)
-    }
-
-    #[must_use]
-    pub fn admission_wait_cap(&self) -> Duration {
-        admission_wait_cap(self.admission_wait, self.request_timeout)
-    }
-
-    #[must_use]
-    pub fn connection_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_connections)
-    }
-
-    #[must_use]
-    pub fn connection_age_cap(&self) -> Option<Duration> {
-        (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
-    }
+    pub max_connections: Option<NonZeroU32>,
+    pub max_connection_age: Option<Duration>,
 }
 
 #[derive(Clone)]

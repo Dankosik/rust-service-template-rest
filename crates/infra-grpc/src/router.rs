@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::extract::{Request, State};
@@ -14,7 +16,7 @@ use opentelemetry::context::FutureExt as _;
 use operation_context::{Deadline, OperationContext};
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
 use tracing::Instrument as _;
 
@@ -22,7 +24,7 @@ use crate::call::{ServerCustody, attach_server, deadline_status, server_stopped}
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
-use crate::services::{CallType, Methods};
+use crate::services::{CallType, Methods, REFLECTION_PATHS};
 use crate::status::internal_status;
 use crate::{Error, Failure, Services};
 
@@ -60,6 +62,7 @@ struct BusinessState {
     authentication: Authentication,
     methods: Arc<Methods>,
     limits: Limits,
+    reflection_enabled: bool,
     opening_permits: Option<Arc<Semaphore>>,
     call_permits: Option<Arc<Semaphore>>,
     // template:begin authn:grpc-router-bearer-field
@@ -70,12 +73,44 @@ struct BusinessState {
     // template:end service-auth:grpc-router-caller-field
 }
 
+#[derive(Clone, Debug)]
+pub struct Application(axum::Router);
+
+impl Application {
+    #[must_use]
+    pub fn serve(
+        self,
+        listener: infra_http_transport::BoundListener,
+        options: infra_http_transport::ServerOptions,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> infra_http_transport::Server {
+        listener.serve_h2(self.0, options, tls)
+    }
+}
+
+impl<B> tower::Service<http::Request<B>> for Application
+where
+    axum::Router: tower::Service<http::Request<B>, Response = Response, Error = Infallible>,
+{
+    type Response = Response;
+    type Error = Infallible;
+    type Future = <axum::Router as tower::Service<http::Request<B>>>::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        tower::Service::<http::Request<B>>::poll_ready(&mut self.0, cx)
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        tower::Service::call(&mut self.0, request)
+    }
+}
+
 pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
     authentication: Authentication,
     limits: Limits,
-) -> Result<axum::Router, Error> {
+) -> Result<Application, Error> {
     if services.reflection {
         services.attach_reflection()?;
     }
@@ -104,6 +139,7 @@ pub fn router(
         authentication,
         methods: Arc::clone(&methods),
         limits,
+        reflection_enabled: services.reflection,
         opening_permits: semaphore(limits.max_in_flight),
         call_permits: semaphore(limits.max_in_flight),
         // template:begin authn:grpc-router-bearer-init
@@ -118,13 +154,13 @@ pub fn router(
         .routes()
         .into_axum_router()
         .layer(axum::middleware::from_fn_with_state(state, business_call));
-    Ok(native_router(
+    Ok(Application(native_router(
         business,
         readiness,
         services.names,
         methods,
         limits.request_timeout,
-    ))
+    )))
 }
 
 #[must_use]
@@ -204,8 +240,9 @@ async fn business_call(
     let (opening_deadline, response_deadline) =
         call_deadlines(request.headers(), state.limits.request_timeout);
 
+    let call_type = method.call_type;
     let is_streaming = matches!(
-        method.call_type,
+        call_type,
         Some(CallType::ServerStream | CallType::BidiStream)
     );
     let response_token = match connection.filter(|_| is_streaming) {
@@ -218,7 +255,13 @@ async fn business_call(
         response_deadline,
         response_token.clone(),
     ));
-    let response_guard = response_token.drop_guard();
+    let custody = ServerCustody {
+        deadline: response_deadline,
+        end_on_drain: (state.reflection_enabled && REFLECTION_PATHS.contains(&path))
+            .then(|| response_token.clone()),
+        cancel_on_drop: Some(response_token.drop_guard()),
+        ..ServerCustody::default()
+    };
     request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context);
 
@@ -229,7 +272,7 @@ async fn business_call(
                 reason = opening_context.wait_stopped() => {
                     OpeningOutcome::Rejected(server_stopped(reason).into_http())
                 }
-                outcome = open_business(&state, &opening_context, request, next) => outcome,
+                outcome = open_business(&state, &opening_context, call_type, request, next) => outcome,
             };
             if let Some(reason) = opening_context.stopped() {
                 return OpeningOutcome::Rejected(server_stopped(reason).into_http());
@@ -242,12 +285,13 @@ async fn business_call(
     )
     .await;
 
-    finish_call(outcome, call, fallback, response_guard, response_deadline)
+    finish_call(outcome, call, fallback, custody)
 }
 
 async fn open_business(
     state: &BusinessState,
     opening_context: &OperationContext,
+    call_type: Option<CallType>,
     request: Request,
     next: Next,
 ) -> OpeningOutcome {
@@ -292,6 +336,12 @@ async fn open_business(
         Ok(request) => request,
         Err(response) => return OpeningOutcome::Rejected(response),
     };
+    if call_type.is_none() {
+        let status = tonic::Status::unimplemented("");
+        return OpeningOutcome::Rejected(
+            reject_with_budget(opening_context, request, status).await,
+        );
+    }
     let (call_permit, request) = match acquire_permit(
         state.call_permits.as_ref(),
         &mut remaining_wait,
@@ -453,20 +503,15 @@ fn finish_call(
     outcome: OpeningOutcome,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
-    response_guard: DropGuard,
-    response_deadline: Option<Deadline>,
+    mut custody: ServerCustody,
 ) -> Response {
     match outcome {
         OpeningOutcome::Admitted { response, permit } => {
-            let custody = ServerCustody {
-                permit,
-                cancel_on_drop: Some(response_guard),
-                deadline: response_deadline,
-            };
+            custody.permit = permit;
             attach_server(response, call, fallback, custody).map(axum::body::Body::new)
         }
         OpeningOutcome::Rejected(response) => {
-            drop(response_guard);
+            drop(custody);
             attach_server(response, call, fallback, ServerCustody::default())
                 .map(axum::body::Body::new)
         }

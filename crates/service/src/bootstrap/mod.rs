@@ -559,7 +559,7 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-bind
     if let Some((listener, grpc)) = grpc_listener {
-        let server = listener.serve_h2(grpc.router, grpc.options, grpc.tls);
+        let server = grpc.app.serve(listener, grpc.options, grpc.tls);
         let listener = serving.grpc_listener.insert(server);
         background.watch_listener("grpc_accept", listener);
         tracing::info!(addr = %listener.local_addr(), "grpc listener bound");

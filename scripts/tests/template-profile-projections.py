@@ -1141,6 +1141,13 @@ def _check_service_auth_projections(source: Path, candidate: str, initializer, w
             manifest = nodes["crates/infra-grpc/Cargo.toml"]
             assert isinstance(manifest.payload, bytes)
             grpc_manifest = tomllib.loads(manifest.payload.decode())
+            if "crates/infra-grpc/tests/transport.rs" not in nodes:
+                raise initializer.Refusal("gRPC projection lost the wire transport suite")
+            test_dependencies = grpc_manifest["dev-dependencies"]
+            if "infra-outbound-grpc" not in test_dependencies:
+                raise initializer.Refusal("gRPC wire transport suite lost its client")
+            if ("url" in test_dependencies) != (authn == "oidc-introspection"):
+                raise initializer.Refusal("gRPC wire transport suite retained an incorrect provider dependency")
             outbound_manifest = nodes["crates/infra-outbound-grpc/Cargo.toml"]
             assert isinstance(outbound_manifest.payload, bytes)
             outbound_grpc_manifest = tomllib.loads(outbound_manifest.payload.decode())
