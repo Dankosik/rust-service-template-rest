@@ -308,16 +308,40 @@ async fn silent_client_is_closed_after_the_header_timeout() {
 }
 
 #[tokio::test]
-async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
+async fn an_http1_listener_opens_no_http2_connection() {
     let server = Server::bind(loopback(), app(), options()).unwrap();
-    let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
-    stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
+    let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+    let empty_settings_frame = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+    peer.write_all(&[HTTP2_PREFACE, empty_settings_frame.as_slice()].concat())
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let closed =
+        tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
+    assert!(closed.is_ok(), "the connection stayed open");
+    assert!(
+        response.is_empty() || response.starts_with(b"HTTP/1."),
+        "an HTTP/2 frame was sent: {response:?}"
+    );
+    server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_http1_listener_reads_the_first_request_head_under_one_timeout() {
+    let options = ServerOptions {
+        header_read_timeout: Duration::from_secs(1),
+        ..options()
+    };
+    let server = Server::bind(loopback(), app(), options).unwrap();
+    let mut slow = TcpStream::connect(server.local_addr()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    slow.write_all(b"GET /ok HTTP/1.1\r\n").await.unwrap();
     let mut buf = [0u8; 1];
-    let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
+    let closed = tokio::time::timeout(Duration::from_millis(900), slow.read(&mut buf)).await;
     std::assert_matches!(
         closed,
         Ok(Ok(0)),
-        "expected EOF from the server, got {closed:?}"
+        "expected EOF one timeout after accept, got {closed:?}"
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
 }
@@ -658,6 +682,23 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         span.attributes
             .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
     );
+}
+
+#[tokio::test]
+async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), options(), None);
+    let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
+    stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
+    let mut buf = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0)),
+        "expected EOF from the server, got {closed:?}"
+    );
+    server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]

@@ -578,12 +578,9 @@ mod grpc {
                 limits,
             )
             .unwrap();
-            let server = Server::bind(
-                "127.0.0.1:0".parse().unwrap(),
-                router,
-                infra_grpc::server_options(limits),
-            )
-            .unwrap();
+            let server = infra_http::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+                .unwrap()
+                .serve_h2(router, infra_grpc::server_options(limits), None);
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),

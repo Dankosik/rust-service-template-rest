@@ -20,6 +20,13 @@ impl<IO> SniffDeadline<IO> {
             undecided: Some((0, Box::pin(tokio::time::sleep(timeout)))),
         }
     }
+
+    pub(super) const fn decided(io: IO) -> Self {
+        Self {
+            io,
+            undecided: None,
+        }
+    }
 }
 
 impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
