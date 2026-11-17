@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{AttemptError, Attempted, CallerIdentity, Digest, ScopeKey, Store};
+use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
 use tokio::time::Instant;
 
-use super::stored::{self, ReplayableResponse};
+use super::stored::ReplayableResponse;
 use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
@@ -64,7 +64,6 @@ impl Outcome {
 pub(super) struct Attempt {
     pub(super) store: Store,
     pub(super) scope: ScopeKey,
-    pub(super) caller: CallerIdentity,
     pub(super) fingerprint: Digest,
     pub(super) operation_id: Arc<str>,
     pub(super) deadline: RequestDeadline,
@@ -97,7 +96,6 @@ impl Attempt {
         let Attempt {
             store,
             scope,
-            caller,
             fingerprint,
             operation_id,
             deadline,
@@ -108,12 +106,13 @@ impl Attempt {
             Some(attempt_end) => {
                 let attempt = store.attempt_with_acquire_deadline(
                     &scope,
-                    &caller,
                     &fingerprint,
                     attempt_end,
                     async |tx: &mut Tx<'_>| {
-                        let response = command.execute(tx).await?;
-                        Ok((response.to_record(), response))
+                        command
+                            .execute(tx)
+                            .await
+                            .map(ReplayableResponse::into_record)
                     },
                 );
                 tokio::time::timeout_at(attempt_end, attempt)
@@ -182,7 +181,7 @@ impl Answer {
 }
 
 fn map_attempted(
-    attempted: Result<Attempted<ReplayableResponse, Rollback>, AttemptError>,
+    attempted: Result<Attempted<Rollback>, AttemptError>,
     scope: &ScopeKey,
     operation_id: &str,
 ) -> Answer {
@@ -205,30 +204,29 @@ fn map_attempted(
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
         Err(AttemptError::Integrity) => {
-            integrity_failure(scope, operation_id, "store_undecodable", None)
+            tracing::error!(
+                scope_digest = %ScopeDigest(scope.digest()),
+                operation = operation_id,
+                failure = "store_undecodable",
+                "http_idempotency_integrity_failed"
+            );
+            Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
         }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
-        Ok(Attempted::Replay(record)) => match stored::decode(record) {
-            Ok(replayable) => {
-                let mut response = replayable.into_response();
-                response
-                    .headers_mut()
-                    .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
-                Answer::operation_response(response, Outcome::Replayed)
-            }
-            Err(undecodable) => integrity_failure(
-                scope,
-                operation_id,
-                "replay_undecodable",
-                Some(undecodable.class()),
-            ),
-        },
+        Ok(Attempted::Replay(record)) => {
+            let mut response = ReplayableResponse::from_record(record).into_response();
+            response
+                .headers_mut()
+                .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
+            Answer::operation_response(response, Outcome::Replayed)
+        }
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
         }
-        Ok(Attempted::Committed(replayable)) => {
-            Answer::operation_response(replayable.into_response(), Outcome::Executed)
-        }
+        Ok(Attempted::Committed(record)) => Answer::operation_response(
+            ReplayableResponse::from_record(record).into_response(),
+            Outcome::Executed,
+        ),
     }
 }
 
@@ -242,22 +240,6 @@ pub(super) fn refusal(mut response: Response) -> Response {
     }
     response.headers_mut().remove(REPLAYED_HEADER);
     response
-}
-
-fn integrity_failure(
-    scope: &ScopeKey,
-    operation_id: &str,
-    failure: &'static str,
-    reason: Option<&'static str>,
-) -> Answer {
-    tracing::error!(
-        scope_digest = %ScopeDigest(scope.digest()),
-        operation = operation_id,
-        failure,
-        reason,
-        "http_idempotency_integrity_failed"
-    );
-    Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
 }
 
 fn unavailable() -> Response {
@@ -302,7 +284,14 @@ mod tests {
     use crate::test_support::body_json;
 
     fn scope() -> ScopeKey {
-        ScopeKey::from_digest([1; 32])
+        ScopeKey::new(
+            infra_idempotency_store::CallerIdentity {
+                issuer: "issuer".into(),
+                kind: infra_idempotency_store::CallerKind::Subject,
+                value: "subject".into(),
+            },
+            b"key",
+        )
     }
 
     struct UnreachableCommand;
@@ -328,11 +317,6 @@ mod tests {
                 store: Store::new(pool.clone(), Duration::from_mins(1))
                     .expect("retention fits PostgreSQL"),
                 scope: scope(),
-                caller: CallerIdentity {
-                    issuer: "issuer".into(),
-                    kind: infra_idempotency_store::CallerKind::Subject,
-                    value: "subject".into(),
-                },
                 fingerprint: [9; 32],
                 operation_id: "test".into(),
                 deadline: RequestDeadline::from_deadline(
