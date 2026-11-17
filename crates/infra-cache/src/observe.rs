@@ -23,6 +23,23 @@ pub(crate) const ADMISSION_REFUSED_METRIC: &str = "cache_command_admission_refus
 pub(crate) const COMMANDS_IN_FLIGHT_METRIC: &str = "cache_commands_in_flight";
 pub(crate) const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total";
 pub(crate) const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
+const LOCAL_SIZE_REFUSALS_METRIC: &str = "cache_local_size_refusals_total";
+
+pub(super) enum LocalSizeRefusal {
+    Key,
+    Value,
+}
+
+impl LocalSizeRefusal {
+    pub(super) fn record(self, namespace: &'static str) {
+        let reason = match self {
+            Self::Key => "key_too_large",
+            Self::Value => "value_too_large",
+        };
+        metrics::counter!(LOCAL_SIZE_REFUSALS_METRIC, "cache" => namespace, "reason" => reason)
+            .increment(1);
+    }
+}
 
 fn operation_label(operation: Operation) -> &'static str {
     match operation {
@@ -119,6 +136,7 @@ impl<'a> OperationGuard<'a> {
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
             cache.mutation.outcome = tracing::field::Empty,
+            cache.error.reason = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
@@ -146,21 +164,28 @@ impl<'a> OperationGuard<'a> {
         }
         match error.failure() {
             CommandFailure::Stopped(Stopped::Cancelled) => self.finish(Outcome::Cancelled),
-            CommandFailure::Stopped(Stopped::Deadline) => self.fail(ErrorType::Timeout),
-            CommandFailure::Failed(error) => self.fail(error),
-            CommandFailure::InvalidTtl => self.fail(ErrorType::ServerErrorReply),
+            CommandFailure::Stopped(Stopped::Deadline) => self.fail(ErrorType::Timeout, None),
+            CommandFailure::Failed(error) => self.fail(error, None),
+            CommandFailure::PermissionDenied => {
+                self.fail(ErrorType::ServerErrorReply, Some("permission_denied"));
+            }
+            CommandFailure::InvalidTtl => self.fail(ErrorType::ServerErrorReply, None),
         }
     }
 
-    pub(crate) fn fail(mut self, error_type: ErrorType) {
+    pub(crate) fn fail(mut self, error_type: ErrorType, reason: Option<&'static str>) {
         let label = error_type.label();
         self.span.record("error.type", label);
+        if let Some(reason) = reason {
+            self.span.record("cache.error.reason", reason);
+        }
         self.span.record("otel.status_code", "ERROR");
         self.finish(Outcome::Failed(error_type));
         self.span.in_scope(|| {
             tracing::debug!(
                 cache.name = self.namespace,
                 cache.operation = operation_label(self.operation),
+                cache.error.reason = reason,
                 error.type = label,
                 "cache_operation_failed"
             );
@@ -194,6 +219,11 @@ pub(crate) fn describe() {
         ADMISSION_REFUSED_METRIC,
         Unit::Count,
         "Cache commands refused because their admission slots are full"
+    );
+    metrics::describe_counter!(
+        LOCAL_SIZE_REFUSALS_METRIC,
+        Unit::Count,
+        "Cache operations refused locally because the encoded key or supplied value exceeds its configured limit"
     );
     metrics::describe_gauge!(
         COMMANDS_IN_FLIGHT_METRIC,

@@ -32,9 +32,13 @@ values still held by callers. Check peak RSS, lookup p99 and source load
 under bursts and cache loss before promotion. Budget source capacity for
 refused lookups and entries that exceed the value limit.
 
-For a cache-aside read, reserve the time the source needs from the parent
-operation's remaining budget. Skip the lookup when the reserve consumes that
-budget. Otherwise pass a child context capped at the remainder to `get`.
-After a miss, size refusal, or lookup timeout, check the original context
-before calling the source. Propagate cancellation of the original operation.
+At feature startup pass its optional `CacheNamespace` and the time its source
+needs to `CacheLookup::new`. When `lookup` returns `Ok(None)`, call the source
+with the original operation context. The source, key, TTL, fill, and
+invalidation remain feature decisions. Use `CacheNamespace::get` when the
+caller needs the exact cache result.
+
+For repeated fallback, check `cache_local_size_refusals_total` for key or value
+limits and `cache.error.reason=permission_denied` on cache command spans for
+missing Valkey ACL grants.
 <!-- template:end cache:docs-cache-decisions -->
