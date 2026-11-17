@@ -1,17 +1,17 @@
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use axum::extract::{Request, State};
-use axum::middleware::Next;
+use axum::extract::Request;
 use axum::response::Response;
 use foldhash::HashMap;
-use futures_util::future::BoxFuture;
 use http::header::AUTHORIZATION;
-use infra_serviceauth::{Caller, ReceiverTokens, ServiceName, Verifier};
-use tonic::body::Body;
+pub use infra_serviceauth::Caller;
+use infra_serviceauth::{ServiceName, Verifier};
+use operation_context::OperationContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use crate::{Client, Failure};
+use crate::Failure;
+use crate::call::server_stopped;
+use crate::router::reject_with_budget;
 
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
@@ -19,6 +19,10 @@ pub const REFLECTION_PATHS: [&str; 2] = [
 ];
 
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
+
+pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
+    extensions.remove::<Caller>();
+}
 
 pub(crate) struct CallerAdmission {
     verifier: Option<Verifier>,
@@ -42,32 +46,33 @@ impl CallerAdmission {
 }
 
 pub(crate) async fn admit_caller(
-    State(admission): State<Arc<CallerAdmission>>,
+    admission: &CallerAdmission,
+    context: &OperationContext,
     mut request: Request,
-    next: Next,
-) -> Response {
+) -> Result<Request, Response> {
     let Some(verifier) = &admission.verifier else {
         request.headers_mut().remove(AUTHORIZATION);
-        return next.run(request).await;
-    };
-    let Some(context) = crate::router::opening_context(&request).cloned() else {
-        return crate::status::internal_status().into_http();
+        return Ok(request);
     };
     if let Some(reason) = context.stopped() {
-        return crate::call::Side::Server.stopped(reason).into_http();
+        return Err(server_stopped(reason).into_http());
     }
-    let authorization = request
-        .headers()
-        .get_all(AUTHORIZATION)
-        .iter()
-        .map(http::HeaderValue::as_bytes);
-    let result = verifier.authenticate(authorization);
+    let result = {
+        let authorization = request
+            .headers()
+            .get_all(AUTHORIZATION)
+            .iter()
+            .map(http::HeaderValue::as_bytes);
+        verifier.authenticate(authorization)
+    };
     if let Some(reason) = context.stopped() {
-        return crate::call::Side::Server.stopped(reason).into_http();
+        return Err(server_stopped(reason).into_http());
     }
     let caller = match result {
         Ok(caller) => caller,
-        Err(failure) => return crate::router::reject(request, verification_status(failure)).await,
+        Err(failure) => {
+            return Err(reject_with_budget(context, request, verification_status(failure)).await);
+        }
     };
     let path = request.uri().path();
     let rule = admission.caller_rules.get(path);
@@ -80,15 +85,15 @@ pub(crate) async fn admit_caller(
         );
         let status = Failure::new(service_failure::Code::Forbidden)
             .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
-        return crate::router::reject(request, status).await;
+        return Err(reject_with_budget(context, request, status).await);
     }
     if let Some(reason) = context.stopped() {
-        return crate::call::Side::Server.stopped(reason).into_http();
+        return Err(server_stopped(reason).into_http());
     }
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
-    request.extensions_mut().insert::<Caller>(caller);
     request.headers_mut().remove(AUTHORIZATION);
-    next.run(request).await
+    request.extensions_mut().insert::<Caller>(caller);
+    Ok(request)
 }
 
 fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
@@ -101,60 +106,10 @@ fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
     .into()
 }
 
-#[derive(Clone, Debug)]
-pub struct ServiceTokenClient {
-    tokens: ReceiverTokens,
-    resource: Client,
-}
-
-impl Client {
-    #[must_use]
-    pub fn with_service_tokens(self, tokens: ReceiverTokens) -> ServiceTokenClient {
-        ServiceTokenClient {
-            tokens,
-            resource: self,
-        }
-    }
-}
-
-impl tower::Service<http::Request<Body>> for ServiceTokenClient {
-    type Response = http::Response<Body>;
-    type Error = tonic::Status;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let mut prepared = self.resource.prepare_call(request);
-        if prepared.headers_mut().contains_key(AUTHORIZATION) {
-            return Box::pin(std::future::ready(Err(prepared.refuse(
-                tonic::Status::internal("authorization conflicts with the service token"),
-            ))));
-        }
-        let tokens = self.tokens.clone();
-        Box::pin(prepared.send_inner(
-            move |headers| {
-                let authorization = tokens.authorization().map_err(|error| {
-                    let mut status = tonic::Status::unavailable("service token unavailable");
-                    status.set_source(Arc::new(error));
-                    status
-                })?;
-                if let Some(value) = authorization {
-                    headers.insert(AUTHORIZATION, value);
-                }
-                Ok(())
-            },
-            None,
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -163,15 +118,13 @@ mod tests {
         JwtType, TrustRegistry,
         test_support::{TestKey, now_secs, registry},
     };
-    use operation_context::OperationContext;
-    use tower::ServiceExt as _;
 
     use super::*;
 
     const METHOD: &str = "/example.v1.EchoService/Unary";
     const TYPE: &str = "example-svc+jwt";
 
-    fn orders_only_router() -> (axum::Router, String, Arc<AtomicBool>) {
+    fn orders_only_admission() -> (CallerAdmission, String, String) {
         let orders = TestKey::new("orders/2026-10");
         let billing = TestKey::new("billing/2026-10");
         let trust = TrustRegistry::parse(&registry(&[
@@ -189,50 +142,32 @@ mod tests {
             METHOD.to_owned(),
             Box::from([ServiceName::parse("orders").unwrap()]),
         );
-        let admission = Arc::new(CallerAdmission::new(Some(verifier), rules));
-
-        let reached_handler = Arc::new(AtomicBool::new(false));
-        let handler_flag = Arc::clone(&reached_handler);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
-        )]
-        let app = axum::Router::new()
-            .route(
-                METHOD,
-                axum::routing::post(move || {
-                    let handler_flag = Arc::clone(&handler_flag);
-                    async move {
-                        handler_flag.store(true, Ordering::SeqCst);
-                        tonic::Status::ok("").into_http::<Body>()
-                    }
-                }),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                admission,
-                admit_caller,
-            ));
-
         let now = now_secs();
-        let billing_token = billing.sign(
-            &serde_json::json!({"alg": "ES256", "typ": TYPE, "kid": billing.kid()}),
-            &serde_json::json!({
-                "iss": "billing",
-                "sub": "billing",
-                "aud": "catalog",
-                "iat": now,
-                "exp": now + 60,
-            }),
-        );
-        (app, format!("Bearer {billing_token}"), reached_handler)
+        let sign = |key: &TestKey, name: &str| {
+            let token = key.sign(
+                &serde_json::json!({"alg": "ES256", "typ": TYPE, "kid": key.kid()}),
+                &serde_json::json!({
+                    "iss": name,
+                    "sub": name,
+                    "aud": "catalog",
+                    "iat": now,
+                    "exp": now + 60,
+                }),
+            );
+            format!("Bearer {token}")
+        };
+        (
+            CallerAdmission::new(Some(verifier), rules),
+            sign(&billing, "billing"),
+            sign(&orders, "orders"),
+        )
     }
 
     #[tokio::test]
-    async fn a_stopped_context_answers_before_caller_admission() {
-        let (app, bearer, reached_handler) = orders_only_router();
-
+    async fn stopped_context_answers_before_caller_admission() {
+        let (admission, billing_bearer, orders_bearer) = orders_only_admission();
         let body_polls = Arc::new(AtomicUsize::new(0));
-        let make_request = |context: OperationContext, authorization: Option<&str>| {
+        let make_request = |authorization: Option<&str>| {
             let polls = Arc::clone(&body_polls);
             let stream = futures_util::stream::iter(0..2).map(move |_| {
                 polls.fetch_add(1, Ordering::SeqCst);
@@ -242,22 +177,16 @@ mod tests {
             if let Some(value) = authorization {
                 builder = builder.header(AUTHORIZATION, value);
             }
-            let mut request = builder.body(axum::body::Body::from_stream(stream)).unwrap();
-            request.extensions_mut().insert(context);
-            request
+            builder.body(axum::body::Body::from_stream(stream)).unwrap()
         };
 
-        for authorization in [Some(bearer.as_str()), None] {
-            let response = app
-                .clone()
-                .oneshot(make_request(
-                    OperationContext::with_timeout(Duration::ZERO),
-                    authorization,
-                ))
+        for authorization in [Some(billing_bearer.as_str()), None] {
+            let context = OperationContext::with_timeout(Duration::ZERO);
+            let rejected = admit_caller(&admission, &context, make_request(authorization))
                 .await
-                .unwrap();
+                .unwrap_err();
             assert_eq!(
-                tonic::Status::from_header_map(response.headers())
+                tonic::Status::from_header_map(rejected.headers())
                     .unwrap()
                     .code(),
                 tonic::Code::DeadlineExceeded
@@ -266,33 +195,39 @@ mod tests {
 
         let cancelled_context = OperationContext::unbounded();
         cancelled_context.cancellation().cancel();
-        let cancelled = app
-            .clone()
-            .oneshot(make_request(cancelled_context, Some(&bearer)))
-            .await
-            .unwrap();
+        let cancelled = admit_caller(
+            &admission,
+            &cancelled_context,
+            make_request(Some(&billing_bearer)),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             tonic::Status::from_header_map(cancelled.headers())
                 .unwrap()
                 .code(),
             tonic::Code::Cancelled
         );
-
-        assert!(!reached_handler.load(Ordering::SeqCst));
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
 
-        let live = app
-            .oneshot(make_request(
-                OperationContext::with_timeout(Duration::from_secs(5)),
-                Some(&bearer),
-            ))
+        let live = OperationContext::with_timeout(Duration::from_secs(5));
+        let denied = admit_caller(&admission, &live, make_request(Some(&billing_bearer)))
             .await
-            .unwrap();
+            .unwrap_err();
         assert_eq!(
-            tonic::Status::from_header_map(live.headers())
+            tonic::Status::from_header_map(denied.headers())
                 .unwrap()
                 .code(),
             tonic::Code::PermissionDenied
         );
+
+        let admitted = admit_caller(&admission, &live, make_request(Some(&orders_bearer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            admitted.extensions().get::<Caller>().unwrap().name().as_str(),
+            "orders"
+        );
+        assert!(!admitted.headers().contains_key(AUTHORIZATION));
     }
 }

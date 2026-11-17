@@ -258,6 +258,7 @@ _PROFILE_SECTION_ORDER = (
     "grpc",
     "grpc-authn",
     "grpc-transport-tests",
+    "grpc-client-tests",
     "grpc-jwt",
     "outbound-auth-grpc",
     "runtime-progress",
@@ -444,6 +445,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-authn")
         if inputs.authn in {"none", "oidc-introspection"}:
             selected.add("grpc-transport-tests")
+        if inputs.authn in {"none", "oidc-introspection"} or inputs.service_auth == "jwt":
+            selected.add("grpc-client-tests")
         if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
             selected.add("postgres-grpc-consumers")
         if inputs.database == "postgres" and inputs.authn == "oidc-introspection":

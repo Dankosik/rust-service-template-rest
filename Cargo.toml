@@ -39,6 +39,7 @@ infra-http = { path = "crates/infra-http" }
 service-failure = { path = "crates/service-failure" }
 # template:begin grpc:workspace-grpc-crates
 infra-grpc = { path = "crates/infra-grpc" }
+infra-outbound-grpc = { path = "crates/infra-outbound-grpc" }
 grpc-contracts = { path = "crates/grpc-contracts" }
 # template:end grpc:workspace-grpc-crates
 # template:begin authn:workspace-authn-crate
@@ -147,6 +148,7 @@ prost-types = { version = "=0.14.4", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls
 rustls = { version = "0.23.46", default-features = false }
+rustls-platform-verifier = { version = "0.7.0", default-features = false }
 # template:end rustls:workspace-rustls
 
 utoipa = { version = "6.0.0", default-features = false }
@@ -201,7 +203,6 @@ async-stream = { version = "0.3.6", default-features = false }
 foldhash = { version = "0.2.0", default-features = false }
 arc-swap = { version = "1.9.2", default-features = false }
 arrayvec = { version = "0.7.8", default-features = false }
-atomic-take = { version = "1.1.0", default-features = false }
 compact_str = { version = "0.10.0", default-features = false }
 crossbeam-channel = { version = "0.5.17", default-features = false }
 parking_lot = { version = "0.12.5", default-features = false }
@@ -239,7 +240,6 @@ wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
 # template:begin outbound-http:workspace-outbound-http-transport
 hyper-rustls = { version = "0.27.9", default-features = false }
-rustls-platform-verifier = { version = "0.7.0", default-features = false }
 # template:end outbound-http:workspace-outbound-http-transport
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }

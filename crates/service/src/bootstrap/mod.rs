@@ -750,9 +750,9 @@ mod tests {
         .await
         .unwrap();
         let address = serving.grpc_listener.as_ref().unwrap().local_addr();
-        let resource = infra_grpc::Client::try_new(
+        let resource = infra_outbound_grpc::Client::try_new(
             &format!("http://{address}"),
-            infra_grpc::ClientSecurity::Plaintext,
+            infra_outbound_grpc::ClientSecurity::Plaintext,
             Duration::from_secs(5),
         )
         .unwrap();

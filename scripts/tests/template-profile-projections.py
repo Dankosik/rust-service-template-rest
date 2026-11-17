@@ -1092,7 +1092,13 @@ def _check_service_auth_projections(source: Path, candidate: str, initializer, w
             manifest = nodes["crates/infra-grpc/Cargo.toml"]
             assert isinstance(manifest.payload, bytes)
             grpc_manifest = tomllib.loads(manifest.payload.decode())
-            if ("infra-serviceauth" in grpc_manifest["dependencies"]) != retained:
+            outbound_manifest = nodes["crates/infra-outbound-grpc/Cargo.toml"]
+            assert isinstance(outbound_manifest.payload, bytes)
+            outbound_grpc_manifest = tomllib.loads(outbound_manifest.payload.decode())
+            if (
+                ("infra-serviceauth" in grpc_manifest["dependencies"]) != retained
+                or ("infra-serviceauth" in outbound_grpc_manifest["dependencies"]) != retained
+            ):
                 raise initializer.Refusal("gRPC transport and the service-token crate disagree")
             workspace = nodes["Cargo.toml"]
             assert isinstance(workspace.payload, bytes)

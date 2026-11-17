@@ -118,7 +118,8 @@ configured.
   ([`infra-oauth2-client-credentials`](crates/infra-oauth2-client-credentials)).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
-- `GRPC=enabled`: tonic gRPC on a separate listener ([`infra-grpc`](crates/infra-grpc)).
+- `GRPC=enabled`: tonic gRPC on a separate listener and an outbound client
+  ([`infra-grpc`](crates/infra-grpc), [`infra-outbound-grpc`](crates/infra-outbound-grpc)).
 <!-- template:end grpc:readme-grpc-profile -->
 <!-- template:begin service-auth:docs-readme-service-auth-profile -->
 - `SERVICE_AUTH=jwt`: signed service-to-service tokens for gRPC

@@ -21,7 +21,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
-use infra_grpc::{Client, ClientSecurity, ClientTimeout};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
 use operation_context::OperationContext;
 use tokio::{
     net::TcpListener,
@@ -234,7 +234,7 @@ impl hyper::body::Body for GatedTrailers {
 async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Body> {
     if request.uri().path() == "/budget-stream" {
         peer.record(header_string(request.headers(), "authorization"));
-        if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         let status = request
@@ -271,7 +271,7 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
-        if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         return tonic::server::Grpc::new(
