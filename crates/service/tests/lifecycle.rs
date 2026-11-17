@@ -401,7 +401,8 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
     let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
     silent.set_nonblocking(true).expect("nonblocking listener");
     let port = silent.local_addr().expect("silent listener").port();
-    let dsn = format!("postgres://service@127.0.0.1:{port}/service?sslmode=disable");
+    let dsn =
+        format!("postgres://service:startup-fixture@127.0.0.1:{port}/service?sslmode=disable");
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
         ("APP__POSTGRES__ENABLED", "true"),
