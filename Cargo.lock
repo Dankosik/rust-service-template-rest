@@ -5196,6 +5196,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-health",
+ "tower",
  "tracing",
  "ureq",
  "utoipa",

@@ -36,7 +36,9 @@ pub(super) fn bind_listeners(
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
-        let routes = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
+        let reader = readiness.reader();
+        let routes = diagnostics_router(metrics.clone(), move || reader.is_ready())
+            .merge(infra_http::liveness_router());
         let diagnostics = resources
             .listeners
             .diagnostics

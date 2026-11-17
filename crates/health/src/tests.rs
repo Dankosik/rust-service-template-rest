@@ -450,8 +450,6 @@ async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_n
 
 #[tokio::test(start_paused = true)]
 async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
-    let recorder = recorder();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
     let hold = Arc::new(AtomicBool::new(true));
     let release = Arc::new(tokio::sync::Notify::new());
     let readiness = Readiness::new(
@@ -468,7 +466,6 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
     release.notify_one();
     refresh.await;
     assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
-    assert_sample(&recorder.handle().render(), "readiness_ready 0");
 }
 
 #[tokio::test(start_paused = true)]
@@ -578,63 +575,6 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
         );
     }
     assert_sample(&scrape, "readiness_checks_total{outcome=\"timed_out\"} 2");
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_ready_gauge_is_the_published_verdict() {
-    let ready = |recorder: &metrics_exporter_prometheus::PrometheusRecorder| {
-        recorder
-            .handle()
-            .render()
-            .lines()
-            .find(|line| line.starts_with("readiness_ready "))
-            .map(str::to_owned)
-    };
-
-    let recorder_before = recorder();
-    {
-        let _recorder = metrics::set_default_local_recorder(&recorder_before);
-        let _ = flaky(true);
-    }
-    assert_eq!(
-        ready(&recorder_before).as_deref(),
-        Some("readiness_ready 0")
-    );
-
-    let absorbed_failure = recorder();
-    {
-        let _recorder = metrics::set_default_local_recorder(&absorbed_failure);
-        let (readiness, flag, _) = flaky(true);
-        readiness.refresh().await;
-        flag.store(false, Ordering::Relaxed);
-        readiness.refresh().await;
-    }
-    assert_eq!(
-        ready(&absorbed_failure).as_deref(),
-        Some("readiness_ready 1")
-    );
-
-    let withdrawn = recorder();
-    {
-        let _recorder = metrics::set_default_local_recorder(&withdrawn);
-        let (readiness, flag, _) = flaky(true);
-        readiness.refresh().await;
-        flag.store(false, Ordering::Relaxed);
-        for _ in 0..3 {
-            readiness.refresh().await;
-        }
-    }
-    assert_eq!(ready(&withdrawn).as_deref(), Some("readiness_ready 0"));
-
-    let draining = recorder();
-    {
-        let _recorder = metrics::set_default_local_recorder(&draining);
-        let (readiness, _, _) = flaky(true);
-        readiness.refresh().await;
-        readiness.start_drain();
-        readiness.refresh().await;
-    }
-    assert_eq!(ready(&draining).as_deref(), Some("readiness_ready 0"));
 }
 
 #[tokio::test(start_paused = true)]

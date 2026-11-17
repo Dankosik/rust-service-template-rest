@@ -88,8 +88,6 @@ const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
-const READY_METRIC: &str = "readiness_ready";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
     #[error("refresh interval must be between {min:?} and {max:?}, got {0:?}", min = RefreshPolicy::MIN_DURATION, max = RefreshPolicy::MAX_DURATION)]
@@ -147,7 +145,7 @@ struct State {
 }
 
 impl State {
-    fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+    fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
         if self.draining {
             return Err(NotReady::Draining);
         }
@@ -160,7 +158,20 @@ impl State {
                 stale_after,
             });
         }
-        check.verdict.clone().map_err(NotReady::from)
+        Ok(check)
+    }
+
+    fn ready_check(&self, now: Instant, stale_after: Duration) -> Option<&Check> {
+        self.fresh_check(now, stale_after)
+            .ok()
+            .filter(|check| check.verdict.is_ok())
+    }
+
+    fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+        self.fresh_check(now, stale_after)?
+            .verdict
+            .clone()
+            .map_err(NotReady::from)
     }
 }
 
@@ -220,11 +231,6 @@ impl Readiness {
             metrics::Unit::Count,
             "Completed readiness probe checks by probe and outcome."
         );
-        metrics::describe_gauge!(
-            READY_METRIC,
-            "1 while the last completed check published a ready verdict and the service is not draining, 0 otherwise."
-        );
-        metrics::gauge!(READY_METRIC).set(0.0);
         Self {
             tx: watch::Sender::new(State {
                 draining: false,
@@ -252,7 +258,6 @@ impl Readiness {
             }
             state.draining = true;
             self.draining.store(true, Ordering::Release);
-            metrics::gauge!(READY_METRIC).set(0.0);
             true
         });
     }
@@ -275,8 +280,7 @@ impl Readiness {
         self.tx.send_if_modified(|state| {
             let at = Instant::now();
             let previous = state.last_check.as_ref();
-            let was_ready =
-                !state.draining && previous.is_some_and(|check| check.is_ready_at(at, stale_after));
+            let was_ready = state.ready_check(at, stale_after).is_some();
             let (next, absorbed) =
                 apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
             if !state.draining {
@@ -288,7 +292,6 @@ impl Readiness {
             }
             let now_ready = !state.draining && next.verdict.is_ok();
             let notify = !state.draining && (previous.is_none() || was_ready != now_ready);
-            metrics::gauge!(READY_METRIC).set(f64::from(now_ready));
             state.last_check = Some(next);
             notify
         });
@@ -424,7 +427,10 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.verdict().is_ok()
+        self.rx
+            .borrow()
+            .ready_check(Instant::now(), self.stale_after)
+            .is_some()
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
@@ -440,18 +446,15 @@ impl ReadinessReader {
         loop {
             let stale_at = {
                 let state = self.rx.borrow_and_update();
-                let ready = state.verdict(Instant::now(), self.stale_after).is_ok();
+                let ready_check = state.ready_check(Instant::now(), self.stale_after);
+                let ready = ready_check.is_some();
                 if ready != seen {
                     return Some(ready);
                 }
                 if state.draining {
                     return None;
                 }
-                state
-                    .last_check
-                    .as_ref()
-                    .filter(|_| ready)
-                    .map(|check| check.at + self.stale_after + Duration::from_nanos(1))
+                ready_check.map(|check| check.at + self.stale_after + Duration::from_nanos(1))
             };
             let changed = self.rx.changed();
             match stale_at {
