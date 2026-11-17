@@ -12,12 +12,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-hotpath = [
-    "dep:hotpath", "hotpath/hotpath",
-    # template:begin inbound-webhooks:http-hotpath-webhooks-feature
-    "infra-webhooks/hotpath",
-    # template:end inbound-webhooks:http-hotpath-webhooks-feature
-]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 operation-context = { workspace = true }
@@ -30,10 +25,6 @@ axum = { workspace = true, features = ["http1", "tokio", "matched-path", "origin
 mime = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
-# template:begin inbound-webhooks:http-webhooks-dependency
-derive_more = { workspace = true, features = ["debug"] }
-infra-webhooks = { workspace = true }
-# template:end inbound-webhooks:http-webhooks-dependency
 # template:begin authn:http-authn-dependency
 infra-bearerauthn = { workspace = true }
 secrecy = { workspace = true }
@@ -77,9 +68,6 @@ utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
-# template:begin inbound-webhooks:http-webhooks-test-dependencies
-infra-postgres = { workspace = true }
-# template:end inbound-webhooks:http-webhooks-test-dependencies
 # template:begin grpc:http-tls-test-dependencies
 http = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }

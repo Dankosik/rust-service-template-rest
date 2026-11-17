@@ -26,6 +26,9 @@ workspace = true
 hotpath = [
     "dep:hotpath", "hotpath/hotpath", "hotpath/threads", "hotpath/tokio",
     "hotpath/axum-0-8", "infra-http/hotpath", "infra-telemetry/hotpath",
+    # template:begin inbound-webhooks:service-hotpath-webhooks-feature
+    "infra-webhooks/hotpath",
+    # template:end inbound-webhooks:service-hotpath-webhooks-feature
     # template:begin postgres:service-hotpath-postgres-feature
     "infra-postgres/hotpath",
     # template:end postgres:service-hotpath-postgres-feature
