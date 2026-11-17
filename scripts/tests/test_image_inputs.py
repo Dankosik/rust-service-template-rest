@@ -77,13 +77,6 @@ class Coverage(unittest.TestCase):
         checker = self.root / "scripts/checks/image_inputs.py"
         checker.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / "scripts/checks/image_inputs.py", checker)
-        (self.root / "Makefile").write_text(
-            ".PHONY: docs-check\n"
-            "docs-check:\n"
-            f"\t{sys.executable} scripts/checks/image_inputs.py --repo .\n"
-            "\tdocker run --rm lychee\n",
-            encoding="utf-8",
-        )
 
     def replace(self, relative: str, before: str, after: str) -> None:
         path = self.root / relative
@@ -179,37 +172,51 @@ class Coverage(unittest.TestCase):
         (self.root / IAC).write_text(image.replace("source:", "...overrides, source:"), encoding="utf-8")
         self.run_check("unsupported computed/spread")
 
-    def test_docs_gate_refuses_before_link_checker(self) -> None:
+    def test_docs_gate_propagates_image_input_and_repository_link_failures(self) -> None:
+        shutil.copytree(ROOT / "make", self.root / "make", ignore=shutil.ignore_patterns("source.mk"))
+        (self.root / "tools").mkdir()
+        shutil.copy2(ROOT / "tools/versions.env", self.root / "tools/versions.env")
+        shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, capture_output=True)
+        (self.root / "README.md").write_text("# Fixture\n", encoding="utf-8")
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        marker = self.root / "docker-called"
         docker = bin_dir / "docker"
-        docker.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n', encoding="utf-8")
+        docker.write_text(
+            '#!/bin/sh\n'
+            'case "$*" in\n'
+            '  info) exit 0 ;;\n'
+            '  *" -- README.md") echo "repository link check"; exit "$LYCHEE_STATUS" ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n',
+            encoding="utf-8",
+        )
         docker.chmod(0o755)
         env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
 
+        def check(lychee_status: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["make", "docs-check"],
+                cwd=self.root,
+                env={**env, "LYCHEE_STATUS": str(lychee_status)},
+                capture_output=True,
+                text=True,
+            )
+
         self.remove_watch("migrations/**")
-        failed = subprocess.run(
-            ["make", "docs-check"],
-            cwd=self.root,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        failed = check(0)
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("migrations/**: image input is uncovered", failed.stderr)
-        self.assertFalse(marker.exists(), "link checker ran after policy refusal")
+        self.assertNotIn("repository link check", failed.stdout)
 
         (self.root / IAC).write_text(FIXTURE[IAC], encoding="utf-8")
-        passed = subprocess.run(
-            ["make", "docs-check"],
-            cwd=self.root,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        passed = check(0)
         self.assertEqual(passed.returncode, 0, passed.stderr)
-        self.assertTrue(marker.exists())
+        self.assertIn("repository link check", passed.stdout)
+
+        failed = check(7)
+        self.assertIn("repository link check", failed.stdout)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
 
 
 if __name__ == "__main__":

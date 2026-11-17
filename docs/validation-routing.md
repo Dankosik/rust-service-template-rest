@@ -1,11 +1,9 @@
 # Validation Routing
 
-[AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local completion;
-[`make/template.mk`](../make/template.mk), [`make/profile-postgres.mk`](../make/profile-postgres.mk),
-and [`make/source.mk`](../make/source.mk) (`make help`) are the single source of
-truth for exact verification targets, prerequisites, and flags, and
-[`scripts/verify/surfaces.py`](../scripts/verify/surfaces.py) is the
-surface classifier shared by CI and `make verify`.
+[AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local completion.
+Run `make help` to see the verification commands available for this checkout
+and its selected profiles. CI and `make verify` use the same
+[surface classifier](../scripts/verify/surfaces.py).
 
 ## Policy rules beyond `make help`
 

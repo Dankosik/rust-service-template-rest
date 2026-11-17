@@ -92,7 +92,6 @@ runs:
         RUNTIME_IMAGE_CACHE_FROM: type=registry,ref=${{ steps.meta.outputs.image_repo }}:buildcache
         RUNTIME_IMAGE_CACHE_TO: type=registry,ref=${{ steps.meta.outputs.image_repo }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd
         VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
-        VALIDATION_BUILDER_EXCLUSIVE: "1"
       run: |
         set -euo pipefail
         metadata_dir=$(mktemp -d "${RUNNER_TEMP}/runtime-export.XXXXXXXX")

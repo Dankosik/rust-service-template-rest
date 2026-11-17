@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for npx.py, tools.py, cargo_artifact.py, publish_metadata.py, and harness/sync.py."""
+"""Tests for tooling, Make gates, image scripts, and harness generation."""
 
 from __future__ import annotations
 
@@ -27,6 +27,68 @@ def _write_executable(path: Path, body: str) -> str:
     path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
     path.chmod(0o755)
     return str(path)
+
+
+class MakeGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="make-gate-test-")))
+        shutil.copytree(ROOT / "make", self.root / "make", ignore=shutil.ignore_patterns("source.mk"))
+        (self.root / "tools").mkdir()
+        shutil.copy2(ROOT / "tools/versions.env", self.root / "tools/versions.env")
+        shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
+
+    def run_make(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "LC_ALL": "C", "PATH": f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"}
+        env.pop("DATABASE", None)
+        return subprocess.run(["make", *args], cwd=self.root, env=env, capture_output=True, text=True)
+
+    def install_source_make(self) -> Path:
+        source = ROOT / "make/source.mk"
+        if not source.is_file():
+            self.skipTest("source template only")
+        shutil.copy2(source, self.root / "make/source.mk")
+        scripts = self.root / "scripts/template"
+        scripts.mkdir(parents=True)
+        return scripts
+
+    def test_verify_check_propagates_initializer_matrix_failure(self) -> None:
+        scripts = self.install_source_make()
+        _write_executable(
+            self.root / "bin/python3",
+            'case "$*" in\n'
+            '  "-m unittest "*) exit 0 ;;\n'
+            '  "scripts/template/matrix.py --self-test") echo "matrix self-test"; exit "$MATRIX_STATUS" ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac',
+        )
+        (scripts / "check_init.sh").write_text('echo "recorder self-test ran"\n', encoding="utf-8")
+
+        failed = self.run_make("verify-check", "MATRIX_STATUS=7")
+        self.assertIn("matrix self-test", failed.stdout, failed.stderr)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertNotIn("recorder self-test ran", failed.stdout)
+
+        passed = self.run_make("verify-check", "MATRIX_STATUS=0")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("recorder self-test ran", passed.stdout)
+
+    def test_generated_make_has_no_initializer(self) -> None:
+        result = self.run_make("template-init")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No rule to make target", result.stderr)
+
+    def test_source_make_captures_initializer_inputs_literally(self) -> None:
+        scripts = self.install_source_make()
+        (scripts / "init.py").write_text(
+            'import json, os\n'
+            'from pathlib import Path\n'
+            'Path("inputs.json").write_text(json.dumps([os.environ["DESCRIPTION"], os.environ["DATABASE"]]))\n',
+            encoding="utf-8",
+        )
+        description = "Catalog ($5) $(SERVICE_NAME)"
+        result = self.run_make("template-init", "SERVICE_NAME=catalog-api", f"DESCRIPTION={description}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.root / "inputs.json").read_text()), [description, "none"])
 
 
 class NpxWrapperTests(unittest.TestCase):

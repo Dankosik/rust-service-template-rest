@@ -61,6 +61,7 @@ SURFACE_NAMES: tuple[str, ...] = (
     "validation_system",
     "template_engine",
     "module_initializer",
+    "initializer_source",
     "initializer_runtime",
     "initializer_artifacts",
     "no_validation_required",
@@ -216,7 +217,7 @@ def all_surfaces_report(repo: Path, *, post_merge: bool = False) -> Classificati
     if profiles["outbound_auth"] != "oauth2-client-credentials":
         surfaces["oauth_integration"] = False
     if not source_only:
-        for key in ("template_engine", "module_initializer", "initializer_runtime", "initializer_artifacts"):
+        for key in ("template_engine", "module_initializer", "initializer_source", "initializer_runtime", "initializer_artifacts"):
             surfaces[key] = False
     if post_merge and (surfaces["duplication"] or surfaces["architecture"]):
         surfaces["quality_tooling"] = True
@@ -465,7 +466,7 @@ def classify_report(
         ):
             mark("tool_manifest")
 
-        if _matches(
+        if file != "build/docker/runtime-progress.Dockerfile" and _matches(
             file,
             ".dockerignore", "build/docker/*", "scripts/image/build.sh", "scripts/image/check.sh",
             "scripts/image/inventory.py", "scripts/image/scan.sh", "scripts/image/cargo_artifact.py",
@@ -527,7 +528,7 @@ def classify_report(
         ):
             mark("validation_system")
 
-        if _matches(
+        if file != "scripts/template/sync.py" and _matches(
             file,
             "template-owned.paths", "make/source.mk", "scripts/template/*", "scripts/tests/template-*",
         ):
@@ -537,7 +538,9 @@ def classify_report(
             if _matches(file, "scripts/template/matrix.py", "scripts/template/check_init.sh"):
                 mark("validation_system")
 
-            if _matches(
+            if file == "scripts/template/sync.py":
+                mark("module_initializer", "initializer_source")
+            elif _matches(
                 file,
                 "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "template.lock",
                 "Makefile", "make/*.mk", "api/openapi/*", "env/config/*",
@@ -611,8 +614,11 @@ def classify_report(
         if not matched:
             unclassified.append(file)
 
-    if source_only and (surfaces["initializer_runtime"] or surfaces["runtime_image"]):
-        surfaces["initializer_artifacts"] = True
+    if source_only:
+        if surfaces["initializer_runtime"]:
+            surfaces["initializer_source"] = True
+        if surfaces["initializer_runtime"] or surfaces["runtime_image"]:
+            surfaces["initializer_artifacts"] = True
 
     if post_merge and (surfaces["duplication"] or surfaces["architecture"]):
         surfaces["quality_tooling"] = True
