@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_claim_access_preserves_evidence_and_custom_last_member_semantics() {
+    fn typed_claim_access_reads_wide_integers_and_refuses_a_repeated_requested_member() {
         #[derive(serde::Deserialize)]
         struct ApplicationClaims {
             tenant: String,
@@ -719,8 +719,13 @@ mod tests {
             #[serde(rename = "tenant")]
             _tenant: u64,
         }
+        #[derive(Debug, serde::Deserialize)]
+        struct RepeatedMember {
+            #[serde(rename = "region")]
+            _region: String,
+        }
         let principal = validate_introspection_claims(
-            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value","accounts":[{"id":"old","id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
+            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"private-value","region":"first","region":"second","accounts":[{"id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
             &policy(), 100, access_token(),
         ).unwrap().principal;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
@@ -734,6 +739,10 @@ mod tests {
         let error = principal.claims::<WrongShape>().unwrap_err();
         assert_eq!(error, crate::ClaimAccessError::InvalidShape);
         assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
+        assert_eq!(
+            principal.claims::<RepeatedMember>().unwrap_err(),
+            crate::ClaimAccessError::InvalidShape
+        );
     }
 
     #[test]
