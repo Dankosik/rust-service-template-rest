@@ -317,13 +317,10 @@ impl Service<http::Uri> for GrpcConnector {
         let tls = self.tls.clone();
         Box::pin(async move {
             let dial = async move {
-                let tcp = http.call(uri).await.map_err(|error| -> BoxError {
-                    if is_io_timeout(&error) {
-                        Box::new(tonic::TimeoutExpired(()))
-                    } else {
-                        Box::new(error)
-                    }
-                })?;
+                let tcp = http
+                    .call(uri)
+                    .await
+                    .map_err(|error| Box::new(error) as BoxError)?;
                 let tcp = tcp.into_inner();
                 match tls {
                     None => Ok(TokioIo::new(Either::Left(tcp))),
@@ -331,7 +328,7 @@ impl Service<http::Uri> for GrpcConnector {
                         let tls_stream = connector
                             .connect(server_name, tcp)
                             .await
-                            .map_err(handshake_error)?;
+                            .map_err(|error| Box::new(error) as BoxError)?;
                         if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
                             return Err(Box::new(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -344,32 +341,22 @@ impl Service<http::Uri> for GrpcConnector {
             };
             tokio::time::timeout(CONNECT_TIMEOUT, dial)
                 .await
-                .unwrap_or_else(|_elapsed| Err(Box::new(tonic::TimeoutExpired(()))))
+                .unwrap_or_else(|elapsed| {
+                    Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        elapsed,
+                    )))
+                })
         })
     }
-}
-
-fn handshake_error(error: std::io::Error) -> BoxError {
-    if error.kind() == std::io::ErrorKind::TimedOut {
-        Box::new(tonic::TimeoutExpired(()))
-    } else {
-        Box::new(error)
-    }
-}
-
-fn is_io_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
-    causes(error).any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::TimedOut)
-    })
 }
 
 fn parse_destination(
     raw: &str,
     security: ClientSecurity,
 ) -> Result<(http::Uri, Option<TlsTarget>), ClientError> {
-    if shared_rules::uri::has_whitespace_or_control(raw)
+    if raw.contains('#')
+        || shared_rules::uri::has_whitespace_or_control(raw)
         || shared_rules::uri::authority_has_userinfo(raw)
     {
         return Err(ClientError::InvalidDestination);

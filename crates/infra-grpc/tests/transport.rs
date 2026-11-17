@@ -145,12 +145,14 @@ impl Hold {
     }
 }
 
+type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
+
 #[derive(Clone)]
 struct Echo {
     calls: Arc<Mutex<Vec<SeenCall>>>,
     hold: Arc<Hold>,
     stream_dropped: Arc<Notify>,
-    upload_aborts: Arc<Mutex<Vec<Result<Option<String>, Code>>>>,
+    upload_aborts: UploadAborts,
     upload_abort_recorded: Arc<Notify>,
     // template:begin authn:grpc-transport-test-principals-field
     principals: Arc<Mutex<Vec<infra_grpc::VerifiedPrincipal>>>,
