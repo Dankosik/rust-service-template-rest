@@ -6,9 +6,9 @@ use metrics::{Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
-use crate::connection::ErrorType;
+use crate::ServerEndpoint;
+use crate::connection::{CommandFailure, ErrorType};
 use crate::namespace::Operation;
-use crate::{ServerEndpoint, Unavailable};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
@@ -133,17 +133,16 @@ impl<'a> OperationGuard<'a> {
         self.finish(outcome);
     }
 
-    pub(crate) fn stop(mut self, stopped: Stopped) -> Unavailable {
-        match stopped {
-            Stopped::Deadline => self.fail(ErrorType::Timeout),
-            Stopped::Cancelled => {
-                self.finish(Outcome::Cancelled);
-                Unavailable
-            }
+    pub(crate) fn failed(mut self, failure: CommandFailure) {
+        match failure {
+            CommandFailure::Stopped(Stopped::Cancelled) => self.finish(Outcome::Cancelled),
+            CommandFailure::Stopped(Stopped::Deadline) => self.fail(ErrorType::Timeout),
+            CommandFailure::Failed(error) => self.fail(error),
+            CommandFailure::InvalidTtl => self.fail(ErrorType::ServerErrorReply),
         }
     }
 
-    pub(crate) fn fail(mut self, error_type: ErrorType) -> Unavailable {
+    pub(crate) fn fail(mut self, error_type: ErrorType) {
         let label = error_type.label();
         self.span.record("error.type", label);
         self.span.record("otel.status_code", "ERROR");
@@ -156,7 +155,6 @@ impl<'a> OperationGuard<'a> {
                 "cache_operation_failed"
             );
         });
-        Unavailable
     }
 
     fn finish(&mut self, outcome: Outcome) {
@@ -180,7 +178,7 @@ pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,
         Unit::Seconds,
-        "Cache operation duration in seconds including admission and command construction, excluding SETs with invalid TTL"
+        "Cache operation duration in seconds including admission and command construction, excluding SETs rejected by local TTL validation"
     );
     metrics::describe_counter!(
         ADMISSION_REFUSED_METRIC,

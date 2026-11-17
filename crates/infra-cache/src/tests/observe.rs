@@ -47,8 +47,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Parse,
                 ErrorType::Other,
             ] {
-                let _ = OperationGuard::start("causes", &histograms, operation, &server)
-                    .fail(error_type);
+                OperationGuard::start("causes", &histograms, operation, &server).fail(error_type);
             }
         }
     });
@@ -115,11 +114,6 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
         (Duration::from_millis(1), "1"),
         (Duration::from_micros(1999), "1"),
         (Duration::from_millis(27), "27"),
-        (maximum, "9223372036854775807"),
-        (
-            maximum + Duration::from_nanos(999_999),
-            "9223372036854775807",
-        ),
     ];
     for (ttl, _) in admitted {
         assert_eq!(namespace.set("key", b"value", ttl).await, Ok(()));

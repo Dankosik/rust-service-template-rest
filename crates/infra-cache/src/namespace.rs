@@ -6,7 +6,7 @@ use redis::{SetExpiry, SetOptions};
 
 use crate::connection::CommandError;
 use crate::observe::{OperationGuard, Outcome};
-use crate::{Cache, CacheNamespace, Namespace, SetError, Unavailable};
+use crate::{Cache, CacheNamespace, MutationError, Namespace, OperationError, SetError};
 
 impl Cache {
     #[must_use]
@@ -34,38 +34,30 @@ impl Operation {
             Self::Delete => "DEL",
         }
     }
-
-    fn is_read(self) -> bool {
-        match self {
-            Self::Get => true,
-            Self::Set | Self::Delete => false,
-        }
-    }
 }
 
 impl CacheNamespace {
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_bounded(key, &self.standalone_command_scope())
-            .await
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, OperationError> {
+        self.get_bounded(key, None).await
     }
 
     pub async fn get_with_context(
         &self,
         key: &str,
         context: &OperationContext,
-    ) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_bounded(key, &self.command_scope(context)).await
+    ) -> Result<Option<Vec<u8>>, OperationError> {
+        self.get_bounded(key, Some(context)).await
     }
 
     async fn get_bounded(
         &self,
         key: &str,
-        scope: &OperationContext,
-    ) -> Result<Option<Vec<u8>>, Unavailable> {
+        parent: Option<&OperationContext>,
+    ) -> Result<Option<Vec<u8>>, OperationError> {
         let operation = Operation::Get;
         let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
         self.run(
-            scope,
+            parent,
             operation,
             build_command,
             |value: &Option<Vec<u8>>| {
@@ -77,11 +69,11 @@ impl CacheNamespace {
             },
         )
         .await
+        .map_err(Into::into)
     }
 
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, &self.standalone_command_scope())
-            .await
+        self.set_bounded(key, value, ttl, None).await
     }
 
     pub async fn set_with_context(
@@ -91,8 +83,7 @@ impl CacheNamespace {
         ttl: Duration,
         context: &OperationContext,
     ) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, &self.command_scope(context))
-            .await
+        self.set_bounded(key, value, ttl, Some(context)).await
     }
 
     async fn set_bounded(
@@ -100,7 +91,7 @@ impl CacheNamespace {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        scope: &OperationContext,
+        parent: Option<&OperationContext>,
     ) -> Result<(), SetError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
@@ -121,64 +112,62 @@ impl CacheNamespace {
             command.arg(value).arg(options);
             command
         };
-        self.run(scope, operation, build_command, |(): &()| Outcome::Ok)
+        self.run(parent, operation, build_command, |(): &()| Outcome::Ok)
             .await
-            .map_err(SetError::Unavailable)
+            .map_err(Into::into)
     }
 
-    pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        self.delete_bounded(key, &self.standalone_command_scope())
-            .await
+    pub async fn delete(&self, key: &str) -> Result<(), MutationError> {
+        self.delete_bounded(key, None).await
     }
 
     pub async fn delete_with_context(
         &self,
         key: &str,
         context: &OperationContext,
-    ) -> Result<(), Unavailable> {
-        self.delete_bounded(key, &self.command_scope(context)).await
+    ) -> Result<(), MutationError> {
+        self.delete_bounded(key, Some(context)).await
     }
 
-    async fn delete_bounded(&self, key: &str, scope: &OperationContext) -> Result<(), Unavailable> {
+    async fn delete_bounded(
+        &self,
+        key: &str,
+        parent: Option<&OperationContext>,
+    ) -> Result<(), MutationError> {
         let operation = Operation::Delete;
         let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
-        self.run(scope, operation, build_command, |(): &()| Outcome::Ok)
+        self.run(parent, operation, build_command, |(): &()| Outcome::Ok)
             .await
-    }
-
-    fn command_scope(&self, context: &OperationContext) -> OperationContext {
-        context.child(self.cache.link.command_timeout)
-    }
-
-    fn standalone_command_scope(&self) -> OperationContext {
-        OperationContext::with_timeout(self.cache.link.command_timeout)
+            .map_err(Into::into)
     }
 
     async fn run<T: redis::FromRedisValue + Send + 'static>(
         &self,
-        scope: &OperationContext,
+        parent: Option<&OperationContext>,
         operation: Operation,
         build_command: impl FnOnce() -> redis::Cmd,
         outcome: fn(&T) -> Outcome,
-    ) -> Result<T, Unavailable> {
+    ) -> Result<T, CommandError> {
         let guard = OperationGuard::start(
             self.name,
             &self.histograms,
             operation,
             &self.cache.link.server,
         );
-        match self.cache.link.command(build_command, scope).await {
+        match self
+            .cache
+            .link
+            .command(build_command, parent, operation)
+            .await
+        {
             Ok(value) => {
-                if operation.is_read()
-                    && let Some(stopped) = scope.stopped()
-                {
-                    return Err(guard.stop(stopped));
-                }
                 guard.succeed(outcome(&value));
                 Ok(value)
             }
-            Err(CommandError::Stopped(stopped)) => Err(guard.stop(stopped)),
-            Err(CommandError::Failed(error)) => Err(guard.fail(error)),
+            Err(error) => {
+                guard.failed(error.failure());
+                Err(error)
+            }
         }
     }
 

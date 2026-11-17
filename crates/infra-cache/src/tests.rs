@@ -247,14 +247,11 @@ async fn serve_resp(
                 b"-NOPERM no permissions to run the 'ping' command\r\n"
             }
             Some("PING") => b"+PONG\r\n",
-            Some("DEL") => b":1\r\n",
-            Some("SET") => {
-                if generation == primary.load(Ordering::SeqCst) {
-                    b"+OK\r\n"
-                } else {
-                    b"-READONLY You can't write against a read only replica.\r\n"
-                }
+            Some("DEL") => socket.observed.mutation_reply(b":1\r\n"),
+            Some("SET") if generation != primary.load(Ordering::SeqCst) => {
+                b"-READONLY You can't write against a read only replica.\r\n"
             }
+            Some("SET") => socket.observed.mutation_reply(b"+OK\r\n"),
             _ => b"+OK\r\n",
         };
         let reply_delay = socket.observed.reply_delay(&arguments);
@@ -295,11 +292,20 @@ struct SocketObservations {
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
     next_set_reply: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    next_mutation_reply: std::sync::Mutex<Option<&'static [u8]>>,
     slow_get_delay: std::sync::Mutex<Duration>,
     changed: tokio::sync::Notify,
 }
 
 impl SocketObservations {
+    fn mutation_reply(&self, default: &'static [u8]) -> &'static [u8] {
+        self.next_mutation_reply
+            .lock()
+            .expect("mutation reply lock")
+            .take()
+            .unwrap_or(default)
+    }
+
     async fn wait_for_set_reply_release(&self) {
         let release = self
             .next_set_reply

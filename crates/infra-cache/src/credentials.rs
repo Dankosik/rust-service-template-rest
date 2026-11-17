@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -70,10 +70,31 @@ impl PasswordFile {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "startup admission and owned blocking reads; PasswordFile::read keeps at most one in flight"
+    clippy::disallowed_types,
+    clippy::verbose_file_reads,
+    reason = "blocking workers must read from the same descriptor they validated as a regular file"
 )]
+pub(crate) fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn read_password_file(path: &Path) -> Result<String, ErrorKind> {
-    std::fs::read_to_string(path).map_err(|error| error.kind())
+    let bytes = read_regular_file(path).map_err(|error| error.kind())?;
+    String::from_utf8(bytes).map_err(|_| ErrorKind::InvalidData)
 }
 
 fn password_from(content: String) -> Option<Zeroizing<String>> {
