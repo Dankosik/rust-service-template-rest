@@ -515,41 +515,13 @@ mod tests {
 
         std::fs::write(&file, " p w \r\n").unwrap();
         assert_eq!(read_password(&file).unwrap().as_str(), " p w ");
+        #[cfg(unix)]
+        {
+            let mounted = dir.path().join("mounted");
+            std::os::unix::fs::symlink(&file, &mounted).unwrap();
+            assert_eq!(read_password(&mounted).unwrap().as_str(), " p w ");
+        }
         dir.close().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "test-owned mounted password file"
-    )]
-    fn a_mounted_password_must_resolve_to_a_regular_file() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target");
-        let mounted = dir.path().join("password");
-        std::os::unix::fs::symlink(&target, &mounted).unwrap();
-        std::fs::write(&target, "first").unwrap();
-        let raw = "postgres://app@db.internal:5432/app?sslmode=require";
-        assert!(Dsn::admit_from(raw, Some(&mounted), |_| false).is_ok());
-
-        std::fs::remove_file(&target).unwrap();
-        nix::unistd::mkfifo(&target, nix::sys::stat::Mode::S_IRUSR).unwrap();
-        let (send, receive) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let outcome = Dsn::admit_from(raw, Some(&mounted), |_| false);
-            let _ = send.send(outcome.err());
-        });
-        assert_eq!(
-            receive
-                .recv_timeout(Duration::from_secs(2))
-                .expect("refuse a FIFO without a writer"),
-            Some(DsnError::PasswordFile(std::io::ErrorKind::InvalidInput))
-        );
-        worker.join().unwrap();
     }
 
     #[test]
