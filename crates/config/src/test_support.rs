@@ -55,13 +55,11 @@ pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
     assert_matches!(&err, Error::SecretInFile { key: found, .. } if found == key, "{err}");
 }
 
-#[allow(
-    dead_code,
-    reason = "removing the cache and messaging profiles leaves this assertion without a caller"
-)]
+// template:begin cache:test-support-unknown-env-key
 pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
     assert_matches!(
         load_from(&LoadOptions::default(), BUILD, env(&[(variable, "x")])),
         Err(Error::Deserialize(_))
     );
 }
+// template:end cache:test-support-unknown-env-key

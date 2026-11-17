@@ -7,10 +7,11 @@ use serde::Deserialize;
 use serde::de::IgnoredAny as IgnoredSection;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::observability::validate_service_name;
 use crate::validate::{
     Rejected, ValidationErrors, Violations, duration_range, int_range, required,
 };
-use crate::{AppConfig, LogConfig, ObservabilityConfig};
+use crate::{AppConfig, LogConfig, OtelConfig};
 
 /// Where a pooled session's `statement_timeout` and
 /// `idle_in_transaction_session_timeout` come from. The adapter verifies the
@@ -143,7 +144,7 @@ pub(crate) struct MigrationInput {
     // template:begin object-storage:migration-input-object-storage
     object_storage: IgnoredSection,
     // template:end object-storage:migration-input-object-storage
-    observability: ObservabilityConfig,
+    observability: MigrationObservabilityInput,
     postgres: PostgresInput,
     runtime: IgnoredSection,
     // template:begin service-auth:migration-input-service-auth
@@ -154,12 +155,40 @@ pub(crate) struct MigrationInput {
     // template:end webhooks:migration-input-webhooks
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct MigrationObservabilityInput {
+    metrics: IgnoredSection,
+    otel: MigrationOtelInput,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct MigrationOtelInput {
+    #[serde(deserialize_with = "crate::de::optional_string")]
+    service_name: Option<String>,
+    traces_sampler: IgnoredSection,
+    traces_sampler_arg: IgnoredSection,
+    exporter: IgnoredSection,
+}
+
+#[derive(Clone, Debug)]
 pub struct MigrationConfig {
     pub app: AppConfig,
     pub log: LogConfig,
-    pub observability: ObservabilityConfig,
+    pub service_name: String,
     pub postgres: Option<PostgresConfig>,
+}
+
+impl Default for MigrationConfig {
+    fn default() -> Self {
+        Self {
+            app: AppConfig::default(),
+            log: LogConfig::default(),
+            service_name: OtelConfig::default().service_name,
+            postgres: None,
+        }
+    }
 }
 
 impl MigrationInput {
@@ -168,7 +197,12 @@ impl MigrationInput {
         let v = &mut violations;
         self.app.validate(v);
         self.log.validate(v);
-        self.observability.validate(v);
+        let service_name = self
+            .observability
+            .otel
+            .service_name
+            .unwrap_or_else(|| OtelConfig::default().service_name);
+        v.check(validate_service_name(&service_name));
         v.check(duration_range(
             "postgres.migration_deadline",
             self.postgres.migration_deadline,
@@ -178,7 +212,7 @@ impl MigrationInput {
         let admitted = postgres.map(|postgres| MigrationConfig {
             app: self.app,
             log: self.log,
-            observability: self.observability,
+            service_name,
             postgres,
         });
         violations.finish(admitted)

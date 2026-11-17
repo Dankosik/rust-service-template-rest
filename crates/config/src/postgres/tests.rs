@@ -139,6 +139,20 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
         ("APP__POSTGRES__SESSION_BUDGETS", "server"),
         ("APP__POSTGRES__MIGRATION_DEADLINE", "2h"),
         ("APP__LOG__FORMAT", "text"),
+        ("APP__OBSERVABILITY__METRICS__ADDR", "invalid-listener"),
+        ("APP__OBSERVABILITY__OTEL__SERVICE_NAME", "orders"),
+        (
+            "APP__OBSERVABILITY__OTEL__TRACES_SAMPLER",
+            "invalid-sampler",
+        ),
+        (
+            "APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG",
+            "invalid-ratio",
+        ),
+        (
+            "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
+            "invalid-endpoint",
+        ),
         // template:begin grpc:postgres-migration-test-grpc-env
         ("APP__GRPC__ENABLED", "true"),
         // template:end grpc:postgres-migration-test-grpc-env
@@ -162,17 +176,56 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     );
     assert_eq!(cfg.log.format, LogFormat::Text);
     assert_eq!(cfg.app.version, "1.2.3");
+    assert_eq!(cfg.service_name, "orders");
+}
+
+#[test]
+fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
+    let options = LoadOptions::default();
+    let migration = load_migration_from(&options, BUILD, env(&[])).unwrap();
+    let service = load_from(&options, BUILD, env(&[])).unwrap();
+    assert_eq!(
+        migration.service_name,
+        service.observability.otel.service_name
+    );
+
+    let blank = load_migration_from(
+        &options,
+        BUILD,
+        env(&[("APP__OBSERVABILITY__OTEL__SERVICE_NAME", "  ")]),
+    )
+    .unwrap_err();
+    assert_matches!(blank, Error::Validate(errors) if errors.names("observability.otel.service_name"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "non-string.toml",
+        "[observability.otel]\nservice_name = 123\n",
+    );
+    let non_string = load_migration_from(
+        &LoadOptions {
+            config: Some(file),
+            ..options
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(non_string, Error::Deserialize(_), "{non_string}");
 }
 
 #[test]
 fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
-    let unknown = load_migration_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__POSTGRES__BOGUS", "1")]),
-    )
-    .unwrap_err();
-    assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
+    for key in [
+        "APP__POSTGRES__BOGUS",
+        "APP__OBSERVABILITY__EXTRA",
+        "APP__OBSERVABILITY__OTEL__EXTRA",
+    ] {
+        let unknown =
+            load_migration_from(&LoadOptions::default(), BUILD, env(&[(key, "1")])).unwrap_err();
+        assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
+    }
 
     let typo_section = load_migration_from(
         &LoadOptions::default(),
