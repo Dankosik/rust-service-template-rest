@@ -45,6 +45,7 @@ impl FullPipeline {
             write: Mutex::new(()),
             changed: Notify::new(),
             retirements: Counter::noop(),
+            tasks: TaskTracker::new(),
         });
         let finished = tokio::spawn(async {});
         let supervisor = finished.abort_handle();
