@@ -104,6 +104,7 @@ pub(crate) fn pool_options<'a>(
             PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
             PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
+        wait_order: infra_postgres::WaitOrder::Arrival,
     }
 }
 

@@ -69,6 +69,7 @@ pub async fn template_pool(
             application_name,
             default_isolation: isolation,
             session_settings_source: SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
         },
     )
     .await

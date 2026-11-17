@@ -27,6 +27,7 @@ pub(super) async fn open(
             service_config::PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
             service_config::PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
+        wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
     };
     let pool = retained.insert(infra_postgres::prepare_pool(&dsn, &options));
     infra_postgres::admit_pool(pool, &options).await?;
