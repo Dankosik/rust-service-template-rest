@@ -251,6 +251,9 @@ async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
     let unknown = MutationError::OutcomeUnknown(OperationError::Unavailable);
     for (set, reply, expected) in [
         (true, &b"-NOPERM access denied\r\n"[..], Err(refused)),
+        (true, b"-NOREPLICAS not enough replicas\r\n", Err(refused)),
+        (false, b"-BUSY script running\r\n", Err(refused)),
+        (true, b"-REDIRECT primary:6379\r\n", Err(refused)),
         (false, b"-ERR unspecified failure\r\n", Err(unknown)),
         (true, b":1\r\n", Err(unknown)),
         (false, b"+OK\r\n", Err(unknown)),

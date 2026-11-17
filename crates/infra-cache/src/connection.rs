@@ -98,7 +98,7 @@ impl CommandError {
         match error.code() {
             Some(
                 "READONLY" | "NOAUTH" | "NOPERM" | "OOM" | "LOADING" | "MOVED" | "ASK"
-                | "CLUSTERDOWN" | "MASTERDOWN" | "MISCONF",
+                | "CLUSTERDOWN" | "MASTERDOWN" | "MISCONF" | "NOREPLICAS" | "BUSY" | "REDIRECT",
             ) => Self::NotApplied(failure),
             _ => Self::OutcomeUnknown(failure),
         }
@@ -210,11 +210,14 @@ impl Generation {
     }
 
     async fn reserve(&self) -> Result<OwnedSemaphorePermit, ErrorType> {
-        self.caller_capacity
+        let reservation = self
+            .caller_capacity
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| ErrorType::Io)
+            .map_err(|_| ErrorType::Io)?;
+        tokio::task::consume_budget().await;
+        Ok(reservation)
     }
 }
 
@@ -487,23 +490,18 @@ impl Link {
         };
         check()?;
         let generation = generation?;
-        let reserve = async {
-            let reservation = generation.reserve().await?;
-            tokio::task::consume_budget().await;
-            Ok::<_, ErrorType>(reservation)
-        };
         let reservation = tokio::select! {
             biased;
-            result = reserve => result?,
+            result = generation.reserve() => result?,
             stopped = context.wait_stopped() => return Err(CommandError::NotApplied(stop(stopped))),
             () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
-        let check_dispatch = || {
+        let check_dispatch = || -> Result<(), CommandError> {
             check()?;
             if generation.retired.is_cancelled() {
                 return Err(ErrorType::Io.into());
             }
-            Ok::<(), CommandError>(())
+            Ok(())
         };
         check_dispatch()?;
         let command = build_command();
@@ -514,22 +512,19 @@ impl Link {
             query(command, generation.connection.clone(), operation),
             Deadline::new(Instant::now(), self.command_timeout),
         );
-        tokio::select! {
+        let reply = tokio::select! {
             biased;
-            reply = poll_fn(|cx| exchange.poll_reply(cx)) => {
-                match reply {
-                    Ok(value) => {
-                        if matches!(operation, Operation::Get) {
-                            check()?;
-                        }
-                        Ok(value)
-                    }
-                    Err(error) => Err(CommandError::from_reply(&error, operation, context.stopped().map(stop))),
-                }
-            }
-            stopped = context.wait_stopped() => Err(CommandError::OutcomeUnknown(stop(stopped))),
-            () = generation.retired.cancelled() => Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io))),
+            reply = poll_fn(|cx| exchange.poll_reply(cx)) => reply,
+            stopped = context.wait_stopped() => return Err(CommandError::OutcomeUnknown(stop(stopped))),
+            () = generation.retired.cancelled() => return Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io))),
+        };
+        let value = reply.map_err(|error| {
+            CommandError::from_reply(&error, operation, context.stopped().map(stop))
+        })?;
+        if matches!(operation, Operation::Get) {
+            check()?;
         }
+        Ok(value)
     }
 
     fn claim_slot(&self) -> Result<impl Drop + '_, ErrorType> {
