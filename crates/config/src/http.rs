@@ -52,16 +52,13 @@ pub struct HttpConfig {
     /// being accepted. Production-shaped on purpose; local overlays set `0s`.
     #[serde(deserialize_with = "crate::de::duration")]
     pub readiness_propagation_delay: Duration,
-    /// Separate time limits of this duration apply to protocol detection and
-    /// reading a complete HTTP/1 request head. On the first request, those
-    /// waits can add up to twice this value. The HTTP/1 timer also bounds
-    /// keep-alive idle time, so keep it above the idle timeout of whatever
-    /// reuses connections to this listener: a balancer that reuses a
-    /// connection the service has just closed answers 502. The default
-    /// clears the common 60 s (AWS ALB, nginx upstreams, Railway); Google
-    /// Cloud load balancers hold backend connections for 600 s. HTTP/2
-    /// request headers have a size limit (`max_header_bytes`) and no read
-    /// timeout from this setting. HTTP/2 idle uses a separate PING cadence.
+    /// Time limit for reading a complete request head. The listener speaks
+    /// HTTP/1.1 only. The same timer bounds keep-alive idle time, so keep it
+    /// above the idle timeout of whatever reuses connections to this
+    /// listener: a balancer that reuses a connection the service has just
+    /// closed answers 502. The default clears the common 60 s (AWS ALB,
+    /// nginx upstreams, Railway); Google Cloud load balancers hold backend
+    /// connections for 600 s.
     #[serde(deserialize_with = "crate::de::duration")]
     pub header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
@@ -69,9 +66,8 @@ pub struct HttpConfig {
     /// and any resources held after the response head.
     #[serde(deserialize_with = "crate::de::duration")]
     pub request_timeout: Duration,
-    /// HTTP/1 read-buffer ceiling for one request head; overflow answers
-    /// hyper-native 431 before the router, not a Problem. HTTP/2 applies the
-    /// same number as uncompressed header-list size.
+    /// Read-buffer ceiling for one request head; overflow answers
+    /// hyper-native 431 before the router, not a Problem.
     pub max_header_bytes: ByteSize,
     /// A declared request body length above this ceiling answers 413.
     /// Streaming bodies are checked as handlers or extractors read them.
@@ -93,8 +89,8 @@ pub struct HttpConfig {
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound;
     /// [`Self::connection_cap`] gives the adapter form.
-    /// HTTP/2 can run several handlers on one connection, so the two limits
-    /// can be sized independently.
+    /// A connection carries one request at a time, so `max_in_flight` takes
+    /// effect only below this cap.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_connections: u32,
     /// Age after which a connection is told to finish and close, so its

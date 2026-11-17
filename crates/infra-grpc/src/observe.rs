@@ -750,17 +750,18 @@ mod tests {
                 "/example.v1.EchoService/ServerStream",
                 axum::routing::post(client_status_fixture),
             );
-        let server = infra_http::Server::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            app,
-            infra_http::ServerOptions {
-                header_read_timeout: WAIT,
-                max_header_bytes: 16 * 1024,
-                max_connections: None,
-                max_connection_age: None,
-            },
-        )
-        .unwrap();
+        let server = infra_http::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .serve_h2(
+                app,
+                infra_http::ServerOptions {
+                    header_read_timeout: WAIT,
+                    max_header_bytes: 16 * 1024,
+                    max_connections: None,
+                    max_connection_age: None,
+                },
+                None,
+            );
         let destination = format!("http://{}", server.local_addr());
         for (method, expected) in [
             ("Header", tonic::Code::Ok),

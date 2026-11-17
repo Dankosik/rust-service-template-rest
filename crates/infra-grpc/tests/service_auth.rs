@@ -18,7 +18,7 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
-use infra_http::{Drained, Server};
+use infra_http::{BoundListener, Drained, Server};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, now_secs, registry},
@@ -180,12 +180,9 @@ fn serve(services: Services) -> (Server, SocketAddr) {
         limits(),
     )
     .unwrap();
-    let server = Server::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        app,
-        server_options(limits()),
-    )
-    .unwrap();
+    let server = BoundListener::bind("127.0.0.1:0".parse().unwrap())
+        .unwrap()
+        .serve_h2(app, server_options(limits()), None);
     let address = server.local_addr();
     (server, address)
 }
