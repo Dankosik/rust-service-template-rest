@@ -290,6 +290,10 @@ impl HttpConfig {
             }
         }
         let drain_budget = propagation_fits_drain.then(|| self.effective_drain_budget());
+        #[allow(
+            unused_variables,
+            reason = "only the cache profile consumes the validated HTTP request timeout"
+        )]
         let request_timeout = ListenerLimits {
             header_read_timeout: self.header_read_timeout,
             request_timeout: self.request_timeout,
@@ -302,8 +306,12 @@ impl HttpConfig {
         }
         .validate(drain_budget, v);
         HttpTimings {
+            // template:begin grpc:http-timings-drain-value
             drain_budget,
+            // template:end grpc:http-timings-drain-value
+            // template:begin cache:http-timings-request-value
             request_timeout,
+            // template:end cache:http-timings-request-value
         }
     }
 }
@@ -472,8 +480,12 @@ impl WorkerHttpConfig {
 
 #[derive(Clone, Copy)]
 pub(crate) struct HttpTimings {
+    // template:begin grpc:http-timings-drain-field
     pub(crate) drain_budget: Option<Duration>,
+    // template:end grpc:http-timings-drain-field
+    // template:begin cache:http-timings-request-field
     pub(crate) request_timeout: Option<Duration>,
+    // template:end cache:http-timings-request-field
 }
 
 #[cfg(test)]
