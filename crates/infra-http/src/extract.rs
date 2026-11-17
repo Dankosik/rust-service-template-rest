@@ -96,17 +96,22 @@ pub struct Query<T>(pub T);
 
 impl<T, S> FromRequestParts<S> for Query<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + Send,
     S: Send + Sync,
 {
     type Rejection = Problem;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let query = parts.uri.query().unwrap_or_default();
         let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
-        serde_path_to_error::deserialize(fields)
-            .map(Self)
-            .map_err(|error| query_problem(error.path()))
+        std::future::ready(
+            serde_path_to_error::deserialize(fields)
+                .map(Self)
+                .map_err(|error| query_problem(error.path())),
+        )
     }
 }
 
