@@ -254,8 +254,20 @@ async fn serve(
                 })?);
                 *logger_installed = true;
                 install_panic_hook();
-                if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
-                    tracing::warn!(error = %error, "open_file_limit_unchanged");
+                match rlimit::increase_nofile_limit(u64::MAX) {
+                    Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
+                    Ok(open_file_limit) => {
+                        let listeners =
+                            1 + u64::from(config.observability.metrics.addr.is_some());
+                        let connection_caps = u64::from(config.http.max_connections) * listeners;
+                        if open_file_limit < connection_caps {
+                            tracing::warn!(
+                                open_file_limit,
+                                connection_caps,
+                                "open_file_limit_below_connection_caps"
+                            );
+                        }
+                    }
                 }
                 let metrics = telemetry::install_metrics()?;
                 metrics.record_trace_exporter(Some(&provider.exporter_state));

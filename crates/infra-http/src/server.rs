@@ -12,7 +12,7 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
@@ -391,26 +391,22 @@ async fn accept_loop<F, Fut, IO>(
             }
         };
         configure_accepted(&stream);
-        let connection = serve_connection(
-            stream,
-            peer,
+        connections.spawn(serve_connection(
+            (stream, peer),
+            permit,
             prepare_io.clone(),
             builder.clone(),
             app.clone(),
             options,
             connection_shutdown.clone(),
-        );
-        connections.spawn(async move {
-            let _permit = permit;
-            connection.await;
-        });
+        ));
     }
     drop(listener);
 }
 
 fn serve_connection<F, Fut, IO>(
-    stream: TcpStream,
-    peer: SocketAddr,
+    (stream, peer): (TcpStream, SocketAddr),
+    permit: Option<OwnedSemaphorePermit>,
     prepare_io: F,
     builder: auto::Builder<TokioExecutor>,
     app: Router,
@@ -426,6 +422,7 @@ where
         .max_connection_age
         .map(|age| deadline_after(spread(age)));
     async move {
+        let _permit = permit;
         let ConnectionShutdown { finish, force } = shutdown;
         let forced = Arc::new(AtomicBool::new(false));
         let connection_forced = Arc::clone(&forced);

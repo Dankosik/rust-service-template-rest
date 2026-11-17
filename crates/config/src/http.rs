@@ -66,8 +66,10 @@ pub struct HttpConfig {
     /// A declared request body length above this ceiling answers 413.
     /// Streaming bodies are checked as handlers or extractors read them.
     pub max_body_bytes: ByteSize,
-    /// Concurrent handler executions. A request over the limit waits up to
-    /// `admission_wait` for a slot and is then shed with 503. Zero disables
+    /// Requests in handlers at once, each counted until its response head:
+    /// a body still streaming holds no slot. A request over the limit waits
+    /// up to `admission_wait` for a slot and is then shed with 503; while it
+    /// waits, `http_server_active_requests` already counts it. Zero disables
     /// the limit; [`Self::in_flight_cap`] gives the adapter form.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_in_flight: u32,
