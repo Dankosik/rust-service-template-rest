@@ -1205,6 +1205,44 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
 }
 
 #[tokio::test]
+async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
+    use http_body_util::BodyExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 1);
+    let call = || opening_request(UNARY_PATH, Some(ACCEPTED), "echo");
+    let warm = app.clone().oneshot(call()).await.unwrap();
+    assert!(grpc_status(&warm).is_none());
+    drop(warm);
+
+    tokio::time::pause();
+    let mut limited = call();
+    limited
+        .headers_mut()
+        .insert("grpc-timeout", "1S".parse().unwrap());
+    let mut held = app.clone().oneshot(limited).await.unwrap();
+    assert!(grpc_status(&held).is_none());
+    let waiting = app.oneshot(call());
+    tokio::pin!(waiting);
+    assert!(
+        timeout(Duration::from_millis(900), &mut waiting)
+            .await
+            .is_err()
+    );
+    let admitted = timeout(Duration::from_millis(200), waiting)
+        .await
+        .expect("expiry admits the waiting call while the first body is unpolled")
+        .unwrap();
+    assert!(grpc_status(&admitted).is_none());
+    let frame = held.body_mut().frame().await.unwrap().unwrap();
+    let status = Status::from_header_map(frame.trailers_ref().unwrap()).unwrap();
+    assert_eq!(status.code(), Code::DeadlineExceeded);
+    tokio::time::resume();
+    provider.stop().await;
+}
+
+#[tokio::test]
 async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();

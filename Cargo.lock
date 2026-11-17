@@ -2887,14 +2887,17 @@ name = "infra-outbound-grpc"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "axum",
  "bytes",
  "derive_more",
  "foldhash",
  "futures-util",
+ "grpc-contracts",
  "http",
  "http-body",
  "http-body-util",
  "hyper-util",
+ "infra-http",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
