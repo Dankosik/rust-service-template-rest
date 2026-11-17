@@ -456,7 +456,9 @@ mod tests {
                 drop(worker);
             }
             let result = tokio::time::timeout(Duration::from_millis(1), waiter)
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(result.unwrap_err(), Failure::Unavailable);
             assert!(matches!(
                 futures_util::poll!(Box::pin(verifier.verify(&token))),

@@ -7,12 +7,15 @@
 
 use std::{net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
-// template:begin authn:grpc-transport-test-auth-std-imports
+// template:begin oidc-introspection:grpc-transport-test-auth-std-imports
 use std::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::AtomicUsize,
     time::{SystemTime, UNIX_EPOCH},
 };
-// template:end authn:grpc-transport-test-auth-std-imports
+// template:end oidc-introspection:grpc-transport-test-auth-std-imports
+// template:begin authn:grpc-transport-test-auth-atomic-types
+use std::sync::atomic::{AtomicBool, Ordering};
+// template:end authn:grpc-transport-test-auth-atomic-types
 
 use futures_util::StreamExt as _;
 use grpc_contracts::example::v1::{
@@ -22,12 +25,16 @@ use grpc_contracts::example::v1::{
     echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
-// template:begin authn:grpc-transport-test-auth-imports
+// template:begin oidc-introspection:grpc-transport-test-auth-imports
 use infra_bearerauthn::{
-    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
+    EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl,
     test_support::{FixtureTransport, prepare_introspection_with_fixture},
 };
-// template:end authn:grpc-transport-test-auth-imports
+// template:end oidc-introspection:grpc-transport-test-auth-imports
+// template:begin authn:grpc-transport-test-verifier-import
+use infra_bearerauthn::Verifier;
+use infra_grpc::DelegationCredential;
+// template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
@@ -45,10 +52,9 @@ use rustls::{
     ClientConfig, RootCertStore,
     pki_types::{PrivateKeyDer, ServerName, pem::PemObject as _},
 };
-// template:begin authn:grpc-transport-test-auth-secret
-use infra_grpc::DelegationCredential;
+// template:begin oidc-introspection:grpc-transport-test-auth-secret
 use secrecy::SecretString;
-// template:end authn:grpc-transport-test-auth-secret
+// template:end oidc-introspection:grpc-transport-test-auth-secret
 use service_failure::Code as FailureCode;
 use tokio::{
     io::AsyncReadExt as _,
@@ -56,15 +62,15 @@ use tokio::{
     sync::{Notify, watch},
     time::timeout,
 };
-// template:begin authn:grpc-transport-test-auth-listener
+// template:begin oidc-introspection:grpc-transport-test-auth-listener
 use tokio::net::TcpListener;
-// template:end authn:grpc-transport-test-auth-listener
-// template:begin authn:grpc-transport-test-auth-io
+// template:end oidc-introspection:grpc-transport-test-auth-listener
+// template:begin oidc-introspection:grpc-transport-test-auth-io
 use tokio::io::AsyncWriteExt as _;
-// template:end authn:grpc-transport-test-auth-io
-// template:begin authn:grpc-transport-test-auth-tls-acceptor
+// template:end oidc-introspection:grpc-transport-test-auth-io
+// template:begin oidc-introspection:grpc-transport-test-auth-tls-acceptor
 use tokio_rustls::TlsAcceptor;
-// template:end authn:grpc-transport-test-auth-tls-acceptor
+// template:end oidc-introspection:grpc-transport-test-auth-tls-acceptor
 use tokio_rustls::TlsConnector;
 use tonic::{Code, Request, Response, Status};
 use tonic_health::pb::{
@@ -78,11 +84,19 @@ use tonic_reflection::pb::v1alpha;
 use tonic_types::StatusExt as _;
 use tower::ServiceExt as _;
 
-// template:begin authn:grpc-transport-test-accepted-token
+// template:begin authn:grpc-transport-test-bearer-module
+#[path = "support/bearer.rs"]
+mod bearer;
+use bearer::{BearerFixture, BearerMode};
+// template:end authn:grpc-transport-test-bearer-module
+
+// template:begin oidc-introspection:grpc-transport-test-introspection-tokens
 const ACCEPTED: &str = "accepted";
 const UNSCOPED: &str = "unscoped";
+// template:end oidc-introspection:grpc-transport-test-introspection-tokens
+// template:begin authn:grpc-transport-test-unary-path
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
-// template:end authn:grpc-transport-test-accepted-token
+// template:end authn:grpc-transport-test-unary-path
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -411,7 +425,7 @@ struct Fixture {
     echo: Echo,
     address: SocketAddr,
     // template:begin authn:grpc-transport-test-auth-provider-field
-    provider: ProviderFixture,
+    bearer: BearerFixture,
     // template:end authn:grpc-transport-test-auth-provider-field
 }
 
@@ -472,7 +486,7 @@ impl Fixture {
         #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
         let authentication = infra_grpc::Authentication::None;
         // template:begin authn:grpc-transport-test-auth-fixture
-        let (verifier, provider) = verifier_fixture().await;
+        let (verifier, bearer) = BearerFixture::start().await;
         let authentication = infra_grpc::Authentication::Bearer(verifier);
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(
@@ -521,9 +535,8 @@ impl Fixture {
             })
             .expect("server TLS config")
         });
-        let bound = BoundListener::bind(address)
-            .expect("listener binds")
-            .serve_h2(app, server_options(limits), tls);
+        let listener = BoundListener::bind(address).expect("listener binds");
+        let bound = app.serve(listener, server_options(limits), tls);
         let address = bound.local_addr();
         Self {
             server: Some(bound),
@@ -532,7 +545,7 @@ impl Fixture {
             echo,
             address,
             // template:begin authn:grpc-transport-test-auth-provider-init
-            provider,
+            bearer,
             // template:end authn:grpc-transport-test-auth-provider-init
         }
     }
@@ -559,7 +572,7 @@ impl Fixture {
             assert_eq!(drained, Drained::Complete);
         }
         // template:begin authn:grpc-transport-test-auth-provider-stop
-        self.provider.stop().await;
+        self.bearer.stop().await;
         // template:end authn:grpc-transport-test-auth-provider-stop
     }
 }
@@ -613,7 +626,9 @@ fn request<T>(message: T) -> Request<T> {
     let mut metadata = metadata;
     metadata.insert(
         "authorization",
-        format!("Bearer {ACCEPTED}").parse().unwrap(),
+        format!("Bearer {}", BearerMode::SELECTED.token(true))
+            .parse()
+            .unwrap(),
     );
     // template:end authn:grpc-transport-test-bearer
     Request::from_parts(metadata, http::Extensions::new(), message)
@@ -873,7 +888,9 @@ fn unscoped<T>(message: T) -> Request<T> {
     let mut request = Request::new(message);
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {UNSCOPED}").parse().unwrap(),
+        format!("Bearer {}", BearerMode::SELECTED.token(false))
+            .parse()
+            .unwrap(),
     );
     request
 }
@@ -900,7 +917,7 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
     let credential = credential.expect("the opted-in RPC receives the presented token");
     assert_eq!(
         secrecy::ExposeSecret::expose_secret(credential.access_token()),
-        ACCEPTED
+        BearerMode::SELECTED.token(true)
     );
     assert!(!fixture.echo.calls.lock()[0].had_authorization);
 
@@ -999,7 +1016,7 @@ async fn rejected_calls_do_not_close_the_shared_connection() {
 }
 // template:end authn:grpc-transport-test-rejection-flood
 
-// template:begin authn:grpc-transport-test-authentication-deadline
+// template:begin oidc-introspection:grpc-transport-test-provider-deadline
 fn impatient_raw(mut call: http::Request<axum::body::Body>) -> http::Request<axum::body::Body> {
     call.headers_mut()
         .insert("grpc-timeout", "100m".parse().unwrap());
@@ -1009,7 +1026,13 @@ fn impatient_raw(mut call: http::Request<axum::body::Body>) -> http::Request<axu
 #[tokio::test]
 async fn the_deadline_bounds_authentication_too() {
     let fixture = Fixture::plaintext().await;
-    fixture.provider.silent.store(true, Ordering::Release);
+    fixture
+        .bearer
+        .provider
+        .as_ref()
+        .expect("the introspection profile selected its provider")
+        .silent
+        .store(true, Ordering::Release);
     let status = timeout(WAIT, raw_call(fixture.address, ECHO_SERVICE_UNARY))
         .await
         .expect("the deadline answers while the provider is silent");
@@ -1018,9 +1041,12 @@ async fn the_deadline_bounds_authentication_too() {
     fixture.stop().await;
 }
 
+// template:end oidc-introspection:grpc-transport-test-provider-deadline
+
+// template:begin authn:grpc-transport-test-refused-upload
 #[tokio::test]
 async fn a_refused_upload_drains_within_the_call_budget() {
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 4);
     let call = pending_upload(
@@ -1036,10 +1062,10 @@ async fn a_refused_upload_drains_within_the_call_budget() {
     let status = grpc_status(&response).unwrap();
     assert_eq!(status.code(), Code::Unauthenticated, "{status:?}");
     assert!(echo.calls.lock().is_empty());
-    provider.stop().await;
+    bearer.stop().await;
 }
 
-fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
+fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> infra_grpc::Application {
     opening_app_waiting(verifier, echo, capacity, limits().max_admission_wait)
 }
 
@@ -1048,7 +1074,7 @@ fn opening_app_waiting(
     echo: &Echo,
     capacity: u32,
     max_admission_wait: Duration,
-) -> axum::Router {
+) -> infra_grpc::Application {
     let readiness = Readiness::new(
         Vec::new(),
         RefreshPolicy::try_new(
@@ -1073,11 +1099,11 @@ fn opening_app_waiting(
     .unwrap()
 }
 
-async fn hold_capacity(app: &axum::Router) -> axum::response::Response {
+async fn hold_capacity(app: &infra_grpc::Application) -> axum::response::Response {
     app.clone()
         .oneshot(opening_request(
             "/example.v1.EchoService/ServerStream",
-            Some(ACCEPTED),
+            Some(BearerMode::SELECTED.token(true)),
             "hold-after-first",
         ))
         .await
@@ -1114,6 +1140,9 @@ fn pending_upload(
     request
 }
 
+// template:end authn:grpc-transport-test-refused-upload
+
+// template:begin oidc-introspection:grpc-transport-test-provider-admission-followers
 #[tokio::test]
 async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1220,14 +1249,17 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     provider.stop().await;
 }
 
+// template:end oidc-introspection:grpc-transport-test-provider-admission-followers
+
+// template:begin authn:grpc-transport-test-unpolled-unary
 #[tokio::test]
 async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
     use http_body_util::BodyExt as _;
 
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
-    let call = || opening_request(UNARY_PATH, Some(ACCEPTED), "echo");
+    let call = || opening_request(UNARY_PATH, Some(BearerMode::SELECTED.token(true)), "echo");
     let warm = app.clone().oneshot(call()).await.unwrap();
     assert!(grpc_status(&warm).is_none());
     drop(warm);
@@ -1255,9 +1287,12 @@ async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
     let status = Status::from_header_map(frame.trailers_ref().unwrap()).unwrap();
     assert_eq!(status.code(), Code::DeadlineExceeded);
     tokio::time::resume();
-    provider.stop().await;
+    bearer.stop().await;
 }
 
+// template:end authn:grpc-transport-test-unpolled-unary
+
+// template:begin oidc-introspection:grpc-transport-test-provider-admission-timeout
 #[tokio::test]
 async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     let (verifier, provider) = verifier_fixture().await;
@@ -1268,7 +1303,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
         .clone()
         .oneshot(opening_request(
             stream_path,
-            Some(ACCEPTED),
+            Some(BearerMode::SELECTED.token(true)),
             "hold-after-first",
         ))
         .await
@@ -1390,19 +1425,22 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
     }
 }
 
+// template:end oidc-introspection:grpc-transport-test-provider-admission-timeout
+
+// template:begin authn:grpc-transport-test-admission
 #[tokio::test]
 async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
     let held = hold_capacity(&app).await;
     assert!(grpc_status(&held).is_none());
     let mut waiting = Box::pin(app.clone().oneshot(opening_request(
         UNARY_PATH,
-        Some(ACCEPTED),
+        Some(BearerMode::SELECTED.token(true)),
         "waited",
     )));
     assert!(
@@ -1423,7 +1461,7 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     assert!(rendered.contains("grpc_server_shed_requests_total 0"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
     assert!(rendered.contains("grpc_server_admission_waiting 0"));
-    provider.stop().await;
+    bearer.stop().await;
 }
 
 #[tokio::test]
@@ -1431,14 +1469,14 @@ async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
     let held = hold_capacity(&app).await;
     let call = pending_upload(
         opening_request(
             "/example.v1.EchoService/BidiStream",
-            Some(ACCEPTED),
+            Some(BearerMode::SELECTED.token(true)),
             "refused",
         ),
         "500m",
@@ -1459,7 +1497,7 @@ async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
     drop(held);
-    provider.stop().await;
+    bearer.stop().await;
 }
 
 #[tokio::test]
@@ -1467,7 +1505,7 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_millis(200));
     let held = hold_capacity(&app).await;
@@ -1475,8 +1513,11 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
-        app.clone()
-            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "refused")),
+        app.clone().oneshot(opening_request(
+            UNARY_PATH,
+            Some(BearerMode::SELECTED.token(true)),
+            "refused",
+        )),
     )
     .await
     .expect("the refusal is answered long before the call budget")
@@ -1493,17 +1534,20 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
     assert!(rendered.contains("grpc_server_admission_waiting 0"));
     drop(held);
-    provider.stop().await;
+    bearer.stop().await;
 }
 
+// template:end authn:grpc-transport-test-admission
+
+// template:begin authn:grpc-transport-test-shared-queue-limit
 #[tokio::test]
 async fn both_admission_queues_share_the_call_wait_limit() {
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_secs(1));
     let mut holding = Box::pin(app.clone().oneshot(opening_request(
         "/example.v1.EchoService/ServerStream",
-        Some(ACCEPTED),
+        Some(BearerMode::SELECTED.token(true)),
         "hold-before-headers",
     )));
     timeout(WAIT, async {
@@ -1517,7 +1561,11 @@ async fn both_admission_queues_share_the_call_wait_limit() {
 
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    let mut waiting = Box::pin(app.oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "queued")));
+    let mut waiting = Box::pin(app.oneshot(opening_request(
+        UNARY_PATH,
+        Some(BearerMode::SELECTED.token(true)),
+        "queued",
+    )));
     assert!(futures_util::poll!(waiting.as_mut()).is_pending());
     tokio::time::advance(Duration::from_millis(750)).await;
 
@@ -1537,15 +1585,18 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     assert_seen(&echo, &[Seen::ServerStream]);
     drop(held);
     tokio::time::resume();
-    provider.stop().await;
+    bearer.stop().await;
 }
 
+// template:end authn:grpc-transport-test-shared-queue-limit
+
+// template:begin authn:grpc-transport-test-zero-admission
 #[tokio::test]
 async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::ZERO);
     let held = hold_capacity(&app).await;
@@ -1553,8 +1604,11 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
-        app.clone()
-            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "refused")),
+        app.clone().oneshot(opening_request(
+            UNARY_PATH,
+            Some(BearerMode::SELECTED.token(true)),
+            "refused",
+        )),
     )
     .await
     .expect("the refusal is answered")
@@ -1566,12 +1620,12 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(!rendered.contains("grpc_server_admission_wait_seconds_count"));
     drop(held);
-    provider.stop().await;
+    bearer.stop().await;
 }
 
 #[tokio::test]
 async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
     let app = opening_app(verifier, &Echo::new(), 1);
     let progressed = Arc::new(AtomicBool::new(false));
     let other = tokio::spawn({
@@ -1594,18 +1648,19 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
         "ready empty frames must yield before completing drainage"
     );
     timeout(WAIT, other).await.unwrap().unwrap();
-    provider.stop().await;
+    bearer.stop().await;
 }
 
-// template:end authn:grpc-transport-test-authentication-deadline
+// template:end authn:grpc-transport-test-zero-admission
 
 // template:begin authn:grpc-transport-test-verified-principal
 #[tokio::test]
 async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypass_auth() {
-    let (verifier, provider) = verifier_fixture().await;
+    let (verifier, bearer) = BearerFixture::start().await;
+    let header = format!("Bearer {}", BearerMode::SELECTED.token(false));
     let (_, previously_verified) = verifier
         .authenticate_presented_with_context(
-            [b"Bearer unscoped".as_slice()],
+            [header.as_bytes()],
             infra_bearerauthn::Transport::Grpc,
             &operation_context::OperationContext::unbounded(),
         )
@@ -1615,7 +1670,12 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 4);
 
-    let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "genuine").map(|body| {
+    let mut request = opening_request(
+        UNARY_PATH,
+        Some(BearerMode::SELECTED.token(true)),
+        "genuine",
+    )
+    .map(|body| {
         use http_body_util::BodyExt as _;
         let mut trailers = http::HeaderMap::new();
         trailers.insert(http::header::AUTHORIZATION, "redacted".parse().unwrap());
@@ -1653,7 +1713,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     assert!(echo.identities.lock().is_empty());
     assert_eq!(echo.calls.lock().len(), 1);
 
-    provider.stop().await;
+    bearer.stop().await;
 }
 // template:end authn:grpc-transport-test-verified-principal
 
@@ -2067,7 +2127,10 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
         .header("te", "trailers")
         .header("grpc-timeout", "100m");
     // template:begin authn:grpc-transport-test-deadline-bearer
-    let builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
+    let builder = builder.header(
+        "authorization",
+        format!("Bearer {}", BearerMode::SELECTED.token(true)),
+    );
     // template:end authn:grpc-transport-test-deadline-bearer
     let request = builder
         .body(axum::body::Body::from(grpc_frame("deadline")))
@@ -2623,7 +2686,7 @@ fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
 }
 
 #[tokio::test]
-async fn reflection_lists_only_registered_services_in_both_versions() {
+async fn both_reflection_versions_list_registered_services_and_close_idle_streams_on_drain() {
     use prost::Message as _;
 
     const UNREGISTERED: &str = "example.v1.Unregistered";
@@ -2663,7 +2726,8 @@ async fn reflection_lists_only_registered_services_in_both_versions() {
         ask(MessageRequest::FileContainingSymbol(
             UNREGISTERED.to_owned(),
         )),
-    ]);
+    ])
+    .chain(futures_util::stream::pending());
     let mut answers = client
         .server_reflection_info(request(asks))
         .await
@@ -2699,13 +2763,14 @@ async fn reflection_lists_only_registered_services_in_both_versions() {
         message_request: Some(
             v1alpha::server_reflection_request::MessageRequest::ListServices(String::new()),
         ),
-    }]);
-    let mut answers = older
+    }])
+    .chain(futures_util::stream::pending());
+    let mut older_answers = older
         .server_reflection_info(request(asks))
         .await
         .expect("v1alpha reflection opens")
         .into_inner();
-    let answer = timeout(WAIT, answers.message())
+    let answer = timeout(WAIT, older_answers.message())
         .await
         .expect("v1alpha reflection answers in time")
         .expect("v1alpha reflection stream stays open")
@@ -2718,6 +2783,56 @@ async fn reflection_lists_only_registered_services_in_both_versions() {
     let mut names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, expected_names);
+    let ((), latest, alpha) = timeout(WAIT, async {
+        tokio::join!(fixture.stop(), answers.message(), older_answers.message())
+    })
+    .await
+    .expect("reflection streams and the listener finish while both uploads remain open");
+    assert!(latest.unwrap().is_none());
+    assert!(alpha.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
+    use prost::Message as _;
+
+    let mut contract =
+        prost_types::FileDescriptorSet::decode(grpc_contracts::FILE_DESCRIPTOR_SET).unwrap();
+    let echo = contract
+        .file
+        .iter_mut()
+        .find(|file| file.package() == "example.v1")
+        .unwrap()
+        .service
+        .iter_mut()
+        .find(|service| service.name() == "EchoService")
+        .unwrap();
+    let original_count = echo.method.len();
+    echo.method.retain(|method| method.name() != "ServerStream");
+    assert_eq!(echo.method.len() + 1, original_count);
+    let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
+    let fixture = Fixture::open_with_at(true, None, limits(), loopback(), descriptor_set).await;
+    let mut client = fixture.echo_client();
+
+    let omitted = timeout(
+        WAIT,
+        client.server_stream(request(ServerStreamRequest {
+            message: "must not reach the handler".to_owned(),
+        })),
+    )
+    .await
+    .expect("the omitted method answers")
+    .unwrap_err();
+    assert_eq!(omitted.code(), Code::Unimplemented);
+    assert!(fixture.echo.calls.lock().is_empty());
+
+    let included = timeout(WAIT, client.unary(request(unary("described"))))
+        .await
+        .expect("the described method answers")
+        .unwrap()
+        .into_inner();
+    assert_eq!(included.message, "described");
+    assert_seen(&fixture.echo, &[Seen::Unary]);
     fixture.stop().await;
 }
 
@@ -3177,7 +3292,7 @@ fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> Client {
     .expect("tls client")
 }
 
-// template:begin authn:grpc-transport-test-auth-provider
+// template:begin oidc-introspection:grpc-transport-test-auth-provider
 struct ProviderFixture {
     silent: Arc<AtomicBool>,
     gate: Arc<Mutex<Option<Arc<Hold>>>>,
@@ -3410,13 +3525,13 @@ fn provider_tls_config(pki: &Pki) -> rustls::ServerConfig {
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config
 }
-// template:end authn:grpc-transport-test-auth-provider
+// template:end oidc-introspection:grpc-transport-test-auth-provider
 
 struct Pki {
     ca_certificate: Vec<u8>,
-    // template:begin authn:grpc-transport-test-auth-ca-der
+    // template:begin oidc-introspection:grpc-transport-test-auth-ca-der
     ca_der: Vec<u8>,
-    // template:end authn:grpc-transport-test-auth-ca-der
+    // template:end oidc-introspection:grpc-transport-test-auth-ca-der
     server_certificate: Vec<u8>,
     server_key: Vec<u8>,
     client_certificate: Vec<u8>,
@@ -3438,9 +3553,9 @@ impl Pki {
         );
         Self {
             ca_certificate: issuer.pem().into_bytes(),
-            // template:begin authn:grpc-transport-test-auth-ca-der-init
+            // template:begin oidc-introspection:grpc-transport-test-auth-ca-der-init
             ca_der: issuer.der().to_vec(),
-            // template:end authn:grpc-transport-test-auth-ca-der-init
+            // template:end oidc-introspection:grpc-transport-test-auth-ca-der-init
             server_certificate,
             server_key,
             client_certificate,

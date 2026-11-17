@@ -1,16 +1,16 @@
 mod attempt;
 mod maintenance;
+mod record;
 
 use std::time::Duration;
 
 use infra_postgres::{Isolation, TxOptions};
 use sqlx::postgres::PgPool;
 
-pub use attempt::{
-    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
-};
+pub use attempt::{AttemptError, Attempted, CallerIdentity, CallerKind, Digest, ScopeKey};
 pub use infra_postgres::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
+pub use record::{CaptureError, MAX_STORED_BODY_BYTES, Record, is_replayable_header_name};
 
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
@@ -27,12 +27,12 @@ pub struct Store {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("retention exceeds the maximum of {MAX_RETENTION_DAYS} days")]
+#[error("retention must be between 1 microsecond and {MAX_RETENTION_DAYS} days")]
 pub struct InvalidRetention;
 
 impl Store {
     pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
-        if retention > MAX_RETENTION {
+        if !(Duration::from_micros(1)..=MAX_RETENTION).contains(&retention) {
             return Err(InvalidRetention);
         }
         Ok(Self {
@@ -53,12 +53,15 @@ mod tests {
             .expect("lazy pool does no I/O");
         let max = Duration::from_hours(36_500 * 24);
         assert!(Store::new(pool.clone(), max).is_ok());
-        for too_long in [
+        assert!(Store::new(pool.clone(), Duration::from_micros(1)).is_ok());
+        for invalid in [
+            Duration::ZERO,
+            Duration::from_nanos(999),
             max + Duration::from_nanos(1),
             Duration::from_micros(i64::MAX.unsigned_abs()),
             Duration::from_secs(10_000_000_000_000),
         ] {
-            let rejected = Store::new(pool.clone(), too_long);
+            let rejected = Store::new(pool.clone(), invalid);
             assert_eq!(rejected.unwrap_err(), InvalidRetention);
         }
         pool.close().await;

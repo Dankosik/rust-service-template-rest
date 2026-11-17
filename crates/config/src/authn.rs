@@ -241,7 +241,8 @@ fn required_jwks_max_age(
     let minimum = shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE;
     if age < minimum {
         return Err(ValidationError::new(
-            key, format!("must be at least {}", crate::de::display_duration(minimum))
+            key,
+            format!("must be at least {}", crate::de::display_duration(minimum)),
         ));
     }
     Ok(age)

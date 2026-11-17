@@ -13,6 +13,11 @@
 //!   keeps its own policy (windows, random sources, error codes and wording)
 //!   and maps the result into its own error.
 
+// template:begin cache:shared-rules-cache
+pub mod cache {
+    pub const MAX_ENTRY_BYTES: usize = 512 * 1024 * 1024;
+}
+// template:end cache:shared-rules-cache
 pub mod error_chain;
 // template:begin grpc:shared-rules-grpc
 pub mod grpc;

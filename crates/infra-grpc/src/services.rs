@@ -5,14 +5,23 @@ use std::sync::{Arc, OnceLock};
 use foldhash::{HashMap, HashSet};
 use prost::Message as _;
 use tonic::server::NamedService as _;
+use tonic::service::LayerExt as _;
 use tonic_reflection::pb::{v1, v1alpha};
+use tower::util::MapRequestLayer;
 
 use crate::Error;
 use crate::health::HealthServer;
 use crate::observe::MethodMetrics;
 use crate::protocol::{method_path, split_method_path};
 
+mod reflection;
+
 const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
+const REFLECTION_DESCRIPTORS: [&[u8]; 3] = [
+    v1::FILE_DESCRIPTOR_SET,
+    v1alpha::FILE_DESCRIPTOR_SET,
+    tonic_health::pb::FILE_DESCRIPTOR_SET,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CallType {
@@ -172,15 +181,17 @@ impl Services {
     pub(crate) fn attach_reflection(&mut self) -> Result<(), Error> {
         self.learn(v1::FILE_DESCRIPTOR_SET)?;
         self.learn(v1alpha::FILE_DESCRIPTOR_SET)?;
+        let sets = REFLECTION_DESCRIPTORS
+            .into_iter()
+            .chain(self.descriptor_sets.iter().copied());
+        reflection::check_files(sets.clone())?;
         let builder = || {
-            let builder = tonic_reflection::server::Builder::configure()
-                .include_reflection_service(false)
-                .register_encoded_file_descriptor_set(v1::FILE_DESCRIPTOR_SET)
-                .register_encoded_file_descriptor_set(v1alpha::FILE_DESCRIPTOR_SET)
-                .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
-            let builder = self.descriptor_sets.iter().fold(builder, |builder, set| {
-                builder.register_encoded_file_descriptor_set(set)
-            });
+            let builder =
+                tonic_reflection::server::Builder::configure().include_reflection_service(false);
+            let builder = sets.clone().fold(
+                builder,
+                tonic_reflection::server::Builder::register_encoded_file_descriptor_set,
+            );
             self.names
                 .iter()
                 .copied()
@@ -200,8 +211,9 @@ impl Services {
         let v1alpha = builder()
             .build_v1alpha()
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        self.add(v1)?;
-        self.add(v1alpha)
+        let layer = MapRequestLayer::new(reflection::cancel_request_body);
+        self.add(layer.named_layer(v1))?;
+        self.add(layer.named_layer(v1alpha))
     }
 
     #[allow(

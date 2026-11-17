@@ -83,10 +83,10 @@ fn tls_requires_certificate_and_environment_only_private_key() {
 fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
     let config = admit(enabled()).unwrap().unwrap();
     assert_eq!(config.request_timeout, Duration::from_secs(8));
-    assert_eq!(config.in_flight_cap().map(NonZeroU32::get), Some(256));
+    assert_eq!(config.max_in_flight.map(NonZeroU32::get), Some(256));
     assert_eq!(config.admission_wait, Duration::from_secs(1));
-    assert_eq!(config.connection_cap().map(NonZeroU32::get), Some(4096));
-    assert_eq!(config.connection_age_cap(), Some(Duration::from_mins(30)));
+    assert_eq!(config.max_connections.map(NonZeroU32::get), Some(4096));
+    assert_eq!(config.max_connection_age, Some(Duration::from_mins(30)));
 
     let unbounded = admit(GrpcInput {
         max_in_flight: 0,
@@ -96,9 +96,9 @@ fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
     })
     .unwrap()
     .unwrap();
-    assert_eq!(unbounded.in_flight_cap(), None);
-    assert_eq!(unbounded.connection_cap(), None);
-    assert_eq!(unbounded.connection_age_cap(), None);
+    assert_eq!(unbounded.max_in_flight, None);
+    assert_eq!(unbounded.max_connections, None);
+    assert_eq!(unbounded.max_connection_age, None);
 }
 
 #[test]
@@ -109,17 +109,14 @@ fn the_admission_wait_never_outlasts_the_call_budget() {
     })
     .unwrap()
     .unwrap();
-    assert_eq!(
-        short_budget.admission_wait_cap(),
-        Duration::from_millis(500)
-    );
+    assert_eq!(short_budget.admission_wait, Duration::from_millis(500));
     let immediate = admit(GrpcInput {
         admission_wait: Duration::ZERO,
         ..enabled()
     })
     .unwrap()
     .unwrap();
-    assert_eq!(immediate.admission_wait_cap(), Duration::ZERO);
+    assert_eq!(immediate.admission_wait, Duration::ZERO);
     assert_eq!(
         refused_keys(GrpcInput {
             admission_wait: Duration::from_mins(11),
@@ -232,10 +229,10 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     .unwrap();
     let grpc = cfg.grpc.as_ref().unwrap();
     assert_eq!(grpc.request_timeout, Duration::from_secs(3));
-    assert_eq!(grpc.in_flight_cap().map(NonZeroU32::get), Some(32));
+    assert_eq!(grpc.max_in_flight.map(NonZeroU32::get), Some(32));
     assert_eq!(grpc.admission_wait, Duration::from_secs(2));
-    assert_eq!(grpc.connection_cap(), None);
-    assert_eq!(grpc.connection_age_cap(), Some(Duration::from_mins(5)));
+    assert_eq!(grpc.max_connections, None);
+    assert_eq!(grpc.max_connection_age, Some(Duration::from_mins(5)));
 
     let over_drain = [("APP__GRPC__REQUEST_TIMEOUT", "11s")];
     let err = load_from(

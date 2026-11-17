@@ -79,6 +79,8 @@ fn options(
         allow_plaintext: true,
         allow_unauthenticated: true,
         command_timeout,
+        max_key_bytes: 1024,
+        max_value_bytes: 64 * 1024,
     }
 }
 
@@ -304,6 +306,43 @@ async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
         assert_eq!(alpha.get(&caller, &key).await.unwrap(), None);
         alpha.delete(&caller, &key).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn bounded_reads_detect_oversized_values_written_by_another_client() {
+    let caller = OperationContext::unbounded();
+    let url = cache_url();
+    let writer = connect_url(&url, COMMAND_TIMEOUT)
+        .await
+        .namespace(namespace!("bounded"));
+    let reader = Cache::start(CacheOptions {
+        max_value_bytes: 4,
+        ..options(&url, COMMAND_TIMEOUT, None)
+    })
+    .await
+    .unwrap()
+    .namespace(namespace!("bounded"));
+    let key = unique_key();
+    let large_value = vec![0; 64 * 1024];
+    for value in [&b""[..], b"1234", b"12345", &large_value] {
+        writer
+            .set(&caller, &key, value, Duration::from_secs(30))
+            .await
+            .unwrap();
+        if value.len() <= 4 {
+            assert_eq!(
+                reader.get(&caller, &key).await.unwrap().as_deref(),
+                Some(value)
+            );
+        } else {
+            assert_eq!(
+                reader.get(&caller, &key).await,
+                Err(OperationError::ValueTooLarge)
+            );
+        }
+    }
+    reader.delete(&caller, &key).await.unwrap();
+    assert_eq!(reader.get(&caller, &key).await.unwrap(), None);
 }
 
 #[tokio::test]

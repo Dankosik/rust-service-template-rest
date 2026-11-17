@@ -174,9 +174,8 @@ fn echo_services(echo: &Echo) -> Services {
 
 fn serve(services: Services, authentication: Authentication) -> (Server, SocketAddr) {
     let app = infra_grpc::router(services, readiness().reader(), authentication, limits()).unwrap();
-    let server = BoundListener::bind("127.0.0.1:0".parse().unwrap())
-        .unwrap()
-        .serve_h2(app, server_options(limits()), None);
+    let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let server = app.serve(listener, server_options(limits()), None);
     let address = server.local_addr();
     (server, address)
 }

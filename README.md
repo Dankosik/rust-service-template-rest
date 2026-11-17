@@ -151,9 +151,10 @@ configured.
   ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
-- `CACHE=redis`: a Valkey cache (Redis 6+ speaks the same protocol but is not
-  tested) that falls back to the source of truth
-  ([`infra-cache`](crates/infra-cache)).
+- `CACHE=redis`: an optional Valkey cache. Each feature reserves time for
+  its source of truth and owns fallback on a miss or an unavailable cache.
+  Configure entry sizes and grant the read commands before rolling out the
+  [cache profile](docs/decisions/cache-decisions.md).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->
 - `OBJECT_STORAGE=s3`: Amazon S3, Cloudflare R2 or Railway Buckets

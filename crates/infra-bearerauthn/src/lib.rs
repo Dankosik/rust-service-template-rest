@@ -285,9 +285,14 @@ impl VerificationCounters {
     }
 }
 
-// template:begin oidc-introspection:authn-introspection-test-support
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    // template:begin oidc-jwt:authn-jwt-test-support
+    #[cfg(feature = "test-support")]
+    pub use crate::jwt::JwtFixture;
+    // template:end oidc-jwt:authn-jwt-test-support
+
+    // template:begin oidc-introspection:authn-introspection-test-support
     use tokio_util::sync::CancellationToken;
 
     use super::{Failure, provider};
@@ -315,8 +320,8 @@ pub mod test_support {
             self.provider
         }
     }
+    // template:end oidc-introspection:authn-introspection-test-support
 }
-// template:end oidc-introspection:authn-introspection-test-support
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Verifier([REDACTED])")]
