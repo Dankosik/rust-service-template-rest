@@ -313,18 +313,23 @@ async fn query<T: redis::FromRedisValue>(
     mut connection: MultiplexedConnection,
     operation: Operation,
 ) -> redis::RedisResult<T> {
-    let mut reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
+    let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
+    match (operation, reply_data(reply)?) {
+        (Operation::Get, value @ (redis::Value::Nil | redis::Value::BulkString(_)))
+        | (Operation::Set, value @ redis::Value::Okay)
+        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => Ok(T::from_redis_value(value)?),
+        _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
+    }
+}
+
+fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::Value> {
     while let redis::Value::Attribute { data, .. } = reply {
         reply = *data;
     }
-    let value = match (operation, reply) {
-        (_, redis::Value::ServerError(error)) => return Err(error.into()),
-        (Operation::Get, value) => value.extract_error()?,
-        (Operation::Set, value @ redis::Value::Okay)
-        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => value,
-        _ => return Err((redis::ErrorKind::Parse, "unexpected cache mutation reply").into()),
-    };
-    Ok(T::from_redis_value(value)?)
+    match reply {
+        redis::Value::ServerError(error) => Err(error.into()),
+        data => Ok(data),
+    }
 }
 
 impl std::fmt::Debug for Link {
@@ -463,15 +468,12 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
         &self,
         build_command: impl FnOnce() -> redis::Cmd,
-        parent: Option<&OperationContext>,
+        parent: &OperationContext,
         operation: Operation,
     ) -> Result<T, CommandError> {
-        let context = parent.map_or_else(
-            || OperationContext::with_timeout(self.command_timeout),
-            |caller| caller.child(self.command_timeout),
-        );
+        let context = parent.child(self.command_timeout);
         let stop = |_: Stopped| {
-            parent.and_then(OperationContext::stopped).map_or(
+            parent.stopped().map_or(
                 CommandFailure::Failed(ErrorType::Timeout),
                 CommandFailure::Stopped,
             )
@@ -592,21 +594,36 @@ async fn reply_until<T>(
 async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
+    accepts: fn(redis::Value) -> bool,
     deadline: impl FnOnce() -> Deadline,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
-    let reply = tokio::task::unconstrained(command.query_async(&mut connection));
-    reply_until(&generation.retired, reply, deadline).await
+    let reply = tokio::task::unconstrained(connection.send_packed_command(command));
+    let result = reply_until(&generation.retired, reply, deadline).await?;
+    Ok(result.and_then(reply_data).and_then(|value| {
+        if accepts(value) {
+            Ok(())
+        } else {
+            Err((
+                redis::ErrorKind::Parse,
+                "unexpected cache maintenance reply",
+            )
+                .into())
+        }
+    }))
 }
 
 async fn ping_until(
     generation: &Generation,
     command_timeout: Duration,
 ) -> Result<(), (ErrorType, Disposition)> {
-    let reply = query_until(generation, &redis::Cmd::ping(), || {
-        Deadline::new(Instant::now(), command_timeout)
-    })
+    let reply = query_until(
+        generation,
+        &redis::Cmd::ping(),
+        |value| matches!(value, redis::Value::SimpleString(pong) if pong == "PONG"),
+        || Deadline::new(Instant::now(), command_timeout),
+    )
     .await
     .map_err(|error| (error, Disposition::Retire))?;
     let disposition = if ping_keeps_generation(&reply) {
@@ -920,9 +937,12 @@ impl<'a> Rotation<'a> {
         }
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(password.as_str());
-        let result = query_until(generation, &command, || {
-            Deadline::new(Instant::now(), command_timeout)
-        })
+        let result = query_until(
+            generation,
+            &command,
+            |value| matches!(value, redis::Value::Okay),
+            || Deadline::new(Instant::now(), command_timeout),
+        )
         .await
         .and_then(|reply| reply.map_err(|error| error_type(&error)));
         match result {
