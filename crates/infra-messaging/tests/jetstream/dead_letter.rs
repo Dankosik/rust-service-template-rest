@@ -2,6 +2,21 @@ use std::time::UNIX_EPOCH;
 
 use super::*;
 
+fn permanent_transfer_timestamp(scrape: &str) -> Option<f64> {
+    let sample = scrape.lines().find(|line| {
+        line.starts_with("messaging_last_dead_letter_timestamp_seconds{")
+            && line.contains(r#"event_type="test.example.created""#)
+            && line.contains(r#"reason="permanent""#)
+            && line.contains(r#"outcome="accepted""#)
+    })?;
+    let (_, value) = sample.rsplit_once(' ').expect("Prometheus sample value");
+    Some(
+        value
+            .parse()
+            .expect("DLQ publication timestamp is a number"),
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_identity() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -39,14 +54,8 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .publication
         .prepare(&event("event-permanent"))
         .expect("fixture event is prepared");
-    let dead_letter_timestamp = "messaging_last_dead_letter_timestamp_seconds{";
-    assert!(
-        !recorder
-            .handle()
-            .render()
-            .lines()
-            .any(|line| line.starts_with(dead_letter_timestamp))
-    );
+    let metrics = recorder.handle();
+    assert_eq!(permanent_transfer_timestamp(&metrics.render()), None);
     let before = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
     messaging
         .producer()
@@ -78,19 +87,8 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .await
         .expect("terminal transfer worker can drain after source settlement");
 
-    let scrape = recorder.handle().render();
-    let observed = scrape
-        .lines()
-        .find(|line| {
-            line.starts_with(dead_letter_timestamp)
-                && line.contains(r#"event_type="test.example.created""#)
-                && line.contains(r#"reason="permanent""#)
-                && line.contains(r#"outcome="accepted""#)
-        })
-        .and_then(|line| line.split_ascii_whitespace().last())
-        .expect("an acknowledged DLQ publication publishes its timestamp")
-        .parse::<f64>()
-        .expect("DLQ publication timestamp is a number");
+    let observed = permanent_transfer_timestamp(&metrics.render())
+        .expect("an acknowledged DLQ publication publishes its timestamp");
     let after = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
     assert!((before.as_secs_f64()..=after.as_secs_f64()).contains(&observed));
 
