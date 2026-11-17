@@ -328,12 +328,6 @@ async fn a_short_ttl_expires() {
 }
 
 #[tokio::test]
-async fn wait_connected_succeeds_against_valkey() {
-    let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
-    cache.wait_connected().await.expect("cache connected");
-}
-
-#[tokio::test]
 async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);

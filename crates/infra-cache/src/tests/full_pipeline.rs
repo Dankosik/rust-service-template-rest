@@ -1,6 +1,6 @@
 use std::pin::pin;
 use std::sync::atomic::Ordering;
-use std::task::Wake;
+use std::task::{Wake, Waker};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 

@@ -321,9 +321,6 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
-    let startup = service.await_record("cache_unavailable_at_startup");
-    let reason = startup["reason"].as_str().expect("reason field");
-    assert!(!reason.is_empty(), "{startup}");
     let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
@@ -331,6 +328,8 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         poll_until(&ready, 200, Duration::from_secs(5)),
         "a cache outage must not keep the service from becoming ready"
     );
+    let outage = service.await_record("cache_connection_failed");
+    assert_eq!(outage["error.type"], "io", "{outage}");
     service.terminate();
     let (code, stderr) = service.wait();
     assert_eq!(code, Some(0), "stderr: {stderr}");

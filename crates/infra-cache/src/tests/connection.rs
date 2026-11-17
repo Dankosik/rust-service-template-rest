@@ -49,17 +49,57 @@ impl TestMetrics {
             })
             .collect()
     }
+
+    fn retirements(&self) -> u64 {
+        let target = Key::from_name(crate::observe::RETIREMENTS_METRIC);
+        self.snapshot()
+            .iter()
+            .find_map(|(composite, value)| match value {
+                DebugValue::Counter(count) if composite.key() == &target => Some(*count),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_retirements(&self, expected: u64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.retirements() < expected {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the supervisor did not record {expected} retirements"));
+    }
 }
 
 async fn wait_until_connected(cache: &Cache, budget: Duration) {
-    let deadline = tokio::time::Instant::now() + budget;
-    while cache.wait_connected().await.is_err() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "cache did not publish a connected generation within {budget:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    let probe = cache.namespace(namespace!("connected_probe"));
+    tokio::time::timeout(budget, async {
+        while probe.get("probe").await.is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("cache did not publish a connected generation within {budget:?}"));
+}
+
+fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    let captured = CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    (captured, tracing::subscriber::set_default(subscriber))
+}
+
+fn connection_failed_with(logs: &str, error_type: &str) -> bool {
+    logs.lines().any(|line| {
+        line.contains("cache_connection_failed")
+            && (line.contains(&format!("error.type=\"{error_type}\""))
+                || line.contains(&format!("error.type={error_type}")))
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -263,8 +303,9 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn a_refused_hello_is_reported_as_auth() {
+    let (captured, _subscriber) = capture_logs();
     let gate = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_millis(200),
@@ -278,12 +319,16 @@ async fn a_refused_hello_is_reported_as_auth() {
     .await
     .expect("start connect");
 
-    let refused = tokio::time::timeout(Duration::from_secs(20), cache.wait_connected())
+    captured
+        .wait_for(Duration::from_secs(20), |logs| {
+            connection_failed_with(logs, "auth")
+        })
         .await
-        .expect("the setup attempt ends")
-        .expect_err("the server refuses the password");
-    assert_eq!(refused.reason, "auth");
-    assert_eq!(refused.to_string(), "cache connection failed: auth");
+        .expect("the refused password was not reported as auth");
+    assert_eq!(
+        cache.namespace(namespace!("auth")).get("key").await,
+        Err(crate::Unavailable)
+    );
 }
 
 #[tokio::test]
@@ -292,11 +337,12 @@ async fn a_refused_hello_is_reported_as_auth() {
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
+    let (captured, _subscriber) = capture_logs();
     let server = FakeServer::start().await;
     let password = ephemeral_password();
     server.require_password(&password);
     let file = temp_file(&password);
-    let cache = Cache::start(with_password_file(
+    let _cache = Cache::start(with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
     ))
@@ -304,12 +350,13 @@ async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
     .expect("start cache");
     std::fs::remove_file(file.path()).expect("remove password file");
 
-    let refused = tokio::time::timeout(Duration::from_secs(5), cache.wait_connected())
+    captured
+        .wait_for(Duration::from_secs(5), |logs| {
+            connection_failed_with(logs, "other")
+        })
         .await
-        .expect("the setup attempt ends")
-        .expect_err("setup cannot read the password");
-    assert_eq!(refused.reason, "other");
-    assert_eq!(refused.to_string(), "cache connection failed: other");
+        .expect("the unreadable password file was not reported as other");
+    assert!(!connection_failed_with(&captured.rendered(), "auth"));
     assert_eq!(server.command_count("HELLO", None), 0);
 }
 
@@ -375,10 +422,10 @@ async fn a_large_command_timeout_keeps_maintenance_and_commands_usable() {
     .expect("start cache");
     let namespace = cache.namespace(namespace!("large_budget"));
     let limit = Duration::from_secs(6);
-    tokio::time::timeout(limit, cache.wait_connected())
-        .await
-        .expect("connect must complete")
-        .expect("connect must succeed");
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.get("first")).await,
+        Ok(Ok(None))
+    );
 
     server
         .wait_for(limit, "maintenance must send recurring PINGs", || {
@@ -392,7 +439,8 @@ async fn a_large_command_timeout_keeps_maintenance_and_commands_usable() {
 }
 
 #[tokio::test]
-async fn ping_permission_denial_keeps_the_connection_usable() {
+async fn ping_permission_denial_keeps_the_connection_usable_and_is_reported_once() {
+    let (captured, _subscriber) = capture_logs();
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true).await;
     let namespace = cache.namespace(namespace!("ping_permission"));
@@ -410,6 +458,11 @@ async fn ping_permission_denial_keeps_the_connection_usable() {
         .await;
     assert_eq!(namespace.get("after_maintenance").await, Ok(None));
     assert_eq!(server.connections(), connections);
+    assert_eq!(
+        captured.rendered().matches("cache_ping_failed").count(),
+        1,
+        "a run of refused PINGs must be reported once"
+    );
 }
 
 #[tokio::test]
@@ -599,11 +652,6 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     assert_work_metrics(&metrics, 1, 1, 0);
     assert_eq!(replacement.await, Ok(None));
     assert_work_metrics(&metrics, 0, 1, 0);
-    cache
-        .wait_connected()
-        .await
-        .expect("setup survives acquisition cancellation");
-    assert_work_metrics(&metrics, 0, 1, 0);
     assert_eq!(server.connections(), 1);
     assert_eq!(server.command_count("GET", Some("waiting:pending")), 0);
     assert_eq!(server.command_count("GET", Some("waiting:refused")), 0);
@@ -667,7 +715,6 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
             || server.connections() > old,
         )
         .await;
-    wait_until_connected(&cache, Duration::from_secs(1)).await;
     drop(pending);
     server
         .wait_for(Duration::from_secs(1), "old socket stayed open", || {
@@ -700,6 +747,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
             started.elapsed() < Duration::from_millis(500),
             "SET exceeded its 100 ms budget plus scheduling allowance"
         );
+        metrics.wait_for_retirements(cycle + 1).await;
         assert_work_metrics(&metrics, 0, 0, cycle + 1);
         server
             .wait_for(
@@ -727,6 +775,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
         namespace.delete("delete-once").await,
         Err(crate::Unavailable)
     );
+    metrics.wait_for_retirements(4).await;
     assert_work_metrics(&metrics, 0, 0, 4);
     server
         .wait_for(
@@ -796,6 +845,7 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
             .expect("command must observe its own reply timeout"),
         Err(crate::Unavailable)
     );
+    metrics.wait_for_retirements(1).await;
     assert_work_metrics(&metrics, 2, 0, 1);
     assert_eq!(
         futures_util::poll!(peer.as_mut()),
@@ -827,10 +877,6 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
         )
         .await;
     assert_eq!(server.active(), 1);
-    cache
-        .wait_connected()
-        .await
-        .expect("healthy connection after timeout");
 }
 
 #[tokio::test]
@@ -1090,7 +1136,9 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
 }
 
 #[test]
-fn wait_connected_reports_the_exit_of_a_supervisor_that_never_ran() {
+fn a_command_after_the_supervisor_exited_fails_instead_of_hanging() {
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let cache = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1101,13 +1149,19 @@ fn wait_connected_reports_the_exit_of_a_supervisor_that_never_ran() {
         .build()
         .expect("wait runtime");
     runtime.block_on(async {
-        let error = tokio::time::timeout(Duration::from_secs(1), cache.wait_connected())
-            .await
-            .expect("wait_connected must observe the supervisor exit")
-            .expect_err("the supervisor exited when its runtime dropped");
-        assert_eq!(error.reason, "io");
-        assert_eq!(error.to_string(), "cache connection failed: io");
+        let namespace = cache.namespace(namespace!("supervisor_exit"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), namespace.get("key")).await,
+            Ok(Err(crate::Unavailable))
+        );
     });
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape.contains(
+            "cache_operation_duration_seconds_count{cache=\"supervisor_exit\",operation=\"get\",outcome=\"error\",error_type=\"io\"} 1"
+        ),
+        "{scrape}"
+    );
 }
 
 #[tokio::test]
@@ -1259,14 +1313,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let metrics = TestMetrics::new();
     let _recorder = metrics::set_default_local_recorder(metrics.recorder());
 
-    let captured = CapturedLogs::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let (captured, _subscriber) = capture_logs();
     let server = FakeServer::start().await;
     let initial = ephemeral_password();
     let pending = ephemeral_password();
@@ -1405,14 +1452,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
 async fn a_password_the_server_keeps_refusing_is_reported_once() {
     let metrics = TestMetrics::new();
     let _recorder = metrics::set_default_local_recorder(metrics.recorder());
-    let captured = CapturedLogs::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let (captured, _subscriber) = capture_logs();
     let server = FakeServer::start().await;
     let initial = ephemeral_password();
     let refused = ephemeral_password();
@@ -1786,6 +1826,7 @@ async fn caller_timeout_after_setup_wait_keeps_the_healthy_connection() {
 async fn commands_fail_fast_while_a_background_setup_retry_is_in_flight() {
     use std::task::Poll;
 
+    let (captured, _subscriber) = capture_logs();
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(2),
@@ -1800,11 +1841,12 @@ async fn commands_fail_fast_while_a_background_setup_retry_is_in_flight() {
     .expect("start cache");
     let namespace = cache.namespace(namespace!("retry_fail_fast"));
 
-    let initial = tokio::time::timeout(Duration::from_secs(2), cache.wait_connected())
+    captured
+        .wait_for(Duration::from_secs(2), |logs| {
+            connection_failed_with(logs, "auth")
+        })
         .await
-        .expect("initial setup attempt must settle")
-        .expect_err("initial password is refused");
-    assert_eq!(initial.reason, "auth");
+        .expect("initial setup attempt must be refused");
     server.observed.silence_all.store(true, Ordering::SeqCst);
     server
         .wait_for(
@@ -1819,17 +1861,13 @@ async fn commands_fail_fast_while_a_background_setup_retry_is_in_flight() {
         futures_util::poll!(command.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    let mut wait = Box::pin(cache.wait_connected());
-    let error = match futures_util::poll!(wait.as_mut()) {
-        Poll::Ready(Err(error)) => error,
-        other => panic!("wait_connected blocked on background retry: {other:?}"),
-    };
-    assert_eq!(error.reason, "auth");
     assert_eq!(server.command_count("GET", None), 0);
 }
 
 #[tokio::test]
 async fn commands_fail_fast_during_generation_cooldown_after_early_disconnect() {
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(2),
@@ -1842,21 +1880,58 @@ async fn commands_fail_fast_during_generation_cooldown_after_early_disconnect() 
 
     server.hang_up();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
-    let error = loop {
-        if let Err(error) = cache.wait_connected().await {
-            break error;
-        }
+    while namespace.get("probe").await.is_ok() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "disconnect during cooldown did not transition to fast failure"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-    assert_eq!(error.reason, "io");
+    }
     let started = tokio::time::Instant::now();
     assert_eq!(namespace.get("key").await, Err(crate::Unavailable));
     assert!(
         started.elapsed() < Duration::from_millis(50),
         "command blocked during generation cooldown instead of failing fast"
     );
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape.contains(
+            "cache_operation_duration_seconds_count{cache=\"cooldown\",operation=\"get\",outcome=\"error\",error_type=\"io\"}"
+        ),
+        "{scrape}"
+    );
+}
+
+#[tokio::test]
+async fn every_published_connection_is_reported_as_connected() {
+    let (captured, _subscriber) = capture_logs();
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true).await;
+    let namespace = cache.namespace(namespace!("announce"));
+    assert_eq!(namespace.get("ready").await, Ok(None));
+
+    let connected = |logs: &str| {
+        logs.lines()
+            .filter(|line| line.contains("cache_connected"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    captured
+        .wait_for(Duration::from_secs(1), |logs| connected(logs).len() == 1)
+        .await
+        .expect("the first connection was not reported");
+    let first = connected(&captured.rendered());
+    assert!(first[0].contains("server.address=127.0.0.1"), "{first:?}");
+    assert!(
+        first[0].contains(&format!("server.port={}", server.address.port())),
+        "{first:?}"
+    );
+    assert!(first[0].contains("cache.tls=false"), "{first:?}");
+
+    server.hang_up();
+    captured
+        .wait_for(Duration::from_secs(5), |logs| connected(logs).len() == 2)
+        .await
+        .expect("the reconnection was not reported");
+    assert_eq!(server.connections(), 2);
 }
