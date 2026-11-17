@@ -30,6 +30,10 @@ pub(crate) fn load_env(pairs: &[(&str, &str)]) -> Config {
     load_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
 }
 
+#[allow(
+    dead_code,
+    reason = "removing every profile with secret fields leaves this assertion without a caller"
+)]
 pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
     let dir = tempfile::tempdir().unwrap();
     let leaked = write(&dir, "leaked.toml", toml);
@@ -45,6 +49,10 @@ pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
     assert_matches!(&err, Error::SecretInFile { key: found, .. } if found == key, "{err}");
 }
 
+#[allow(
+    dead_code,
+    reason = "removing the cache and messaging profiles leaves this assertion without a caller"
+)]
 pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
     assert_matches!(
         load_from(&LoadOptions::default(), BUILD, env(&[(variable, "x")])),

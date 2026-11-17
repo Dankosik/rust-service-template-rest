@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
-use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::test_support::{BUILD, env, write};
 use crate::validate::admit_with;
 use std::assert_matches;
 
@@ -593,7 +593,7 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
 // template:begin oidc-introspection:load-introspection-secret-file
 #[test]
 fn introspection_secret_in_a_file_is_refused() {
-    assert_secret_in_file(
+    crate::test_support::assert_secret_in_file(
         "[authn]\nintrospection_client_secret = \"file-secret\"\n",
         "authn.introspection_client_secret",
     );

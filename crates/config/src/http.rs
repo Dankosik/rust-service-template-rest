@@ -255,16 +255,24 @@ impl HttpConfig {
             self.max_connection_age,
         ));
         HttpTimings {
+            // template:begin grpc:http-timings-drain-value
             drain_budget: propagation_fits_drain.then(|| self.effective_drain_budget()),
+            // template:end grpc:http-timings-drain-value
+            // template:begin cache:http-timings-request-value
             request_timeout: request_timeout_in_range.then_some(self.request_timeout),
+            // template:end cache:http-timings-request-value
         }
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct HttpTimings {
+    // template:begin grpc:http-timings-drain-field
     pub(crate) drain_budget: Option<Duration>,
+    // template:end grpc:http-timings-drain-field
+    // template:begin cache:http-timings-request-field
     pub(crate) request_timeout: Option<Duration>,
+    // template:end cache:http-timings-request-field
 }
 
 #[cfg(test)]
