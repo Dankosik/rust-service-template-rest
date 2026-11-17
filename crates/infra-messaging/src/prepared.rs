@@ -50,7 +50,6 @@ impl PreparedEvent {
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
         let key = route_key::<T>();
-        crate::wire::validate_outbound_whitespace(key.event_type)?;
         if crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::CreatedAtRequired);
         }
@@ -303,13 +302,32 @@ mod tests {
             items: [true, false],
         });
         let expected = r#"{"text":"a\"\\\n\u0000Ж","amount":1.0,"items":[true,false]}"#;
-        let prepared = prepare("events.created", &event, expected.len())
+        let service = crate::PublicationPolicy {
+            max_payload_bytes: expected.len(),
+        };
+        let route = Route::new("events.created");
+        let mut registry = Registry::default();
+        let publication = service.declare(&mut registry, &route).unwrap();
+        let prepared = publication
+            .prepare(&event)
             .expect("payload at the exact ceiling is admitted");
         assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
-        std::assert_matches!(
-            prepare("events.created", &event, expected.len() - 1),
-            Err(EnvelopeError::PayloadTooLarge)
+        assert!(
+            registry
+                .check_publication_limit(expected.len() - 1)
+                .is_err()
         );
+        let strict = service
+            .capped_at(expected.len() - 1)
+            .declare(&mut Registry::default(), &route)
+            .unwrap();
+        std::assert_matches!(strict.prepare(&event), Err(EnvelopeError::PayloadTooLarge));
+        let mut registry = Registry::default();
+        service
+            .capped_at(usize::MAX)
+            .declare(&mut registry, &route)
+            .unwrap();
+        assert!(registry.check_publication_limit(expected.len()).is_ok());
     }
 
     #[test]
