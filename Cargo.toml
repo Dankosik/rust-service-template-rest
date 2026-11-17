@@ -179,7 +179,6 @@ opentelemetry-semantic-conventions = { version = "0.33.0", default-features = fa
 # Tests decode captured OTLP export bodies with it; opentelemetry-otlp already resolves it.
 opentelemetry-proto = { version = "0.33.1", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
-axum-tracing-opentelemetry = { version = "0.42.1", default-features = false }
 tracing-opentelemetry-instrumentation-sdk = { version = "=0.42.1", default-features = false, features = ["http"] }
 metrics = { version = "0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }

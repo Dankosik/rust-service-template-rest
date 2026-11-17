@@ -14,7 +14,6 @@ use axum::http::header::{
 use axum::http::{HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
 use health::{NotReady, ReadinessReader};
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
@@ -80,7 +79,6 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             Observer::new(options.log_health_probes),
             observe::observe,
         ))
-        .layer(OtelInResponseLayer)
         .layer(option_layer(in_flight))
         .layer(middleware::from_fn_with_state(
             options.request_timeout,

@@ -15,6 +15,14 @@ pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), Va
     )
 }
 
+pub(super) fn admission_wait_range(key: &str, value: Duration) -> Result<(), ValidationError> {
+    duration_range(key, value, Duration::ZERO..=Duration::from_mins(10))
+}
+
+pub(super) fn admission_wait_cap(wait: Duration, request_timeout: Duration) -> Duration {
+    wait.min(request_timeout)
+}
+
 pub(super) fn request_budget_fits_drain(
     key: &str,
     timeout: Duration,

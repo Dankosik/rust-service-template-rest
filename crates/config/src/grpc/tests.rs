@@ -102,17 +102,27 @@ fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
 }
 
 #[test]
-fn the_admission_wait_may_not_outlast_the_call_budget() {
-    for admitted in [Duration::from_secs(8), Duration::ZERO] {
-        admit(GrpcInput {
-            admission_wait: admitted,
-            ..enabled()
-        })
-        .unwrap();
-    }
+fn the_admission_wait_never_outlasts_the_call_budget() {
+    let short_budget = admit(GrpcInput {
+        request_timeout: Duration::from_millis(500),
+        ..enabled()
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        short_budget.admission_wait_cap(),
+        Duration::from_millis(500)
+    );
+    let immediate = admit(GrpcInput {
+        admission_wait: Duration::ZERO,
+        ..enabled()
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(immediate.admission_wait_cap(), Duration::ZERO);
     assert_eq!(
         refused_keys(GrpcInput {
-            admission_wait: Duration::from_millis(8_001),
+            admission_wait: Duration::from_mins(11),
             ..enabled()
         }),
         ["grpc.admission_wait"]

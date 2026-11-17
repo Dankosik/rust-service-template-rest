@@ -18,7 +18,9 @@ use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
-use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
+use tracing_opentelemetry_instrumentation_sdk::{
+    find_context_from_tracing, otel_trace_span, set_parent_or_fallback,
+};
 
 use crate::body::hold_guard_until_end;
 use crate::harden::AdmissionShed;
@@ -114,6 +116,9 @@ pub(crate) async fn observe(
         connection.as_ref(),
     );
     let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
+    let trace_context = fallback
+        .clone()
+        .unwrap_or_else(|| find_context_from_tracing(&span));
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
@@ -150,6 +155,7 @@ pub(crate) async fn observe(
     let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
     DropGuard::dismiss(pending).record(status, problem_code, termination);
     update_span_from_response(&span, status);
+    otel_http::inject_context(&trace_context, response.headers_mut());
     if let Some(id) = &request_id {
         response
             .headers_mut()
@@ -563,6 +569,12 @@ mod tests {
     }
 
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {
+        served(request).await.1
+    }
+
+    async fn served(
+        request: Request,
+    ) -> (axum::http::HeaderMap, opentelemetry_sdk::trace::SpanData) {
         use axum::Router;
         use axum::routing::get;
         use opentelemetry::trace::TracerProvider as _;
@@ -593,11 +605,41 @@ mod tests {
                 draining: None,
             },
         );
-        drop(app.oneshot(request).await.unwrap());
+        let headers = app.oneshot(request).await.unwrap().into_parts().0.headers;
 
         let mut spans = exporter.get_finished_spans().unwrap();
         assert_eq!(spans.len(), 1, "one server span, got {spans:?}");
-        spans.remove(0)
+        (headers, spans.remove(0))
+    }
+
+    #[tokio::test]
+    async fn a_response_names_the_server_span_in_traceparent() {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let request = Request::builder()
+            .uri("/items/1")
+            .header(
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let (headers, span) = served(request).await;
+
+        let context = &span.span_context;
+        assert_eq!(
+            context.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        let expected = format!("00-{}-{}-01", context.trace_id(), context.span_id());
+        let sent: Vec<_> = headers
+            .get_all("traceparent")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(sent, [expected.as_str()]);
     }
 
     fn attribute(

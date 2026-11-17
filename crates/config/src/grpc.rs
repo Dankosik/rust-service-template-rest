@@ -9,10 +9,10 @@ use serde::Deserialize;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, connection_age_range, connection_count_range, in_flight_range,
-    request_budget_fits_drain, request_timeout_range,
+    DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
+    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
-use crate::validate::{Rejected, ValidationError, Violations, duration_range, required};
+use crate::validate::{Rejected, ValidationError, Violations, required};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -103,12 +103,11 @@ impl GrpcInput {
                     "calls",
                 ));
             }
-            violations.check(duration_range(
-                "grpc.admission_wait",
-                self.admission_wait,
-                Duration::ZERO..=self.request_timeout,
-            ));
         }
+        violations.check(admission_wait_range(
+            "grpc.admission_wait",
+            self.admission_wait,
+        ));
         violations.check(in_flight_range("grpc.max_in_flight", self.max_in_flight));
         violations.check(connection_count_range(
             "grpc.max_connections",
@@ -179,6 +178,11 @@ impl GrpcConfig {
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_in_flight)
+    }
+
+    #[must_use]
+    pub fn admission_wait_cap(&self) -> Duration {
+        admission_wait_cap(self.admission_wait, self.request_timeout)
     }
 
     #[must_use]

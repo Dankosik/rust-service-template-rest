@@ -8,8 +8,8 @@ use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, connection_age_range, connection_count_range, in_flight_range,
-    request_budget_fits_drain, request_timeout_range,
+    DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
+    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
@@ -156,7 +156,7 @@ impl HttpConfig {
 
     #[must_use]
     pub fn admission_wait_cap(&self) -> Duration {
-        self.admission_wait.min(self.request_timeout)
+        admission_wait_cap(self.admission_wait, self.request_timeout)
     }
 
     #[must_use]
@@ -242,10 +242,9 @@ impl HttpConfig {
             1..=ByteSize::gib(1).as_u64(),
         ));
         v.check(in_flight_range("http.max_in_flight", self.max_in_flight));
-        v.check(duration_range(
+        v.check(admission_wait_range(
             "http.admission_wait",
             self.admission_wait,
-            Duration::ZERO..=Duration::from_mins(10),
         ));
         v.check(connection_count_range(
             "http.max_connections",

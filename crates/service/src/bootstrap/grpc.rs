@@ -97,7 +97,7 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
     infra_grpc::Limits {
         request_timeout: grpc.request_timeout,
         max_in_flight: grpc.in_flight_cap(),
-        max_admission_wait: grpc.admission_wait,
+        max_admission_wait: grpc.admission_wait_cap(),
         max_connections: grpc.connection_cap(),
         max_connection_age: grpc.connection_age_cap(),
     }
