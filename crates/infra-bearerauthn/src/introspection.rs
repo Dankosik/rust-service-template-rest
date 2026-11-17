@@ -211,7 +211,7 @@ impl IntrospectionVerifier {
             if let Some(value) = cache.retained.get(&key).await
                 && value.reusable_at(now()?)
             {
-                return Ok(value.identity.clone());
+                return Ok(value.identity);
             }
             let filled = cache
                 .join_fill(key, context, |last_waiter_stop| {

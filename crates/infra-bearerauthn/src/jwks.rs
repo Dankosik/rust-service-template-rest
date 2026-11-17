@@ -212,23 +212,22 @@ fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejecti
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithm = match jwk.common.key_algorithm {
-        Some(explicit) => Algorithm::try_from(explicit)
+    let algorithm = if let Some(explicit) = jwk.common.key_algorithm {
+        Algorithm::try_from(explicit)
             .ok()
             .and_then(JwtAlgorithm::from_jsonwebtoken)
             .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
-            .ok_or(KeyRejection::AlgorithmBinding)?,
-        None => {
-            let mut matching = configured
-                .iter()
-                .copied()
-                .filter(|algorithm| algorithm.family() == family);
-            let algorithm = matching.next().ok_or(KeyRejection::AlgorithmBinding)?;
-            if matching.any(|other| other != algorithm) {
-                return Err(KeyRejection::AlgorithmBinding);
-            }
-            algorithm
+            .ok_or(KeyRejection::AlgorithmBinding)?
+    } else {
+        let mut matching = configured
+            .iter()
+            .copied()
+            .filter(|algorithm| algorithm.family() == family);
+        let algorithm = matching.next().ok_or(KeyRejection::AlgorithmBinding)?;
+        if matching.any(|other| other != algorithm) {
+            return Err(KeyRejection::AlgorithmBinding);
         }
+        algorithm
     };
     let public_key = key_material(&jwk.algorithm)
         .and_then(|material| material.parse(algorithm))

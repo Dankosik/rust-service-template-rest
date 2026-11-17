@@ -163,6 +163,10 @@ impl Hold {
 
 type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
 
+// template:begin authn:grpc-transport-test-admitted-identity
+type AdmittedIdentity = (infra_grpc::VerifiedPrincipal, Option<DelegationCredential>);
+// template:end authn:grpc-transport-test-admitted-identity
+
 #[derive(Clone)]
 struct Echo {
     calls: Arc<Mutex<Vec<SeenCall>>>,
@@ -171,7 +175,7 @@ struct Echo {
     upload_aborts: UploadAborts,
     upload_abort_recorded: Arc<Notify>,
     // template:begin authn:grpc-transport-test-principals-field
-    identities: Arc<Mutex<Vec<(infra_grpc::VerifiedPrincipal, Option<DelegationCredential>)>>>,
+    identities: Arc<Mutex<Vec<AdmittedIdentity>>>,
     // template:end authn:grpc-transport-test-principals-field
 }
 
