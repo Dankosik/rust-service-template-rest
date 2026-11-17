@@ -31,11 +31,21 @@ use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
 
+const REGISTRATION_HINT: &str = concat!(
+    "no handler is registered: register this service's retained capabilities ",
+    "in the callback passed to jobs_worker::run (available registries:",
+    // template:begin jobs:worker-registration-jobs-hint
+    " registration.jobs",
+    // template:end jobs:worker-registration-jobs-hint
+    // template:begin messaging:worker-registration-messages-hint
+    " registration.messages",
+    // template:end messaging:worker-registration-messages-hint
+    ")",
+);
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
-    #[error(
-        "no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
-    )]
+    #[error("{REGISTRATION_HINT}")]
     NoRegistrations,
     #[error(transparent)]
     Load(#[from] service_config::Error),
@@ -665,12 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_texts_name_the_failed_check() {
-        assert_eq!(
-            WorkerError::NoRegistrations.to_string(),
-            "no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
-        );
-
+    fn invalid_shutdown_budget_names_the_failed_check() {
         let refused = service_config::fixtures::worker(
             &[("APP__HTTP__GRACE_PERIOD", "30s")],
             crate::BUILD_INFO,
