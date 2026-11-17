@@ -146,6 +146,7 @@ tonic-health = { version = "=0.14.8", default-features = false }
 tonic-reflection = { version = "=0.14.8", default-features = false }
 tonic-types = { version = "=0.14.8", default-features = false }
 prost-types = { version = "=0.14.4", default-features = false }
+prost-reflect = { version = "0.16.5", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls
 rustls = { version = "0.23.46", default-features = false }
