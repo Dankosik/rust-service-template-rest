@@ -277,6 +277,36 @@ class Inventory(unittest.TestCase):
         )
         self.run_check("ambiguous output /service")
 
+    def test_pgo_wrapper_must_build_the_selected_auditable_binary(self) -> None:
+        dockerfile = self.root / "build/docker/Dockerfile"
+        original = dockerfile.read_text(encoding="utf-8")
+        direct = 'RUN cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}"'
+        self.assertEqual(original.count(direct), 1)
+        wrapper = (
+            'RUN build() { cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" '
+            '--bin "${SERVICE_BIN}" "$@"; } && case "${PGO}" in none) ;; '
+            'train) build --target-dir /pgo/target ;; *) exit 1 ;; esac && build'
+        )
+        wrapped = original.replace(direct, wrapper)
+        dockerfile.write_text(wrapped, encoding="utf-8")
+        self.run_check()
+        for old, new, refusal in (
+            ('"$@"', '"$*"', "unsupported auditable build wrapper"),
+            ('"$@"', "'$@'", "unsupported auditable build wrapper"),
+            ('"$@"', "$@", "unsupported auditable build wrapper"),
+            ("esac && build &&", "esac && true &&", "unsupported auditable build wrapper"),
+            (
+                "train) build --target-dir /pgo/target ;;",
+                "train) true;case x in x) true ;; esac && build && true ;;",
+                "unsupported auditable build wrapper",
+            ),
+            ('--bin "${SERVICE_BIN}"', "--bin wrong-binary", "does not select an admitted auditable binary output"),
+        ):
+            with self.subTest(mutation=new):
+                self.assertEqual(wrapped.count(old), 1)
+                dockerfile.write_text(wrapped.replace(old, new), encoding="utf-8")
+                self.run_check(refusal)
+
     def install_docker_fixture(self) -> None:
         binary = self.root / "bin/docker"
         binary.parent.mkdir()

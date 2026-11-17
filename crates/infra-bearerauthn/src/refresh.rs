@@ -26,7 +26,6 @@ pub(crate) enum SignatureRefresh {
     #[debug("NewerSet(..)")]
     NewerSet(Arc<KeySet>),
     NoNewerSet,
-    Unavailable,
 }
 
 struct State {
@@ -40,10 +39,6 @@ struct State {
 impl State {
     fn pending(&self) -> Option<u64> {
         (self.requested_ticket > self.finished_ticket).then_some(self.requested_ticket)
-    }
-
-    fn last_fetch_failed(&self) -> bool {
-        self.last_successful_ticket != self.finished_ticket
     }
 
     fn request_fetch(&mut self) -> u64 {
@@ -102,21 +97,17 @@ impl KeyStore {
         &self,
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
-        let mut admission = Admission::Answer(SignatureRefresh::Unavailable);
+        let mut admission = Admission::Answer(SignatureRefresh::NoNewerSet);
         self.state.send_if_modified(|state| {
             let installed = self.keys.load();
             admission = if state.stopped {
-                Admission::Answer(SignatureRefresh::Unavailable)
+                Admission::Answer(SignatureRefresh::NoNewerSet)
             } else if !Arc::ptr_eq(&installed, checked) {
                 Admission::Answer(SignatureRefresh::NewerSet(Arc::clone(&installed)))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
-                Admission::Answer(if state.last_fetch_failed() {
-                    SignatureRefresh::Unavailable
-                } else {
-                    SignatureRefresh::NoNewerSet
-                })
+                Admission::Answer(SignatureRefresh::NoNewerSet)
             } else {
                 Admission::Request(state.request_fetch())
             };
@@ -135,7 +126,7 @@ impl KeyStore {
                 drop(state);
                 SignatureRefresh::NewerSet(self.keys.load_full())
             }
-            _ => SignatureRefresh::Unavailable,
+            _ => SignatureRefresh::NoNewerSet,
         }
     }
 
@@ -365,7 +356,7 @@ mod tests {
         assert!(Arc::ptr_eq(&store.current(), &keys));
         assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
-            SignatureRefresh::Unavailable
+            SignatureRefresh::NoNewerSet
         );
     }
 
@@ -382,7 +373,6 @@ mod tests {
             match store.refresh_for_signature_miss(&store.current()).await {
                 SignatureRefresh::NewerSet(keys) => Some(keys.has_kid("new")),
                 SignatureRefresh::NoNewerSet => None,
-                SignatureRefresh::Unavailable => Some(false),
             }
         })
     }
@@ -460,7 +450,7 @@ mod tests {
             let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
             assert!(futures_util::poll!(unknown.as_mut()).is_pending());
             finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
-            assert_matches!(unknown.await, SignatureRefresh::Unavailable);
+            assert_matches!(unknown.await, SignatureRefresh::NoNewerSet);
 
             let due = started + Duration::from_secs(901);
             tokio::time::advance(due - tokio::time::Instant::now()).await;
@@ -529,9 +519,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_cooldown_reports_the_last_outcome() {
+    async fn a_failed_fetch_offers_no_newer_set_to_its_waiter_or_during_its_cooldown() {
         let store = KeyStore::new(key_set("old"));
-        assert!(spawn_refresh(&store).await.unwrap().is_none());
+        assert_eq!(spawn_refresh(&store).await.unwrap(), None);
         store.permit_unknown_refresh_for_test();
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
@@ -539,8 +529,9 @@ mod tests {
             1,
             Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
         );
-        assert_eq!(waiter.await.unwrap(), Some(false));
-        assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
+        assert_eq!(waiter.await.unwrap(), None);
+        assert_eq!(spawn_refresh(&store).await.unwrap(), None);
+        assert_eq!(store.pending(), None);
         assert!(store.current().has_kid("old"));
     }
 
@@ -599,7 +590,7 @@ mod tests {
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
         store.stop();
-        assert_eq!(waiter.await.unwrap(), Some(false));
-        assert_eq!(spawn_refresh(&store).await.unwrap(), Some(false));
+        assert_eq!(waiter.await.unwrap(), None);
+        assert_eq!(spawn_refresh(&store).await.unwrap(), None);
     }
 }

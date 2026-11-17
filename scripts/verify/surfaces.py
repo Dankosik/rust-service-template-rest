@@ -423,7 +423,7 @@ def classify_report(
 
         if _matches(
             file,
-            ".redocly.yaml", "api/openapi/*", "crates/service/src/webhooks.rs",
+            ".redocly.yaml", "api/openapi/*", "crates/infra-webhooks/src/inbound/route.rs",
             "crates/service/src/api.rs", "scripts/image/cargo_artifact.py", "scripts/checks/npx.py",
         ):
             mark("openapi")

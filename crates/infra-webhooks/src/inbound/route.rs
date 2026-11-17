@@ -11,13 +11,14 @@ use infra_http::extract::Path;
 use infra_http::problem::responses::{GatewayTimeout, InternalServerError, RequestEntityTooLarge};
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext, RequestDeadline};
-use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
-use infra_webhooks::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{IntoResponses, OpenApi, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
+
+use super::{ReceiptOutcome, ReceiveError, Receiver};
+use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
 
 const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
@@ -382,15 +383,17 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::inbound::Verifier;
+    use crate::protocol::KeyRing;
 
-    async fn body_json(response: Response) -> serde_json::Value {
+    async fn body_text(response: Response) -> String {
         let bytes = response
             .into_body()
             .collect()
             .await
             .expect("response body")
             .to_bytes();
-        serde_json::from_slice(&bytes).expect("JSON body")
+        String::from_utf8(bytes.to_vec()).expect("UTF-8 body")
     }
 
     #[tokio::test]
@@ -401,17 +404,11 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
-        let keys = infra_webhooks::protocol::KeyRing::from_encoded(
-            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-            None,
-        )
-        .expect("key");
+        let keys = KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None)
+            .expect("key");
         let state = WebhookState::active(Receiver::new(
             pool,
-            [(
-                "partner".to_owned(),
-                Arc::new(keys) as Arc<dyn infra_webhooks::inbound::Verifier>,
-            )],
+            [("partner".to_owned(), Arc::new(keys) as Arc<dyn Verifier>)],
         ));
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
@@ -516,8 +513,8 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
-        let problem = body_json(response).await;
-        assert_eq!(problem["code"], "not_found");
+        let problem = body_text(response).await;
+        assert!(problem.contains(r#""code":"not_found""#), "{problem}");
     }
 
     #[tokio::test]
@@ -541,8 +538,11 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
-        let problem = body_json(response).await;
-        assert_eq!(problem["code"], "bad_request");
-        assert_eq!(problem["invalid_params"][0]["name"], "path.endpoint_id");
+        let problem = body_text(response).await;
+        assert!(problem.contains(r#""code":"bad_request""#), "{problem}");
+        assert!(
+            problem.contains(r#""name":"path.endpoint_id""#),
+            "{problem}"
+        );
     }
 }

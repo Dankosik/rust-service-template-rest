@@ -60,12 +60,7 @@ infra-object-storage = { workspace = true }
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:service-outbound-http-dependency
 # template:begin inbound-webhooks:service-webhooks-dependency
-enum-map = { workspace = true, features = ["derive"] }
-foldhash = { workspace = true, features = ["std"] }
-http-body-util = { workspace = true }
 infra-webhooks = { workspace = true }
-metrics = { workspace = true }
-parking_lot = { workspace = true }
 # template:end inbound-webhooks:service-webhooks-dependency
 # template:begin authn:service-authn-dependency
 infra-bearerauthn = { workspace = true }
@@ -100,10 +95,6 @@ tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
 similar = { workspace = true, features = ["text"] }
-# template:begin inbound-webhooks:service-webhooks-test-dependencies
-metrics-util = { workspace = true, features = ["debugging"] }
-tower = { workspace = true, features = ["util"] }
-# template:end inbound-webhooks:service-webhooks-test-dependencies
 # template:begin grpc:service-grpc-example-dependencies
 grpc-contracts = { workspace = true }
 service-failure = { workspace = true }

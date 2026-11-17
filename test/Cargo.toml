@@ -92,7 +92,6 @@ sha2 = { workspace = true }
 infra-outbound-http = { workspace = true, features = ["test-support"] }
 # template:end outbound-http:test-outbound-http-dependencies
 # template:begin inbound-webhooks:test-inbound-webhooks-dependencies
-service = { workspace = true }
 http = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:test-inbound-webhooks-dependencies
@@ -150,8 +149,10 @@ migrate = { workspace = true }
 # template:begin test-metrics:test-metrics-dependency
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-metrics-util = { workspace = true, features = ["debugging"] }
 # template:end test-metrics:test-metrics-dependency
+# template:begin test-metrics-util:test-metrics-util-dependency
+metrics-util = { workspace = true, features = ["debugging"] }
+# template:end test-metrics-util:test-metrics-util-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies

@@ -381,6 +381,9 @@
   "test-metrics": {
     "remove_when_unselected": []
   },
+  "test-metrics-util": {
+    "remove_when_unselected": []
+  },
   "jobs-reference": {
     "remove_when_unselected": [
       "test/src/reading_counter.rs",
@@ -457,7 +460,6 @@
     "remove_when_unselected": [
       "crates/config/src/inbound_webhooks.rs",
       "crates/config/src/inbound_webhooks/",
-      "crates/service/src/webhooks.rs",
       "crates/service/src/bootstrap/inbound_webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
       "crates/infra-webhooks/src/inbound/",
