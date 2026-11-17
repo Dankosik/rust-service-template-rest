@@ -27,31 +27,8 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SE
 static DESCRIBE: Once = Once::new();
 static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| Arc::new(Series::new()));
 
-const CODE_NAMES: [(&str, &str); 17] = [
-    ("OK", "OK"),
-    ("CANCELLED", "Canceled"),
-    ("UNKNOWN", "Unknown"),
-    ("INVALID_ARGUMENT", "InvalidArgument"),
-    ("DEADLINE_EXCEEDED", "DeadlineExceeded"),
-    ("NOT_FOUND", "NotFound"),
-    ("ALREADY_EXISTS", "AlreadyExists"),
-    ("PERMISSION_DENIED", "PermissionDenied"),
-    ("RESOURCE_EXHAUSTED", "ResourceExhausted"),
-    ("FAILED_PRECONDITION", "FailedPrecondition"),
-    ("ABORTED", "Aborted"),
-    ("OUT_OF_RANGE", "OutOfRange"),
-    ("UNIMPLEMENTED", "Unimplemented"),
-    ("INTERNAL", "Internal"),
-    ("UNAVAILABLE", "Unavailable"),
-    ("DATA_LOSS", "DataLoss"),
-    ("UNAUTHENTICATED", "Unauthenticated"),
-];
-
-fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
-    match CODE_NAMES.get(code as usize) {
-        Some(&names) => names,
-        None => ("UNKNOWN", "Unknown"),
-    }
+const fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
+    shared_rules::grpc::status_code_names(code as usize)
 }
 
 #[derive(Clone, Debug, Default)]

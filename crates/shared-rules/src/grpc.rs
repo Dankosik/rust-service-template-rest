@@ -3,6 +3,35 @@ use std::time::Duration;
 pub const MAX_TIMEOUT_DIGITS: usize = 8;
 pub const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
+const STATUS_CODE_NAMES: [(&str, &str); 17] = [
+    ("OK", "OK"),
+    ("CANCELLED", "Canceled"),
+    ("UNKNOWN", "Unknown"),
+    ("INVALID_ARGUMENT", "InvalidArgument"),
+    ("DEADLINE_EXCEEDED", "DeadlineExceeded"),
+    ("NOT_FOUND", "NotFound"),
+    ("ALREADY_EXISTS", "AlreadyExists"),
+    ("PERMISSION_DENIED", "PermissionDenied"),
+    ("RESOURCE_EXHAUSTED", "ResourceExhausted"),
+    ("FAILED_PRECONDITION", "FailedPrecondition"),
+    ("ABORTED", "Aborted"),
+    ("OUT_OF_RANGE", "OutOfRange"),
+    ("UNIMPLEMENTED", "Unimplemented"),
+    ("INTERNAL", "Internal"),
+    ("UNAVAILABLE", "Unavailable"),
+    ("DATA_LOSS", "DataLoss"),
+    ("UNAUTHENTICATED", "Unauthenticated"),
+];
+
+#[must_use]
+pub const fn status_code_names(code: usize) -> (&'static str, &'static str) {
+    if code < STATUS_CODE_NAMES.len() {
+        STATUS_CODE_NAMES[code]
+    } else {
+        ("UNKNOWN", "Unknown")
+    }
+}
+
 #[must_use]
 pub fn split_method_path(path: &str) -> Option<(&str, &str)> {
     let (service, method) = path.strip_prefix('/')?.split_once('/')?;

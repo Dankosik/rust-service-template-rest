@@ -289,28 +289,8 @@ fn describe() {
     });
 }
 
-const RPC_CODE_LABELS: [(&str, &str); 17] = [
-    ("OK", "OK"),
-    ("CANCELLED", "Canceled"),
-    ("UNKNOWN", "Unknown"),
-    ("INVALID_ARGUMENT", "InvalidArgument"),
-    ("DEADLINE_EXCEEDED", "DeadlineExceeded"),
-    ("NOT_FOUND", "NotFound"),
-    ("ALREADY_EXISTS", "AlreadyExists"),
-    ("PERMISSION_DENIED", "PermissionDenied"),
-    ("RESOURCE_EXHAUSTED", "ResourceExhausted"),
-    ("FAILED_PRECONDITION", "FailedPrecondition"),
-    ("ABORTED", "Aborted"),
-    ("OUT_OF_RANGE", "OutOfRange"),
-    ("UNIMPLEMENTED", "Unimplemented"),
-    ("INTERNAL", "Internal"),
-    ("UNAVAILABLE", "Unavailable"),
-    ("DATA_LOSS", "DataLoss"),
-    ("UNAUTHENTICATED", "Unauthenticated"),
-];
-
 const fn code_labels(code: tonic::Code) -> (&'static str, &'static str) {
-    RPC_CODE_LABELS[code as usize]
+    shared_rules::grpc::status_code_names(code as usize)
 }
 
 #[cfg(test)]
