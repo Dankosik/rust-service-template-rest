@@ -269,10 +269,16 @@ async fn accept_panic_after_stop_is_still_observed() {
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
     let listener = BoundListener::bind(loopback()).unwrap();
-    let server = serve_listener(listener, app(), options(), move |stream| {
-        let _ = &marker;
-        async move { Some((stream, ListenerScheme::Http)) }
-    });
+    let server = serve_listener(
+        listener,
+        app(),
+        options(),
+        connection_builder(options()),
+        move |stream| {
+            let _ = &marker;
+            async move { Some((stream, ListenerScheme::Http)) }
+        },
+    );
     stop.set(server.connection_shutdown.finish.clone()).unwrap();
     let failure = server.accept_failure();
     let peer = TcpStream::connect(server.local_addr()).await.unwrap();
@@ -652,6 +658,27 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         span.attributes
             .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
     );
+}
+
+#[tokio::test]
+async fn an_http2_only_listener_answers_no_http1_request() {
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), options(), None);
+    let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+    peer.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let closed =
+        tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
+    assert!(closed.is_ok(), "the connection stayed open");
+    assert!(
+        !response.starts_with(b"HTTP/1."),
+        "an HTTP/1 response was sent: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+    server.drain(Duration::from_secs(1)).await.unwrap();
 }
 // template:end grpc:http-server-tls-test
 

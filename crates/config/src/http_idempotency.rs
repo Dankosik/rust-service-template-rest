@@ -52,7 +52,7 @@ where
 {
     blank_as_none::<_, String>(deserializer)?
         .map(|text| {
-            humantime::parse_duration(&text).map_err(|_| {
+            crate::de::parse_duration(&text).ok_or_else(|| {
                 serde::de::Error::invalid_value(
                     serde::de::Unexpected::Str(&text),
                     &"a duration such as 24h",

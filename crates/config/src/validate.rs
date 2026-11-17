@@ -124,9 +124,9 @@ pub(crate) fn duration_range(
             key,
             format!(
                 "must be between {} and {}, got {}",
-                humantime::format_duration(*range.start()),
-                humantime::format_duration(*range.end()),
-                humantime::format_duration(value)
+                crate::de::display_duration(*range.start()),
+                crate::de::display_duration(*range.end()),
+                crate::de::display_duration(value)
             ),
         ));
     }

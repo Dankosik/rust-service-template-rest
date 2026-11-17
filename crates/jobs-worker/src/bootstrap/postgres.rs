@@ -38,7 +38,7 @@ pub(super) async fn admit_pool(
     let admit_inputs = || {
         config
             .jobs
-            .validate_pool_capacity(postgres)
+            .validate_pool_capacity(postgres.max_connections)
             .map_err(WorkerError::from)
     };
     // template:begin outbox:worker-bootstrap-outbox-pool-inputs

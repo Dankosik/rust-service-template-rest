@@ -32,7 +32,7 @@ use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 use crate::request_id;
 
 struct Admission {
-    permits: Semaphore,
+    permits: Arc<Semaphore>,
     patience: Duration,
 }
 
@@ -52,7 +52,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
         middleware::from_fn_with_state(
             Arc::new(Admission {
-                permits: Semaphore::new(limit.get() as usize),
+                permits: Arc::new(Semaphore::new(limit.get() as usize)),
                 patience: options.admission_wait,
             }),
             admit,
@@ -172,16 +172,17 @@ async fn admit(
         return next.run(request).await;
     }
     let arrived = tokio::time::Instant::now();
-    let _permit = if let Ok(permit) = admission.permits.try_acquire() {
-        permit
-    } else {
-        let waited = tokio::time::timeout(admission.patience, admission.permits.acquire()).await;
-        let elapsed = arrived.elapsed();
-        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(elapsed.as_secs_f64());
-        match waited {
-            Ok(Ok(permit)) if elapsed < admission.patience => permit,
-            _ => return shed_response(),
-        }
+    let acquired =
+        crate::admission::acquire_within(&admission.permits, admission.patience, || ()).await;
+    let waited = match &acquired {
+        Ok((_, waited)) => *waited,
+        Err(waited) => Some(*waited),
+    };
+    if let Some(waited) = waited {
+        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited.as_secs_f64());
+    }
+    let Ok((_permit, _)) = acquired else {
+        return shed_response();
     };
     request
         .extensions_mut()

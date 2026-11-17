@@ -405,8 +405,8 @@ pub enum KindError {
     InvalidMaxAttempts { kind: &'static str },
     #[error(
         "job kind {kind:?}: timeout must be between {} and {}",
-        humantime::format_duration(MIN_TIMEOUT),
-        humantime::format_duration(MAX_TIMEOUT)
+        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MIN_TIMEOUT),
+        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_TIMEOUT)
     )]
     InvalidTimeout { kind: &'static str },
 }

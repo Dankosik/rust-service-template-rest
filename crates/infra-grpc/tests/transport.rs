@@ -416,23 +416,20 @@ impl Fixture {
             limits,
         )
         .expect("router builds");
-        let bound = match tls {
-            Some((pki, mtls)) => {
-                let certificate = pem(&pki.server_certificate);
-                let key = secrecy::SecretString::from(pem(&pki.server_key));
-                let ca = pem(&pki.ca_certificate);
-                let config = server_tls_config(ServerTlsMaterial {
-                    certificate_pem: &certificate,
-                    private_key_pem: &key,
-                    client_ca_pem: mtls.then_some(ca.as_str()),
-                })
-                .expect("server TLS config");
-                BoundListener::bind(address)
-                    .expect("tls listener binds")
-                    .serve_tls(app, server_options(limits), config)
-            }
-            None => Server::bind(address, app, server_options(limits)).expect("listener binds"),
-        };
+        let tls = tls.map(|(pki, mtls)| {
+            let certificate = pem(&pki.server_certificate);
+            let key = secrecy::SecretString::from(pem(&pki.server_key));
+            let ca = pem(&pki.ca_certificate);
+            server_tls_config(ServerTlsMaterial {
+                certificate_pem: &certificate,
+                private_key_pem: &key,
+                client_ca_pem: mtls.then_some(ca.as_str()),
+            })
+            .expect("server TLS config")
+        });
+        let bound = BoundListener::bind(address)
+            .expect("listener binds")
+            .serve_h2(app, server_options(limits), tls);
         let address = bound.local_addr();
         Self {
             server: Some(bound),
@@ -2253,7 +2250,7 @@ fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
     assert_eq!(
         infra_grpc::Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
-        Error::DestinationSecurityMismatch
+        infra_grpc::ClientError::DestinationSecurityMismatch
     );
     assert_eq!(
         infra_grpc::Client::try_new(
@@ -2262,7 +2259,7 @@ fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
             CLIENT_TIMEOUT
         )
         .unwrap_err(),
-        Error::DestinationSecurityMismatch
+        infra_grpc::ClientError::DestinationSecurityMismatch
     );
 }
 

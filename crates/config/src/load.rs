@@ -51,17 +51,14 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
-    #[error("config file {}: {error}", path.display())]
-    ParseFile {
-        path: PathBuf,
-        error: toml::de::Error,
-    },
+    #[error("config file {}: {message}", path.display())]
+    ParseFile { path: PathBuf, message: String },
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
     #[error("load configuration: {0}")]
-    Merge(config::ConfigError),
+    Merge(String),
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
@@ -167,7 +164,7 @@ where
     let mut builder = config::Config::builder();
     let mut table_keys = BTreeSet::new();
     // template:begin authn:load-audience-file-kind
-    let mut file_audience_has_datetime = false;
+    let mut file_audience_datetime_path: Option<&Path> = None;
     // template:end authn:load-audience-file-kind
     for path in options.files() {
         #[allow(
@@ -180,10 +177,11 @@ where
             .get("authn")
             .and_then(|section| section.get("audience"))
         {
-            file_audience_has_datetime = audience.is_datetime()
+            let has_datetime = audience.is_datetime()
                 || audience
                     .as_array()
                     .is_some_and(|items| items.iter().any(toml::Value::is_datetime));
+            file_audience_datetime_path = has_datetime.then_some(path);
         }
         // template:end authn:load-audience-file-scan
         builder = builder.add_source(file);
@@ -200,14 +198,16 @@ where
     // template:begin authn:load-audience-list-decode
     let audience_list = match authn_audience_handling {
         AuthnAudienceHandling::Apply => {
-            if file_audience_has_datetime
+            if let Some(path) = file_audience_datetime_path
                 && !variables
                     .values()
                     .any(|variable| variable.key == variables::AUDIENCE_KEY)
             {
-                return Err(Error::Deserialize(
-                    crate::authn::AUDIENCE_INPUT_FORM.to_owned(),
-                ));
+                return Err(Error::Deserialize(format!(
+                    "{} in {}",
+                    crate::authn::AUDIENCE_INPUT_FORM,
+                    path.display(),
+                )));
             }
             variables::audience_list(&variables)?
         }
@@ -220,15 +220,17 @@ where
         let value = config::Value::new(Some(&environment_origin), variable.value);
         builder = builder
             .set_override(&variable.key, value)
-            .map_err(Error::Merge)?;
+            .map_err(|error| Error::Merge(error.to_string()))?;
         variable_keys.push(variable.key);
     }
     // template:begin authn:load-audience-list-override
     let builder = builder
         .set_override_option(variables::AUDIENCE_KEY, audience_list)
-        .map_err(Error::Merge)?;
+        .map_err(|error| Error::Merge(error.to_string()))?;
     // template:end authn:load-audience-list-override
-    let merged = builder.build().map_err(Error::Merge)?;
+    let merged = builder
+        .build()
+        .map_err(|error| Error::Merge(error.to_string()))?;
 
     let carrier = if options.secrets_dir.is_some() {
         "the environment or the secrets directory"
@@ -282,7 +284,7 @@ fn scan_file(
         };
         Error::ParseFile {
             path: path.to_owned(),
-            error: serde::de::Error::custom(message),
+            message,
         }
     })?;
     if let Some(key) = first_unaddressable_key(&table, &mut Vec::new()) {

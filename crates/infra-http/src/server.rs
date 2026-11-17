@@ -125,9 +125,8 @@ impl BoundListener {
 
     #[must_use]
     pub fn serve(self, app: Router, options: ServerOptions) -> Server {
-        serve_listener(self, app, options, |stream| async move {
-            Some((stream, ListenerScheme::Http))
-        })
+        let builder = connection_builder(options);
+        serve_plaintext(self, app, options, builder)
     }
 
     // template:begin grpc:http-bound-listener-tls
@@ -138,35 +137,73 @@ impl BoundListener {
         options: ServerOptions,
         tls: Arc<rustls::ServerConfig>,
     ) -> Server {
-        let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-        let handshake_timeout = options.header_read_timeout;
-        serve_listener(self, app, options, move |stream| {
-            let acceptor = acceptor.clone();
-            async move {
-                let peer = stream.peer_addr().ok();
-                match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(tls_stream)) => Some((tls_stream, ListenerScheme::Https)),
-                    Ok(Err(error)) => {
-                        tracing::debug!(
-                            peer = peer.map(tracing::field::display),
-                            %error,
-                            "http_tls_handshake_failed"
-                        );
-                        None
-                    }
-                    Err(_) => {
-                        tracing::debug!(
-                            peer = peer.map(tracing::field::display),
-                            "http_tls_handshake_timed_out"
-                        );
-                        None
-                    }
-                }
-            }
-        })
+        let builder = connection_builder(options);
+        serve_tls(self, app, options, builder, tls)
+    }
+
+    #[must_use]
+    pub fn serve_h2(
+        self,
+        app: Router,
+        options: ServerOptions,
+        tls: Option<Arc<rustls::ServerConfig>>,
+    ) -> Server {
+        let builder = connection_builder(options).http2_only();
+        match tls {
+            Some(tls) => serve_tls(self, app, options, builder, tls),
+            None => serve_plaintext(self, app, options, builder),
+        }
     }
     // template:end grpc:http-bound-listener-tls
 }
+
+fn serve_plaintext(
+    bound: BoundListener,
+    app: Router,
+    options: ServerOptions,
+    builder: auto::Builder<TokioExecutor>,
+) -> Server {
+    serve_listener(bound, app, options, builder, |stream| async move {
+        Some((stream, ListenerScheme::Http))
+    })
+}
+
+// template:begin grpc:http-serve-tls
+fn serve_tls(
+    bound: BoundListener,
+    app: Router,
+    options: ServerOptions,
+    builder: auto::Builder<TokioExecutor>,
+    tls: Arc<rustls::ServerConfig>,
+) -> Server {
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    let handshake_timeout = options.header_read_timeout;
+    serve_listener(bound, app, options, builder, move |stream| {
+        let acceptor = acceptor.clone();
+        async move {
+            let peer = stream.peer_addr().ok();
+            match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+                Ok(Ok(tls_stream)) => Some((tls_stream, ListenerScheme::Https)),
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        peer = peer.map(tracing::field::display),
+                        %error,
+                        "http_tls_handshake_failed"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        peer = peer.map(tracing::field::display),
+                        "http_tls_handshake_timed_out"
+                    );
+                    None
+                }
+            }
+        }
+    })
+}
+// template:end grpc:http-serve-tls
 
 fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = match addr {
@@ -285,6 +322,7 @@ fn serve_listener<F, Fut, IO>(
     bound: BoundListener,
     app: Router,
     options: ServerOptions,
+    builder: auto::Builder<TokioExecutor>,
     prepare_io: F,
 ) -> Server
 where
@@ -329,6 +367,7 @@ where
         listener,
         app,
         options,
+        builder,
         connection_shutdown.clone(),
         connections.clone(),
         prepare_io,
@@ -350,6 +389,7 @@ async fn accept_loop<F, Fut, IO>(
     listener: TcpListener,
     app: Router,
     options: ServerOptions,
+    builder: auto::Builder<TokioExecutor>,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
     prepare_io: F,
@@ -359,7 +399,6 @@ async fn accept_loop<F, Fut, IO>(
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
-    let builder = connection_builder(options);
     let permits = options
         .max_connections
         .map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));

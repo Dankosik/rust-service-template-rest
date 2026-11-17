@@ -80,8 +80,8 @@ fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
     }
 }
 
-fn is_at_or_under(path: &str, key: &str) -> bool {
-    path.strip_prefix(key)
+fn is_at_or_under(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 

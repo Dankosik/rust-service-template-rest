@@ -22,7 +22,7 @@ impl ClaimPolicy {
         issuer: String,
         audiences: Vec<String>,
     ) -> Result<Self, PreparationError> {
-        if audiences.is_empty() || audiences.iter().any(String::is_empty) {
+        if audiences.is_empty() || audiences.iter().any(|audience| audience.trim().is_empty()) {
             return Err(PreparationError::invalid_options());
         }
         Ok(Self { issuer, audiences })

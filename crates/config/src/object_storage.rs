@@ -63,7 +63,7 @@ pub(crate) struct ObjectStorageInput {
     max_concurrency: u64,
     /// Bound for one call, retries included; GET covers the entire body
     /// through confirmed EOF from its original start.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     operation_timeout: Duration,
 }
 

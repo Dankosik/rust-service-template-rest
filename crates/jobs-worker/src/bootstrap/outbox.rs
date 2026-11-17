@@ -13,9 +13,10 @@ pub(super) fn admit_pool_inputs(
     postgres: &PostgresConfig,
     capabilities: &RetainedCapabilities,
 ) -> Result<(), WorkerError> {
-    config
-        .jobs
-        .validate_pool_capacity_with_outbox(postgres, capabilities.jobs.is_some())?;
+    config.jobs.validate_pool_capacity_with_outbox(
+        postgres.max_connections,
+        capabilities.jobs.is_some(),
+    )?;
     if capabilities.messages.is_none() {
         config.messaging.validate_producer()?;
     }
