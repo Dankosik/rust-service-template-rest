@@ -2,7 +2,7 @@ use std::{panic::AssertUnwindSafe, time::Duration};
 
 use futures_util::FutureExt;
 use health::ReadinessControl;
-use infra_http::{Drained, Server};
+use infra_http_transport::{Drained, Server};
 // template:begin cache:service-shutdown-cache-imports
 use infra_cache::Cache;
 // template:end cache:service-shutdown-cache-imports

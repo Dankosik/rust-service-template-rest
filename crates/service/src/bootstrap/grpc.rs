@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use infra_grpc::ServerTlsMaterial;
-use infra_http::ServerOptions;
+use infra_http_transport::ServerOptions;
 use rustls::ServerConfig;
 use std::net::SocketAddr;
 
@@ -11,7 +11,8 @@ use super::background::{Background, BackgroundRegistration};
 // template:begin service-auth:bootstrap-grpc-service-auth-import
 use super::service_auth::PreparedServiceAuth;
 // template:end service-auth:bootstrap-grpc-service-auth-import
-use super::{BootstrapError, PreparedAuth};
+use super::BootstrapError;
+use infra_http::Authentication;
 
 pub type GrpcRegistration = fn(
     &mut infra_grpc::Services,
@@ -30,7 +31,8 @@ pub(super) fn prepare(
     grpc: &GrpcConfig,
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
-    #[allow(unused_variables, reason = "bearer authentication alone reads it")] auth: &PreparedAuth,
+    #[allow(unused_variables, reason = "bearer authentication alone reads it")]
+    auth: &Authentication,
     // template:begin service-auth:bootstrap-grpc-service-auth-parameter
     service_auth: &PreparedServiceAuth,
     // template:end service-auth:bootstrap-grpc-service-auth-parameter
@@ -50,9 +52,9 @@ pub(super) fn prepare(
     // template:end service-auth:bootstrap-grpc-service-tokens
     // template:begin grpc-authn:bootstrap-grpc-verifier
     let verifier = match auth {
-        PreparedAuth::Enabled(verifier) => Some((**verifier).clone()),
-        PreparedAuth::None if service_tokens => None,
-        PreparedAuth::None => {
+        Authentication::Bearer(verifier) => Some((**verifier).clone()),
+        Authentication::Public if service_tokens => None,
+        Authentication::Public => {
             return Err(ValidationError::new(
                 "grpc.enabled",
                 "requires authn.mode = oidc-jwt or oidc-introspection",

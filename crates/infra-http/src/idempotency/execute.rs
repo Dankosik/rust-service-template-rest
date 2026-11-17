@@ -7,9 +7,7 @@ use std::time::Duration;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{
-    AttemptError, Attempted, CallerIdentity, Digest, Record, ScopeKey, Store,
-};
+use infra_idempotency_store::{AttemptError, Attempted, CallerIdentity, Digest, ScopeKey, Store};
 use tokio::time::Instant;
 
 use super::Tx;
@@ -117,10 +115,9 @@ where
 }
 
 impl Idempotency {
-    pub async fn execute<W, R>(self, work: W) -> Response
+    pub async fn execute<W>(self, work: W) -> Response
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> R,
-        R: IntoResponse,
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<ReplayableResponse, Rollback>,
     {
         let Attempt {
             store,
@@ -141,7 +138,8 @@ impl Idempotency {
                     &fingerprint,
                     attempt_end,
                     async |tx: &mut Tx<'_>| {
-                        commit_candidate(work(tx).await.into_response(), &operation_id).await
+                        let response = work(tx).await?;
+                        Ok((response.to_record(), response))
                     },
                 );
                 tokio::time::timeout_at(attempt_end, attempt)
@@ -155,33 +153,25 @@ impl Idempotency {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the store's work contract returns the rollback, which carries the handler's Response"
-)]
-async fn commit_candidate(
-    response: Response,
-    operation_id: &str,
-) -> Result<(Record, ReplayableResponse), Rollback> {
-    if !response.status().is_success() {
-        return Err(Rollback::Response(response));
-    }
-    stored::capture(response)
-        .await
-        .map(|replayable| (replayable.to_record(), replayable))
-        .map_err(|unstorable| {
-            tracing::warn!(
-                operation = operation_id,
-                failure = unstorable.class(),
-                "http_idempotency_success_not_stored"
-            );
-            Rollback::Unstorable
-        })
+#[derive(Debug, thiserror::Error)]
+pub enum Rollback {
+    #[error("operation refused")]
+    Refused(Box<Response>),
+    #[error("status")]
+    InvalidStatus,
+    #[error("body_limit")]
+    BodyLimit,
+    #[error("header_limit")]
+    HeaderLimit,
+    #[error("serialization")]
+    Serialization,
 }
 
-pub(super) enum Rollback {
-    Response(Response),
-    Unstorable,
+impl Rollback {
+    #[must_use]
+    pub fn refuse(response: impl IntoResponse) -> Self {
+        Self::Refused(Box::new(response.into_response()))
+    }
 }
 
 struct Answer {
@@ -232,7 +222,15 @@ fn map_attempted(
         Err(AttemptError::Internal) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
         }
-        Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
+        Ok(Attempted::RolledBack(Rollback::Refused(response))) => {
+            Answer::operation_response(*response, Outcome::NotStored)
+        }
+        Ok(Attempted::RolledBack(error)) => {
+            tracing::warn!(
+                operation = operation_id,
+                failure = %error,
+                "http_idempotency_success_not_stored"
+            );
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
         Err(AttemptError::Integrity) => {
@@ -253,9 +251,6 @@ fn map_attempted(
         },
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
-        }
-        Ok(Attempted::RolledBack(Rollback::Response(response))) => {
-            Answer::operation_response(response, Outcome::NotStored)
         }
         Ok(Attempted::Committed(replayable)) => Answer::operation_response(
             mark_provenance(replayable.into_response(), Provenance::Executed),
@@ -373,7 +368,7 @@ mod tests {
                 },
             };
             let response = idempotency
-                .execute(async |_: &mut Tx<'_>| -> StatusCode {
+                .execute(async |_: &mut Tx<'_>| {
                     panic!("exhausted requests must not execute work");
                 })
                 .now_or_never()

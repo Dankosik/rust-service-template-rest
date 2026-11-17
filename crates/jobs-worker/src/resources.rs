@@ -1,5 +1,5 @@
 use health::ReadinessControl;
-use infra_http::Server;
+use infra_http_transport::Server;
 // template:begin jobs:worker-resources-jobs-import
 use infra_jobs::Started;
 // template:end jobs:worker-resources-jobs-import

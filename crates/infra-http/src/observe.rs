@@ -24,10 +24,9 @@ use tracing_opentelemetry_instrumentation_sdk::{
 
 use crate::body::hold_guard_until_end;
 use crate::harden::AdmissionShed;
-use crate::probes::is_health_probe_route;
-use crate::problem::{Problem, complete_problem};
-use crate::request_id::REQUEST_ID_HEADER;
-use crate::server::{ConnectionInfo, ListenerScheme};
+use crate::probes::ProbeRoutes;
+use crate::problem::Problem;
+use infra_http_transport::ConnectionInfo;
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
 
@@ -79,13 +78,15 @@ const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
 #[derive(Clone, Debug)]
 pub(crate) struct Observer {
     log_health_probes: bool,
+    probes: ProbeRoutes,
     series: Arc<Series>,
 }
 
 impl Observer {
-    pub(crate) fn new(log_health_probes: bool) -> Self {
+    pub(crate) fn new(log_health_probes: bool, probes: ProbeRoutes) -> Self {
         Self {
             log_health_probes,
+            probes,
             series: Arc::default(),
         }
     }
@@ -94,6 +95,7 @@ impl Observer {
 pub(crate) async fn observe(
     State(Observer {
         log_health_probes,
+        probes,
         series,
     }): State<Observer>,
     matched: Option<MatchedPath>,
@@ -122,7 +124,7 @@ pub(crate) async fn observe(
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let log_access = !suppresses_access_log(log_health_probes, method, route);
+    let log_access = !suppresses_access_log(log_health_probes, &probes, method, route);
     let gauge = series.active_gauge(method_label);
     gauge.increment(1);
     let active = DropGuard::new(gauge, |gauge| gauge.decrement(1));
@@ -141,12 +143,11 @@ pub(crate) async fn observe(
     );
 
     let traced = next.run(request).instrument(span.clone());
-    let response = match fallback {
+    let mut response = match fallback {
         None => traced.await,
         Some(context) => traced.with_context(context).await,
     };
 
-    let mut response = complete_problem(response, request_id_text);
     let status = response.status();
     let extensions = response.extensions();
     let problem_code = extensions
@@ -156,12 +157,6 @@ pub(crate) async fn observe(
     DropGuard::dismiss(pending).record(status, problem_code, termination);
     update_span_from_response(&span, status);
     otel_http::inject_context(&trace_context, response.headers_mut());
-    if let Some(id) = &request_id {
-        response
-            .headers_mut()
-            .insert(REQUEST_ID_HEADER, id.header_value().clone());
-        response.extensions_mut().insert(id.clone());
-    }
     response.map(|body| hold_guard_until_end(body, active))
 }
 
@@ -249,12 +244,11 @@ fn make_span(
 }
 
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
-    let scheme = match uri.scheme_str() {
-        Some("https") => ListenerScheme::Https,
-        None => connection.map_or(ListenerScheme::Http, |connection| connection.scheme),
-        Some(_) => ListenerScheme::Http,
-    };
-    scheme.as_str()
+    match uri.scheme_str() {
+        Some("https") => "https",
+        None => connection.map_or("http", ConnectionInfo::scheme),
+        Some(_) => "http",
+    }
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -368,8 +362,13 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-fn suppresses_access_log(log_health_probes: bool, method: &Method, route: &str) -> bool {
-    !log_health_probes && method == Method::GET && is_health_probe_route(route)
+fn suppresses_access_log(
+    log_health_probes: bool,
+    probes: &ProbeRoutes,
+    method: &Method,
+    route: &str,
+) -> bool {
+    !log_health_probes && method == Method::GET && probes.contains(method, route)
 }
 
 #[cfg(test)]
@@ -550,19 +549,43 @@ mod tests {
 
     #[test]
     fn probes_are_skipped_by_route_template_only() {
-        let quiet = false;
-        assert!(suppresses_access_log(quiet, &Method::GET, "/health/live"));
-        assert!(suppresses_access_log(quiet, &Method::GET, "/health/ready"));
+        let probes = ProbeRoutes::new(vec![
+            ("/health/live".into(), true),
+            ("/api/health/ready".into(), true),
+        ]);
         assert!(suppresses_access_log(
-            quiet,
+            false,
+            &probes,
             &Method::GET,
-            "/api/health/live"
+            "/health/live"
         ));
-        assert!(!suppresses_access_log(quiet, &Method::POST, "/health/live"));
-        assert!(!suppresses_access_log(quiet, &Method::GET, UNMATCHED_ROUTE));
-        let verbose = true;
+        assert!(suppresses_access_log(
+            false,
+            &probes,
+            &Method::GET,
+            "/api/health/ready"
+        ));
         assert!(!suppresses_access_log(
-            verbose,
+            false,
+            &probes,
+            &Method::GET,
+            "/business/health/live"
+        ));
+        assert!(!suppresses_access_log(
+            false,
+            &probes,
+            &Method::HEAD,
+            "/health/live"
+        ));
+        assert!(!suppresses_access_log(
+            false,
+            &probes,
+            &Method::POST,
+            "/health/live"
+        ));
+        assert!(!suppresses_access_log(
+            true,
+            &probes,
             &Method::GET,
             "/health/live"
         ));

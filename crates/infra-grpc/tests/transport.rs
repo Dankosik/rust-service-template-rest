@@ -32,7 +32,7 @@ use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
-use infra_http::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, Drained, Server};
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };

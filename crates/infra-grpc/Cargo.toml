@@ -24,7 +24,7 @@ health = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-infra-http = { workspace = true }
+infra-http-transport = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
 infra-bearerauthn = { workspace = true }
 serde = { workspace = true, features = ["std"] }

@@ -105,11 +105,11 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             "/example.v1.EchoService/ServerStream",
             axum::routing::post(client_status_fixture),
         );
-    let server = infra_http::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+    let server = infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
         .unwrap()
         .serve_h2(
             app,
-            infra_http::ServerOptions {
+            infra_http_transport::ServerOptions {
                 header_read_timeout: WAIT,
                 max_header_bytes: 16 * 1024,
                 max_connections: None,
@@ -422,7 +422,7 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             .await
             .unwrap()
             .unwrap(),
-        infra_http::Drained::Complete
+        infra_http_transport::Drained::Complete
     );
 
     tokio::time::pause();

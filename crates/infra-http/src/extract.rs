@@ -76,6 +76,13 @@ where
     T: Serialize,
 {
     fn into_response(self) -> Response {
+        self.with_status(StatusCode::OK)
+    }
+}
+
+impl<T: Serialize> Json<T> {
+    #[must_use]
+    pub fn with_status(self, status: StatusCode) -> Response {
         let Ok(body) = serde_json::to_vec(&self.0) else {
             tracing::error!(
                 response_type = std::any::type_name::<T>(),
@@ -84,6 +91,7 @@ where
             return sanitized_problem().into_response();
         };
         (
+            status,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
             body,
         )
@@ -507,8 +515,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_json_response_is_what_axum_renders() {
-        let response = Json(json!({"slug": "a"})).into_response();
-        assert_eq!(response.status(), StatusCode::OK);
+        let json = Json(json!({"slug": "a"}));
+        assert_eq!(json.clone().into_response().status(), StatusCode::OK);
+        let response = json.with_status(StatusCode::CREATED);
+        assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
             response.headers().get(CONTENT_TYPE).unwrap(),
             "application/json"
@@ -522,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn a_response_serde_cannot_serialize_is_the_sanitized_500_problem() {
         let unserializable = std::collections::BTreeMap::from([((1, 2), 3)]);
-        let response = Json(unserializable).into_response();
+        let response = Json(unserializable).with_status(StatusCode::CREATED);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response.headers().get(CONTENT_TYPE).unwrap(),

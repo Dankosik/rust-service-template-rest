@@ -82,7 +82,7 @@ where
     }
 }
 
-pub fn finalize<S>(
+pub(crate) fn finalize<S>(
     contract: OpenApiRouter<S>,
     verifier: Verifier,
 ) -> Result<Router<S>, FinalizeError>

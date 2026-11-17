@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use infra_http::{Drained, Server};
+use infra_http_transport::{Drained, Server};
 // template:begin jobs:worker-shutdown-jobs-imports
 use infra_jobs::Started;
 // template:end jobs:worker-shutdown-jobs-imports

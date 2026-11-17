@@ -356,7 +356,7 @@ def classify_report(
                 mark("db_integration")
             if _matches(file, ".sqlx/*", "crates/*/.sqlx/*"):
                 mark("cargo_dependencies")
-            if p9_retained and _matches(file, "crates/infra-http/*", "crates/infra-bearerauthn/*"):
+            if p9_retained and _matches(file, "crates/infra-http/*", "crates/infra-http-transport/*", "crates/infra-bearerauthn/*"):
                 mark("db_integration")
             if _matches(
                 file,
@@ -543,7 +543,7 @@ def classify_report(
                 "crates/service/src/*", "crates/service/tests/*", "crates/service/Cargo.toml",
                 "crates/infra-bearerauthn/*", "crates/infra-outbound-http/*",
                 "crates/infra-idempotency-store/*", "crates/infra-webhooks/*",
-                "crates/infra-http/Cargo.toml", "crates/infra-http/src/authn.rs",
+                "crates/infra-http-transport/*", "crates/infra-http/Cargo.toml", "crates/infra-http/src/authn.rs",
                 "crates/infra-http/src/context.rs", "crates/infra-http/src/idempotency/*",
                 "crates/infra-http/src/harden.rs", "crates/infra-http/src/harden/*",
                 "crates/infra-http/src/lib.rs", "crates/infra-http/src/problem.rs",
