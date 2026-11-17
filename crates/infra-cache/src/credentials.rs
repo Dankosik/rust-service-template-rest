@@ -71,7 +71,8 @@ impl PasswordFile {
 #[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "startup admission and credential refresh own these synchronous file operations on blocking workers"
+    clippy::verbose_file_reads,
+    reason = "blocking workers must read from the same descriptor they validated as a regular file"
 )]
 pub(crate) fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
