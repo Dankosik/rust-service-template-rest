@@ -465,10 +465,7 @@ impl Link {
         self.shared.acquire().await.map(drop)
     }
 
-    fn claim_slot(
-        &self,
-    ) -> Result<SlotGuard<'_>, ErrorType>
-    {
+    fn claim_slot(&self) -> Result<SlotGuard<'_>, ErrorType> {
         let permit = self.application_slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
