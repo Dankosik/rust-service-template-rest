@@ -80,13 +80,15 @@ class MakeGateTests(unittest.TestCase):
     def test_source_make_captures_initializer_inputs_literally(self) -> None:
         scripts = self.install_source_make()
         (scripts / "init.py").write_text(
-            'import os\nprint(os.environ["DESCRIPTION"])\nprint(os.environ["DATABASE"])\n',
+            'import json, os\n'
+            'from pathlib import Path\n'
+            'Path("inputs.json").write_text(json.dumps([os.environ["DESCRIPTION"], os.environ["DATABASE"]]))\n',
             encoding="utf-8",
         )
         description = "Catalog ($5) $(SERVICE_NAME)"
         result = self.run_make("template-init", "SERVICE_NAME=catalog-api", f"DESCRIPTION={description}")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [description, "none"])
+        self.assertEqual(json.loads((self.root / "inputs.json").read_text()), [description, "none"])
 
 
 class NpxWrapperTests(unittest.TestCase):
