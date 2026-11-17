@@ -156,8 +156,9 @@ configured.
   ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
-- `CACHE=redis`: an optional Valkey cache. Each feature reserves time for
-  its source of truth and owns fallback on a miss or an unavailable cache.
+- `CACHE=redis`: an optional Valkey cache. Bind a source-specific time reserve
+  at startup with `CacheLookup` and let the feature read from its source when
+  lookup returns no value.
   Configure entry sizes and grant the read commands before rolling out the
   [cache profile](docs/decisions/cache-decisions.md).
 <!-- template:end cache:docs-readme-cache-profile -->
