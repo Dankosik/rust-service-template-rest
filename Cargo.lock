@@ -2739,8 +2739,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "derive_more",
+ "http",
  "infra-postgres",
  "metrics",
+ "sha2 0.11.1",
  "sqlx",
  "thiserror",
  "tokio",

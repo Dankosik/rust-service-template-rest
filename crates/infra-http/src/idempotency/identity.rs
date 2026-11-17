@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, Method, Uri};
-use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
+use infra_idempotency_store::{CallerIdentity, CallerKind, Digest};
 use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
 
@@ -10,7 +10,6 @@ pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
 pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string.";
 
-const SCOPE_DOMAIN: &[u8] = b"http-idempotency/scope/v2";
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
 
@@ -54,17 +53,6 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
     (1..=MAX_DECODED_KEY_BYTES)
         .contains(&decoded.len())
         .then_some(decoded)
-}
-
-pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> ScopeKey {
-    let mut hasher = Sha256::new();
-    hasher.update(SCOPE_DOMAIN);
-    hasher.update([0]);
-    frame(&mut hasher, caller.issuer.as_bytes());
-    hasher.update([caller_tag(caller.kind)]);
-    frame(&mut hasher, caller.value.as_bytes());
-    frame(&mut hasher, key);
-    ScopeKey::from_digest(hasher.finalize().into())
 }
 
 pub(super) fn request_fingerprint(
@@ -119,13 +107,6 @@ fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderNa
     hasher.update((values.iter().count() as u64).to_be_bytes());
     for value in values {
         frame(hasher, value.as_bytes());
-    }
-}
-
-const fn caller_tag(kind: CallerKind) -> u8 {
-    match kind {
-        CallerKind::Subject => 1,
-        CallerKind::Client => 2,
     }
 }
 
@@ -209,10 +190,8 @@ mod tests {
         )
         .expect("verified caller");
         assert_eq!(
-            scope_key(&caller, b"k-123"),
-            ScopeKey::from_digest(decode_digest(
-                "98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94"
-            ))
+            infra_idempotency_store::ScopeKey::new(caller, b"k-123").digest(),
+            &decode_digest("98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94")
         );
         assert_eq!(
             legacy_fingerprint(
