@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::Producer;
-use crate::error::EnvelopeError;
-use crate::prepared::{PreparedEvent, PreparedEventParts};
+use crate::error::{EnvelopeError, PublishError, PublishRejection};
+use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
 use crate::wire::prefixed_digest_hex;
 
 const OUTBOX_KIND: &str = "publish_domain_event";
@@ -179,7 +179,19 @@ impl Handler<PublishDomainEvent> for Publisher {
             .publish(&event, &job.context())
             .await
             .map(|_| ())
-            .map_err(JobError::retryable)
+            .map_err(|error| match error {
+                PublishError::Rejected(PublishRejection::InvalidEnvelope(_)) => {
+                    JobError::permanent(error)
+                }
+                PublishError::Rejected(
+                    PublishRejection::BrokerRefused
+                    | PublishRejection::BrokerSizeLimit
+                    | PublishRejection::WindowFull
+                    | PublishRejection::Unavailable
+                    | PublishRejection::ContextStopped,
+                )
+                | PublishError::Ambiguous => JobError::retryable(error),
+            })
     }
 }
 
@@ -277,8 +289,11 @@ impl PublishDomainEvent {
             .payload
             .clone()
             .map_err(|InvalidBase64| IntentError::Base64)?;
-        serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
-            .map_err(|_| IntentError::NotJson)?;
+        let json = std::str::from_utf8(&payload).map_err(|_| IntentError::NotJson)?;
+        if !payload_depth_allowed(&payload) {
+            return Err(EnvelopeError::PayloadStructure.into());
+        }
+        serde_json::from_str::<serde::de::IgnoredAny>(json).map_err(|_| IntentError::NotJson)?;
         Ok(PreparedEvent::from_parts(PreparedEventParts {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),

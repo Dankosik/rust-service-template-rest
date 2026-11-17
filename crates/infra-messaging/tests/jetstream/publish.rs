@@ -1,4 +1,5 @@
 use super::*;
+use infra_messaging::{EnvelopeError, PublishRejection};
 
 #[tokio::test]
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
@@ -12,17 +13,24 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     .await
     .expect("fixture source stream is admitted");
     let original = event("event-publication");
-    let prepared = registry(&fixture)
+    let prepared = fixture
         .prepare(&original, 1024)
         .expect("registered event is prepared once");
 
-    let first = messaging
-        .producer()
+    let producer = messaging.producer();
+    let stopped = CancellationToken::new();
+    stopped.cancel();
+    assert_eq!(
+        producer
+            .publish(&prepared, &context(deadline(), &stopped))
+            .await,
+        Err(PublishRejection::ContextStopped.into())
+    );
+    let first = producer
         .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("first publication receives a JetStream acknowledgment");
-    let duplicate = messaging
-        .producer()
+    let duplicate = producer
         .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("retrying the same immutable publication identity is acknowledged");
@@ -33,16 +41,21 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.sequence, first.sequence);
 
-    let rejected = registry(&fixture)
+    let rejected = fixture
         .prepare(&event("event-refused"), 1024)
         .expect("second registered event is prepared");
-    let result = messaging
-        .producer()
+    let result = producer
         .publish(&rejected, &context(deadline(), &cancel))
         .await;
-    std::assert_matches!(result, Err(PublishError::Rejected));
+    assert_eq!(result, Err(PublishRejection::BrokerRefused.into()));
 
     close(messaging).await;
+    assert_eq!(
+        producer
+            .publish(&prepared, &context(deadline(), &cancel))
+            .await,
+        Err(PublishRejection::Unavailable.into())
+    );
     fixture.cleanup().await;
 }
 
@@ -50,7 +63,7 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
 async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
-    let prepared = registry(&fixture)
+    let prepared = fixture
         .prepare(&event("event-receiving-limit"), 1024)
         .expect("event fits the preparing resource");
     let receiving_limit = prepared.payload().len() - 1;
@@ -66,7 +79,9 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
             .producer()
             .publish(&prepared, &context(deadline(), &cancel))
             .await,
-        Err(PublishError::Rejected)
+        Err(PublishError::Rejected(PublishRejection::InvalidEnvelope(
+            EnvelopeError::PayloadTooLarge
+        )))
     );
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     assert_eq!(source.info().await.unwrap().state.messages, 0);
@@ -120,9 +135,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     ))
     .await
     .unwrap();
-    let prepared = registry(&fixture)
-        .prepare(&event("event-window"), 1024)
-        .unwrap();
+    let prepared = fixture.prepare(&event("event-window"), 1024).unwrap();
     let mut publications = tokio::task::JoinSet::new();
     for _ in 0..capacity {
         let (producer, prepared, cancel) = (messaging.producer(), prepared.clone(), cancel.clone());
@@ -147,7 +160,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     )
     .await
     .expect("a full shared window refuses without waiting");
-    std::assert_matches!(refused, Err(PublishError::Rejected));
+    assert_eq!(refused, Err(PublishRejection::WindowFull.into()));
     assert_eq!(observed.load(Ordering::SeqCst), capacity);
 
     let ack = eventually(
@@ -158,8 +171,8 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
             .await
         {
             Ok(ack) => Some(ack),
-            Err(PublishError::Rejected) => None,
-            Err(PublishError::Ambiguous) => panic!("restored ACK path must confirm"),
+            Err(PublishError::Rejected(PublishRejection::WindowFull)) => None,
+            Err(error) => panic!("restored ACK path must confirm: {error}"),
         },
     )
     .await;
@@ -181,7 +194,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     ))
     .await
     .expect("fixture source stream is admitted through the transparent relay");
-    let prepared = registry(&fixture)
+    let prepared = fixture
         .prepare(&event("event-ambiguous"), 1024)
         .expect("fixture event is prepared once before its ambiguous publication");
 

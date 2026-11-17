@@ -249,6 +249,23 @@ lists (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
+### Changing a durable subscription
+
+Treat a durable's filter and delivery settings as a migration shared by all
+replicas using that stream and durable name. For the first rollout of strict
+admission, deploy every replica with the existing settings before changing
+them. Older workers can still update the durable when they start.
+
+To change an existing durable, stop and drain all workers using it, save the
+current configuration, and inspect its pending deliveries and acknowledgement
+floor. Decide how to handle records entering or leaving the filter. Apply the
+intended settings once with the broker administration account, then start the
+compatible workers. Verify the filter, acknowledgement progress and DLQ on
+the first deliveries. To roll back, drain the new workers and restore the
+saved configuration before restarting the old ones. Restoring the filter
+cannot undo deliveries or effects already acknowledged. Creating a new durable
+also starts a separate delivery history and needs an explicit replay decision.
+
 ### MessagingDeadLettered
 
 The adapter attempted to move an event to the dead-letter stream. A
@@ -260,6 +277,13 @@ to read an exact DLQ record without changing the broker. Redrive and
 retirement are available through the recovery controller for its own
 isolated broker sessions. Use your deployment's recovery procedure for
 other brokers.
+
+When independent durable subscriptions need separate incident histories,
+provision a separate DLQ stream for each. A transfer ID identifies the source
+record. If two subscriptions reject that record within the same stream's
+duplicate window, the second transfer can receive a duplicate acknowledgement
+even when the subscriptions publish to different subjects in that stream.
+
 After lowering a source limit, older records can still need the previous DLQ
 capacity. If the consumer stops with a dead-letter size error, raise the DLQ
 or broker limit to fit the indicated source record and restart the consumer.

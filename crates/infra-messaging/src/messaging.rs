@@ -145,7 +145,12 @@ impl Messaging {
             .checked_add(HEADER_LIMIT_BYTES)
             .ok_or(MessagingError::Bounds)?;
         let publication_permits = PUBLICATION_WINDOW_BYTES / envelope_limit;
-        if publication_permits == 0 {
+        if publication_permits == 0
+            || options
+                .consumer
+                .as_ref()
+                .is_some_and(|consumer| consumer.concurrency.get() > publication_permits)
+        {
             return Err(MessagingError::Bounds);
         }
         Ok(MessagingStartup {
@@ -172,7 +177,12 @@ impl Messaging {
         }
     }
 
-    pub async fn consumer(&self, registry: Registry) -> Result<Consumer, MessagingError> {
+    pub async fn consumer(
+        &self,
+        registry: Registry,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<Consumer, MessagingError> {
         if self.shared.refuses_work() {
             return Err(MessagingError::Unavailable);
         }
@@ -183,7 +193,14 @@ impl Messaging {
         registry
             .require_handlers()
             .map_err(|_| MessagingError::Configuration("no typed event handlers are registered"))?;
-        Consumer::admit(Arc::clone(&self.shared), admission, registry).await
+        Consumer::admit(
+            Arc::clone(&self.shared),
+            admission,
+            registry,
+            deadline,
+            cancel,
+        )
+        .await
     }
 
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
@@ -264,10 +281,17 @@ impl MessagingStartup {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn invalid_publication_bounds_are_rejected_before_connecting() {
-        for max_payload_bytes in [0, 64 * 1024 * 1024 - 8192 + 1, usize::MAX] {
-            let result = Messaging::connect(
+    #[test]
+    fn preparation_bounds_publication_and_resident_deliveries() {
+        for (max_payload_bytes, concurrency, accepted) in [
+            (0, None, false),
+            (64 * 1024 * 1024 - 8192 + 1, None, false),
+            (usize::MAX, None, false),
+            (32 * 1024 * 1024 - 8192, Some(2), true),
+            (32 * 1024 * 1024 - 8192 + 1, Some(2), false),
+            (1, Some(usize::MAX), false),
+        ] {
+            let result = Messaging::prepare(
                 MessagingOptions {
                     connection_name: "invalid-bounds".to_owned(),
                     servers: vec!["not a server URL".to_owned()],
@@ -277,13 +301,24 @@ mod tests {
                     tls_first: false,
                     source_stream: "SOURCE".to_owned(),
                     max_payload_bytes,
-                    consumer: None,
+                    consumer: concurrency.and_then(NonZeroUsize::new).map(|concurrency| {
+                        ConsumerOptions {
+                            durable_name: "worker".to_owned(),
+                            filter_subject: "events".to_owned(),
+                            dlq_subject: "failed".to_owned(),
+                            dlq_stream: None,
+                            concurrency,
+                        }
+                    }),
                 },
                 Instant::now() + BROKER_OPERATION_BUDGET,
                 CancellationToken::new(),
-            )
-            .await;
-            std::assert_matches!(result, Err(MessagingError::Bounds));
+            );
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                std::assert_matches!(result, Err(MessagingError::Bounds));
+            }
         }
     }
 }

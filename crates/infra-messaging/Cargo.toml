@@ -40,7 +40,7 @@ derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
 operation-context = { workspace = true }
-async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
+async-nats = { workspace = true, features = ["jetstream", "server_2_10", "aws-lc-rs", "nkeys"] }
 async-trait = { workspace = true }
 # template:begin outbox:messaging-outbox-dependencies
 # The outbox adapter prepares jobs through the canonical jobs transaction and
@@ -75,6 +75,9 @@ tracing-opentelemetry = { workspace = true }
 # utoipa 6.0.0 names `crate::utoipa::Number` in schema fields that exist
 # without `macros`, so the library alone does not compile without it.
 utoipa = { workspace = true, features = ["macros"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 base64 = { workspace = true, features = ["std"] }

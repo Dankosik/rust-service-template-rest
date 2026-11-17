@@ -341,6 +341,13 @@ pub struct Batch {
     terminated: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("error while processing messages from the stream: {status}, {description:?}")]
+pub struct BatchStatusError {
+    pub status: StatusCode,
+    pub description: Option<String>,
+}
+
 impl Batch {
     async fn batch(batch: BatchConfig, consumer: &Consumer<Config>) -> Result<Batch, BatchError> {
         let inbox = Subject::from(consumer.context.client.new_inbox());
@@ -432,10 +439,10 @@ impl futures_util::Stream for Batch {
                         status => {
                             debug!("received error");
                             self.terminated = true;
-                            Poll::Ready(Some(Err(Box::new(std::io::Error::other(format!(
-                                "error while processing messages from the stream: {}, {:?}",
-                                status, message.description
-                            ))))))
+                            Poll::Ready(Some(Err(Box::new(BatchStatusError {
+                                status,
+                                description: message.description,
+                            }))))
                         }
                     },
                     None => Poll::Ready(None),
@@ -3025,7 +3032,12 @@ mod batch_completion_tests {
                 drop(sender);
                 let next = batch.next().now_or_never().unwrap();
                 if error {
-                    assert!(next.unwrap().is_err());
+                    let error = next.unwrap().unwrap_err();
+                    let status = error.downcast_ref::<BatchStatusError>().unwrap();
+                    assert_eq!(
+                        Some((status.status, status.description.as_deref().unwrap())),
+                        terminal
+                    );
                 } else {
                     assert!(next.is_none());
                 }

@@ -47,20 +47,19 @@ type PostgresMessages = Box<
 
 impl<'a> Registration<'a> {
     #[allow(
-        clippy::unnecessary_wraps,
         unused_variables,
-        reason = "only messaging registration is fallible and only webhook registrations use configuration"
+        reason = "only webhook registrations use configuration"
     )]
     fn new(
         config: &'a service_config::WorkerConfig,
         background: &'a background::Background,
-    ) -> Result<Self, bootstrap::WorkerError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             // template:begin jobs:worker-bootstrap-register-jobs
             jobs: infra_jobs::KindsBuilder::new(),
             // template:end jobs:worker-bootstrap-register-jobs
             // template:begin messaging:worker-bootstrap-register-messaging
-            messages: infra_messaging::Registry::try_new([])?,
+            messages: infra_messaging::Registry::default(),
             // template:end messaging:worker-bootstrap-register-messaging
             // template:begin outbox:worker-bootstrap-postgres-messages-initial
             postgres_messages: None,
@@ -72,7 +71,7 @@ impl<'a> Registration<'a> {
             inbound_webhook_endpoints: &config.inbound_webhook_endpoints,
             // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
             background,
-        })
+        }
     }
 
     // template:begin outbox:worker-with-postgres-messages

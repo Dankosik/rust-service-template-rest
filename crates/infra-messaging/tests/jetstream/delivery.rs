@@ -23,9 +23,9 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     .expect("fixture source stream is admitted");
     let (observed_tx, observed_rx) = oneshot::channel();
     let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |event, _| {
+        .register(&fixture.route, move |event, _| {
             let sender = observed_tx
                 .lock()
                 .expect("test completion sender lock must not be poisoned")
@@ -37,16 +37,13 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-consumer"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-consumer"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -90,9 +87,9 @@ async fn handler_runs_in_the_trace_of_the_publication() {
     .expect("fixture source stream is admitted");
     let (observed_tx, observed_rx) = oneshot::channel();
     let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             let sender = observed_tx
                 .lock()
                 .expect("test completion sender lock must not be poisoned")
@@ -104,16 +101,13 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-traced"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-traced"), 1024)
+        .expect("fixture event is prepared");
     let request = tracing::info_span!("request");
     messaging
         .producer()
@@ -183,9 +177,9 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
     let attempts_for_handler = Arc::clone(&attempts);
     let (completed_tx, completed_rx) = oneshot::channel();
     let completed_tx = Arc::new(Mutex::new(Some(completed_tx)));
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             let attempt = attempts_for_handler.fetch_add(1, Ordering::SeqCst);
             let completed_tx = Arc::clone(&completed_tx);
             async move {
@@ -205,16 +199,13 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-retry"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-retry"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -271,9 +262,9 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
     .expect("fixture source stream is admitted");
     let attempts = Arc::new(AtomicUsize::new(0));
     let attempts_for_handler = Arc::clone(&attempts);
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             let attempt = attempts_for_handler.fetch_add(1, Ordering::SeqCst);
             async move {
                 assert!(attempt > 0, "intentional first-delivery handler panic");
@@ -282,16 +273,13 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-panic"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-panic"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -322,9 +310,9 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
     .expect("fixture source stream is admitted");
     let started = Arc::new(Notify::new());
     let started_for_handler = Arc::clone(&started);
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             let started = Arc::clone(&started_for_handler);
             async move {
                 started.notify_one();
@@ -333,16 +321,13 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-drain"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-drain"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -364,22 +349,24 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
 async fn aborting_one_consumer_leaves_the_resource_serving() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
+    let startup_deadline = deadline();
+    let startup_cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        startup_deadline,
+        startup_cancel.clone(),
     ))
     .await
     .expect("fixture source stream is admitted");
     let handled = || {
-        let mut registry = registry(&fixture);
+        let mut registry = fixture.registry.clone();
         registry
-            .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+            .register(&fixture.route, |_, _| async { Ok(()) })
             .expect("fixture handler is registered");
         registry
     };
     let mut handle = messaging
-        .consumer(handled())
+        .consumer(handled(), deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -387,19 +374,28 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
     let outcome = handle.finish(deadline()).await;
     std::assert_matches!(outcome, Err(ConsumerError::DrainTimedOut), "{outcome:?}");
 
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-after-abort"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-after-abort"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("publication continues after the owner aborted one consumer");
+    startup_cancel.cancel();
+    tokio::time::sleep_until(startup_deadline).await;
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    std::assert_matches!(
+        messaging.consumer(handled(), deadline(), &cancelled).await,
+        Err(infra_messaging::MessagingError::Cancelled)
+    );
+    std::assert_matches!(
+        messaging.consumer(handled(), Instant::now(), &cancel).await,
+        Err(infra_messaging::MessagingError::TimedOut { .. })
+    );
     let mut replacement = messaging
-        .consumer(handled())
+        .consumer(handled(), deadline(), &cancel)
         .await
         .expect("a new consumer is admitted after the owner aborted one")
         .start(&cancel);
@@ -434,9 +430,9 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
     let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
     let release_first = CancellationToken::new();
     let release_other = CancellationToken::new();
-    let mut blocking = registry(&fixture);
+    let mut blocking = fixture.registry.clone();
     blocking
-        .register::<ExampleEvent, _, _>({
+        .register(&fixture.route, {
             let release_first = release_first.clone();
             let release_other = release_other.clone();
             move |event, _| {
@@ -459,9 +455,9 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         "event-next",
         "event-unadmitted",
     ] {
-        let prepared =
-            infra_messaging::PreparedEvent::prepare(fixture.subject.clone(), &event(id), 1024)
-                .expect("fixture event is prepared");
+        let prepared = fixture
+            .prepare(&event(id), 1024)
+            .expect("fixture event is prepared");
         messaging
             .producer()
             .publish(&prepared, &context(deadline(), &cancel))
@@ -469,7 +465,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
             .expect("fixture event publication is acknowledged");
     }
     let mut first = messaging
-        .consumer(blocking)
+        .consumer(blocking, deadline(), &cancel)
         .await
         .expect("adapter creates its named durable consumer")
         .start(&cancel);
@@ -510,15 +506,15 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         .expect("the in-flight deliveries settle within the shared deadline");
 
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut recording = registry(&fixture);
+    let mut recording = fixture.registry.clone();
     recording
-        .register::<ExampleEvent, _, _>(move |event, _| {
+        .register(&fixture.route, move |event, _| {
             let _ = observed_tx.send(event.id);
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
     let mut second = messaging
-        .consumer(recording)
+        .consumer(recording, deadline(), &cancel)
         .await
         .expect("the durable consumer is admitted again")
         .start(&cancel);

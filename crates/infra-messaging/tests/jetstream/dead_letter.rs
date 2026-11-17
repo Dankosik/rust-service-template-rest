@@ -13,9 +13,9 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     .expect("fixture source stream is admitted");
     let (called_tx, called_rx) = oneshot::channel();
     let called_tx = Arc::new(Mutex::new(Some(called_tx)));
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             let sender = called_tx
                 .lock()
                 .expect("test handler signal lock must not be poisoned")
@@ -27,16 +27,13 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-permanent"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-permanent"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -123,14 +120,20 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
         )
         .await
         .unwrap();
-        let mut registered = registry(&fixture);
+        let mut registered = fixture.registry.clone();
         registered
-            .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
+            .register(&fixture.route, |_, _| async {
+                Err(HandlerError::Permanent)
+            })
             .unwrap();
         let prepared = registered
-            .prepare(&event("lost-transfer-ack"), 1024)
+            .prepare(&fixture.route, &event("lost-transfer-ack"), 1024)
             .unwrap();
-        let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+        let mut handle = messaging
+            .consumer(registered, deadline(), &cancel)
+            .await
+            .unwrap()
+            .start(&cancel);
         messaging
             .producer()
             .publish(&prepared, &context(deadline(), &cancel))
@@ -182,15 +185,15 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
-    let mut handlers = registry(&fixture);
+    let mut handlers = fixture.registry.clone();
     handlers
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers)
+        .consumer(handlers, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -213,7 +216,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
     wait_for_source_ack(&fixture).await;
 
-    let unknown = registry(&fixture)
+    let unknown = fixture
         .prepare(&event("event-unknown"), 1024)
         .expect("unknown-type fixture starts from a valid production envelope");
     let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown)
@@ -263,26 +266,26 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
-    let mut handlers = registry(&fixture);
+    let mut handlers = fixture.registry.clone();
     handlers
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers)
+        .consumer(handlers, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
 
-    let newer = registry(&fixture)
+    let newer = fixture
         .prepare(&event("event-newer-schema"), 1024)
         .expect("newer-schema fixture starts from a valid production envelope");
     let mut newer_headers = infra_messaging::wire::encode_prepared(&newer)
         .expect("newer-schema fixture has valid identity headers");
     newer_headers.insert("Event-Schema", "v2");
-    let undecodable = registry(&fixture)
+    let undecodable = fixture
         .prepare(&event("event-undecodable"), 1024)
         .expect("undecodable fixture starts from a valid production envelope");
     let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable)
@@ -351,21 +354,20 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
     ))
     .await
     .expect("fixture source stream is admitted");
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(|_, _| async { Err(HandlerError::Permanent) })
+        .register(&fixture.route, |_, _| async {
+            Err(HandlerError::Permanent)
+        })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-dlq-refused"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-dlq-refused"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -411,12 +413,9 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     ))
     .await
     .expect("fixture source stream is admitted");
-    let prepared = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event("event-exhausted"),
-        1024,
-    )
-    .expect("fixture event is prepared");
+    let prepared = fixture
+        .prepare(&event("event-exhausted"), 1024)
+        .expect("fixture event is prepared");
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
@@ -426,15 +425,15 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
 
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             async { Err(HandlerError::Retryable) }
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -480,7 +479,7 @@ async fn retain_record_before_shrinking_source(
     ))
     .await
     .expect("fixture producer is admitted against the original source bound");
-    let oversized = registry(fixture)
+    let oversized = fixture
         .prepare(
             &event_with_value("event-oversized", &"x".repeat(12 * 1024)),
             16 * 1024,
@@ -508,8 +507,16 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();
     let oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut limits = durable(&fixture).await.cached_info().config.clone();
+    limits.max_batch = 1;
+    limits.max_bytes = 24 * 1024;
+    limits.max_expires = Duration::from_secs(2);
+    source.update_consumer(limits).await.unwrap();
+    let mut worker = consumer_options(&fixture);
+    worker.concurrency = std::num::NonZeroUsize::new(3).unwrap();
     let messaging = Box::pin(Messaging::connect(
-        options(&fixture, Some(consumer_options(&fixture)), 32),
+        options(&fixture, Some(worker), 32),
         deadline(),
         cancel.clone(),
     ))
@@ -517,15 +524,15 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     .expect("fixture source stream is admitted for the smaller delivery bound");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(move |_, _| {
+        .register(&fixture.route, move |_, _| {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -539,12 +546,9 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     );
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
     wait_for_source_ack(&fixture).await;
-    let next = infra_messaging::PreparedEvent::prepare(
-        fixture.subject.clone(),
-        &event_with_value("event-after-oversized", "ok"),
-        32,
-    )
-    .expect("ordinary event fits the reduced limit");
+    let next = fixture
+        .prepare(&event_with_value("event-after-oversized", "ok"), 32)
+        .expect("ordinary event fits the reduced limit");
     let ack = messaging
         .producer()
         .publish(&next, &context(deadline(), &cancel))
@@ -557,6 +561,51 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         .await
         .expect("an oversized delivery must not stop the consumer");
 
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let retained = retain_record_before_shrinking_source(&fixture, &cancel).await;
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 32),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .unwrap();
+    let mut registered = fixture.registry.clone();
+    registered
+        .register(&fixture.route, |_, _| async { Ok(()) })
+        .unwrap();
+    let admitted = messaging
+        .consumer(registered, deadline(), &cancel)
+        .await
+        .unwrap();
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut limits = durable(&fixture).await.cached_info().config.clone();
+    limits.max_bytes = 10 * 1024;
+    source.update_consumer(limits).await.unwrap();
+    let mut handle = admitted.start(&cancel);
+    std::assert_matches!(
+        timeout(Duration::from_secs(5), handle.failed())
+            .await
+            .unwrap(),
+        ConsumerError::RetainedMessageTooLarge
+    );
+    std::assert_matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::RetainedMessageTooLarge)
+    );
+    let info = durable(&fixture).await.cached_info().clone();
+    assert_eq!(info.ack_floor.stream_sequence, 0);
+    assert_eq!(
+        source.get_raw_message(1).await.unwrap().payload.as_ref(),
+        retained.payload().as_ref()
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -585,12 +634,12 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
     ))
     .await
     .expect("current stream limits satisfy admission");
-    let mut registry = registry(&fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .register(&fixture.route, |_, _| async { Ok(()) })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("current stream limits satisfy consumer admission")
         .start(&cancel);
