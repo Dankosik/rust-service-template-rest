@@ -198,52 +198,47 @@ async fn healthy_instance_survives_blips_below_the_threshold() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn is_ready_and_is_draining_match_verdict_across_lifecycle() {
-    let assert_state = |reader: &ReadinessReader, expected_ready: bool, expected_draining: bool| {
-        assert_eq!(reader.is_ready(), expected_ready);
-        assert_eq!(reader.is_draining(), expected_draining);
-        assert_eq!(reader.verdict().is_ok(), expected_ready);
-        assert_eq!(
-            reader.verdict() == Err(NotReady::Draining),
-            expected_draining
-        );
-    };
-
+async fn is_draining_stays_false_through_every_verdict_until_drain_starts() {
     let (readiness, flag, _) = flaky(true);
     let reader = readiness.reader();
 
     assert_eq!(reader.verdict(), Err(NotReady::NotEvaluated));
-    assert_state(&reader, false, false);
+    assert!(!reader.is_draining(), "not evaluated");
 
     readiness.refresh().await;
     assert_eq!(reader.verdict(), Ok(()));
-    assert_state(&reader, true, false);
+    assert!(!reader.is_draining(), "ready");
 
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
     std::assert_matches!(reader.verdict(), Err(NotReady::Stale { .. }));
-    assert_state(&reader, false, false);
+    assert!(!reader.is_draining(), "stale");
 
     readiness.refresh().await;
-    assert_eq!(reader.verdict(), Ok(()));
-    assert_state(&reader, true, false);
+    assert_eq!(
+        reader.verdict(),
+        Ok(()),
+        "a refresh after staleness recovers"
+    );
+    assert!(!reader.is_draining(), "recovered from stale");
 
     flag.store(false, Ordering::Relaxed);
     readiness.refresh().await;
     assert_eq!(reader.verdict(), Ok(()));
-    assert_state(&reader, true, false);
+    assert!(!reader.is_draining(), "absorbed failure");
 
     readiness.refresh().await;
     readiness.refresh().await;
     std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
-    assert_state(&reader, false, false);
+    assert!(!reader.is_draining(), "probe failed");
 
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
-    assert_state(&reader, true, false);
+    assert_eq!(reader.verdict(), Ok(()));
+    assert!(!reader.is_draining(), "recovered from failure");
 
     readiness.start_drain();
     assert_eq!(reader.verdict(), Err(NotReady::Draining));
-    assert_state(&reader, false, true);
+    assert!(reader.is_draining(), "draining");
 }
 
 #[tokio::test(start_paused = true)]
@@ -619,35 +614,6 @@ async fn the_ready_gauge_is_the_published_verdict() {
         Some("readiness_ready 1")
     );
 
-    let stale_wakeup = recorder();
-    {
-        let _recorder = metrics::set_default_local_recorder(&stale_wakeup);
-        let hold = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(tokio::sync::Notify::new());
-        let readiness = Readiness::new(
-            vec![Box::new(Gated {
-                hold: Arc::clone(&hold),
-                release: Arc::clone(&release),
-            })],
-            policy(),
-        );
-        readiness.refresh().await;
-        assert_eq!(ready(&stale_wakeup).as_deref(), Some("readiness_ready 1"));
-        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-        hold.store(true, Ordering::Relaxed);
-        let refresh = readiness.refresh();
-        tokio::pin!(refresh);
-        assert!(futures_util::FutureExt::now_or_never(refresh.as_mut()).is_none());
-        assert_eq!(
-            ready(&stale_wakeup).as_deref(),
-            Some("readiness_ready 0"),
-            "stale wakeup drops ready gauge before slow probes finish"
-        );
-        release.notify_one();
-        refresh.await;
-        assert_eq!(ready(&stale_wakeup).as_deref(), Some("readiness_ready 1"));
-    }
-
     let withdrawn = recorder();
     {
         let _recorder = metrics::set_default_local_recorder(&withdrawn);
@@ -717,13 +683,13 @@ async fn a_draining_owner_logs_no_check_outcome() {
 
 // template:begin grpc:health-changed-verdict-test
 #[tokio::test(start_paused = true)]
-async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain() {
+async fn a_ready_watch_sleeps_through_steady_and_absorbed_refreshes_and_wakes_on_each_flip() {
     let (readiness, flag, _) = flaky(true);
     readiness.refresh().await;
     let mut reader = readiness.reader();
     let waiter = tokio::spawn(async move {
-        let result = reader.wait_for_verdict_event().await;
-        (reader, result)
+        let changed = reader.wait_until_ready_is_not(true).await;
+        (reader, changed)
     });
     tokio::task::yield_now().await;
 
@@ -733,7 +699,7 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
-            "steady-state Ok -> Ok must not wake waiter past original stale_after"
+            "a ready -> ready refresh past the first stale boundary must not end the wait"
         );
     }
 
@@ -744,46 +710,25 @@ async fn steady_state_refreshes_keep_verdict_event_asleep_until_failure_or_drain
         tokio::task::yield_now().await;
         assert!(
             !waiter.is_finished(),
-            "absorbed failure keeps verdict ready and waiter asleep"
+            "a failure absorbed below the threshold must not end the wait"
         );
     }
 
     tokio::time::advance(policy().interval).await;
     readiness.refresh().await;
-    let (mut reader, result) = tokio::time::timeout(Duration::from_millis(1), waiter)
+    let (mut reader, changed) = tokio::time::timeout(Duration::from_millis(1), waiter)
         .await
-        .expect("threshold failure wakes waiter immediately")
+        .expect("the threshold failure must end the wait at once")
         .unwrap();
-    assert_eq!(result, Ok(()));
-    assert!(!reader.is_ready());
+    assert_eq!(changed, Some(false));
 
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
-    assert_eq!(reader.wait_for_verdict_event().await, Ok(()));
-    assert!(reader.is_ready());
-
-    let waiter = tokio::spawn(async move {
-        let result = reader.wait_for_verdict_event().await;
-        (reader, result)
-    });
-    tokio::task::yield_now().await;
-
-    for _ in 0..6 {
-        tokio::time::advance(policy().interval).await;
-        readiness.refresh().await;
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-    }
-
-    readiness.start_drain();
-    let (reader, result) = tokio::time::timeout(Duration::from_millis(1), waiter)
-        .await
-        .expect("start_drain wakes waiter immediately")
-        .unwrap();
-    assert_eq!(result, Ok(()));
-    assert!(reader.is_draining());
-    assert!(!reader.is_ready());
-    assert_eq!(reader.verdict(), Err(NotReady::Draining));
+    assert_eq!(
+        futures_util::FutureExt::now_or_never(reader.wait_until_ready_is_not(false)),
+        Some(Some(true)),
+        "a recovered verdict must be reported without waiting"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -833,106 +778,219 @@ async fn wait_for_drain_or_owner_drop_resolves_on_both_events() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn wait_for_verdict_event_delivers_drain_once_then_waits_without_losing_drain() {
-    let (readiness, _, calls) = flaky(true);
-    readiness.refresh().await;
-    let mut reader = readiness.reader();
-
-    readiness.start_drain();
-    assert_eq!(reader.wait_for_verdict_event().await, Ok(()));
-
-    let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
-    tokio::task::yield_now().await;
-    assert!(
-        !waiter.is_finished(),
-        "observed draining must wait without spurious wakeups"
-    );
-
-    readiness.refresh().await;
-    tokio::task::yield_now().await;
-    assert!(
-        !waiter.is_finished(),
-        "refresh during drain must not wake waiter"
-    );
-    assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
-
-    drop(readiness);
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("owner drop must finish waiter")
-            .expect("waiter must not panic"),
-        Err(OwnerDropped)
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn wait_for_verdict_event_delivers_each_stale_edge_once_without_a_probe() {
+async fn a_ready_watch_reports_the_stale_boundary_once_then_the_next_successful_refresh() {
     let (readiness, _, calls) = flaky(true);
     readiness.refresh().await;
     let mut reader = readiness.reader();
     let waiter = tokio::spawn(async move {
-        let result = reader.wait_for_verdict_event().await;
-        (reader, result)
+        let changed = reader.wait_until_ready_is_not(true).await;
+        (reader, changed)
     });
     tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
-        "a fresh check must wait for its stale boundary"
+        "a fresh ready check must wait for its stale boundary"
     );
 
-    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    let (mut reader, result) = tokio::time::timeout(Duration::from_secs(1), waiter)
+    tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+    let (mut reader, changed) = tokio::time::timeout(Duration::from_secs(1), waiter)
         .await
-        .expect("stale boundary waiter must finish")
-        .expect("stale boundary waiter must not panic");
-    assert_eq!(result, Ok(()));
+        .expect("the stale boundary must end the wait without a refresh")
+        .unwrap();
+    assert_eq!(changed, Some(false));
 
-    let waiter = tokio::spawn(async move { reader.wait_for_verdict_event().await });
+    let waiter = tokio::spawn(async move { reader.wait_until_ready_is_not(false).await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(policy().stale_after()).await;
     tokio::task::yield_now().await;
     assert!(
         !waiter.is_finished(),
-        "the same stale check must not wake repeatedly"
+        "the same stale check must not end a not-ready wait"
     );
 
     readiness.refresh().await;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), waiter)
+        tokio::time::timeout(Duration::from_millis(1), waiter)
             .await
-            .expect("publication waiter must finish")
-            .expect("publication waiter must not panic"),
-        Ok(())
+            .expect("a successful refresh must end the not-ready wait")
+            .unwrap(),
+        Some(true)
     );
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        2,
+        "waiting must not run probes"
+    );
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_verdict_event_wait_dropped_in_select_keeps_the_stale_edge() {
+async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_is_polled_again() {
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    let mut reader = readiness.reader();
+    let wait = reader.wait_until_ready_is_not(true);
+    tokio::pin!(wait);
+    assert!(futures_util::FutureExt::now_or_never(wait.as_mut()).is_none());
+
+    tokio::time::advance(policy().stale_after() + Duration::from_millis(5)).await;
+    flag.store(false, Ordering::Relaxed);
+    readiness.refresh().await;
+    std::assert_matches!(
+        readiness.reader().verdict(),
+        Err(NotReady::ProbeFailed { .. })
+    );
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(60), wait.as_mut()).await,
+        Ok(Some(false)),
+        "a watcher that last saw ready must learn about the failed check"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_watch_reports_a_stall_while_the_refresher_holds_a_check_in_flight() {
+    let hold = Arc::new(AtomicBool::new(false));
+    let readiness = Readiness::new(
+        vec![Box::new(Gated {
+            hold: Arc::clone(&hold),
+            release: Arc::new(tokio::sync::Notify::new()),
+        })],
+        policy(),
+    );
+    let mut reader = readiness.reader();
+    let cancel = CancellationToken::new();
+    let refresher = tokio::spawn({
+        let readiness = readiness.clone();
+        let cancel = cancel.clone();
+        async move { readiness.refresh_until(cancel).await }
+    });
+    assert_eq!(
+        tokio::time::timeout(policy().probe_budget, reader.wait_until_ready_is_not(false)).await,
+        Ok(Some(true)),
+        "the refresher's first check must publish ready"
+    );
+
+    let waiter = tokio::spawn(async move { reader.wait_until_ready_is_not(true).await });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    hold.store(true, Ordering::Relaxed);
+    tokio::time::advance(policy().interval).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "a check in flight within the stale boundary must not end the wait"
+    );
+
+    tokio::time::advance(policy().stale_after() + Duration::from_secs(1)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(1), waiter)
+            .await
+            .expect("a stall past stale_after must end the ready wait")
+            .unwrap(),
+        Some(false)
+    );
+    assert!(readiness.reader().verdict().is_err());
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), refresher)
+        .await
+        .expect("refresh_until must return on cancel")
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_watch_reports_drain_as_not_ready_then_ends() {
+    let (readiness, _, _) = flaky(true);
+    readiness.refresh().await;
+    let mut reader = readiness.reader();
+    let waiter = tokio::spawn(async move {
+        let changed = reader.wait_until_ready_is_not(true).await;
+        (reader, changed)
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    readiness.start_drain();
+    let (mut reader, changed) = tokio::time::timeout(Duration::from_millis(1), waiter)
+        .await
+        .expect("start_drain must end a ready wait at once")
+        .unwrap();
+    assert_eq!(changed, Some(false));
+
+    readiness.refresh().await;
+    assert_eq!(
+        futures_util::FutureExt::now_or_never(reader.wait_until_ready_is_not(false)),
+        Some(None),
+        "a draining service can never become ready again"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_not_ready_watch_ends_when_drain_starts() {
+    let (readiness, _, _) = flaky(false);
+    readiness.refresh().await;
+    let mut reader = readiness.reader();
+    std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
+    let waiter = tokio::spawn(async move { reader.wait_until_ready_is_not(false).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "a failed verdict must wait for a change"
+    );
+
+    readiness.start_drain();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(1), waiter)
+            .await
+            .expect("start_drain must end a not-ready wait at once")
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_watch_dropped_mid_wait_still_reports_the_stale_boundary_later() {
     let (readiness, _, _) = flaky(true);
     readiness.refresh().await;
     let mut reader = readiness.reader();
     tokio::select! {
-        result = reader.wait_for_verdict_event() => panic!("a fresh check resolved early: {result:?}"),
+        changed = reader.wait_until_ready_is_not(true) => panic!("a fresh ready check ended the wait early: {changed:?}"),
         () = tokio::time::sleep(policy().stale_after() / 2) => {}
     }
     tokio::time::advance(policy().stale_after()).await;
-    let event =
-        tokio::time::timeout(Duration::from_millis(1), reader.wait_for_verdict_event()).await;
     assert_eq!(
-        event,
-        Ok(Ok(())),
-        "the dropped wait must not swallow the stale edge"
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            reader.wait_until_ready_is_not(true)
+        )
+        .await,
+        Ok(Some(false)),
+        "the dropped wait must not swallow the stale boundary"
     );
-    std::assert_matches!(reader.verdict(), Err(NotReady::Stale { .. }));
 }
 
-#[tokio::test]
-async fn wait_for_verdict_event_reports_when_the_owner_is_dropped() {
+#[tokio::test(start_paused = true)]
+async fn a_watch_ends_when_every_owner_is_dropped() {
     let readiness = Readiness::new(Vec::new(), policy());
+    let survivor = readiness.clone();
     let mut reader = readiness.reader();
+    let waiter = tokio::spawn(async move { reader.wait_until_ready_is_not(false).await });
     drop(readiness);
-    assert_eq!(reader.wait_for_verdict_event().await, Err(OwnerDropped));
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "a remaining owner can still publish readiness"
+    );
+
+    drop(survivor);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(1), waiter)
+            .await
+            .expect("dropping the last owner must end the wait")
+            .unwrap(),
+        None
+    );
 }
 // template:end grpc:health-changed-verdict-test
 
