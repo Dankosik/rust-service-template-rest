@@ -76,7 +76,7 @@ pub(crate) async fn within_mutation<T>(
     .await
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Interrupted {
     pub(crate) stopped: CallStop,
     pub(crate) polled: bool,
