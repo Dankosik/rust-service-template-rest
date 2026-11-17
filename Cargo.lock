@@ -2579,6 +2579,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "nix",
  "operation-context",
  "parking_lot",
  "pem 4.0.0",

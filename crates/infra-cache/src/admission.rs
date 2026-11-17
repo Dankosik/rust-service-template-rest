@@ -5,7 +5,7 @@ use redis::IntoConnectionInfo;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
 
-use crate::credentials::PasswordFile;
+use crate::credentials::{PasswordFile, read_regular_file};
 use crate::dial::{Dial, Tls};
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 
@@ -122,12 +122,9 @@ fn admit_password(
     }
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "startup cache admission owns finite TLS material reads before serving"
-)]
 fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, CacheError> {
-    let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
+    let bytes =
+        read_regular_file(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
     let mut roots = rustls::RootCertStore::empty();
     for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
         roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
@@ -140,16 +137,12 @@ struct ClientIdentity {
     key: PrivateKeyDer<'static>,
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "startup cache admission owns finite TLS material reads before serving"
-)]
 fn read_client_certificate(certificate: &ClientCertificate) -> Result<ClientIdentity, CacheError> {
     use rustls::pki_types::pem::PemObject;
 
-    let client_cert = std::fs::read(&certificate.cert_path)
+    let client_cert = read_regular_file(&certificate.cert_path)
         .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
-    let client_key = std::fs::read(&certificate.key_path)
+    let client_key = read_regular_file(&certificate.key_path)
         .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
     let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
     let key =

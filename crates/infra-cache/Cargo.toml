@@ -44,6 +44,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 futures-util = { workspace = true, features = ["async-await"] }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }

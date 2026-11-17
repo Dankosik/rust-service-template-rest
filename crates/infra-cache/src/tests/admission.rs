@@ -193,6 +193,70 @@ fn with_client_certificate(dsn: &str, cert_path: PathBuf, key_path: PathBuf) -> 
 
 const TLS_DSN: &str = "rediss://:hunter2@127.0.0.1:6379";
 
+#[cfg(unix)]
+pub(super) fn with_unserviced_fifo(test: impl Future<Output = ()>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("FIFO fixture runtime");
+    let runtime = std::mem::DropGuard::new(runtime, |runtime| {
+        if std::thread::panicking() {
+            runtime.shutdown_background();
+        }
+    });
+    runtime.block_on(test);
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_files_accept_regular_symlink_targets_and_refuse_fifos_without_a_writer() {
+    use nix::sys::stat::Mode;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::symlink;
+
+    with_unserviced_fifo(async {
+        let directory = tempfile::tempdir().unwrap();
+        let (cert, key) = client_identity();
+        let password = temp_file(ephemeral_password());
+        let links = ["password", "ca", "cert", "key"].map(|name| directory.path().join(name));
+        for (target, link) in [password.path(), cert.path(), cert.path(), key.path()]
+            .into_iter()
+            .zip(&links)
+        {
+            symlink(target, link).unwrap();
+        }
+        let options = |[password, ca, cert, key]: [PathBuf; 4]| CacheOptions {
+            password_file: Some(password),
+            root_ca_path: Some(ca),
+            ..with_client_certificate("rediss://127.0.0.1:6379", cert, key)
+        };
+        Cache::start(options(links.clone()))
+            .await
+            .expect("regular-file symlinks");
+
+        let fifo = directory.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+        let kind = ErrorKind::InvalidInput;
+        for (index, expected) in [
+            CacheError::PasswordFile { kind },
+            CacheError::CaFile { kind },
+            CacheError::ClientCertificateFile { kind },
+            CacheError::ClientKeyFile { kind },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut paths = links.clone();
+            paths[index].clone_from(&fifo);
+            let error = tokio::time::timeout(Duration::from_secs(2), Cache::start(options(paths)))
+                .await
+                .expect("refuse a FIFO before the admission deadline")
+                .unwrap_err();
+            assert_eq!(error, expected);
+        }
+    });
+}
+
 #[tokio::test]
 async fn a_client_certificate_with_its_key_is_admitted_without_dialing() {
     let (cert, key) = client_identity();
