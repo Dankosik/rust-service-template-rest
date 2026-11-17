@@ -774,9 +774,9 @@ fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
 }
 
 fn write_timestamp(line: &mut Bytes) {
-    let now = std::time::SystemTime::now();
-    if now >= std::time::UNIX_EPOCH
-        && write!(line, "{}", humantime::format_rfc3339_micros(now)).is_ok()
+    if let Ok(now) = jiff::Timestamp::try_from(std::time::SystemTime::now())
+        && now >= jiff::Timestamp::UNIX_EPOCH
+        && write!(line, "{now:.6}").is_ok()
     {
         return;
     }
