@@ -3,13 +3,14 @@ use axum::http::header::{
     CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
     LOCATION,
 };
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, Limited};
+use bytes::{BufMut as _, BytesMut};
 use infra_idempotency_store::{HeaderPair, Record};
+use serde::Serialize;
 use smallvec::SmallVec;
 
-use crate::problem::caused_by_length_limit;
+use super::execute::Rollback;
 
 const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
@@ -27,29 +28,10 @@ const REPLAYABLE: [HeaderName; 7] = [
 type StoredHeaders = SmallVec<[(HeaderName, HeaderValue); 4]>;
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub(super) struct ReplayableResponse {
+pub struct ReplayableResponse {
     status: StatusCode,
     headers: StoredHeaders,
     body: Bytes,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Unstorable {
-    Status,
-    BodyStream,
-    BodyLimit,
-    HeaderLimit,
-}
-
-impl Unstorable {
-    pub(super) const fn class(self) -> &'static str {
-        match self {
-            Self::Status => "status",
-            Self::BodyStream => "body_stream",
-            Self::BodyLimit => "body_limit",
-            Self::HeaderLimit => "header_limit",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,43 +55,55 @@ impl Undecodable {
     }
 }
 
-pub(super) async fn capture(response: Response) -> Result<ReplayableResponse, Unstorable> {
-    let (parts, body) = response.into_parts();
-    if !parts.status.is_success() {
-        return Err(Unstorable::Status);
-    }
-    let body = Limited::new(body, MAX_STORED_BODY_BYTES)
-        .collect()
-        .await
-        .map_err(|error| {
-            if caused_by_length_limit(&*error) {
-                Unstorable::BodyLimit
-            } else {
-                Unstorable::BodyStream
-            }
-        })?
-        .to_bytes();
-    let headers = REPLAYABLE
-        .iter()
-        .flat_map(|name| {
-            parts
-                .headers
-                .get_all(name)
-                .iter()
-                .map(move |value| (name.clone(), value.clone()))
-        })
-        .collect::<StoredHeaders>();
-    if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
-        return Err(Unstorable::HeaderLimit);
-    }
-    Ok(ReplayableResponse {
-        status: parts.status,
-        headers,
-        body,
-    })
-}
-
 impl ReplayableResponse {
+    pub fn bytes(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Result<Self, Rollback> {
+        if !status.is_success() {
+            return Err(Rollback::InvalidStatus);
+        }
+        if body.len() > MAX_STORED_BODY_BYTES {
+            return Err(Rollback::BodyLimit);
+        }
+        let headers = REPLAYABLE
+            .iter()
+            .flat_map(|name| {
+                headers
+                    .get_all(name)
+                    .iter()
+                    .map(move |value| (name.clone(), value.clone()))
+            })
+            .collect::<StoredHeaders>();
+        if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
+            return Err(Rollback::HeaderLimit);
+        }
+        Ok(Self {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    pub fn json<T: Serialize + ?Sized>(
+        status: StatusCode,
+        mut headers: HeaderMap,
+        value: &T,
+    ) -> Result<Self, Rollback> {
+        let mut body = BytesMut::new();
+        let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
+        serde_json::to_writer(&mut writer, value).map_err(|error| {
+            if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
+                Rollback::BodyLimit
+            } else {
+                Rollback::Serialization
+            }
+        })?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Self::bytes(status, &headers, body.freeze())
+    }
+
+    pub fn empty(status: StatusCode, headers: &HeaderMap) -> Result<Self, Rollback> {
+        Self::bytes(status, headers, Bytes::new())
+    }
+
     pub(super) fn to_record(&self) -> Record {
         let headers = self
             .headers
@@ -183,13 +177,17 @@ fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt as _;
 
-    fn response(status: u16, headers: &[(&str, &str)], body: impl Into<Body>) -> Response {
-        let mut builder = Response::builder().status(status);
+    fn header_map(headers: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
         for (name, value) in headers {
-            builder = builder.header(*name, *value);
+            map.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
         }
-        builder.body(body.into()).expect("valid response")
+        map
     }
 
     fn record(status: i16, headers: Vec<HeaderPair>, body: Vec<u8>) -> Record {
@@ -202,9 +200,9 @@ mod tests {
 
     #[tokio::test]
     async fn first_success_and_replay_have_the_same_admitted_bytes() {
-        let captured = capture(response(
-            201,
-            &[
+        let captured = ReplayableResponse::bytes(
+            StatusCode::CREATED,
+            &header_map(&[
                 ("content-type", "application/json"),
                 ("x-trace", "drop"),
                 ("content-language", "en"),
@@ -212,10 +210,9 @@ mod tests {
                 ("etag", "\"v1\""),
                 ("last-modified", "Mon, 01 Jan 2024 00:00:00 GMT"),
                 ("set-cookie", "secret"),
-            ],
-            br#"{"id":1}"#.as_slice(),
-        ))
-        .await
+            ]),
+            Bytes::from_static(br#"{"id":1}"#),
+        )
         .expect("storable response");
         let record = captured.to_record();
         assert_eq!(
@@ -257,21 +254,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn admission_rejects_non_success_and_oversized_headers() {
-        assert_eq!(
-            capture(response(409, &[], Body::empty())).await,
-            Err(Unstorable::Status)
+    #[test]
+    fn admission_rejects_non_success_and_oversized_headers() {
+        std::assert_matches!(
+            ReplayableResponse::empty(StatusCode::CONFLICT, &HeaderMap::new()),
+            Err(Rollback::InvalidStatus)
         );
         let large = "x".repeat(MAX_TOTAL_STORED_HEADER_BYTES);
-        assert_eq!(
-            capture(response(
-                200,
-                &[("content-type", large.as_str())],
-                Body::empty()
-            ))
-            .await,
-            Err(Unstorable::HeaderLimit)
+        std::assert_matches!(
+            ReplayableResponse::empty(
+                StatusCode::OK,
+                &header_map(&[("content-type", large.as_str())])
+            ),
+            Err(Rollback::HeaderLimit)
         );
     }
 
@@ -349,10 +344,10 @@ mod tests {
             let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
             let pairs: Vec<(&str, &str)> =
                 headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
-            let replay = runtime.block_on(async {
-                let captured = capture(response(status, &pairs, body.clone())).await.unwrap();
-                decode(captured.to_record()).unwrap().into_response()
-            });
+            let captured = ReplayableResponse::bytes(
+                StatusCode::from_u16(status).unwrap(), &header_map(&pairs), Bytes::from(body.clone())
+            ).unwrap();
+            let replay = decode(captured.to_record()).unwrap().into_response();
 
             proptest::prop_assert_eq!(replay.status().as_u16(), status);
             for name in replay.headers().keys() {

@@ -635,6 +635,11 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
     )
     _assert_workspace_dependencies_inherited(initializer, nodes)
+    grpc = nodes.get("crates/infra-grpc/Cargo.toml")
+    if grpc is not None:
+        dependencies = tomllib.loads(grpc.payload.decode())["dependencies"]
+        if "infra-http-transport" not in dependencies or "infra-http" in dependencies:
+            raise initializer.Refusal("gRPC must share the listener without the REST adapter")
     _assert_dropped_crates_unnamed(initializer, nodes, source_crates, _declared_crates(destination))
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",

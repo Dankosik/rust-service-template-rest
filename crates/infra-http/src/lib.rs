@@ -1,4 +1,3 @@
-mod admission;
 mod body;
 mod contract;
 pub mod extract;
@@ -12,17 +11,19 @@ pub mod idempotency;
 
 mod context;
 mod harden;
+#[cfg(test)]
+mod listener_tests;
 mod observe;
 mod probes;
 mod request_id;
-mod server;
 #[cfg(test)]
 mod test_support;
 
-pub use admission::acquire_within;
 pub use context::{RequestContext, ResponseContext};
-pub use contract::{FinalizeError, finalize_public};
-pub use harden::{HardenOptions, harden};
+pub use contract::{Application, Authentication, FinalizeError, HttpContract};
+pub use harden::HardenOptions;
+#[cfg(test)]
+use harden::harden;
 pub use observe::HISTOGRAMS;
 // template:begin authn:infra-http-authn-exports
 pub use authn::VerifiedPrincipal;
@@ -30,10 +31,6 @@ pub use authn::VerifiedPrincipal;
 // template:begin request-budget:infra-http-request-deadline-export
 pub use context::RequestDeadline;
 // template:end request-budget:infra-http-request-deadline-export
-pub use probes::{liveness_router, router};
+pub use probes::liveness_router;
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
-pub use server::{
-    AcceptFailure, BoundListener, Drained, Server, ServerError, ServerOptions,
-    take_listener_drain_token,
-};

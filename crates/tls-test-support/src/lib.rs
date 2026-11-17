@@ -52,3 +52,33 @@ pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     )
     .expect("create TLS fixture CA")
 }
+
+// template:begin grpc:tls-fixtures-http-listener-config
+#[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "fixture setup failures are test failures"
+)]
+pub fn localhost_tls(alpn: &[u8]) -> (rustls::ServerConfig, rustls::ClientConfig) {
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    let material = TlsMaterial::new("localhost");
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let mut server = rustls::ServerConfig::builder_with_provider(provider.clone().into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 server")
+        .with_no_client_auth()
+        .with_single_cert(vec![material.cert.into()], key)
+        .expect("fixture server certificate");
+    server.alpn_protocols = vec![alpn.to_vec()];
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(material.root.into()).expect("fixture CA");
+    let mut client = rustls::ClientConfig::builder_with_provider(provider.into())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 client")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client.alpn_protocols = vec![alpn.to_vec()];
+    (server, client)
+}
+// template:end grpc:tls-fixtures-http-listener-config

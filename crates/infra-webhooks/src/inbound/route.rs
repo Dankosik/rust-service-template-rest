@@ -8,7 +8,9 @@ use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http_body_util::{BodyExt, Limited};
 use infra_http::extract::Path;
-use infra_http::problem::responses::{GatewayTimeout, InternalServerError, RequestEntityTooLarge};
+use infra_http::problem::responses::{
+    GatewayTimeout, InternalServerError, RequestEntityTooLarge, RequestTimeout,
+};
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use metrics::{Counter, SharedString};
@@ -136,6 +138,8 @@ enum WebhookProblemResponses {
     Rejected(#[ref_response] WebhookRejected),
     #[response(status = 404)]
     NotFound(#[ref_response] NotFound),
+    #[response(status = 408)]
+    RequestTimeout(#[ref_response] RequestTimeout),
     #[response(status = 413)]
     RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
     #[response(status = 500)]
@@ -147,7 +151,13 @@ enum WebhookProblemResponses {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable, GatewayTimeout)))]
+#[openapi(components(responses(
+    NotFound,
+    WebhookRejected,
+    ServiceUnavailable,
+    GatewayTimeout,
+    RequestTimeout
+)))]
 struct WebhookComponents;
 
 #[must_use]
@@ -386,6 +396,24 @@ mod tests {
     use crate::inbound::Verifier;
     use crate::protocol::KeyRing;
 
+    fn inert_app() -> infra_http::Application {
+        use std::time::Duration;
+        infra_http::HttpContract::new(router())
+            .build(
+                WebhookState::inert(),
+                infra_http::Authentication::Public,
+                &infra_http::HardenOptions {
+                    max_body_bytes: MAX_BODY_BYTES + 1,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: None,
+                    admission_wait: Duration::ZERO,
+                    log_health_probes: false,
+                    draining: None,
+                },
+            )
+            .expect("the webhook operation is explicitly public")
+    }
+
     async fn body_text(response: Response) -> String {
         let bytes = response
             .into_body()
@@ -494,10 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
-        let app = infra_http::finalize_public(router())
-            .expect("the webhook operation is explicitly public")
-            .with_state(WebhookState::inert());
-        let response = app
+        let response = inert_app()
             .oneshot(
                 Request::post("/webhooks/unknown")
                     .body(Body::from(vec![b'x'; MAX_BODY_BYTES + 1]))
@@ -519,10 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_undecodable_endpoint_id_is_a_problem() {
-        let app = infra_http::finalize_public(router())
-            .expect("the webhook operation is explicitly public")
-            .with_state(WebhookState::inert());
-        let response = app
+        let response = inert_app()
             .oneshot(
                 Request::post("/webhooks/%FF")
                     .body(Body::empty())

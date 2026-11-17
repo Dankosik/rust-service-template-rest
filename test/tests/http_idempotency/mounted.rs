@@ -14,7 +14,7 @@ use axum::http::header::{
 };
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Router};
+use axum::{Extension, ServiceExt as _};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::{Readiness, RefreshPolicy};
 use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
@@ -24,10 +24,14 @@ use infra_bearerauthn::{
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
-    Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
+    Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, ReplayableResponse,
+    Rollback, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
-use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
+use infra_http::{
+    Application, Authentication, Code, HardenOptions, HttpContract, Problem, REQUEST_ID_HEADER,
+    VerifiedPrincipal,
+};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use integration_tests::dsn_for;
@@ -66,6 +70,7 @@ const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
 const HANDLER_TIMEOUT_COLOR: &str = "handler-timeout";
+const UNSERIALIZABLE_COLOR: &str = "unserializable";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const KEY_REASON: &str = concat!(
     "must be one Idempotency-Key field; An unquoted value is visible ASCII; ",
@@ -195,8 +200,8 @@ async fn create_widget(
     let execution =
         idempotency.execute(
             async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
-                Ok(widget) => created_response(widget),
-                Err(err) => err.into_problem().into_response(),
+                Ok(widget) => created_response(&widget),
+                Err(err) => Err(Rollback::refuse(err.into_problem())),
             },
         );
     if handler_timeout {
@@ -243,18 +248,17 @@ async fn replace_widget(
     idempotency
         .execute(
             async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
-                Ok(widget) => created_response(widget),
-                Err(err) => err.into_problem().into_response(),
+                Ok(widget) => created_response(&widget),
+                Err(err) => Err(Rollback::refuse(err.into_problem())),
             },
         )
         .await
 }
 
-fn created_response(widget: Widget) -> Response {
+fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
     let location = widget.location();
     let id = widget.id;
-    let mut response = (StatusCode::CREATED, Json(widget)).into_response();
-    let headers = response.headers_mut();
+    let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         LOCATION,
         HeaderValue::from_str(&location).expect("a location"),
@@ -275,7 +279,14 @@ fn created_response(widget: Widget) -> Response {
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
     headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
-    response
+    if widget.color == UNSERIALIZABLE_COLOR {
+        return ReplayableResponse::json(
+            StatusCode::CREATED,
+            headers,
+            &BTreeMap::from([((1, 2), 3)]),
+        );
+    }
+    ReplayableResponse::json(StatusCode::CREATED, headers, widget)
 }
 
 fn may_create(principal: &VerifiedPrincipal) -> bool {
@@ -517,9 +528,19 @@ impl FromRef<WidgetState> for Arc<dyn CreateWidgets> {
     }
 }
 
+fn options(budget: Duration) -> HardenOptions {
+    HardenOptions {
+        max_body_bytes: MAX_BODY_BYTES,
+        request_timeout: budget,
+        max_in_flight: NonZeroU32::new(16),
+        admission_wait: budget,
+        log_health_probes: false,
+        draining: None,
+    }
+}
+
 fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
     OpenApiRouter::with_openapi(bearer_document())
-        .merge(infra_http::router())
         .routes(
             composer
                 .route(routes!(create_widget))
@@ -538,7 +559,9 @@ fn widget_contract_declares_supported_protected_security() {
     let mut composer = Composer::inert();
     let contract = widget_contract(&mut composer);
     std::assert_matches!(
-        infra_http::finalize_public(contract).unwrap_err(),
+        HttpContract::new(OpenApiRouter::with_openapi(contract.into_openapi()))
+            .build((), Authentication::Public, &options(BUDGET))
+            .unwrap_err(),
         infra_http::FinalizeError::ProtectedOperation { .. },
     );
 }
@@ -561,27 +584,23 @@ impl Mounted {
         let contract = widget_contract(&mut composer);
         let activation = composer.finish();
         std::assert_matches!(activation, Activation::Active { .. }, "{activation:?}");
-        let routes = infra_http::authn::finalize(contract, provider.verifier())
-            .expect("the mounted auth contract finalizes");
-        let mounted = Router::new()
-            .nest(PRIMARY_PREFIX, routes.clone())
-            .nest(SECONDARY_PREFIX, routes);
-        let app = harden(
-            mounted.with_state(WidgetState {
-                readiness: readiness_reader(),
-                widgets,
-            }),
-            &HardenOptions {
-                max_body_bytes: MAX_BODY_BYTES,
-                request_timeout: budget,
-                max_in_flight: NonZeroU32::new(16),
-                admission_wait: budget,
-                log_health_probes: false,
-                draining: None,
-            },
-        );
+        let mounted = OpenApiRouter::with_openapi(bearer_document())
+            .nest(PRIMARY_PREFIX, contract.clone())
+            .nest(SECONDARY_PREFIX, contract);
+        let app = HttpContract::new(mounted)
+            .with_probes(PRIMARY_PREFIX)
+            .with_probes(SECONDARY_PREFIX)
+            .build(
+                WidgetState {
+                    readiness: readiness_reader(),
+                    widgets,
+                },
+                Authentication::Bearer(Box::new(provider.verifier())),
+                &options(budget),
+            )
+            .expect("the mounted auth contract builds");
         Self {
-            server: TestServer::new(app),
+            server: TestServer::new(app.into_make_service()),
             hold,
             provider,
             store_pool,
@@ -927,23 +946,17 @@ async fn inherited_get() -> &'static str {
 async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
     let provider = Provider::start().await;
     let contract = OpenApiRouter::with_openapi(bearer_document())
-        .merge(infra_http::router())
         .routes(routes!(authorized_without_idempotency, public_head))
         .routes(routes!(inherited_get));
-    let router = infra_http::authn::finalize(contract, provider.verifier())
-        .unwrap()
-        .with_state(readiness_reader());
-    let server = TestServer::new(harden(
-        router,
-        &HardenOptions {
-            max_body_bytes: MAX_BODY_BYTES,
-            request_timeout: BUDGET,
-            max_in_flight: NonZeroU32::new(16),
-            admission_wait: BUDGET,
-            log_health_probes: false,
-            draining: None,
-        },
-    ));
+    let app = HttpContract::new(contract)
+        .with_probes("/")
+        .build(
+            readiness_reader(),
+            Authentication::Bearer(Box::new(provider.verifier())),
+            &options(BUDGET),
+        )
+        .unwrap();
+    let server = TestServer::new(app.into_make_service());
     let explicit = server
         .method(axum::http::Method::HEAD, "/_test/authorization")
         .authorization("Bearer broken token")
@@ -985,26 +998,26 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
     provider.stop().await;
 }
 
-fn timeout_router(verifier: Verifier, timeout: Duration, delay: Duration) -> Router {
-    let contract = OpenApiRouter::with_openapi(bearer_document()).routes(routes!(inherited_get));
-    let router = infra_http::authn::finalize(contract, verifier).unwrap();
-    let router = router.layer(axum::middleware::from_fn(
-        move |request, next: axum::middleware::Next| async move {
-            tokio::time::sleep(delay).await;
-            next.run(request).await
-        },
-    ));
-    harden(
-        router,
-        &HardenOptions {
-            max_body_bytes: MAX_BODY_BYTES,
-            request_timeout: timeout,
-            max_in_flight: NonZeroU32::new(16),
-            admission_wait: timeout,
-            log_health_probes: false,
-            draining: None,
-        },
-    )
+fn timeout_router(
+    verifier: Verifier,
+    timeout: Duration,
+    entered: Arc<tokio::sync::Notify>,
+) -> Application {
+    #[utoipa::path(get, path = "/hold", security(), responses((status = 204)))]
+    async fn hold(Extension(entered): Extension<Arc<tokio::sync::Notify>>) -> StatusCode {
+        entered.notify_one();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        StatusCode::NO_CONTENT
+    }
+    let contract = OpenApiRouter::with_openapi(bearer_document())
+        .routes(routes!(inherited_get))
+        .routes(routes!(hold))
+        .layer(Extension(entered));
+    let mut options = options(timeout);
+    options.max_in_flight = Some(NonZeroU32::MIN);
+    HttpContract::new(contract)
+        .build((), Authentication::Bearer(Box::new(verifier)), &options)
+        .unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1020,11 +1033,12 @@ async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
         .unwrap();
     assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
     tokio::time::pause();
-    let server = TestServer::new(timeout_router(
-        verifier,
-        Duration::from_millis(200),
-        Duration::from_millis(150),
-    ));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let app = timeout_router(verifier, Duration::from_millis(200), Arc::clone(&entered));
+    let server = TestServer::new(app.into_make_service());
+    let holder = server.get("/hold");
+    let holder = tokio::spawn(async move { holder.await });
+    entered.notified().await;
     let response = server
         .get("/_test/inherited")
         .authorization(authorization)
@@ -1035,6 +1049,7 @@ async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
         1,
         "the live hit bypasses provider work"
     );
+    assert_eq!(holder.await.unwrap().status_code(), StatusCode::NO_CONTENT);
     tokio::time::resume();
     provider.stop().await;
 }
@@ -1045,8 +1060,8 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
     let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
-    let router = timeout_router(provider.verifier(), Duration::from_secs(1), Duration::ZERO);
-    let server = TestServer::new(router);
+    let router = timeout_router(provider.verifier(), Duration::from_secs(1), Arc::default());
+    let server = TestServer::new(router.into_make_service());
     let request = server
         .get("/_test/inherited")
         .authorization(format!("Bearer {HELD_PROVIDER}"))
@@ -1081,22 +1096,17 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
     let root_policy = bearer_document();
-    let contract = OpenApiRouter::with_openapi(root_policy)
-        .merge(infra_http::router())
-        .routes(routes!(authorized_without_idempotency));
-    let router = infra_http::authn::finalize(contract, provider.verifier())
-        .expect("the protected contract finalizes without an idempotency composer");
-    let server = TestServer::new(harden(
-        router.with_state(readiness_reader()),
-        &HardenOptions {
-            max_body_bytes: MAX_BODY_BYTES,
-            request_timeout: BUDGET,
-            max_in_flight: NonZeroU32::new(16),
-            admission_wait: BUDGET,
-            log_health_probes: false,
-            draining: None,
-        },
-    ));
+    let contract =
+        OpenApiRouter::with_openapi(root_policy).routes(routes!(authorized_without_idempotency));
+    let app = HttpContract::new(contract)
+        .with_probes("/")
+        .build(
+            readiness_reader(),
+            Authentication::Bearer(Box::new(provider.verifier())),
+            &options(BUDGET),
+        )
+        .unwrap();
+    let server = TestServer::new(app.into_make_service());
     let mut responses = Vec::new();
     let mut verification_counts = Vec::new();
     for authorization in [
@@ -1160,25 +1170,17 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
 async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
     let provider = Provider::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
-    let contract = OpenApiRouter::with_openapi(bearer_document())
-        .merge(infra_http::router())
-        .routes(routes!(scoped_alternatives));
-    let router = infra_http::authn::finalize(contract, provider.verifier())
-        .expect("the scoped-alternatives contract finalizes")
-        .layer(Extension(Arc::clone(&calls)))
-        .with_state(readiness_reader());
-    let server = TestServer::new(harden(
-        router,
-        &HardenOptions {
-            max_body_bytes: MAX_BODY_BYTES,
-            request_timeout: BUDGET,
-            max_in_flight: NonZeroU32::new(16),
-            admission_wait: BUDGET,
-            log_health_probes: false,
-            draining: None,
-        },
-    ));
-
+    let contract =
+        OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
+    let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
+        .with_probes("/")
+        .build(
+            readiness_reader(),
+            Authentication::Bearer(Box::new(provider.verifier())),
+            &options(BUDGET),
+        )
+        .unwrap();
+    let server = TestServer::new(app.into_make_service());
     let granted_by_and = server
         .get("/_test/scoped-alternatives")
         .authorization_bearer(SCOPE_A_AND_B)
@@ -1527,6 +1529,113 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
         counts(&[("executed", 4), ("key_mismatch", 4)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 4);
+    mounted.finish().await;
+}
+
+#[tokio::test]
+async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
+    use infra_http::{Authentication, HttpContract};
+    use tower::ServiceExt as _;
+
+    let provider = Provider::start().await;
+    let verifier = provider.verifier_with_cache(Some(
+        IntrospectionCacheOptions::try_new(16, Duration::from_secs(30)).unwrap(),
+    ));
+    let authorization = format!("Bearer {ALICE}");
+    verifier
+        .verify_fixture_authorization(authorization.as_bytes())
+        .await
+        .unwrap();
+    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+    let mut composer = Composer::new(Store::new(pool, RETENTION).unwrap());
+    let contract = HttpContract::new(widget_contract(&mut composer)).with_probes("");
+    let document = serde_json::to_value(contract.get_openapi()).unwrap();
+    let app = contract
+        .build(
+            WidgetState {
+                readiness: readiness_reader(),
+                widgets: Arc::new(SqlWidgets {
+                    hold: Arc::default(),
+                }),
+            },
+            Authentication::Bearer(Box::new(verifier)),
+            &HardenOptions {
+                max_body_bytes: MAX_BODY_BYTES,
+                request_timeout: BUDGET,
+                max_in_flight: None,
+                admission_wait: Duration::ZERO,
+                log_health_probes: false,
+                draining: None,
+            },
+        )
+        .unwrap();
+    let upload =
+        Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+    let request = axum::http::Request::post(WIDGETS)
+        .header(axum::http::header::AUTHORIZATION, authorization)
+        .header(KEY, "upload")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(upload)
+        .unwrap();
+    tokio::time::pause();
+    let response = app.oneshot(request).await.unwrap();
+    tokio::time::resume();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    let media = response.headers()[axum::http::header::CONTENT_TYPE]
+        .to_str()
+        .unwrap();
+    assert_eq!(media, "application/problem+json");
+    let reference =
+        document["paths"][WIDGETS]["post"]["responses"][response.status().as_str()]["$ref"]
+            .as_str()
+            .unwrap();
+    let declared = document
+        .pointer(reference.strip_prefix('#').unwrap())
+        .unwrap();
+    assert!(declared["content"].get(media).is_some());
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["code"],
+        "request_timeout"
+    );
+    provider.stop().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_a_serialization_failure_rolls_back_the_widget_and_releases_the_key(pool: PgPool) {
+    let mounted = Mounted::on(&pool, BUDGET).await;
+    let failed = mounted
+        .create(
+            ALICE,
+            "k-encode",
+            &json!({"name": "gizmo", "color": UNSERIALIZABLE_COLOR}),
+            "req-encode",
+        )
+        .await;
+    let body = problem(
+        &failed,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "req-encode",
+    );
+    assert_eq!(body["status"], 500);
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        0
+    );
+    let input = json!({"name": "gizmo", "color": "red"});
+    let first = mounted.create(ALICE, "k-encode", &input, "req-first").await;
+    let replay = mounted
+        .create(ALICE, "k-encode", &input, "req-replay")
+        .await;
+    assert_eq!(created(&first, "req-first"), created(&replay, "req-replay"));
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        1
+    );
     mounted.finish().await;
 }
 

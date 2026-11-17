@@ -1,6 +1,6 @@
 [package]
 name = "infra-http"
-description = "HTTP transport adapter: hardened middleware chain, problem details, health probes, bounded server."
+description = "REST adapter for HTTP operations, problem details, and health probes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,14 @@ publish.workspace = true
 workspace = true
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/axum-0-8"]
 
 [dependencies]
 operation-context = { workspace = true }
 hotpath = { workspace = true, optional = true }
 service-failure = { workspace = true }
 shared-rules = { workspace = true }
-socket2 = { workspace = true, features = ["all"] }
+infra-http-transport = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
 mime = { workspace = true }
@@ -30,6 +30,7 @@ infra-bearerauthn = { workspace = true }
 secrecy = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
+bytes = { workspace = true, features = ["std"] }
 const-hex = { workspace = true }
 infra-idempotency-store = { workspace = true }
 infra-postgres = { workspace = true }
@@ -44,7 +45,6 @@ foldhash = { workspace = true, features = ["std"] }
 parking_lot = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-hyper-util = { workspace = true, features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
@@ -53,25 +53,20 @@ serde_json = { workspace = true, features = ["std"] }
 serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
-tokio-util = { workspace = true, features = ["rt"] }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }
 tracing-opentelemetry = { workspace = true }
-# template:begin grpc:http-tls-dependencies
-rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
-# template:end grpc:http-tls-dependencies
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 # template:begin grpc:http-tls-test-dependencies
-http = { workspace = true }
-hyper = { workspace = true, features = ["client", "http2"] }
-rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tls-test-support = { workspace = true }
 # template:end grpc:http-tls-test-dependencies
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }

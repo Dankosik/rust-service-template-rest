@@ -1,6 +1,7 @@
 use axum::extract::{FromRef, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use health::ReadinessReader;
+use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -16,22 +17,23 @@ const LIVE_BODY: &str = "ok";
 const READY_BODY: &str = "ok";
 const NOT_READY_BODY: &str = "not ready";
 
-const HEALTH_PROBES: [(&str, &str); 2] = [
-    (LIVE_PATH, LIVE_OPERATION_ID),
-    (READY_PATH, READY_OPERATION_ID),
-];
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProbeRoutes(Arc<[(Box<str>, bool)]>);
 
-pub(crate) fn is_health_probe_route(route: &str) -> bool {
-    HEALTH_PROBES.iter().any(|(path, _)| route.ends_with(path))
+impl ProbeRoutes {
+    pub(crate) fn new(routes: Vec<(Box<str>, bool)>) -> Self {
+        Self(routes.into())
+    }
+
+    pub(crate) fn contains(&self, method: &Method, route: &str) -> bool {
+        self.0.iter().any(|(path, implicit_head)| {
+            path.as_ref() == route
+                && (method == Method::GET || (*implicit_head && method == Method::HEAD))
+        })
+    }
 }
 
-pub(crate) fn is_health_probe_operation(path: &str, operation_id: Option<&str>) -> bool {
-    HEALTH_PROBES
-        .iter()
-        .any(|(probe, id)| path.ends_with(probe) && operation_id == Some(*id))
-}
-
-pub fn router<S>() -> OpenApiRouter<S>
+pub(crate) fn router<S>() -> OpenApiRouter<S>
 where
     ReadinessReader: FromRef<S>,
     S: Clone + Send + Sync + 'static,
@@ -106,11 +108,10 @@ mod tests {
     use axum::http::{Method, Request};
     use axum::response::Response;
     use health::{Readiness, RefreshPolicy};
-    use itertools::Itertools;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{HardenOptions, harden};
+    use crate::{Application, Authentication, HardenOptions, HttpContract};
 
     fn options() -> HardenOptions {
         HardenOptions {
@@ -141,13 +142,15 @@ mod tests {
         readiness.reader()
     }
 
-    fn app(reader: ReadinessReader) -> (axum::Router, serde_json::Value) {
-        let contract = router();
+    fn app(reader: ReadinessReader) -> (Application, serde_json::Value) {
+        let contract = HttpContract::new(OpenApiRouter::new()).with_probes("/");
         let document = serde_json::to_value(contract.get_openapi()).unwrap();
-        let routes = crate::finalize_public(contract)
-            .expect("the probe contract is public")
-            .with_state(reader);
-        (harden(routes, &options()), document)
+        (
+            contract
+                .build(reader, Authentication::Public, &options())
+                .unwrap(),
+            document,
+        )
     }
 
     fn media_type(response: &Response) -> String {
@@ -180,29 +183,10 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn document_paths_are_the_access_log_probe_routes() {
-        let document = router::<ReadinessReader>().into_openapi();
-        assert_eq!(
-            document
-                .paths
-                .paths
-                .keys()
-                .map(String::as_str)
-                .sorted()
-                .collect_vec(),
-            HEALTH_PROBES
-                .iter()
-                .map(|(path, _)| *path)
-                .sorted()
-                .collect_vec(),
-        );
-    }
-
     #[tokio::test]
     async fn served_probe_responses_are_declared_by_the_document() {
         let (app, document) = app(ready_reader().await);
-        for (path, _) in HEALTH_PROBES {
+        for path in [LIVE_PATH, READY_PATH] {
             let response = app
                 .clone()
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())

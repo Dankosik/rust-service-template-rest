@@ -35,7 +35,8 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{BoundListener, HardenOptions, ServerOptions};
+use infra_http::{Authentication, HardenOptions};
+use infra_http_transport::{BoundListener, ServerOptions};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
     install_subscriber, install_tracer_provider, runtime_metrics,
@@ -123,7 +124,7 @@ pub(crate) enum BootstrapError {
     },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
-    Server(#[from] infra_http::ServerError),
+    Server(#[from] infra_http_transport::ServerError),
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
@@ -382,7 +383,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
         {
             return Some(background_error(BackgroundFailure {
                 name,
-                panicked: failure == infra_http::AcceptFailure::Panicked,
+                panicked: failure == infra_http_transport::AcceptFailure::Panicked,
             }));
         }
     }
@@ -420,7 +421,7 @@ async fn start(
         unused_variables,
         reason = "the no-auth projection uses this fallback; retained authentication shadows it"
     )]
-    let auth = PreparedAuth::None;
+    let auth = Authentication::Public;
     // template:begin authn:bootstrap-authn-prepare
     let auth = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
@@ -491,12 +492,19 @@ async fn start(
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
     )?;
-    let routes = match auth {
-        PreparedAuth::None => infra_http::finalize_public(contract)?,
-        // template:begin authn:bootstrap-authn-finalize-enabled
-        PreparedAuth::Enabled(verifier) => infra_http::authn::finalize(contract, *verifier)?,
-        // template:end authn:bootstrap-authn-finalize-enabled
-    };
+    let app = contract.build(
+        state,
+        auth,
+        &HardenOptions {
+            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
+                .unwrap_or(usize::MAX),
+            request_timeout: config.http.request_timeout,
+            max_in_flight: config.http.in_flight_cap(),
+            admission_wait: config.http.admission_wait_cap(),
+            log_health_probes: config.http.access_log_health_probes,
+            draining: Some(readiness.reader()),
+        },
+    )?;
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
@@ -525,25 +533,11 @@ async fn start(
         max_connections: config.http.connection_cap(),
         max_connection_age: config.http.connection_age_cap(),
     };
-    let app = infra_http::harden(
-        routes.with_state(state),
-        &HardenOptions {
-            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
-                .unwrap_or(usize::MAX),
-            request_timeout: config.http.request_timeout,
-            max_in_flight: config.http.in_flight_cap(),
-            admission_wait: config.http.admission_wait_cap(),
-            log_health_probes: config.http.access_log_health_probes,
-            draining: Some(readiness.reader()),
-        },
-    );
-    #[cfg(feature = "hotpath")]
-    let app = hotpath::axum!(app);
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!();
     let app_listener = serving
         .app_listener
-        .insert(app_listener.serve(app, server_options));
+        .insert(app.serve(app_listener, server_options));
     background.watch_listener("http_accept", app_listener);
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
@@ -568,13 +562,6 @@ async fn start(
     // template:end grpc:bootstrap-grpc-bind
 
     Ok(())
-}
-
-enum PreparedAuth {
-    None,
-    // template:begin authn:bootstrap-prepared-auth-enabled
-    Enabled(Box<infra_bearerauthn::Verifier>),
-    // template:end authn:bootstrap-prepared-auth-enabled
 }
 
 #[cfg(test)]
@@ -654,7 +641,9 @@ mod tests {
         .await;
         std::assert_matches!(
             result,
-            Err(BootstrapError::Server(infra_http::ServerError::Bind { .. }))
+            Err(BootstrapError::Server(
+                infra_http_transport::ServerError::Bind { .. }
+            ))
         );
         assert!(!serving.admitted);
         assert!(serving.app_listener.is_none());

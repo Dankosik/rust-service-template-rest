@@ -18,7 +18,7 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Caller, Error, Limits, Services, server_options};
-use infra_http::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, Drained, Server};
 use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,

@@ -11,9 +11,11 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use http_body::Body as _;
 use operation_context::{Deadline, OperationContext, Stopped};
+use tower_http::request_id::RequestId;
 
 use crate::body::hold_guard_until_end;
-use crate::problem::{Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, complete_problem, sanitized_internal_error};
+use crate::request_id::REQUEST_ID_HEADER;
 
 #[derive(Clone, Debug)]
 pub struct RequestContext {
@@ -130,8 +132,27 @@ pub(crate) fn missing_extension<T>() -> Response {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Arrival(pub(crate) tokio::time::Instant);
 
+pub(crate) async fn finish_response(mut request: Request, next: Next) -> Response {
+    let id = request.extensions().get::<RequestId>().cloned();
+    let context = OperationContext::unbounded();
+    let guard = context.cancellation().clone().drop_guard();
+    request.extensions_mut().insert(ResponseContext(context));
+    let mut response = next.run(request).await;
+    if let Some(id) = id {
+        if let Ok(text) = id.header_value().to_str() {
+            complete_problem(&mut response, text);
+        }
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, id.header_value().clone());
+        response.extensions_mut().insert(id);
+    }
+    response.map(|body| hold_guard_until_end(body, guard))
+}
+
 pub(crate) async fn opening(
     State(budget): State<Duration>,
+    response_context: ResponseContext,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -140,9 +161,11 @@ pub(crate) async fn opening(
         .get::<Arrival>()
         .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
     let deadline = Deadline::new(origin, budget);
-    let response_context = OperationContext::unbounded();
     let context = RequestContext {
-        operation: OperationContext::new(Some(deadline), response_context.cancellation().clone()),
+        operation: OperationContext::new(
+            Some(deadline),
+            response_context.operation().cancellation().clone(),
+        ),
         upload_reads: (!request.body().is_end_stream()).then(|| Arc::new(AtomicUsize::new(0))),
     };
     let version = request.version();
@@ -153,12 +176,8 @@ pub(crate) async fn opening(
             .filter(|reads| reads.load(Ordering::Relaxed) != 0)
             .map(|_| version)
     };
-    let guard = response_context.cancellation().clone().drop_guard();
     request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
-    request
-        .extensions_mut()
-        .insert(ResponseContext(response_context));
     // template:begin request-budget:http-request-deadline-projection
     if let Some(deadline) = RequestDeadline::from_deadline(deadline, budget) {
         request.extensions_mut().insert(deadline);
@@ -168,14 +187,16 @@ pub(crate) async fn opening(
         biased;
         stopped = async {
             let reason = context.operation.wait_stopped().await;
+            response_context.operation().cancel();
             stopped_response(reason, upload_version())
         } => return stopped,
         response = next.run(request) => response,
     };
     if let Some(reason) = context.operation.stopped() {
+        response_context.operation().cancel();
         return stopped_response(reason, upload_version());
     }
-    response.map(|body| hold_guard_until_end(body, guard))
+    response
 }
 
 fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
@@ -214,7 +235,6 @@ mod tests {
     use super::*;
     use axum::body::{Body, Bytes};
     use axum::routing::get;
-    use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
     #[tokio::test(start_paused = true)]
@@ -238,9 +258,13 @@ mod tests {
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let app = axum::Router::new().route("/", get(handler)).layer(
-            axum::middleware::from_fn_with_state(Duration::from_secs(1), opening),
-        );
+        let app = axum::Router::new()
+            .route("/", get(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                Duration::from_secs(1),
+                opening,
+            ))
+            .layer(axum::middleware::from_fn(finish_response));
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
         let (opening, continuing) = receive.await.unwrap();
         assert_eq!(
@@ -259,7 +283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_response_eof_cancels_continuing_work() {
+    async fn completed_problem_keeps_response_work_alive_until_its_final_body_ends() {
         let (send, receive) = tokio::sync::oneshot::channel();
         let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(send)));
         let handler = move |response: ResponseContext| {
@@ -272,22 +296,41 @@ mod tests {
                     .unwrap()
                     .send(response)
                     .unwrap();
-                "complete"
+                Problem::new(Code::BadRequest)
             }
         };
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let app = axum::Router::new().route("/", get(handler)).layer(
-            axum::middleware::from_fn_with_state(Duration::from_secs(1), opening),
+        let routes = axum::Router::new().route("/", get(handler));
+        let app = crate::harden::harden(
+            routes,
+            &crate::HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: Duration::from_secs(1),
+                max_in_flight: None,
+                admission_wait: Duration::ZERO,
+                log_health_probes: false,
+                draining: None,
+            },
         );
-        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(REQUEST_ID_HEADER, "response-life")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let context = receive.await.unwrap();
         assert!(!context.operation().cancellation().is_cancelled());
+        assert_eq!(response.headers()[REQUEST_ID_HEADER], "response-life");
         assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
-            "complete"
+            crate::test_support::body_json(response).await["request_id"],
+            "response-life"
         );
         assert!(context.operation().cancellation().is_cancelled());
     }

@@ -79,13 +79,13 @@ struct ConnectionShutdown {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum ListenerScheme {
+enum ListenerScheme {
     Http,
     Https,
 }
 
 impl ListenerScheme {
-    pub(crate) const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Http => "http",
             Self::Https => "https",
@@ -93,23 +93,28 @@ impl ListenerScheme {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ConnectionInfo {
-    pub(crate) scheme: ListenerScheme,
+#[derive(Clone, Debug)]
+pub struct ConnectionInfo {
+    scheme: ListenerScheme,
     forced: Arc<AtomicBool>,
     drain: CancellationToken,
 }
 
 impl ConnectionInfo {
-    pub(crate) fn was_forced(&self) -> bool {
+    #[must_use]
+    pub fn child_drain_token(&self) -> CancellationToken {
+        self.drain.child_token()
+    }
+
+    #[must_use]
+    pub const fn scheme(&self) -> &'static str {
+        self.scheme.as_str()
+    }
+
+    #[must_use]
+    pub fn was_forced(&self) -> bool {
         self.forced.load(Ordering::Relaxed)
     }
-}
-
-pub fn take_listener_drain_token(
-    extensions: &mut axum::http::Extensions,
-) -> Option<CancellationToken> {
-    extensions.remove::<ConnectionInfo>().map(|info| info.drain)
 }
 
 #[derive(Debug)]

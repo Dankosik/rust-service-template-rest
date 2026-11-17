@@ -1,6 +1,6 @@
 use std::mem::DropGuard;
 
-use infra_http::Server;
+use infra_http_transport::Server;
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 

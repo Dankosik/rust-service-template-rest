@@ -1,5 +1,6 @@
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HardenOptions, Server, ServerOptions};
+use infra_http::{Authentication, HardenOptions, HttpContract};
+use infra_http_transport::{BoundListener, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
 use service_config::WorkerConfig;
 
@@ -27,12 +28,17 @@ pub(super) fn bind_listeners(
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
     let options = server_options(config);
-    let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
-    let app = infra_http::harden(routes, &harden_options(config, readiness));
+    let app = HttpContract::new(Default::default())
+        .with_probes("/")
+        .build(
+            readiness.reader(),
+            Authentication::Public,
+            &harden_options(config, readiness),
+        )?;
     let health = resources
         .listeners
         .health
-        .insert(Server::bind(config.http.addr, app, options)?);
+        .insert(app.serve(BoundListener::bind(config.http.addr)?, options));
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {

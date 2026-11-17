@@ -25,7 +25,7 @@ use tower_http::request_id::SetRequestIdLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::observe::{self, Observer};
-use crate::probes::is_health_probe_route;
+use crate::probes::ProbeRoutes;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
@@ -34,6 +34,7 @@ use crate::request_id;
 struct Admission {
     permits: Arc<Semaphore>,
     patience: Duration,
+    probes: ProbeRoutes,
 }
 
 #[derive(Clone, Debug)]
@@ -46,7 +47,12 @@ pub struct HardenOptions {
     pub draining: Option<ReadinessReader>,
 }
 
-pub fn harden(routes: Router, options: &HardenOptions) -> Router {
+#[cfg(test)]
+pub(crate) fn harden(routes: Router, options: &HardenOptions) -> Router {
+    assemble(routes, options, ProbeRoutes::default())
+}
+
+pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRoutes) -> Router {
     observe::describe();
     let in_flight = options.max_in_flight.map(|limit| {
         metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
@@ -54,6 +60,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             Arc::new(Admission {
                 permits: Arc::new(Semaphore::new(limit.get() as usize)),
                 patience: options.admission_wait,
+                probes: probes.clone(),
             }),
             admit,
         )
@@ -76,9 +83,10 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             HeaderValue::from_static("nosniff"),
         ))
         .layer(middleware::from_fn_with_state(
-            Observer::new(options.log_health_probes),
+            Observer::new(options.log_health_probes, probes),
             observe::observe,
         ))
+        .layer(middleware::from_fn(crate::context::finish_response))
         .layer(option_layer(in_flight))
         .layer(middleware::from_fn_with_state(
             options.request_timeout,
@@ -168,12 +176,12 @@ async fn admit(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if matched.is_some_and(|route| is_health_probe_route(route.as_str())) {
+    if matched.is_some_and(|route| admission.probes.contains(request.method(), route.as_str())) {
         return next.run(request).await;
     }
     let arrived = tokio::time::Instant::now();
     let acquired =
-        crate::admission::acquire_within(&admission.permits, admission.patience, || ()).await;
+        infra_http_transport::acquire_within(&admission.permits, admission.patience, || ()).await;
     let waited = match &acquired {
         Ok((_, waited)) => *waited,
         Err(waited) => Some(*waited),

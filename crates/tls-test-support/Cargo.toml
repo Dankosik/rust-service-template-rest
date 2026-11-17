@@ -13,3 +13,6 @@ workspace = true
 
 [dependencies]
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+# template:begin grpc:tls-fixtures-http-listener-dependency
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+# template:end grpc:tls-fixtures-http-listener-dependency

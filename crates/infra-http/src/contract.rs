@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -11,7 +13,8 @@ use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
 
-use crate::probes::{is_health_probe_operation, is_health_probe_route};
+use crate::HardenOptions;
+use crate::probes::ProbeRoutes;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
@@ -30,13 +33,125 @@ pub enum FinalizeError {
         method: String,
         fault: &'static str,
     },
-    #[error(
-        "HTTP contract finalization failed: {method} {path} is not a health probe but its route ends like one"
-    )]
-    ReservedProbeRoute { path: String, method: String },
 }
 
-pub fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
+#[derive(Debug)]
+pub enum Authentication {
+    Public,
+    // template:begin authn:http-assembly-verifier
+    Bearer(Box<infra_bearerauthn::Verifier>),
+    // template:end authn:http-assembly-verifier
+}
+
+pub struct HttpContract<S> {
+    routes: OpenApiRouter<S>,
+    probes: Vec<(Box<str>, bool)>,
+}
+
+impl<S: Clone + Send + Sync + 'static> std::fmt::Debug for HttpContract<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpContract")
+            .field("paths", &self.get_openapi().paths.paths.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
+    #[must_use]
+    pub fn new(routes: OpenApiRouter<S>) -> Self {
+        Self {
+            routes,
+            probes: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_probes(mut self, prefix: &str) -> Self
+    where
+        health::ReadinessReader: axum::extract::FromRef<S>,
+    {
+        let probes = crate::probes::router();
+        let mounted = if prefix.is_empty() || prefix == "/" {
+            probes
+        } else {
+            OpenApiRouter::new().nest(prefix, probes)
+        };
+        for path in mounted.get_openapi().paths.paths.keys() {
+            let implicit_head = self
+                .routes
+                .get_openapi()
+                .paths
+                .paths
+                .get(path)
+                .is_none_or(|item| item.head.is_none());
+            self.probes.push((path.as_str().into(), implicit_head));
+        }
+        self.routes = self.routes.merge(mounted);
+        self
+    }
+
+    #[must_use]
+    pub fn get_openapi(&self) -> &OpenApi {
+        self.routes.get_openapi()
+    }
+
+    #[must_use]
+    pub fn into_openapi(self) -> OpenApi {
+        self.routes.into_openapi()
+    }
+
+    pub fn build(
+        self,
+        state: S,
+        authentication: Authentication,
+        options: &HardenOptions,
+    ) -> Result<Application, FinalizeError> {
+        let routes = match authentication {
+            Authentication::Public => finalize_public(self.routes)?,
+            // template:begin authn:http-assembly-finalize
+            Authentication::Bearer(verifier) => crate::authn::finalize(self.routes, *verifier)?,
+            // template:end authn:http-assembly-finalize
+        };
+        Ok(Application(crate::harden::assemble(
+            routes.with_state(state),
+            options,
+            ProbeRoutes::new(self.probes),
+        )))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Application(Router);
+
+impl Application {
+    #[must_use]
+    pub fn serve(
+        self,
+        listener: infra_http_transport::BoundListener,
+        options: infra_http_transport::ServerOptions,
+    ) -> infra_http_transport::Server {
+        let router = self.0;
+        #[cfg(feature = "hotpath")]
+        let router = hotpath::axum!(router);
+        listener.serve(router, options)
+    }
+}
+
+impl tower::Service<Request> for Application {
+    type Response = Response;
+    type Error = Infallible;
+    type Future = <Router as tower::Service<Request>>::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        tower::Service::<Request>::poll_ready(&mut self.0, cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        tower::Service::call(&mut self.0, request)
+    }
+}
+
+pub(crate) fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -83,14 +198,6 @@ fn compile_operation(
     method: &str,
     operation: &Operation,
 ) -> Result<Access, FinalizeError> {
-    if is_health_probe_route(path)
-        && !(method == "GET" && is_health_probe_operation(path, operation.operation_id.as_deref()))
-    {
-        return Err(FinalizeError::ReservedProbeRoute {
-            path: path.to_owned(),
-            method: method.to_owned(),
-        });
-    }
     let invalid = |fault| FinalizeError::InvalidPolicy {
         path: path.to_owned(),
         method: method.to_owned(),
@@ -228,12 +335,7 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
 }
 
 pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str> {
-    let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
-    let inner = extensions
-        .get::<axum::extract::NestedPath>()
-        .and_then(|nested| matched.strip_prefix(nested.as_str().trim_end_matches('/')))
-        .map_or(matched, |inner| if inner.is_empty() { "/" } else { inner });
-    Some(inner)
+    Some(extensions.get::<axum::extract::MatchedPath>()?.as_str())
 }
 
 const BEARER_SCHEME: &str = "bearerAuth";
@@ -308,8 +410,8 @@ mod tests {
     use utoipa::OpenApi;
 
     use super::*;
+    use crate::HardenOptions;
     use crate::test_support::body_json;
-    use crate::{HardenOptions, harden};
 
     #[derive(OpenApi)]
     struct Api;
@@ -329,18 +431,21 @@ mod tests {
         "get"
     }
 
-    fn app(contract: OpenApiRouter) -> axum::Router {
-        harden(
-            finalize_public(contract).expect("the documented public contract finalizes"),
-            &HardenOptions {
-                max_body_bytes: 1024,
-                request_timeout: Duration::from_secs(1),
-                max_in_flight: NonZeroU32::new(2),
-                admission_wait: Duration::from_secs(1),
-                log_health_probes: false,
-                draining: None,
-            },
-        )
+    fn app(contract: OpenApiRouter) -> Application {
+        HttpContract::new(contract)
+            .build(
+                (),
+                Authentication::Public,
+                &HardenOptions {
+                    max_body_bytes: 1024,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: NonZeroU32::new(2),
+                    admission_wait: Duration::from_secs(1),
+                    log_health_probes: false,
+                    draining: None,
+                },
+            )
+            .unwrap()
     }
 
     #[tokio::test]
@@ -426,43 +531,6 @@ mod tests {
             path: "/_test/policy".to_owned(),
             method: "GET".to_owned(),
             fault,
-        }
-    }
-
-    #[test]
-    fn only_the_probe_operations_may_end_like_a_probe_route() {
-        for (path, method, operation_id, accepted) in [
-            ("/health/live", "get", "healthLive", true),
-            ("/api/health/ready", "get", "healthReady", true),
-            ("/vendors/{id}/health/ready", "get", "vendorReady", false),
-            ("/health/live", "get", "healthReady", false),
-            ("/health/live", "post", "healthLive", false),
-            ("/vendors/{id}/health", "get", "vendorHealth", true),
-        ] {
-            let document = serde_json::json!({
-                "openapi": "3.1.0",
-                "info": {"title": "probe fixture", "version": "1"},
-                "paths": {path: {method: {
-                    "operationId": operation_id,
-                    "responses": {"200": {"description": "ok"}}
-                }}}
-            });
-            let contract = OpenApiRouter::<()>::with_openapi(
-                serde_json::from_value(document).expect("valid OpenAPI fixture"),
-            );
-            let expected = if accepted {
-                Ok(())
-            } else {
-                Err(FinalizeError::ReservedProbeRoute {
-                    path: path.to_owned(),
-                    method: if method == "get" { "GET" } else { "POST" }.to_owned(),
-                })
-            };
-            assert_eq!(
-                finalize_public(contract).map(|_| ()),
-                expected,
-                "{method} {path} {operation_id}"
-            );
         }
     }
 
@@ -582,29 +650,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalized_contract_mounted_with_nest_keeps_its_policy() {
+    async fn nested_contract_keeps_its_policy() {
         for prefix in ["/mounted", "/mounted/"] {
             assert_nested_contract_serves(prefix).await;
         }
     }
 
     async fn assert_nested_contract_serves(prefix: &str) {
-        let routes = finalize_public(
+        let app = app(OpenApiRouter::new().nest(
+            prefix,
             OpenApiRouter::with_openapi(Api::openapi())
                 .routes(utoipa_axum::routes!(documented_get)),
-        )
-        .expect("the documented public contract finalizes");
-        let app = harden(
-            axum::Router::new().nest(prefix, routes),
-            &HardenOptions {
-                max_body_bytes: 1024,
-                request_timeout: Duration::from_secs(1),
-                max_in_flight: NonZeroU32::new(2),
-                admission_wait: Duration::from_secs(1),
-                log_health_probes: false,
-                draining: None,
-            },
-        );
+        ));
         let response = app
             .oneshot(
                 Request::builder()
