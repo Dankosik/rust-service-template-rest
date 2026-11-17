@@ -75,6 +75,7 @@ impl ClientTimeout {
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
+    uses_tls: bool,
     #[debug(skip)]
     destination: crate::observe::Destination,
     timeout: ClientTimeout,
@@ -113,11 +114,17 @@ impl Client {
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
         Ok(Self {
+            uses_tls: tls.is_some(),
             channel: Channel::new(GrpcConnector { http, tls }, endpoint),
             destination,
             timeout,
             series: crate::observe::Series::client(),
         })
+    }
+
+    #[must_use]
+    pub const fn uses_tls(&self) -> bool {
+        self.uses_tls
     }
 
     #[must_use]
