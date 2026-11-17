@@ -248,20 +248,41 @@ fn webhooks_file_placeholders_document_environment_only_keys() {
 }
 
 #[test]
-fn service_config_ignores_worker_owned_outbound_webhooks_without_secrets() {
+fn service_uses_the_workers_endpoint_ids_without_delivery_urls_or_signing_keys() {
     let dir = tempfile::tempdir().unwrap();
     let shared = write(
         &dir,
         "shared.toml",
-        "[webhooks.endpoints.partner]\nurl = \"https://partner.example/events\"\nsecret = \"\"\n",
+        "[webhooks.endpoints.partner]\nurl = \"https://partner.example/events\"\n[webhooks.endpoints.orders]\n",
     );
-    load_from(
-        &LoadOptions {
-            config: Some(shared),
-            ..LoadOptions::default()
-        },
+    let options = LoadOptions {
+        config: Some(shared),
+        ..LoadOptions::default()
+    };
+    let service = load_from(&options, BUILD, env(&[])).unwrap();
+    assert_eq!(service.outbound_webhook_endpoints, ["orders", "partner"]);
+    assert!(!format!("{service:?}").contains("https://partner.example/events"));
+
+    let worker = load_worker_from(
+        &options,
         BUILD,
-        env(&[]),
+        env(&[
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                "partner-secret",
+            ),
+            ("APP__WEBHOOKS__ENDPOINTS__ORDERS__SECRET", "orders-secret"),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__ORDERS__URL",
+                "https://orders.example/events",
+            ),
+        ]),
     )
     .unwrap();
+    assert!(
+        service
+            .outbound_webhook_endpoints
+            .iter()
+            .eq(worker.webhooks.endpoints.keys())
+    );
 }

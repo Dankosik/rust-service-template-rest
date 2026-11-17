@@ -187,7 +187,22 @@ async fn truncated_gone_peer(
 async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool) {
     let configured = outbound(&["partner"]);
     let body = b"\0{\"event\":\"created\"}\xff";
-    let id = enqueue(&pool, &configured, "partner", body).await;
+    let id = in_tx(&pool, async |tx| -> Result<_, Step> {
+        std::assert_matches!(
+            configured
+                .enqueue(tx, "parnter", body.to_vec(), "application/webhook+json")
+                .await,
+            Err(OutboundError::UnknownEndpoint)
+        );
+        configured
+            .enqueue(tx, "partner", body.to_vec(), "application/webhook+json")
+            .await
+            .map_err(Step::Delivery)
+    })
+    .await
+    .unwrap()
+    .to_string();
+    assert_eq!(job_count(&pool).await, 1);
     let payload: serde_json::Value =
         sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs WHERE id::text = $1")
             .bind(&id)
@@ -229,14 +244,16 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgPool) {
-    for (status, truncated_length, expected_state) in [
-        (401, None, "pending"),
-        (404, None, "pending"),
-        (410, None, "failed"),
-        (410, Some(1), "failed"),
-        (410, Some(65_537), "failed"),
-        (204, None, "completed"),
+async fn queued_delivery_observes_status_and_response_body_limits(pool: PgPool) {
+    for (status, truncated_length, body_bytes, expected_state, expected_summary) in [
+        (401, None, 0, "pending", Some("response_status")),
+        (404, None, 0, "pending", Some("response_status")),
+        (410, None, 0, "failed", Some("endpoint_gone")),
+        (410, Some(1), 0, "failed", Some("endpoint_gone")),
+        (410, Some(65_537), 0, "failed", Some("endpoint_gone")),
+        (204, None, 0, "completed", None),
+        (200, None, 65_536, "completed", None),
+        (200, None, 65_537, "pending", Some("response_too_large")),
     ] {
         let mut mock_server = None;
         let mut truncated_peer = None;
@@ -246,10 +263,14 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
             addr
         } else {
             let server = MockServer::start().await;
+            let mut response = ResponseTemplate::new(status);
+            if body_bytes > 0 {
+                response = response.set_body_bytes(vec![0; body_bytes]);
+            }
             Mock::given(method("POST"))
                 .and(path("/events"))
                 .and(query_param("source", "queue"))
-                .respond_with(ResponseTemplate::new(status))
+                .respond_with(response)
                 .expect(1)
                 .mount(&server)
                 .await;
@@ -273,41 +294,18 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
         .fetch_one(&pool)
         .await
         .expect("delivery disposition");
-        match status {
-            401 | 404 => {
-                assert!(
-                    row.try_get::<Option<String>, _>("failure_reason")
-                        .expect("reason")
-                        .is_none()
-                );
-                assert_eq!(
-                    row.try_get::<Option<String>, _>("error_summary")
-                        .expect("summary")
-                        .as_deref(),
-                    Some("response_status")
-                );
-            }
-            410 => {
-                assert_eq!(
-                    row.try_get::<Option<String>, _>("failure_reason")
-                        .expect("reason")
-                        .as_deref(),
-                    Some("permanent")
-                );
-                assert_eq!(
-                    row.try_get::<Option<String>, _>("error_summary")
-                        .expect("summary")
-                        .as_deref(),
-                    Some("endpoint_gone")
-                );
-            }
-            204 => assert!(
-                row.try_get::<Option<String>, _>("error_summary")
-                    .expect("summary")
-                    .is_none()
-            ),
-            _ => unreachable!("fixed status table"),
-        }
+        assert_eq!(
+            row.try_get::<Option<String>, _>("failure_reason")
+                .expect("reason")
+                .as_deref(),
+            (status == 410).then_some("permanent")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("error_summary")
+                .expect("summary")
+                .as_deref(),
+            expected_summary
+        );
         if let Some(peer) = truncated_peer {
             let request = super::bounded("fixture peer joins", peer)
                 .await

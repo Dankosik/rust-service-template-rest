@@ -1644,8 +1644,7 @@ impl infra_jobs::TransactionalHandler<TransactionGate> for Arc<TransactionGateSt
         sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
             .bind(job.id().to_string())
             .execute(&mut *tx)
-            .await
-            .map_err(|_| JobError::retryable("test effect write failed"))?;
+            .await?;
         self.business_written.notify_one();
         self.complete.notified().await;
         Ok(())

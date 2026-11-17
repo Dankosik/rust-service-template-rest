@@ -248,6 +248,14 @@ inspect and recover retained jobs with the operator commands `jobs-worker --help
 lists (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
+<!-- template:begin webhooks:docs-alerting-webhook-delivery -->
+For `webhooks.deliver`, start with the job ID and error in the worker's
+`job_failed` log. A payload decoding failure can exhaust the job before the
+dispatcher runs. When the dispatcher reports `webhook_delivery_finished` for
+that attempt, its endpoint and reason can help identify a retired receiver.
+See [Outbound webhook delivery](decisions/outbound-http-decisions.md#outbound-webhook-delivery).
+<!-- template:end webhooks:docs-alerting-webhook-delivery -->
+
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
 ### Changing a durable subscription
 
