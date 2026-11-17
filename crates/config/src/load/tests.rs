@@ -615,12 +615,6 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
         // template:begin postgres:load-zero-postgres-count
         ("APP__POSTGRES__MAX_CONNECTIONS", "postgres.max_connections"),
         // template:end postgres:load-zero-postgres-count
-        // template:begin messaging:load-zero-messaging-count
-        (
-            "APP__MESSAGING__CONSUMER_CONCURRENCY",
-            "messaging.consumer_concurrency",
-        ),
-        // template:end messaging:load-zero-messaging-count
     ];
     for &(name, key) in cases {
         for input in ["0", "yes"] {

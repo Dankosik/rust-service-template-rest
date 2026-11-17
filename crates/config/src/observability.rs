@@ -97,15 +97,16 @@ pub struct OtelExporterConfig {
 
 impl ObservabilityConfig {
     pub(crate) fn validate(&self, v: &mut Violations) {
-        v.check(non_blank(
-            "observability.otel.service_name",
-            &self.otel.service_name,
-        ));
+        v.check(validate_service_name(&self.otel.service_name));
         v.check(sampler_arg(self.otel.traces_sampler_arg));
         if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
             v.check(otlp_endpoint(endpoint));
         }
     }
+}
+
+pub(crate) fn validate_service_name(name: &str) -> Result<(), ValidationError> {
+    non_blank("observability.otel.service_name", name)
 }
 
 fn sampler_arg(arg: f64) -> Result<(), ValidationError> {

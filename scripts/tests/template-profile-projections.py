@@ -629,6 +629,8 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     except (OSError, ValueError) as error:
         raise initializer.Refusal(f"projected image input coverage: {error}") from error
     nodes = _tree(destination, initializer)
+    if ("crates/config/src/worker.rs" in nodes) != ("crates/jobs-worker/Cargo.toml" in nodes):
+        raise initializer.Refusal("worker configuration must follow the worker binary")
     _assert_tls_fixture_ownership(
         initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
     )

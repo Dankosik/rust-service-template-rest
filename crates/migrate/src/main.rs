@@ -190,11 +190,7 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
             u64::try_from(postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
     );
-    let options = RunOptions::defaults(
-        &dsn,
-        &config.observability.otel.service_name,
-        postgres.migration_deadline,
-    );
+    let options = RunOptions::defaults(&dsn, &config.service_name, postgres.migration_deadline);
     run_until_stop(&options).await
 }
 

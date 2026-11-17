@@ -5,10 +5,8 @@ use secrecy::ExposeSecret as _;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
-use crate::test_support::{
-    BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, load_env, write,
-};
+use crate::load::{Error, load_from, load_worker_from};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
 use crate::validate::{ValidationErrors, admit_with};
 
 fn admit(input: MessagingInput, app_env: &str) -> Result<MessagingConfig, ValidationErrors> {
@@ -263,7 +261,7 @@ fn resident_delivery_memory_is_bounded(
 
 #[test]
 fn messaging_environment_decodes_lists_and_redacts_credentials() {
-    let cfg = load_env(&[
+    let cfg = load_worker_env(&[
         (
             "APP__MESSAGING__URLS",
             "tls://nats-a.example:4222,tls://nats-b.example:4222",
@@ -302,7 +300,7 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
 
 #[test]
 fn messaging_trusted_network_admits_plaintext_in_production() {
-    let cfg = load_env(&[
+    let cfg = load_worker_env(&[
         ("APP__APP__ENV", "production"),
         ("APP__MESSAGING__URLS", "nats://nats.internal:4222"),
         ("APP__MESSAGING__TRUSTED_NETWORK", "true"),
@@ -326,13 +324,13 @@ fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
         config: Some(overlay),
         ..LoadOptions::default()
     };
-    let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+    let cfg = load_worker_from(&options, BUILD, env(&[])).unwrap();
     assert_matches!(
         &cfg.messaging.credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/from-file.creds")
     );
 
-    let cfg = load_from(
+    let cfg = load_worker_from(
         &options,
         BUILD,
         env(&[(
@@ -346,7 +344,7 @@ fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/nats.creds")
     );
 
-    let cfg = load_from(
+    let cfg = load_worker_from(
         &options,
         BUILD,
         env(&[("APP__MESSAGING__CREDENTIALS_FILE", " ")]),
@@ -363,7 +361,7 @@ fn messaging_empty_root_ca_path_unsets_the_file_value() {
         "ca.toml",
         "[messaging]\nroot_ca_path = \"/etc/nats/root-ca.pem\"\n",
     );
-    let cfg = load_from(
+    let cfg = load_worker_from(
         &LoadOptions {
             config: Some(file),
             ..LoadOptions::default()
@@ -383,7 +381,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         "list.toml",
         "[messaging]\nurls = [\"tls://nats-a.example:4222\", \"tls://nats-b.example:4222\"]\n",
     );
-    let cfg = load_from(
+    let cfg = load_worker_from(
         &LoadOptions {
             config: Some(list.clone()),
             ..LoadOptions::default()
@@ -394,7 +392,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
     .unwrap();
     assert_eq!(cfg.messaging.urls.len(), 2);
 
-    let overridden = load_from(
+    let overridden = load_worker_from(
         &LoadOptions {
             config: Some(list),
             ..LoadOptions::default()
@@ -406,7 +404,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
     assert_eq!(overridden.messaging.urls, ["tls://nats-c.example:4222"]);
 
     let number = write(&dir, "number.toml", "[messaging]\nurls = 4222\n");
-    let err = load_from(
+    let err = load_worker_from(
         &LoadOptions {
             config: Some(number),
             ..LoadOptions::default()
@@ -425,12 +423,10 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         ("", "messaging.urls[0]"),
         ("tls://nats-a.example:4222,", "messaging.urls[1]"),
     ] {
-        let err = load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[("APP__MESSAGING__URLS", blank)]),
-        )
-        .unwrap_err();
+        let options = LoadOptions::default();
+        let environment = [("APP__MESSAGING__URLS", blank)];
+        load_from(&options, BUILD, env(&environment)).unwrap();
+        let err = load_worker_from(&options, BUILD, env(&environment)).unwrap_err();
         assert_matches!(&err, Error::Validate(error) if error.names(key), "{err}");
     }
 }
@@ -438,7 +434,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
 #[test]
 fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
     for secret in ["00123", "TRUE"] {
-        let cfg = load_env(&[
+        let cfg = load_worker_env(&[
             ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
             ("APP__MESSAGING__CREDENTIALS", secret),
         ]);
@@ -459,6 +455,25 @@ fn messaging_credentials_in_a_file_are_refused() {
 }
 
 #[test]
-fn messaging_unknown_environment_key_fails_loading() {
-    assert_unknown_env_key_fails("APP__MESSAGING__UNKNOWN");
+fn only_the_worker_decodes_messaging_settings() {
+    for (name, value, expected) in [
+        ("APP__MESSAGING__UNKNOWN", "x", "unknown field `unknown`"),
+        (
+            "APP__MESSAGING__CONSUMER_CONCURRENCY",
+            "0",
+            "messaging.consumer_concurrency",
+        ),
+        (
+            "APP__MESSAGING__CONSUMER_CONCURRENCY",
+            "yes",
+            "messaging.consumer_concurrency",
+        ),
+    ] {
+        let options = LoadOptions::default();
+        let environment = [(name, value)];
+        load_from(&options, BUILD, env(&environment)).unwrap();
+        let err = load_worker_from(&options, BUILD, env(&environment)).unwrap_err();
+        assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
+        assert!(err.to_string().contains(expected), "{name}: {err}");
+    }
 }
