@@ -33,7 +33,6 @@ use crate::{
     AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokens, OnBehalfOf, Options,
     RefreshDriver, Registration, Rejection, ServiceTokens, TokenTarget,
     credentials::{Cached, acquisition_deadline},
-    options::Admitted,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -161,7 +160,7 @@ impl Fixture {
         scopes: &[&str],
         audience: Option<&str>,
     ) -> ServiceTokens {
-        let registration = self.build(options);
+        let registration = prepare_registration(options);
         let (tokens, driver) = registration.service_tokens(token_target(scopes, audience));
         self.drive(driver);
         self.registrations.lock().unwrap().push(registration);
@@ -184,21 +183,12 @@ impl Fixture {
         audience: Option<&str>,
         capacity: u32,
     ) -> ExchangeTokens {
-        let registration = self.build(options);
+        let registration = prepare_registration(options);
         let tokens = registration
             .exchange_tokens(token_target(scopes, audience), capacity)
             .unwrap();
         self.registrations.lock().unwrap().push(registration);
         tokens
-    }
-
-    fn build(&self, options: Options) -> Registration {
-        let admitted = Admitted::try_new_for_test(options, self.endpoint.clone()).unwrap();
-        Registration::build(
-            admitted,
-            Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
-        )
-        .unwrap()
     }
 
     fn drive(&self, driver: RefreshDriver) {
@@ -452,6 +442,10 @@ fn exchange_response(access_token: &str) -> serde_json::Value {
         "expires_in": 60,
         "issued_token_type": ACCESS_TOKEN_TYPE,
     })
+}
+
+fn prepare_registration(options: Options) -> Registration {
+    Registration::prepare_for_test_http(options).unwrap()
 }
 
 fn deadline(after: Duration) -> Instant {

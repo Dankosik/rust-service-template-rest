@@ -178,7 +178,7 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
 #[tokio::test]
 async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() {
     let fixture = Fixture::new().await;
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
     let service = service_tokens.http(fixture.resource_client());
     let exchange = registration
@@ -218,13 +218,38 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
 }
 
 #[tokio::test]
+async fn dropping_registration_stops_a_bound_http_call_during_token_acquisition() {
+    let fixture = Fixture::new().await;
+    let registration = prepare_registration(fixture.options());
+    let (credentials, _driver) = registration.service_tokens(TokenTarget::default());
+    let client = credentials.http(fixture.resource_client());
+    let context = OperationContext::unbounded();
+    let client = client.with_context(&context);
+    let _gate = fixture.block_tokens();
+    let mut call = Box::pin(client.execute(fixture.request()));
+    tokio::select! {
+        () = fixture.token_received() => {}
+        result = &mut call => panic!("token must be gated: {result:?}"),
+    }
+    drop(registration);
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_matches!(error, Error::Acquisition(AcquisitionError::Unavailable));
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_open() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let (service, driver) = registration.service_tokens(TokenTarget::default());
     let exchange = registration
         .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
@@ -290,7 +315,7 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
 #[tokio::test]
 async fn dropping_the_service_driver_closes_only_service_clients() {
     let fixture = Fixture::new().await;
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
     let service = service_tokens.http(fixture.resource_client());
     let exchange = registration
@@ -353,7 +378,12 @@ async fn assert_closed_calls(client: &AuthenticatedClient, request: impl Fn() ->
         if let Some(context) = request_context {
             request.extensions_mut().insert(context);
         }
-        let error = client.execute(request, deadline(after)).await.unwrap_err();
+        let context = OperationContext::with_timeout(after);
+        let error = client
+            .with_context(&context)
+            .execute(request)
+            .await
+            .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
     }
 }
@@ -365,7 +395,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
     service_tokens
         .service_token(acquisition_deadline(&token_context()))
@@ -547,7 +577,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         StatusCode::OK,
         &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
     );
-    let registration = fixture.build(Options {
+    let registration = prepare_registration(Options {
         provider_concurrency: 1,
         ..fixture.options()
     });

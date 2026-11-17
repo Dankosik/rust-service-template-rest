@@ -17,6 +17,24 @@ pub struct BackgroundRegistration<'a> {
 }
 
 impl BackgroundRegistration<'_> {
+    // template:begin outbound-auth:service-oauth-refresh
+    pub fn service_tokens(
+        &mut self,
+        registration: impl Into<std::sync::Arc<infra_oauth2_client_credentials::Registration>>,
+        target: infra_oauth2_client_credentials::TokenTarget,
+    ) -> infra_oauth2_client_credentials::ServiceTokens {
+        let registration = registration.into();
+        let (tokens, driver) = registration.service_tokens(target);
+        let owner = tokens.clone();
+        let stop = self.background.child_token();
+        self.background.spawn("oauth_token_refresh", async move {
+            driver.run(stop.cancelled_owned()).await;
+            drop((registration, owner));
+        });
+        tokens
+    }
+    // template:end outbound-auth:service-oauth-refresh
+
     pub fn spawn<F, E>(
         &mut self,
         name: &'static str,

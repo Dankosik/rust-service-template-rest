@@ -39,7 +39,7 @@ use tower::{Service as _, service_fn};
 
 use secrecy::SecretString;
 
-use super::{Fixture, acquisition_deadline, token_context};
+use super::{Fixture, acquisition_deadline, prepare_registration, token_context};
 use crate::{AcquisitionError, OnBehalfOf, Rejection, ServiceTokens, TokenTarget};
 
 #[derive(Clone)]
@@ -154,8 +154,12 @@ impl Resource {
         &self,
         credentials: &ServiceTokens,
     ) -> EchoServiceClient<crate::grpc::AuthenticatedClient> {
+        EchoServiceClient::new(self.transport(credentials))
+    }
+
+    fn transport(&self, credentials: &ServiceTokens) -> crate::grpc::AuthenticatedClient {
         let channel = self.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-        EchoServiceClient::new(credentials.grpc(channel).unwrap())
+        credentials.grpc(channel).unwrap()
     }
 
     fn channel(&self, timeout: ClientTimeout) -> Client {
@@ -379,10 +383,11 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
 }
 
 #[tokio::test]
-async fn caller_authorization_is_internal_before_any_io() {
+async fn caller_authorization_and_competing_bound_contexts_fail_before_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let mut client = resource.client(&tokens.service_tokens(&[], None));
+    let transport = resource.transport(&tokens.service_tokens(&[], None));
+    let mut client = EchoServiceClient::new(transport.clone());
     for (cancelled, expected) in [(false, Code::Internal), (true, Code::Cancelled)] {
         let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
         request
@@ -395,6 +400,18 @@ async fn caller_authorization_is_internal_before_any_io() {
         }
         assert_eq!(client.unary(request).await.unwrap_err().code(), expected);
     }
+    let bound = transport.with_context(&OperationContext::unbounded());
+    let mut client = EchoServiceClient::new(bound);
+    let mut request = Request::new(UnaryRequest::default());
+    request
+        .extensions_mut()
+        .insert(OperationContext::unbounded());
+    let conflict = client.unary(request).await.unwrap_err();
+    assert_eq!(conflict.code(), Code::Internal);
+    assert_eq!(
+        conflict.message(),
+        "request operation context conflicts with client context"
+    );
     assert!(tokens.token_requests().is_empty());
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
@@ -402,25 +419,23 @@ async fn caller_authorization_is_internal_before_any_io() {
 }
 
 #[tokio::test]
-async fn token_acquisition_spends_grpc_timeout_without_dispatch() {
+async fn token_acquisition_spends_the_bound_deadline_without_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let gate = tokens.block_tokens();
     let credentials = tokens.service_tokens(&[], None);
-    let mut client = resource.client(&credentials);
-    let mut call = Box::pin(client.unary(rpc(
-        UnaryRequest {
-            message: "deadline".to_owned(),
-        },
-        Duration::from_secs(1),
-    )));
+    let parent = OperationContext::with_timeout(Duration::from_secs(1));
+    let transport = resource.transport(&credentials).with_context(&parent);
+    let mut client = EchoServiceClient::new(transport);
+    let mut call = Box::pin(client.unary(UnaryRequest::default()));
     tokio::select! {
         () = tokens.token_received() => {}
         result = &mut call => panic!("call finished before the token arrived: {result:?}"),
     }
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(2)).await;
-    assert_eq!(call.await.unwrap_err().code(), Code::DeadlineExceeded);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+    assert_matches!(result, Poll::Ready(Err(error)) if error.code() == Code::DeadlineExceeded);
     tokio::time::resume();
     gate.add_permits(1);
     assert_eq!(resource.calls(), 0);
@@ -475,28 +490,57 @@ async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
     let resource = Resource::new().await;
     let credentials = tokens.service_tokens(&[], None);
     let gate = tokens.block_tokens();
-    let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-    let mut client = credentials.grpc(channel).unwrap();
     let parent = OperationContext::unbounded();
-    let mut request = http::Request::post("/cancelled")
-        .header("content-type", "application/grpc")
-        .body(Body::empty())
-        .unwrap();
-    request.extensions_mut().insert(parent.clone());
-    let mut call = client.call(request);
+    let transport = resource.transport(&credentials).with_context(&parent);
+    let mut client = EchoServiceClient::new(transport);
+    let mut call = Box::pin(client.unary(UnaryRequest::default()));
     tokio::select! {
         () = tokens.token_received() => {}
         result = &mut call => panic!("token must be gated: {result:?}"),
     }
     parent.cancel();
-    let error = call.await.unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .unwrap()
+        .unwrap_err();
     assert_eq!(error.code(), Code::Cancelled);
     assert_eq!(error.message(), "request cancelled");
     let source = std::error::Error::source(&error)
         .and_then(|source| source.downcast_ref::<AcquisitionError>());
     assert_eq!(source, Some(&AcquisitionError::Cancelled));
-    assert!(tokens.resource_requests().is_empty());
+    assert_eq!(resource.calls(), 0);
     drop(gate);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn dropping_registration_stops_a_bound_grpc_call_during_token_acquisition() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let registration = prepare_registration(tokens.options());
+    let (credentials, _driver) = registration.service_tokens(TokenTarget::default());
+    let transport = resource
+        .transport(&credentials)
+        .with_context(&OperationContext::unbounded());
+    let mut client = EchoServiceClient::new(transport);
+    let _gate = tokens.block_tokens();
+    let mut call = Box::pin(client.unary(UnaryRequest::default()));
+    tokio::select! {
+        () = tokens.token_received() => {}
+        result = &mut call => panic!("token must be gated: {result:?}"),
+    }
+    drop(registration);
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .unwrap()
+        .unwrap_err();
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<AcquisitionError>());
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(source, Some(&AcquisitionError::Unavailable));
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
 }
@@ -505,7 +549,7 @@ async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
 async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let registration = tokens.build(crate::Options {
+    let registration = prepare_registration(crate::Options {
         provider_concurrency: 1,
         ..tokens.options()
     });
@@ -550,14 +594,13 @@ async fn one_cached_bearer_is_sent_and_reused() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = tokens.service_tokens(&[], None);
-    let mut client = resource.client(&credentials);
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let transport = resource.transport(&credentials).with_context(&context);
+    let mut client = EchoServiceClient::new(transport);
     let first = client
-        .unary(rpc(
-            UnaryRequest {
-                message: "one".to_owned(),
-            },
-            Duration::from_secs(10),
-        ))
+        .unary(UnaryRequest {
+            message: "one".to_owned(),
+        })
         .await
         .unwrap()
         .into_inner();
@@ -566,12 +609,9 @@ async fn one_cached_bearer_is_sent_and_reused() {
         &serde_json::json!({"access_token": "other", "token_type": "Bearer", "expires_in": 60}),
     );
     let second = client
-        .unary(rpc(
-            UnaryRequest {
-                message: "two".to_owned(),
-            },
-            Duration::from_secs(10),
-        ))
+        .unary(UnaryRequest {
+            message: "two".to_owned(),
+        })
         .await
         .unwrap()
         .into_inner();
@@ -590,7 +630,7 @@ async fn one_cached_bearer_is_sent_and_reused() {
 async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let registration = tokens.build(tokens.options());
+    let registration = prepare_registration(tokens.options());
     let (credentials, driver) = registration.service_tokens(TokenTarget::default());
     let mut client = resource.client(&credentials);
     client
@@ -674,7 +714,11 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let gate = tokens.block_tokens();
-    let mut client = resource.client(&tokens.service_tokens(&[], None));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let transport = resource
+        .transport(&tokens.service_tokens(&[], None))
+        .with_context(&context);
+    let mut client = EchoServiceClient::new(transport);
     let mut call = Box::pin(client.unary(rpc(
         UnaryRequest {
             message: "budget".to_owned(),
@@ -753,29 +797,25 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         ("permission-denied", Code::PermissionDenied, 0),
     ] {
         let credentials = tokens.service_tokens(&[], None);
-        let mut client = resource.client(&credentials);
         let before_tokens = tokens.token_requests().len();
         warm_and_age(&credentials).await;
         let before_calls = resource.calls();
+        let parent = token_context();
+        let mut client =
+            EchoServiceClient::new(resource.transport(&credentials).with_context(&parent));
         let error = client
-            .unary(rpc(
-                UnaryRequest {
-                    message: message.to_owned(),
-                },
-                Duration::from_secs(10),
-            ))
+            .unary(UnaryRequest {
+                message: message.to_owned(),
+            })
             .await
             .unwrap_err();
         assert_eq!(error.code(), expected);
         assert_eq!(tokens.token_requests().len(), before_tokens + 1);
         assert_eq!(resource.calls(), before_calls + 1);
         client
-            .unary(rpc(
-                UnaryRequest {
-                    message: "again".to_owned(),
-                },
-                Duration::from_secs(10),
-            ))
+            .unary(UnaryRequest {
+                message: "again".to_owned(),
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -994,7 +1034,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     assert_eq!(resource.calls(), 1);
 
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
-    let registration = tokens.build(tokens.options());
+    let registration = prepare_registration(tokens.options());
     let exchange = registration
         .exchange_tokens(TokenTarget::default(), 1)
         .unwrap();

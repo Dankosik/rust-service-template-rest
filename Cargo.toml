@@ -52,6 +52,9 @@ infra-serviceauth = { path = "crates/infra-serviceauth" }
 # template:begin outbound-http:workspace-outbound-http-crate
 infra-outbound-http = { path = "crates/infra-outbound-http" }
 # template:end outbound-http:workspace-outbound-http-crate
+# template:begin outbound-auth:workspace-outbound-oauth-crate
+infra-oauth2-client-credentials = { path = "crates/infra-oauth2-client-credentials" }
+# template:end outbound-auth:workspace-outbound-oauth-crate
 # template:begin postgres:workspace-postgres-crates
 infra-postgres = { path = "crates/infra-postgres" }
 # template:end postgres:workspace-postgres-crates

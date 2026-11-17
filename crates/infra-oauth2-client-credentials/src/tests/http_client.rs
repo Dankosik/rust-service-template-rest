@@ -23,7 +23,12 @@ async fn each_grant_enforces_its_subject_policy_before_any_io() {
     assert!(fixture.token_requests().is_empty());
     assert!(fixture.resource_requests().is_empty());
 
-    fixture.send(&service).await.unwrap();
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    service
+        .with_context(&context)
+        .execute(fixture.request())
+        .await
+        .unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
         .send_request(&delegated, fixture.on_behalf_of_request("alice"))
@@ -85,7 +90,8 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let client = fixture.service_client();
         let budget = Duration::from_secs(2);
         let context = OperationContext::with_timeout(budget);
-        let mut exchange = Box::pin(client.execute_with_context(fixture.request(), &context));
+        let client = client.with_context(&context);
+        let mut exchange = Box::pin(client.execute(fixture.request()));
         tokio::select! {
             () = fixture.token_received() => {},
             result = &mut exchange => panic!("response must be gated: {result:?}"),
@@ -95,7 +101,10 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         } else {
             context.cancel();
         }
-        let Err(Error::Acquisition(error)) = exchange.await else {
+        let result = tokio::time::timeout(Duration::from_secs(1), exchange)
+            .await
+            .expect("the request must stop before the provider timeout");
+        let Err(Error::Acquisition(error)) = result else {
             panic!("expected a stopped token acquisition");
         };
         assert_eq!(error, expected_error);

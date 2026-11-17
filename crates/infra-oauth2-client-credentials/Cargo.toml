@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [features]
+test-support = ["infra-outbound-http/test-support"]
 # template:begin outbound-auth-grpc:oauth-grpc-feature
 default = ["grpc"]
 grpc = ["dep:infra-outbound-grpc", "dep:tonic", "dep:tower"]

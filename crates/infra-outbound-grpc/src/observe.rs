@@ -25,7 +25,7 @@ const HANDLING_SECONDS_BUCKETS: &[f64] = &[
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SECONDS_BUCKETS)];
 
 static DESCRIBE: Once = Once::new();
-static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| Arc::new(Series::new()));
+static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
 
 const fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
     shared_rules::grpc::status_code_names(code as usize)
@@ -62,7 +62,7 @@ pub(crate) struct Call {
 
 impl Call {
     pub(crate) fn start<B>(
-        series: &Arc<Series>,
+        series: &Series,
         request: &http::Request<B>,
         destination: &Destination,
     ) -> Self {
@@ -158,8 +158,8 @@ struct MethodMetrics {
 }
 
 impl Series {
-    pub(crate) fn client() -> Arc<Self> {
-        Arc::clone(&CLIENT_SERIES)
+    pub(crate) fn client() -> &'static Self {
+        LazyLock::force(&CLIENT_SERIES)
     }
 
     fn new() -> Self {
@@ -172,8 +172,8 @@ impl Series {
     }
 
     fn resolve<B>(&self, request: &http::Request<B>) -> Arc<MethodMetrics> {
-        if let Some(path) = verified_client_path(request)
-            && let Some(admitted) = self.admit_path(path)
+        if let Some((path, service, method)) = verified_client_path(request)
+            && let Some(admitted) = self.admit_path(path, service, method)
         {
             return admitted;
         }
@@ -183,7 +183,7 @@ impl Series {
         )
     }
 
-    fn admit_path(&self, path: &str) -> Option<Arc<MethodMetrics>> {
+    fn admit_path(&self, path: &str, service: &str, method: &str) -> Option<Arc<MethodMetrics>> {
         let snapshot = self.admitted.load();
         if let Some(existing) = snapshot.get(path) {
             return Some(Arc::clone(existing));
@@ -197,7 +197,7 @@ impl Series {
         if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        let metrics = Arc::new(MethodMetrics::for_path(path));
+        let metrics = Arc::new(MethodMetrics::for_method(service, method));
         let mut next = (**current).clone();
         next.insert(path.into(), Arc::clone(&metrics));
         self.admitted.store(Arc::new(next));
@@ -206,10 +206,7 @@ impl Series {
 }
 
 impl MethodMetrics {
-    fn for_path(path: &str) -> Self {
-        let Some((service, method)) = split_method_path(path) else {
-            return Self::unknown();
-        };
+    fn for_method(service: &str, method: &str) -> Self {
         let rpc_method: Arc<str> = format!("{service}/{method}").into();
         Self::build(
             Some(rpc_method),
@@ -266,7 +263,7 @@ impl MethodMetrics {
     }
 }
 
-fn verified_client_path<B>(request: &http::Request<B>) -> Option<&str> {
+fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, &str, &str)> {
     let declared = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
     if declared.service().len() > CLIENT_COMPONENT_LIMIT
         || declared.method().len() > CLIENT_COMPONENT_LIMIT
@@ -274,8 +271,9 @@ fn verified_client_path<B>(request: &http::Request<B>) -> Option<&str> {
         return None;
     }
     let path = request.uri().path();
-    let (service, rpc) = split_method_path(path)?;
-    (service == declared.service() && rpc == declared.method()).then_some(path)
+    let (service, method) = split_method_path(path)?;
+    (service == declared.service() && method == declared.method())
+        .then_some((path, service, method))
 }
 
 fn describe_client_metrics() {
@@ -332,7 +330,7 @@ mod tests {
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
         let _anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let guard = tracing::subscriber::set_default(subscriber);
-        let series = Arc::new(Series::new());
+        let series = Series::new();
         let known = test_request(
             "/example.v1.EchoService/Unary",
             Some(("example.v1.EchoService", "Unary")),
@@ -418,7 +416,7 @@ mod tests {
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
 
-        let series = Arc::new(Series::new());
+        let series = Series::new();
         let destination = Destination::new(&"http://127.0.0.1:50051".parse().unwrap());
 
         let overlong: &'static str =
