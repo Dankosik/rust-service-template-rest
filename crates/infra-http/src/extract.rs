@@ -1,7 +1,7 @@
 use std::error::Error as StdError;
 
 use axum::body::Bytes;
-use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
@@ -96,20 +96,22 @@ pub struct Query<T>(pub T);
 
 impl<T, S> FromRequestParts<S> for Query<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + Send,
     S: Send + Sync,
 {
     type Rejection = Problem;
 
-    #[expect(
-        clippy::disallowed_types,
-        reason = "this wrapper delegates to the native extractor and maps its rejection"
-    )]
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::extract::Query::<T>::from_request_parts(parts, state).await {
-            Ok(axum::extract::Query(value)) => Ok(Self(value)),
-            Err(rejection) => Err(query_problem(&rejection)),
-        }
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let query = parts.uri.query().unwrap_or_default();
+        let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
+        std::future::ready(
+            serde_path_to_error::deserialize(fields)
+                .map(Self)
+                .map_err(|error| query_problem(error.path())),
+        )
     }
 }
 
@@ -161,15 +163,13 @@ fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
     }
 }
 
-fn query_problem(rejection: &QueryRejection) -> Problem {
+fn query_problem(path: &serde_path_to_error::Path) -> Problem {
     with_param(
         Problem::new(Code::BadRequest).detail_static(QUERY_DETAIL),
-        failed_member::<serde::de::value::Error>(rejection).and_then(|path| {
-            match path.iter().next() {
-                Some(Segment::Map { key }) => Some(format_compact!("query.{key}")),
-                _ => None,
-            }
-        }),
+        match path.iter().next() {
+            Some(Segment::Map { key }) => Some(format_compact!("query.{key}")),
+            _ => None,
+        },
     )
 }
 
@@ -361,6 +361,12 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    struct Filters {
+        #[serde(default)]
+        quantity: Vec<u32>,
+    }
+
+    #[derive(Deserialize)]
     enum OrderState {
         Open,
         Closed,
@@ -403,6 +409,9 @@ mod tests {
     fn app() -> Router {
         let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
         let handler_2 = |Query(_): Query<Page>| async { "page" };
+        let filtered = |Query(filters): Query<Filters>| async move {
+            filters.quantity.iter().sum::<u32>().to_string()
+        };
         let handler_3 = |Path(_): Path<u32>| async { "order" };
         let handler_4 = |Path(_): Path<(u32, u32)>| async { "line" };
         let handler_5 = |Path(_): Path<(u32, u32)>| async { "unreachable" };
@@ -423,6 +432,7 @@ mod tests {
         let routes = Router::new()
             .route("/orders", post(handler_1))
             .route("/orders", get(handler_2))
+            .route("/lines", get(filtered))
             .route("/orders/{id}", get(handler_3))
             .route("/orders/{id}/lines/{line}", get(handler_4))
             .route("/miswired/{id}", get(handler_5))
@@ -657,6 +667,34 @@ mod tests {
             body["invalid_params"],
             json!([{"name": "query.limit", "reason": SCHEMA_REASON}])
         );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_query_parameter_fills_a_list() {
+        for (uri, sum) in [
+            ("/lines", "0"),
+            ("/lines?quantity=3", "3"),
+            ("/lines?quantity=3&quantity=4", "7"),
+        ] {
+            let response = app().oneshot(get_uri(uri)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                sum,
+                "{uri}"
+            );
+        }
+
+        let response = app()
+            .oneshot(get_uri("/lines?quantity=3&quantity=submitted-secret"))
+            .await
+            .unwrap();
+        let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
+        assert_eq!(
+            body["invalid_params"],
+            json!([{"name": "query.quantity", "reason": SCHEMA_REASON}])
+        );
+        assert!(!body.to_string().contains("submitted-secret"), "{body}");
     }
 
     #[tokio::test]

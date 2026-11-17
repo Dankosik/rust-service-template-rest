@@ -160,6 +160,7 @@ serde_json = { version = "1", default-features = false }
 # axum's own extractors report the failing member through it; infra-http reads
 # that path for `invalid_params`.
 serde_path_to_error = { version = "0.1.20", default-features = false }
+serde_html_form = { version = "0.2.8", default-features = false }
 toml = { version = "1.1.6", default-features = false }
 jiff = { version = "0.2.37", default-features = false }
 bytesize = { version = "2.7.0", default-features = false }
