@@ -73,6 +73,9 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
         (UNKNOWN, &["text/plain"][..]),
         (UNKNOWN, &["application/grpc+"][..]),
         (HEALTH_CHECK, &["application/grpc", "text/plain"][..]),
+        (UNKNOWN, &["application/grpc; version=2, text/plain"][..]),
+        (UNKNOWN, &["application/grpc; profile"][..]),
+        (UNKNOWN, &["application/grpc; profile="][..]),
     ] {
         let request = request(path, Method::POST, media, Body::empty());
         let response = app.clone().oneshot(request).await.unwrap();
@@ -86,7 +89,8 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
     for media in [
         "application/grpc",
         "application/grpc+proto",
-        "Application/GRPC+vendor.v2 ; profile=\"custom;v2\"",
+        "Application/GRPC+vendor.v2 ; version=2 ; profile=\"custom;v2, test\"",
+        r#"application/grpc+custom+v2; label="x\"y"; empty="""#,
     ] {
         let request = request(UNKNOWN, Method::POST, &[media], Body::empty());
         let response = app.clone().oneshot(request).await.unwrap();

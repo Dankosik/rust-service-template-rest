@@ -507,24 +507,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn application_body_preserves_data_and_only_noncredential_trailers() {
-        let mut trailers = http::HeaderMap::new();
-        trailers.insert(http::header::AUTHORIZATION, "redacted".parse().unwrap());
-        trailers.insert("x-checksum", "123".parse().unwrap());
-        let data = Bytes::from_static(b"message");
-        let body =
-            http_body_util::Full::new(data.clone()).with_trailers(async { Some(Ok(trailers)) });
-        let body = without_trailer_credentials(axum::body::Body::new(body))
-            .collect()
-            .await
-            .unwrap();
-        let trailers = body.trailers().unwrap();
-        assert_eq!(trailers.len(), 1);
-        assert_eq!(trailers["x-checksum"], "123");
-        assert_eq!(body.to_bytes(), data);
-    }
-
-    #[tokio::test]
     async fn rejected_call_reads_at_most_one_frame_past_64_kib() {
         use futures_util::StreamExt as _;
         use std::convert::Infallible;

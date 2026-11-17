@@ -93,7 +93,7 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
     let closed =
         tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
     std::assert_matches!(closed, Ok(Ok(0) | Err(_)));
-    assert!(response.is_empty());
+    assert_eq!(response.as_slice(), b"");
     let spans = exporter.get_finished_spans().unwrap();
     let access = spans
         .iter()

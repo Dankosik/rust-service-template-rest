@@ -102,6 +102,7 @@ struct SeenCall {
     cardinality: Seen,
     // template:begin authn:grpc-transport-test-seen-identity-field
     had_identity: bool,
+    had_checksum: bool,
     // template:end authn:grpc-transport-test-seen-identity-field
     had_authorization: bool,
 }
@@ -207,6 +208,10 @@ impl Echo {
             cardinality: seen,
             // template:begin authn:grpc-transport-test-seen-principal-value
             had_identity,
+            had_checksum: request
+                .metadata()
+                .get("x-checksum")
+                .is_some_and(|value| value == "123"),
             // template:end authn:grpc-transport-test-seen-principal-value
             had_authorization: request.metadata().get("authorization").is_some(),
         });
@@ -1586,14 +1591,17 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 4);
 
-    let genuine = timeout(
-        WAIT,
-        app.clone()
-            .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "genuine")),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let request = opening_request(UNARY_PATH, Some(ACCEPTED), "genuine").map(|body| {
+        use http_body_util::BodyExt as _;
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert(http::header::AUTHORIZATION, "redacted".parse().unwrap());
+        trailers.insert("x-checksum", "123".parse().unwrap());
+        axum::body::Body::new(body.with_trailers(async move { Some(Ok(trailers)) }))
+    });
+    let genuine = timeout(WAIT, app.clone().oneshot(request))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(grpc_status(&genuine).is_none());
 
     let captured = echo
@@ -1604,7 +1612,10 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     assert_eq!(captured.issuer(), "https://issuer.example");
     assert_eq!(captured.subject(), Some("subject"));
     assert_eq!(captured.scopes(), ["echo.read"]);
-    assert_eq!(echo.calls.lock().len(), 1);
+    let calls = echo.calls.lock().clone();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].had_checksum);
+    assert!(!calls[0].had_authorization);
 
     let mut spoofed = opening_request(UNARY_PATH, None, "spoofed");
     spoofed.extensions_mut().insert(captured);

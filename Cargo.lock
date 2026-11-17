@@ -2621,9 +2621,9 @@ dependencies = [
  "infra-listener",
  "infra-outbound-grpc",
  "infra-serviceauth",
+ "mediatype",
  "metrics",
  "metrics-exporter-prometheus",
- "mime",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
@@ -3588,6 +3588,12 @@ dependencies = [
  "cfg-if",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "mediatype"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0695a693e38d35838dd34bc3ab19911395f6837ccf55c7271189cfb12cb8b57f"
 
 [[package]]
 name = "memchr"

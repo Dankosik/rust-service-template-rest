@@ -140,6 +140,7 @@ tower-http = { version = "0.7.1", default-features = false }
 # OTLP export bodies with it in every profile.
 prost = { version = "=0.14.4", default-features = false }
 # template:begin grpc:workspace-grpc-dependencies
+mediatype = { version = "0.23.0", default-features = false }
 tonic = { version = "=0.14.8", default-features = false }
 tonic-prost = { version = "=0.14.8", default-features = false }
 tonic-health = { version = "=0.14.8", default-features = false }

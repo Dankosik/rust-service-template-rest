@@ -28,18 +28,18 @@ pub(crate) fn native_content_type(headers: &HeaderMap) -> bool {
     let Ok(value) = value.to_str() else {
         return false;
     };
-    let essence = value.split_once(';').map_or(value, |(essence, _)| essence);
-    essence
-        .trim_matches([' ', '\t'])
-        .parse::<mime::Mime>()
-        .ok()
-        .is_some_and(|media| {
-            media.essence_str() == "application/grpc"
-                || media
-                    .essence_str()
-                    .strip_prefix("application/grpc+")
-                    .is_some_and(|codec| !codec.is_empty())
-        })
+    mediatype::MediaType::parse(value.trim_matches([' ', '\t'])).is_ok_and(|media| {
+        let subtype = media.subty.as_str();
+        let family = subtype
+            .split_once('+')
+            .map_or(subtype, |(family, _)| family);
+        media.ty == "application"
+            && family.eq_ignore_ascii_case("grpc")
+            && media
+                .params
+                .iter()
+                .all(|(_, value)| !value.as_str().is_empty())
+    })
 }
 
 #[must_use]

@@ -502,8 +502,8 @@ def _assert_tls_fixture_ownership(initializer, nodes: dict[str, Node], paths: It
             continue
         assert isinstance(node.payload, bytes)
         manifest = tomllib.loads(node.payload.decode())
-        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
-            dependency = manifest.get(table, {}).get("rcgen")
+        for section in initializer._dependency_sections(manifest):
+            dependency = section.get("rcgen")
             if isinstance(dependency, dict) and dependency.get("workspace") is True:
                 consumers.append(relative)
                 break
@@ -527,9 +527,9 @@ def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]
             continue
         assert isinstance(node.payload, bytes)
         manifest = tomllib.loads(node.payload.decode())
-        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
+        for section in initializer._dependency_sections(manifest):
             inherited.update(
-                name for name, definition in manifest.get(table, {}).items()
+                name for name, definition in section.items()
                 if isinstance(definition, dict) and definition.get("workspace") is True
             )
     workspace = nodes["Cargo.toml"]
@@ -539,7 +539,7 @@ def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]
         raise initializer.Refusal(f"workspace declares dependencies no retained member inherits: {sorted(unused)}")
 
 
-def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
+def _declared_crates(initializer, root: Path) -> dict[str, frozenset[str]]:
     declared: dict[str, frozenset[str]] = {}
     for manifest in (*sorted(root.glob("crates/*/Cargo.toml")), root / "test/Cargo.toml"):
         if not manifest.is_file():
@@ -547,8 +547,8 @@ def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
         tables = tomllib.loads(manifest.read_text(encoding="utf-8"))
         declared[manifest.parent.relative_to(root).as_posix()] = frozenset(
             name.replace("-", "_")
-            for table in ("dependencies", "dev-dependencies", "build-dependencies")
-            for name in tables.get(table, {})
+            for section in initializer._dependency_sections(tables)
+            for name in section
         )
     return declared
 
@@ -620,7 +620,7 @@ def _image_inputs_checker(source: Path):
 
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
-    source_crates = _declared_crates(destination)
+    source_crates = _declared_crates(initializer, destination)
     profiles = initializer._profile_data(destination)
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
@@ -635,7 +635,7 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
     )
     _assert_workspace_dependencies_inherited(initializer, nodes)
-    _assert_dropped_crates_unnamed(initializer, nodes, source_crates, _declared_crates(destination))
+    _assert_dropped_crates_unnamed(initializer, nodes, source_crates, _declared_crates(initializer, destination))
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",

@@ -33,7 +33,7 @@ serde = { workspace = true, features = ["std"] }
 infra-serviceauth = { workspace = true }
 # template:end service-auth:grpc-service-auth-dependency
 metrics = { workspace = true }
-mime = { workspace = true }
+mediatype = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 prost = { workspace = true, features = ["std"] }
 prost-types = { workspace = true, features = ["std"] }
