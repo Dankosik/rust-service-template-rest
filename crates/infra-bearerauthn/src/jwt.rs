@@ -130,21 +130,31 @@ impl JwtVerifier {
             .decode_slice(signature, &mut signature_bytes)
             .map(|length| &signature_bytes[..length])
             .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
+        let decoded_payload = || {
+            URL_SAFE_NO_PAD
+                .decode(payload)
+                .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
+        };
+        let admitted_claims = |payload: Vec<u8>, now: Duration| {
+            validate_jwt_claims(
+                payload,
+                &self.claim_policy,
+                self.token_profile,
+                now.as_secs(),
+                token.to_secret(),
+            )
+        };
         let key_generation = self
-            .verify_signature(message, signature, header.kid.as_deref(), algorithm)
+            .verify_signature(message, signature, header.kid.as_deref(), algorithm, || {
+                decoded_payload()
+                    .and_then(|payload| admitted_claims(payload, now()?))
+                    .is_ok()
+            })
             .await?;
-        let payload = URL_SAFE_NO_PAD
-            .decode(payload)
-            .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+        let payload = decoded_payload()?;
         let sampled_at = MonotonicInstant::now();
         let now = now()?;
-        let verified = validate_jwt_claims(
-            payload,
-            &self.claim_policy,
-            self.token_profile,
-            now.as_secs(),
-            token.to_secret(),
-        )?;
+        let verified = admitted_claims(payload, now)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR
                 .min(Duration::from_secs(verified.principal.expires_at()).saturating_sub(now)),
@@ -185,20 +195,21 @@ impl JwtVerifier {
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
+        claims_would_be_admitted: impl FnOnce() -> bool,
     ) -> Result<u64, VerificationError> {
         let checked = self.key_store.current();
         let Err(miss) = checked.verify(message, signature, kid, algorithm) else {
             return Ok(checked.generation());
         };
+        if !claims_would_be_admitted() {
+            return Err(miss.into());
+        }
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::NewerSet(key_set) => {
                 key_set.verify(message, signature, kid, algorithm)?;
                 Ok(key_set.generation())
             }
             SignatureRefresh::NoNewerSet => Err(miss.into()),
-            SignatureRefresh::Unavailable => {
-                Err(VerificationError::unavailable(VerificationReason::Refresh))
-            }
         }
     }
 }
@@ -225,7 +236,7 @@ mod tests {
     use crate::{
         Failure, Transport, VerificationReason,
         jwks::{
-            KeySet,
+            KeySet, KeySetFailure,
             tests::{JWT_SIGNING_DER, ec_signing, ed_signing, jwk, key_set, rsa_signing},
         },
         parse_bearer,
@@ -699,6 +710,61 @@ mod tests {
             VerificationReason::Algorithm
         );
         assert_eq!(verifier.key_store.pending(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signature_miss_with_claims_that_would_be_refused_asks_for_no_refresh() {
+        let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
+        verifier.key_store.permit_unknown_refresh_for_test();
+        for refused in [
+            serde_json::json!({"exp": 1}),
+            serde_json::json!({"iss": "https://other.example"}),
+            serde_json::json!({"aud": "other"}),
+        ] {
+            let token = signed(&rsa_signing(), Algorithm::RS256, Some("retired"), &refused);
+            assert_eq!(
+                check(&verifier, &token).await.unwrap_err(),
+                VerificationReason::UnknownKey
+            );
+            assert_eq!(verifier.key_store.pending(), None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_key_stays_an_invalid_token_when_the_refresh_fails() {
+        let verifier = Arc::new(verifier(
+            rsa_key_set("fixture", None),
+            &[JwtAlgorithm::Rs256],
+        ));
+        verifier.key_store.permit_unknown_refresh_for_test();
+        let unknown = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("rotated"),
+            &serde_json::json!({}),
+        );
+        let call = tokio::spawn({
+            let verifier = Arc::clone(&verifier);
+            let unknown = unknown.clone();
+            async move { check(&verifier, &unknown).await.map(|_| ()) }
+        });
+        tokio::task::yield_now().await;
+        verifier.key_store.finish(
+            1,
+            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+        );
+        assert_eq!(call.await.unwrap(), Err(VerificationReason::UnknownKey));
+        assert_eq!(
+            check(&verifier, &unknown).await.unwrap_err(),
+            VerificationReason::UnknownKey
+        );
+        let known = signed(
+            &rsa_signing(),
+            Algorithm::RS256,
+            Some("fixture"),
+            &serde_json::json!({}),
+        );
+        check(&verifier, &known).await.unwrap();
     }
 
     fn sign_raw(header: &str, payload: &[u8]) -> String {
