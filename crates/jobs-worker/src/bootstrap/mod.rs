@@ -336,7 +336,12 @@ async fn prepare(
     // template:begin messaging:worker-bootstrap-messaging-connect
     let consumer = match capabilities.messages.take() {
         Some(messages) => {
-            messaging::connect_messaging(messages, &background.cancel, resources).await?
+            Box::pin(messaging::connect_messaging(
+                messages,
+                &background.cancel,
+                resources,
+            ))
+            .await?
         }
         None => None,
     };

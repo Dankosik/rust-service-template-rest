@@ -121,7 +121,7 @@ fn help_goes_to_stdout_and_usage_errors_go_to_stderr() {
             (output.stderr, output.stdout)
         };
         assert!(String::from_utf8_lossy(&message).contains("Usage:"));
-        assert!(silent.is_empty());
+        assert_eq!(silent.as_slice(), b"");
     }
 }
 
