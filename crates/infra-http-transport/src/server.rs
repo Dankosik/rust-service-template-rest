@@ -18,10 +18,6 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tower::ServiceBuilder;
 
-mod sniff;
-
-use sniff::SniffDeadline;
-
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
 const LISTEN_BACKLOG: u32 = 65_535;
@@ -30,12 +26,32 @@ const LISTEN_BACKLOG: u32 = 65_535;
 const ACCEPTED_TCP_USER_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
-pub struct ServerOptions {
+pub struct Http1Options {
     pub header_read_timeout: Duration,
-    pub max_header_bytes: usize,
+    pub max_read_buffer_bytes: usize,
+    pub connections: ConnectionLimits,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectionLimits {
     pub max_connections: Option<NonZeroU32>,
     pub max_connection_age: Option<Duration>,
 }
+
+// template:begin grpc:http2-listener-options
+#[derive(Clone, Copy, Debug)]
+pub struct Http2Options {
+    pub preface_timeout: Duration,
+    pub max_header_list_size: u32,
+    pub connections: ConnectionLimits,
+}
+
+#[derive(Clone, Debug)]
+pub struct TlsOptions {
+    pub config: Arc<rustls::ServerConfig>,
+    pub handshake_timeout: Duration,
+}
+// template:end grpc:http2-listener-options
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -121,37 +137,22 @@ impl BoundListener {
     }
 
     #[must_use]
-    pub fn serve(self, app: Router, options: ServerOptions) -> Server {
-        let builder = connection_builder(options).http1_only();
-        serve_plaintext(self, app, options, builder)
+    pub fn serve(self, app: Router, options: Http1Options) -> Server {
+        serve_plaintext(self, app, options.connections, http1_driver(options))
     }
 
     // template:begin grpc:http-bound-listener-tls
     #[must_use]
-    pub fn serve_tls(
-        self,
-        app: Router,
-        options: ServerOptions,
-        mut tls: Arc<rustls::ServerConfig>,
-    ) -> Server {
-        if tls.alpn_protocols.iter().any(|alpn| alpn != b"http/1.1") {
-            Arc::make_mut(&mut tls).alpn_protocols = vec![b"http/1.1".to_vec()];
-        }
-        let builder = connection_builder(options).http1_only();
-        serve_tls(self, app, options, builder, tls)
+    pub fn serve_tls(self, app: Router, options: Http1Options, tls: TlsOptions) -> Server {
+        serve_tls(self, app, options.connections, http1_driver(options), tls)
     }
 
     #[must_use]
-    pub fn serve_h2(
-        self,
-        app: Router,
-        options: ServerOptions,
-        tls: Option<Arc<rustls::ServerConfig>>,
-    ) -> Server {
-        let builder = connection_builder(options).http2_only();
+    pub fn serve_h2(self, app: Router, options: Http2Options, tls: Option<TlsOptions>) -> Server {
+        let driver = http2_driver(options);
         match tls {
-            Some(tls) => serve_tls(self, app, options, builder, tls),
-            None => serve_plaintext(self, app, options, builder),
+            Some(tls) => serve_tls(self, app, options.connections, driver, tls),
+            None => serve_plaintext(self, app, options.connections, driver),
         }
     }
     // template:end grpc:http-bound-listener-tls
@@ -160,10 +161,10 @@ impl BoundListener {
 fn serve_plaintext(
     bound: BoundListener,
     app: Router,
-    options: ServerOptions,
-    builder: auto::Builder<TokioExecutor>,
+    limits: ConnectionLimits,
+    driver: ConnectionDriver,
 ) -> Server {
-    serve_listener(bound, app, options, builder, |stream| async move {
+    serve_listener(bound, app, limits, driver, |stream| async move {
         Some((stream, "http"))
     })
 }
@@ -172,18 +173,35 @@ fn serve_plaintext(
 fn serve_tls(
     bound: BoundListener,
     app: Router,
-    options: ServerOptions,
-    builder: auto::Builder<TokioExecutor>,
-    tls: Arc<rustls::ServerConfig>,
+    limits: ConnectionLimits,
+    driver: ConnectionDriver,
+    tls: TlsOptions,
 ) -> Server {
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-    let handshake_timeout = options.header_read_timeout;
-    serve_listener(bound, app, options, builder, move |stream| {
+    let TlsOptions {
+        mut config,
+        handshake_timeout,
+    } = tls;
+    let require_h2 = driver.builder.is_http2_available();
+    let protocol: &[u8] = if require_h2 { b"h2" } else { b"http/1.1" };
+    if config.alpn_protocols.as_slice() != [protocol] {
+        Arc::make_mut(&mut config).alpn_protocols = vec![protocol.to_vec()];
+    }
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
+    serve_listener(bound, app, limits, driver, move |stream| {
         let acceptor = acceptor.clone();
         async move {
             let peer = stream.peer_addr().ok();
             match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                Ok(Ok(tls_stream)) => Some((tls_stream, "https")),
+                Ok(Ok(tls_stream)) => {
+                    if require_h2 && tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+                        tracing::debug!(
+                            peer = peer.map(tracing::field::display),
+                            "http2_alpn_missing"
+                        );
+                        return None;
+                    }
+                    Some((tls_stream, "https"))
+                }
                 Ok(Err(error)) => {
                     tracing::debug!(
                         peer = peer.map(tracing::field::display),
@@ -223,11 +241,7 @@ fn configure_accepted(stream: &TcpStream) {
 }
 
 impl Server {
-    pub fn bind(
-        addr: SocketAddr,
-        app: Router,
-        options: ServerOptions,
-    ) -> Result<Self, ServerError> {
+    pub fn bind(addr: SocketAddr, app: Router, options: Http1Options) -> Result<Self, ServerError> {
         Ok(BoundListener::bind(addr)?.serve(app, options))
     }
 
@@ -286,6 +300,15 @@ impl Drop for Server {
     }
 }
 
+#[derive(Clone)]
+struct ConnectionDriver {
+    builder: auto::Builder<TokioExecutor>,
+    // template:begin grpc:http2-driver-preface-budget
+    preface_timeout: Option<Duration>,
+    // template:end grpc:http2-driver-preface-budget
+}
+
+// template:begin grpc:http2-wire-limits
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -293,8 +316,9 @@ const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
+// template:end grpc:http2-wire-limits
 
-fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
+fn http1_driver(options: Http1Options) -> ConnectionDriver {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
@@ -302,27 +326,42 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         .header_read_timeout(options.header_read_timeout)
         .max_buf_size(
             options
-                .max_header_bytes
+                .max_read_buffer_bytes
                 .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
         )
         .keep_alive(true);
+    ConnectionDriver {
+        builder: builder.http1_only(),
+        // template:begin grpc:http1-driver-no-preface
+        preface_timeout: None,
+        // template:end grpc:http1-driver-no-preface
+    }
+}
+
+// template:begin grpc:http2-driver
+fn http2_driver(options: Http2Options) -> ConnectionDriver {
+    let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http2()
         .timer(TokioTimer::new())
-        .max_header_list_size(u32::try_from(options.max_header_bytes).unwrap_or(u32::MAX))
+        .max_header_list_size(options.max_header_list_size)
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
         .initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
-    builder
+    ConnectionDriver {
+        builder: builder.http2_only(),
+        preface_timeout: Some(options.preface_timeout),
+    }
 }
+// template:end grpc:http2-driver
 
 fn serve_listener<F, Fut, IO>(
     bound: BoundListener,
     app: Router,
-    options: ServerOptions,
-    builder: auto::Builder<TokioExecutor>,
+    limits: ConnectionLimits,
+    driver: ConnectionDriver,
     prepare_io: F,
 ) -> Server
 where
@@ -344,7 +383,7 @@ where
         metrics::Unit::Count,
         "Accepted connections closed without a response because the connection cap was reached."
     );
-    if options.max_connections.is_some() {
+    if limits.max_connections.is_some() {
         metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
     }
     let (failure, accept_failure) = watch::channel(None);
@@ -366,8 +405,8 @@ where
     let accept = accept_loop(
         listener,
         app,
-        options,
-        builder,
+        limits,
+        driver,
         connection_shutdown.clone(),
         connections.clone(),
         prepare_io,
@@ -388,8 +427,8 @@ where
 async fn accept_loop<F, Fut, IO>(
     listener: TcpListener,
     app: Router,
-    options: ServerOptions,
-    builder: auto::Builder<TokioExecutor>,
+    limits: ConnectionLimits,
+    driver: ConnectionDriver,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
     prepare_io: F,
@@ -399,7 +438,7 @@ async fn accept_loop<F, Fut, IO>(
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
-    let permits = options
+    let permits = limits
         .max_connections
         .map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
@@ -411,10 +450,14 @@ async fn accept_loop<F, Fut, IO>(
         let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(err) => {
+                let delay = accept_retry_delay(&err);
+                if delay.is_zero() {
+                    continue;
+                }
                 tracing::warn!(error = %err, "http_accept_failed");
                 tokio::select! {
                     () = finish.cancelled() => break,
-                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    () = tokio::time::sleep(delay) => {}
                 }
                 continue;
             }
@@ -434,22 +477,30 @@ async fn accept_loop<F, Fut, IO>(
             (stream, peer),
             permit,
             prepare_io.clone(),
-            builder.clone(),
+            driver.clone(),
             app.clone(),
-            options,
+            limits,
             connection_shutdown.clone(),
         ));
     }
     drop(listener);
 }
 
+fn accept_retry_delay(error: &std::io::Error) -> Duration {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
+    match error.kind() {
+        ConnectionAborted | ConnectionRefused | ConnectionReset => Duration::ZERO,
+        _ => Duration::from_millis(50),
+    }
+}
+
 fn serve_connection<F, Fut, IO>(
     (stream, peer): (TcpStream, SocketAddr),
     permit: Option<OwnedSemaphorePermit>,
     prepare_io: F,
-    builder: auto::Builder<TokioExecutor>,
+    driver: ConnectionDriver,
     app: Router,
-    options: ServerOptions,
+    limits: ConnectionLimits,
     shutdown: ConnectionShutdown,
 ) -> impl Future<Output = ()>
 where
@@ -457,7 +508,7 @@ where
     Fut: Future<Output = Option<(IO, &'static str)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let age_deadline = options
+    let age_deadline = limits
         .max_connection_age
         .map(|age| deadline_after(spread(age)));
     async move {
@@ -474,13 +525,30 @@ where
                 io = prepare_io(stream) => io,
             };
             let Some((io, scheme)) = io else {
-                return;
+                return Ok(());
             };
-            let io = if builder.is_http2_available() {
-                SniffDeadline::new(io, options.header_read_timeout)
+            // template:begin grpc:http2-observe-initial-read
+            let (io, preface) = if let Some(timeout) = driver.preface_timeout {
+                let (notify, received) = tokio::sync::oneshot::channel();
+                let mut notify = Some(notify);
+                // RFC 9113 §3.4, client connection preface magic.
+                let mut remaining = 24_usize;
+                let io = tokio_util::io::InspectReader::new(io, move |bytes| {
+                    remaining = remaining.saturating_sub(bytes.len());
+                    if remaining == 0
+                        && let Some(notify) = notify.take()
+                    {
+                        let _ = notify.send(());
+                    }
+                });
+                (
+                    tokio_util::either::Either::Left(io),
+                    Some((deadline_after(timeout), received)),
+                )
             } else {
-                SniffDeadline::decided(io)
+                (tokio_util::either::Either::Right(io), None)
             };
+            // template:end grpc:http2-observe-initial-read
             let service = ServiceBuilder::new()
                 .layer(Extension(ConnectionInfo {
                     scheme,
@@ -488,19 +556,31 @@ where
                     drain: finish.clone(),
                 }))
                 .service(app);
-            let connection =
-                builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+            let connection = driver
+                .builder
+                .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
             tokio::pin!(connection);
-            let ended = tokio::select! {
+            // template:begin grpc:http2-wait-initial-read
+            if let Some((deadline, received)) = preface {
+                tokio::select! {
+                    biased;
+                    _ = received => {}
+                    () = closing.as_mut() => return Ok(()),
+                    () = tokio::time::sleep_until(deadline) => {
+                        tracing::debug!(%peer, "http2_preface_timed_out");
+                        return Ok(());
+                    }
+                    ended = connection.as_mut() => return ended,
+                }
+            }
+            // template:end grpc:http2-wait-initial-read
+            tokio::select! {
                 biased;
                 () = closing => {
                     connection.as_mut().graceful_shutdown();
                     connection.await
                 }
                 ended = connection.as_mut() => ended,
-            };
-            if let Err(err) = ended {
-                tracing::debug!(%peer, error = %err, "http_connection_failed");
             }
         };
         tokio::select! {
@@ -509,7 +589,11 @@ where
                 force.cancelled().await;
                 forced.store(true, Ordering::Relaxed);
             } => {},
-            () = serve => {},
+            ended = serve => {
+                if let Err(err) = ended {
+                    tracing::debug!(%peer, error = %err, "http_connection_failed");
+                }
+            },
         }
     }
 }

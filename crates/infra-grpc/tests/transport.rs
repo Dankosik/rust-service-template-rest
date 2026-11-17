@@ -32,7 +32,7 @@ use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
-use infra_http_transport::{BoundListener, Drained, Server};
+use infra_http_transport::{BoundListener, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
@@ -512,12 +512,16 @@ impl Fixture {
             let certificate = pem(&pki.server_certificate);
             let key = secrecy::SecretString::from(pem(&pki.server_key));
             let ca = pem(&pki.ca_certificate);
-            server_tls_config(ServerTlsMaterial {
+            let config = server_tls_config(ServerTlsMaterial {
                 certificate_pem: &certificate,
                 private_key_pem: &key,
                 client_ca_pem: mtls.then_some(ca.as_str()),
             })
-            .expect("server TLS config")
+            .expect("server TLS config");
+            TlsOptions {
+                config,
+                handshake_timeout: Duration::from_secs(5),
+            }
         });
         let bound = BoundListener::bind(address)
             .expect("listener binds")

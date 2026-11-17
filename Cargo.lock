@@ -5203,7 +5203,6 @@ dependencies = [
  "rcgen",
  "rlimit",
  "rstest",
- "rustls",
  "secrecy",
  "serde",
  "serde_json",

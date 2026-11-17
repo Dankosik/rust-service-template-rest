@@ -37,7 +37,7 @@ use futures_util::FutureExt;
 
 use health::{PreparedReadiness, Probe, Readiness, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions};
-use infra_http_transport::{BoundListener, ServerOptions};
+use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
     install_subscriber, install_tracer_provider, runtime_metrics,
@@ -532,11 +532,14 @@ async fn start(
         .await
         .map_err(BootstrapError::Admission)?;
 
-    let server_options = ServerOptions {
+    let server_options = Http1Options {
         header_read_timeout: http.header_read_timeout,
-        max_header_bytes: usize::try_from(http.max_header_bytes.as_u64()).unwrap_or(usize::MAX),
-        max_connections: http.max_connections,
-        max_connection_age: http.max_connection_age,
+        max_read_buffer_bytes: usize::try_from(http.max_header_bytes.as_u64())
+            .unwrap_or(usize::MAX),
+        connections: ConnectionLimits {
+            max_connections: http.max_connections,
+            max_connection_age: http.max_connection_age,
+        },
     };
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!();

@@ -13,13 +13,23 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
-hyper-util = { workspace = true, features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
+hyper-util = { workspace = true, features = [
+    "server", "service", "tokio", "http1",
+    # template:begin grpc:transport-http2-feature
+    "http2",
+    # template:end grpc:transport-http2-feature
+] }
 metrics = { workspace = true }
 shared-rules = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = [
+    "rt",
+    # template:begin grpc:transport-read-inspection-feature
+    "io",
+    # template:end grpc:transport-read-inspection-feature
+] }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std"] }
 # template:begin grpc:transport-tls-dependencies

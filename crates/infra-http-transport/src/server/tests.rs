@@ -2,21 +2,22 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
 use axum::routing::get;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::sniff::HTTP2_PREFACE;
 use super::*;
 
 fn loopback() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
 
-fn options() -> ServerOptions {
-    ServerOptions {
+fn options() -> Http1Options {
+    Http1Options {
         header_read_timeout: Duration::from_millis(300),
-        max_header_bytes: 8 * 1024,
-        max_connections: NonZeroU32::new(4),
-        max_connection_age: None,
+        max_read_buffer_bytes: 8 * 1024,
+        connections: ConnectionLimits {
+            max_connections: NonZeroU32::new(4),
+            max_connection_age: None,
+        },
     }
 }
 
@@ -37,7 +38,11 @@ fn app() -> Router {
 }
 
 async fn fetch(addr: SocketAddr, path: &str) -> String {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let stream = TcpStream::connect(addr).await.unwrap();
+    fetch_http1(stream, path).await
+}
+
+async fn fetch_http1(mut stream: impl AsyncRead + AsyncWrite + Unpin, path: &str) -> String {
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
@@ -146,7 +151,7 @@ async fn pending_request() -> (Server, TcpStream) {
     (server, peer)
 }
 
-async fn assert_peer_closed(mut peer: TcpStream) {
+async fn assert_peer_closed(mut peer: impl AsyncRead + Unpin) {
     let mut response = Vec::new();
     let closed =
         tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
@@ -241,8 +246,8 @@ async fn accept_panic_after_stop_is_still_observed() {
     let server = serve_listener(
         listener,
         app(),
-        options(),
-        connection_builder(options()),
+        options().connections,
+        http1_driver(options()),
         move |stream| {
             let _ = &marker;
             async move { Some((stream, "http")) }
@@ -262,6 +267,25 @@ async fn accept_panic_after_stop_is_still_observed() {
     drop(peer);
 }
 
+#[test]
+fn transient_accept_errors_retry_without_the_resource_backoff() {
+    for error in [
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionRefused,
+    ] {
+        assert_eq!(
+            accept_retry_delay(&error.into()),
+            Duration::ZERO,
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        accept_retry_delay(&io::ErrorKind::OutOfMemory.into()),
+        Duration::from_millis(50)
+    );
+}
+
 #[tokio::test]
 async fn silent_client_is_closed_after_the_header_timeout() {
     let server = Server::bind(loopback(), app(), options()).unwrap();
@@ -278,7 +302,7 @@ async fn silent_client_is_closed_after_the_header_timeout() {
 
 #[tokio::test]
 async fn an_http1_listener_opens_no_http2_connection() {
-    let options = ServerOptions {
+    let options = Http1Options {
         header_read_timeout: Duration::from_secs(30),
         ..options()
     };
@@ -293,10 +317,7 @@ async fn an_http1_listener_opens_no_http2_connection() {
 const HTTP2_CLIENT_PREFACE: &[u8] =
     b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
 
-async fn assert_http2_rejected(
-    mut peer: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    sent: &[u8],
-) {
+async fn assert_http2_rejected(mut peer: impl AsyncRead + AsyncWrite + Unpin, sent: &[u8]) {
     peer.write_all(sent).await.unwrap();
     let mut response = Vec::new();
     let closed =
@@ -316,7 +337,7 @@ async fn assert_http2_rejected(
 
 #[tokio::test]
 async fn an_http1_listener_reads_the_first_request_head_under_one_timeout() {
-    let options = ServerOptions {
+    let options = Http1Options {
         header_read_timeout: Duration::from_secs(1),
         ..options()
     };
@@ -332,60 +353,6 @@ async fn an_http1_listener_reads_the_first_request_head_under_one_timeout() {
         "expected EOF one timeout after accept, got {closed:?}"
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_undecided_protocol_fails_reads_at_the_deadline() {
-    let timeout = Duration::from_secs(5);
-    let preface_but_one = &HTTP2_PREFACE[..HTTP2_PREFACE.len() - 1];
-    for sent in [&b""[..], b"P", preface_but_one] {
-        let (mut client, server) = tokio::io::duplex(64);
-        let mut io = SniffDeadline::new(server, timeout);
-        let started = tokio::time::Instant::now();
-        client.write_all(sent).await.unwrap();
-        let mut read = [0u8; 64];
-        let error = loop {
-            match io.read(&mut read).await {
-                Ok(_) => {}
-                Err(error) => break error,
-            }
-        };
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{sent:?}");
-        assert_eq!(started.elapsed(), timeout, "{sent:?}");
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_undecided_protocol_cannot_be_read_after_the_deadline() {
-    let timeout = Duration::from_secs(5);
-    let (mut client, server) = tokio::io::duplex(64);
-    let mut io = SniffDeadline::new(server, timeout);
-    tokio::time::advance(timeout).await;
-    client.write_all(HTTP2_PREFACE).await.unwrap();
-
-    let error = io.read(&mut [0; 64]).await.unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_decided_protocol_is_never_timed_out() {
-    let cases: [&[&[u8]]; 4] = [
-        &[b"GET"],
-        &[b"PR", b"OPFIND"],
-        &[b"PRI * HTTP/2.0\r\n", b"\r\nSM\r\n\r\n"],
-        &[b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0"],
-    ];
-    for chunks in cases {
-        let (mut client, server) = tokio::io::duplex(64);
-        let mut io = SniffDeadline::new(server, Duration::from_secs(5));
-        let mut read = [0u8; 64];
-        for chunk in chunks {
-            client.write_all(chunk).await.unwrap();
-            assert_eq!(io.read(&mut read).await.unwrap(), chunk.len());
-        }
-        let idle = tokio::time::timeout(Duration::from_mins(1), io.read(&mut read)).await;
-        assert!(idle.is_err(), "{chunks:?}: {idle:?}");
-    }
 }
 
 #[tokio::test]
@@ -430,7 +397,7 @@ async fn oversized_header_is_431() {
 #[tokio::test]
 async fn connection_cap_refuses_the_excess() {
     let mut opts = options();
-    opts.max_connections = NonZeroU32::new(1);
+    opts.connections.max_connections = NonZeroU32::new(1);
     let server = Server::bind(loopback(), app(), opts).unwrap();
     let addr = server.local_addr();
     let first = TcpStream::connect(addr).await.unwrap();
@@ -459,7 +426,7 @@ async fn connection_cap_refuses_the_excess() {
 async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(5);
-    opts.max_connection_age = Some(Duration::from_millis(200));
+    opts.connections.max_connection_age = Some(Duration::from_millis(200));
     let server = Server::bind(loopback(), app(), opts).unwrap();
     let addr = server.local_addr();
     let mut kept = TcpStream::connect(addr).await.unwrap();
@@ -506,118 +473,32 @@ use rustls::pki_types::ServerName;
 use tls_test_support::localhost_tls;
 use tokio_rustls::TlsConnector;
 
-#[tokio::test]
-async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
-    let (server_config, client_config) = localhost_tls(b"h2");
-    let mut opts = options();
-    opts.header_read_timeout = Duration::from_secs(30);
-    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
-        app(),
-        opts,
-        Some(Arc::new(server_config)),
-    );
-    let addr = server.local_addr();
-    let mut stalled = TcpStream::connect(addr).await.unwrap();
-    stalled.write_all(&[0x16]).await.unwrap();
-    let later = TcpStream::connect(addr).await.unwrap();
-    let later = TlsConnector::from(Arc::new(client_config))
-        .connect(ServerName::try_from("localhost").unwrap(), later)
-        .await
-        .unwrap();
-    let drained = server.drain(Duration::from_secs(2)).await.unwrap();
-    assert_eq!(drained, Drained::Complete);
-    drop(later);
-    let mut buf = [0u8; 1];
-    let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
-    std::assert_matches!(
-        closed,
-        Ok(Ok(0)),
-        "expected EOF from the server, got {closed:?}"
-    );
+fn http2_options() -> Http2Options {
+    Http2Options {
+        preface_timeout: Duration::from_millis(300),
+        max_header_list_size: 8 * 1024,
+        connections: options().connections,
+    }
 }
 
-#[tokio::test]
-async fn connection_age_closes_a_socket_still_waiting_for_tls() {
-    let (server_config, _) = localhost_tls(b"h2");
-    let options = ServerOptions {
-        header_read_timeout: Duration::from_secs(10),
-        max_connection_age: Some(Duration::from_millis(200)),
-        ..options()
-    };
-    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
-        app(),
-        options,
-        Some(Arc::new(server_config)),
-    );
-    let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
-    let mut byte = [0];
-    let closed = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte)).await;
-    std::assert_matches!(closed, Ok(Ok(0)), "expected EOF before the TLS timeout");
-    assert_eq!(
-        server.drain(Duration::from_secs(1)).await.unwrap(),
-        Drained::Complete
-    );
+fn tls_options(config: rustls::ServerConfig) -> TlsOptions {
+    TlsOptions {
+        config: Arc::new(config),
+        handshake_timeout: Duration::from_secs(2),
+    }
 }
 
-#[tokio::test]
-async fn http2_listener_serves_http2_over_tls() {
-    use http_body_util::BodyExt as _;
-
-    let (server_config, client_config) = localhost_tls(b"h2");
-    let mut opts = options();
-    opts.header_read_timeout = Duration::from_secs(2);
-    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
-        app(),
-        opts,
-        Some(Arc::new(server_config)),
-    );
-    let addr = server.local_addr();
-    let stream = TcpStream::connect(addr).await.unwrap();
-    let tls = TlsConnector::from(Arc::new(client_config))
-        .connect(ServerName::try_from("localhost").unwrap(), stream)
+async fn connect_tls(
+    addr: SocketAddr,
+    config: rustls::ClientConfig,
+) -> io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let peer = TcpStream::connect(addr).await?;
+    TlsConnector::from(Arc::new(config))
+        .connect(ServerName::try_from("localhost").unwrap(), peer)
         .await
-        .unwrap();
-    let (mut sender, connection) = hyper::client::conn::http2::handshake(
-        hyper_util::rt::TokioExecutor::new(),
-        hyper_util::rt::TokioIo::new(tls),
-    )
-    .await
-    .unwrap();
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    let request = http::Request::builder()
-        .uri(format!("https://localhost:{}/ok", addr.port()))
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let response = tokio::time::timeout(Duration::from_secs(2), sender.send_request(request))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.status(), http::StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"ok");
-    server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
-#[tokio::test]
-async fn http1_tls_listener_rejects_http2_in_alpn_and_on_the_connection() {
-    let (server_config, mut client_config) = localhost_tls(b"h2");
-    let server = BoundListener::bind(loopback()).unwrap().serve_tls(
-        app(),
-        ServerOptions {
-            header_read_timeout: Duration::from_secs(2),
-            ..options()
-        },
-        Arc::new(server_config),
-    );
-    let addr = server.local_addr();
-    let name = ServerName::try_from("localhost").unwrap();
-    let peer = TcpStream::connect(addr).await.unwrap();
-    let error = TlsConnector::from(Arc::new(client_config.clone()))
-        .connect(name.clone(), peer)
-        .await
-        .expect_err("the HTTP/1 listener negotiated TLS with an h2-only client");
+fn assert_no_application_protocol(error: &io::Error) {
     std::assert_matches!(
         error
             .get_ref()
@@ -627,40 +508,253 @@ async fn http1_tls_listener_rejects_http2_in_alpn_and_on_the_connection() {
         )),
         "{error:?}"
     );
+}
 
-    client_config.alpn_protocols.push(b"http/1.1".to_vec());
-    let peer = TcpStream::connect(addr).await.unwrap();
-    let tls = TlsConnector::from(Arc::new(client_config))
-        .connect(name, peer)
+#[tokio::test]
+async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
+    let (server_config, client_config) = localhost_tls(b"h2");
+    let options = http2_options();
+    let tls = TlsOptions {
+        handshake_timeout: Duration::from_secs(30),
+        ..tls_options(server_config)
+    };
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), options, Some(tls));
+    let addr = server.local_addr();
+    let mut stalled = TcpStream::connect(addr).await.unwrap();
+    stalled.write_all(&[0x16]).await.unwrap();
+    let later = connect_tls(addr, client_config).await.unwrap();
+    drop(later);
+    tokio::time::pause();
+    let before_drain =
+        tokio::time::timeout(options.preface_timeout * 2, stalled.read(&mut [0])).await;
+    tokio::time::resume();
+    assert!(before_drain.is_err(), "{before_drain:?}");
+    let drained = server.drain(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(drained, Drained::Complete);
+    assert_peer_closed(stalled).await;
+}
+
+#[tokio::test]
+async fn connection_age_closes_a_socket_still_waiting_for_tls() {
+    let (server_config, _) = localhost_tls(b"h2");
+    let mut options = http2_options();
+    options.connections.max_connection_age = Some(Duration::from_millis(200));
+    let tls = TlsOptions {
+        handshake_timeout: Duration::from_secs(10),
+        ..tls_options(server_config)
+    };
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), options, Some(tls));
+    let client = TcpStream::connect(server.local_addr()).await.unwrap();
+    assert_peer_closed(client).await;
+    assert_eq!(
+        server.drain(Duration::from_secs(1)).await.unwrap(),
+        Drained::Complete
+    );
+}
+
+#[tokio::test]
+async fn an_http2_tls_connection_serves_requests_after_the_preface_deadline() {
+    use http_body_util::BodyExt as _;
+
+    let (mut server_config, client_config) = localhost_tls(b"h2");
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let options = http2_options();
+    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
+        app(),
+        options,
+        Some(tls_options(server_config)),
+    );
+    let addr = server.local_addr();
+    let tls = connect_tls(addr, client_config).await.unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(tls),
+    )
+    .await
+    .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let check_request = async |sender: &mut hyper::client::conn::http2::SendRequest<_>| {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let request = http::Request::builder()
+                .uri(format!("https://localhost:{}/ok", addr.port()))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = sender.send_request(request).await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&body[..], b"ok");
+        })
         .await
         .unwrap();
-    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
-    assert_http2_rejected(tls, HTTP2_CLIENT_PREFACE).await;
+    };
+    check_request(&mut sender).await;
+    tokio::time::pause();
+    tokio::time::advance(options.preface_timeout * 2).await;
+    tokio::time::resume();
+    check_request(&mut sender).await;
     server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
-async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
+async fn an_http2_tls_listener_requires_h2_alpn() {
+    let (server_config, mut client_config) = localhost_tls(b"http/1.1");
+    let server = BoundListener::bind(loopback()).unwrap().serve_h2(
+        app(),
+        http2_options(),
+        Some(tls_options(server_config)),
+    );
+    let addr = server.local_addr();
+    let error = connect_tls(addr, client_config.clone()).await.unwrap_err();
+    assert_no_application_protocol(&error);
+
+    client_config.alpn_protocols.clear();
+    let mut tls = connect_tls(addr, client_config).await.unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), None);
+    if let Err(error) = tls.write_all(HTTP2_CLIENT_PREFACE).await {
+        std::assert_matches!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset,
+            "{error}"
+        );
+    }
+    assert_peer_closed(tls).await;
+    server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_http1_tls_listener_rejects_http2_and_allows_absent_alpn() {
+    let (server_config, mut client_config) = localhost_tls(b"h2");
+    let server = BoundListener::bind(loopback()).unwrap().serve_tls(
+        app(),
+        Http1Options {
+            header_read_timeout: Duration::from_secs(2),
+            ..options()
+        },
+        tls_options(server_config),
+    );
+    let addr = server.local_addr();
+    let error = connect_tls(addr, client_config.clone()).await.unwrap_err();
+    assert_no_application_protocol(&error);
+
+    client_config.alpn_protocols.push(b"http/1.1".to_vec());
+    let tls = connect_tls(addr, client_config.clone()).await.unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+    assert_http2_rejected(tls, HTTP2_CLIENT_PREFACE).await;
+
+    client_config.alpn_protocols.clear();
+    let tls = connect_tls(addr, client_config).await.unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), None);
+    let response = fetch_http1(tls, "/ok").await;
+    assert!(response.starts_with("HTTP/1.1 200 "));
+    assert!(response.ends_with("ok"));
+    server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+async fn read_http2_frame(peer: &mut TcpStream) -> ([u8; 9], Vec<u8>) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut header = [0; 9];
+        peer.read_exact(&mut header).await.unwrap();
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        assert!(length <= 16_384);
+        let mut payload = vec![0; length as usize];
+        peer.read_exact(&mut payload).await.unwrap();
+        (header, payload)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_http2_listener_negotiates_a_segmented_preface_and_advertises_the_header_limit() {
+    let options = Http2Options {
+        preface_timeout: Duration::from_secs(2),
+        max_header_list_size: 12_345,
+        ..http2_options()
+    };
     let server = BoundListener::bind(loopback())
         .unwrap()
-        .serve_h2(app(), options(), None);
-    let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
-    stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
-    let mut sent_by_server = Vec::new();
-    let closed = tokio::time::timeout(
-        Duration::from_secs(2),
-        stalled.read_to_end(&mut sent_by_server),
-    )
-    .await;
-    assert!(closed.is_ok(), "the stalled connection stayed open");
+        .serve_h2(app(), options, None);
+    let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+    let (first, last) = HTTP2_CLIENT_PREFACE.split_at(16);
+    peer.write_all(first).await.unwrap();
+    let (settings, payload) = read_http2_frame(&mut peer).await;
+    assert_eq!(settings[3..], [4, 0, 0, 0, 0, 0]);
+    let [a, b, c, d] = options.max_header_list_size.to_be_bytes();
+    assert!(
+        payload
+            .chunks_exact(6)
+            .any(|setting| setting == [0, 6, a, b, c, d]),
+        "the advertised SETTINGS omitted the header list limit: {payload:?}"
+    );
+
+    peer.write_all(last).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (header, payload) = read_http2_frame(&mut peer).await;
+            if header[3] == 4 {
+                assert_eq!(header, [0, 0, 0, 4, 1, 0, 0, 0, 0]);
+                assert!(payload.is_empty());
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the server did not acknowledge the client's SETTINGS");
+    drop(peer);
     server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn stalled_http2_prefaces_close_after_the_preface_timeout() {
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), http2_options(), None);
+    let mut peers = Vec::new();
+    for sent in [&b""[..], b"P", &HTTP2_CLIENT_PREFACE[..23]] {
+        let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
+        peer.write_all(sent).await.unwrap();
+        let (settings, _) = read_http2_frame(&mut peer).await;
+        assert_eq!(settings[3..], [4, 0, 0, 0, 0, 0]);
+        peers.push(peer);
+    }
+    for peer in peers {
+        assert_peer_closed(peer).await;
+    }
+    server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn drain_closes_an_http2_connection_already_waiting_for_the_preface() {
+    let options = Http2Options {
+        preface_timeout: Duration::from_secs(30),
+        ..http2_options()
+    };
+    let server = BoundListener::bind(loopback())
+        .unwrap()
+        .serve_h2(app(), options, None);
+    let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
+    stalled.write_all(b"P").await.unwrap();
+    let (settings, _) = read_http2_frame(&mut stalled).await;
+    assert_eq!(settings[3..], [4, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        server.drain(Duration::from_secs(1)).await.unwrap(),
+        Drained::Complete
+    );
+    assert_peer_closed(stalled).await;
 }
 
 #[tokio::test]
 async fn an_http2_only_listener_answers_no_http1_request() {
     let server = BoundListener::bind(loopback())
         .unwrap()
-        .serve_h2(app(), options(), None);
+        .serve_h2(app(), http2_options(), None);
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await

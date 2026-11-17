@@ -635,6 +635,15 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
     )
     _assert_workspace_dependencies_inherited(initializer, nodes)
+    transport = tomllib.loads(nodes["crates/infra-http-transport/Cargo.toml"].payload.decode())
+    grpc_enabled = inputs.grpc == "enabled"
+    hyper_util_features = set(transport["dependencies"]["hyper-util"]["features"])
+    if hyper_util_features & {"server-auto", "full"} or ("http2" in hyper_util_features) != grpc_enabled:
+        raise initializer.Refusal("only the gRPC profile may request HTTP/2 from the shared listener")
+    for table in ("dependencies", "dev-dependencies"):
+        hyper_features = set(transport.get(table, {}).get("hyper", {}).get("features", []))
+        if not grpc_enabled and hyper_features & {"http2", "full"}:
+            raise initializer.Refusal("REST-only transport requests HTTP/2 directly from Hyper")
     grpc = nodes.get("crates/infra-grpc/Cargo.toml")
     if grpc is not None:
         dependencies = tomllib.loads(grpc.payload.decode())["dependencies"]
