@@ -292,21 +292,120 @@ async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
 }
 
 #[tokio::test]
-async fn get_distinguishes_missing_and_empty_values_and_rejects_a_sequence_of_bytes() {
+async fn direct_cache_start_rejects_unsupported_byte_limits() {
+    for (max_key_bytes, max_value_bytes) in [(0, 1), (1, 0), (usize::MAX, 1), (1, usize::MAX)] {
+        let error = Cache::start(CacheOptions {
+            max_key_bytes,
+            max_value_bytes,
+            ..options("redis://127.0.0.1", true, true, None)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, CacheError::InvalidSizeLimit);
+    }
+}
+
+#[tokio::test]
+async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
-    let cache = admitted(&format!("redis://{}", server.address), true, true).await;
+    let cache = Cache::start(CacheOptions {
+        max_key_bytes: 4,
+        max_value_bytes: 2,
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .unwrap();
+    let namespace = cache.namespace(namespace!("n"));
+    let ttl = Duration::from_secs(1);
+    assert_eq!(namespace.get(&caller, "é").await, Ok(None));
+    namespace.set(&caller, "é", b"ok", ttl).await.unwrap();
+    namespace.delete(&caller, "é").await.unwrap();
+    let key_too_large = MutationError::NotApplied(OperationError::KeyTooLarge);
+    assert_eq!(
+        namespace.set(&caller, "éx", b"", ttl).await,
+        Err(SetError::Mutation(key_too_large))
+    );
+    assert_eq!(namespace.delete(&caller, "éx").await, Err(key_too_large));
+    assert_eq!(
+        namespace.get(&caller, "éx").await,
+        Err(OperationError::KeyTooLarge)
+    );
+    assert_eq!(
+        namespace.set(&caller, "é", b"abc", ttl).await,
+        Err(SetError::Mutation(MutationError::NotApplied(
+            OperationError::ValueTooLarge
+        )))
+    );
+    for command in ["EXISTS", "GETRANGE", "SET", "DEL"] {
+        assert_eq!(server.command_count(command, Some("n:é")), 1);
+        assert_eq!(server.command_count(command, Some("n:éx")), 0);
+    }
+}
+
+#[tokio::test]
+async fn bounded_reads_accept_attributed_replies_and_reject_invalid_transactions() {
+    let caller = OperationContext::unbounded();
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        max_value_bytes: 2,
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .unwrap();
     let namespace = cache.namespace(namespace!("replies"));
     assert_eq!(namespace.get(&caller, "key").await, Ok(None));
+    server.observed.answer_next(
+        "EXEC",
+        b"|1\r\n+source\r\n+cache\r\n*2\r\n|1\r\n+a\r\n+b\r\n:1\r\n|1\r\n+c\r\n+d\r\n$0\r\n\r\n",
+    );
+    assert_eq!(namespace.get(&caller, "key").await, Ok(Some(Vec::new())));
+    let generation = server.connections();
     server
         .observed
-        .answer_next("GET", b"|1\r\n+source\r\n+cache\r\n$0\r\n\r\n");
-    assert_eq!(namespace.get(&caller, "key").await, Ok(Some(Vec::new())));
-    server.observed.answer_next("GET", b"*1\r\n:65\r\n");
+        .answer_next("EXEC", b"*2\r\n:1\r\n$3\r\nabc\r\n");
+    assert_eq!(
+        namespace.get(&caller, "key").await,
+        Err(OperationError::ValueTooLarge)
+    );
+    server
+        .observed
+        .answer_next("GETRANGE", b"-NOPERM range denied\r\n");
     assert_eq!(
         namespace.get(&caller, "key").await,
         Err(OperationError::Unavailable)
     );
+    assert_eq!(namespace.get(&caller, "key").await, Ok(None));
+    assert_eq!(server.connections(), generation);
+
+    for (command, reply) in [
+        ("MULTI", &b"+QUEUED\r\n"[..]),
+        ("EXISTS", b"+OK\r\n"),
+        ("GETRANGE", b"+OK\r\n"),
+        ("EXEC", b"*1\r\n:1\r\n"),
+        ("EXEC", b"*2\r\n:2\r\n$0\r\n\r\n"),
+        ("EXEC", b"*2\r\n:0\r\n$1\r\na\r\n"),
+        ("EXEC", b"*2\r\n:1\r\n*1\r\n:65\r\n"),
+        ("EXEC", b"*2\r\n:1\r\n$4\r\nabcd\r\n"),
+    ] {
+        let metrics = TestMetrics::new();
+        let _recorder = metrics::set_default_local_recorder(metrics.recorder());
+        let server = FakeServer::start().await;
+        let cache = Cache::start(CacheOptions {
+            max_value_bytes: 2,
+            ..options(&format!("redis://{}", server.address), true, true, None)
+        })
+        .await
+        .unwrap();
+        let namespace = cache.namespace(namespace!("replies"));
+        server.observed.answer_next(command, reply);
+        assert_eq!(
+            namespace.get(&caller, "key").await,
+            Err(OperationError::Unavailable),
+            "{command} {reply:?}"
+        );
+        metrics.wait_for_retirements(1).await;
+    }
 }
 
 #[tokio::test]
@@ -503,12 +602,16 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     }
 
     let during_build = OperationContext::unbounded();
-    let write = cache.link.command::<()>(
-        || {
+    let write = cache.link.command::<(), _>(
+        |connection| {
             let mut command = redis::cmd("DEL");
             command.arg("stop:during_build");
             during_build.cancel();
-            command
+            crate::connection::query_mutation(
+                command,
+                connection,
+                crate::namespace::Operation::Delete,
+            )
         },
         &during_build,
         crate::namespace::Operation::Delete,
@@ -639,7 +742,7 @@ async fn a_slow_command_survives_overlapping_password_rotation() {
                 .wait_for(
                     Duration::from_secs(1),
                     "slow GET did not reach the server",
-                    || server.command_count("GET", Some("rotation_budget:slow")) == 1,
+                    || server.command_count("GETRANGE", Some("rotation_budget:slow")) == 1,
                 )
                 .await;
             server.require_password(&rotated);
@@ -785,11 +888,13 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(OperationError::Unavailable))
     );
-    let refused = cache.link.command::<()>(
-        || panic!("a refused command must not be built"),
-        &caller,
-        crate::namespace::Operation::Delete,
-    );
+    let refused = cache
+        .link
+        .command::<(), std::future::Ready<redis::RedisResult<()>>>(
+            |_| panic!("a refused command must not be built"),
+            &caller,
+            crate::namespace::Operation::Delete,
+        );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
         Poll::Ready(Err(CommandError::NotApplied(CommandFailure::Failed(
@@ -806,8 +911,8 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     assert_eq!(replacement.await, Ok(None));
     assert_work_metrics(&metrics, 0, 2, 0);
     assert_eq!(server.connections(), 1);
-    assert_eq!(server.command_count("GET", Some("waiting:pending")), 0);
-    assert_eq!(server.command_count("GET", Some("waiting:refused")), 0);
+    assert_eq!(server.command_count("GETRANGE", Some("waiting:pending")), 0);
+    assert_eq!(server.command_count("GETRANGE", Some("waiting:refused")), 0);
 }
 
 #[tokio::test]
@@ -837,7 +942,7 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
         () = server.wait_for(
             Duration::from_secs(1),
             "application window never reached the socket",
-            || server.command_count("GET", Some("capacity:pending")) == 256,
+            || server.command_count("GETRANGE", Some("capacity:pending")) == 256,
         ) => {}
     }
     let sibling = cache.namespace(namespace!("other_capacity"));
@@ -979,7 +1084,7 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
         () = server.wait_for(
             Duration::from_secs(1),
             "command did not reach the established socket",
-            || server.command_count("GET", Some("reply_timeout:first")) == 1,
+            || server.command_count("GETRANGE", Some("reply_timeout:first")) == 1,
         ) => {}
     }
     assert_work_metrics(&metrics, 1, 0, 0);
@@ -997,8 +1102,8 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
         () = server.wait_for(
             Duration::from_secs(1),
             "peers never reached established socket",
-            || server.command_count("GET", Some(&format!("reply_timeout:{late_key}"))) == 1
-                && server.command_count("GET", Some(&format!("reply_timeout:{peer_key}"))) == 1,
+            || server.command_count("GETRANGE", Some(&format!("reply_timeout:{late_key}"))) == 1
+                && server.command_count("GETRANGE", Some(&format!("reply_timeout:{peer_key}"))) == 1,
         ) => {}
     }
     assert_work_metrics(&metrics, 3, 0, 0);
@@ -1076,7 +1181,7 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
     assert_eq!(stopped, Err(OperationError::Stopped(Stopped::Deadline)));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
     assert_eq!(
-        server.command_count("GET", Some("caller_stop:slow")),
+        server.command_count("GETRANGE", Some("caller_stop:slow")),
         3,
         "a stopped GET never reached the connection"
     );
@@ -1104,6 +1209,59 @@ async fn reliability_final_owner_drop_cancels_inflight_setup() {
             || server.active() == 0,
         )
         .await;
+}
+
+#[tokio::test]
+async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned() {
+    use crate::CloseOutcome;
+
+    let caller = OperationContext::unbounded();
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(5),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .expect("start cache");
+    let namespace = cache.namespace(namespace!("explicit_close"));
+    assert_eq!(namespace.delete(&caller, "ready").await, Ok(()));
+    let old = server.stall_existing();
+
+    let mut pending =
+        std::pin::pin!(namespace.set(&caller, "pending", b"value", Duration::from_secs(1)));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    server
+        .wait_for(
+            Duration::from_secs(1),
+            "mutation did not reach the cache peer",
+            || server.command_count("SET", Some("explicit_close:pending")) == 1,
+        )
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    assert_eq!(cache.close(deadline).await, CloseOutcome::Complete);
+    assert_eq!(
+        pending.await,
+        Err(SetError::Mutation(MutationError::OutcomeUnknown(
+            OperationError::Unavailable
+        )))
+    );
+    server
+        .wait_for(
+            Duration::from_secs(1),
+            "close left the driver socket alive",
+            || server.closed_through(old),
+        )
+        .await;
+    assert_eq!(
+        namespace.get(&caller, "after").await,
+        Err(OperationError::Unavailable)
+    );
+    assert_eq!(
+        cache.close(tokio::time::Instant::now()).await,
+        CloseOutcome::Complete
+    );
+    assert_eq!(server.connections(), old);
 }
 
 #[tokio::test]
@@ -1142,7 +1300,7 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
         connections,
         "pre-dispatch caller stop must not retire the shared connection"
     );
-    for command in ["GET", "SET", "DEL"] {
+    for command in ["EXISTS", "GETRANGE", "SET", "DEL"] {
         assert_eq!(server.command_count(command, Some("context:stopped")), 0);
     }
 }
@@ -1179,7 +1337,7 @@ async fn dropping_a_command_before_dispatch_keeps_the_connection() {
 
     assert_eq!(server.connections(), connections);
     assert_eq!(
-        server.command_count("GET", Some("yield_before_send:stopped")),
+        server.command_count("GETRANGE", Some("yield_before_send:stopped")),
         0
     );
 }
@@ -1205,7 +1363,7 @@ async fn caller_cutoff_bounds_connection_acquisition() {
         .expect("parent cutoff must end acquisition before the five-second local ceiling"),
         Err(OperationError::Stopped(Stopped::Deadline))
     );
-    assert_eq!(server.command_count("GET", Some("acquire:pending")), 0);
+    assert_eq!(server.command_count("GETRANGE", Some("acquire:pending")), 0);
 }
 
 #[tokio::test]
@@ -1261,7 +1419,7 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
     assert!(futures_util::poll!(read.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "GET was not sent", || {
-            server.command_count("GET", Some("cancel_ready_read:key")) == 1
+            server.command_count("GETRANGE", Some("cancel_ready_read:key")) == 1
         })
         .await;
     assert_eq!(namespace.get(&caller, "fence").await, Ok(None));
@@ -1291,7 +1449,7 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
         assert!(futures_util::poll!(exchange.as_mut()).is_pending());
         assert_eq!(namespace.get(&caller, "fence").await, Ok(None));
         assert_eq!(
-            server.command_count("GET", Some("drop_ready_reply:discarded")),
+            server.command_count("GETRANGE", Some("drop_ready_reply:discarded")),
             1
         );
     }
@@ -1690,18 +1848,23 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
             .unwrap_err();
         assert_eq!(error, CacheError::AdmissionTimedOut);
 
+        let tasks = tokio_util::task::TaskTracker::new();
         {
-            let mut read = std::pin::pin!(file.read());
+            let mut read = std::pin::pin!(file.read(&tasks));
             assert!(futures_util::poll!(read.as_mut()).is_pending());
         }
         std::assert_matches!(
-            futures_util::poll!(std::pin::pin!(file.read())),
+            futures_util::poll!(std::pin::pin!(file.read(&tasks))),
             std::task::Poll::Ready(Err(crate::credentials::ReadFailure::Busy))
         );
+        tasks.close();
+        assert!(futures_util::poll!(std::pin::pin!(tasks.wait())).is_pending());
         release.send(()).unwrap();
         blocker.await.unwrap().unwrap();
-        tokio::task::spawn_blocking(|| ()).await.unwrap();
-        assert_eq!(file.read().await.unwrap().as_str(), "admitted");
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait())
+            .await
+            .expect("the abandoned read must leave the task tracker");
+        assert_eq!(file.read(&tasks).await.unwrap().as_str(), "admitted");
     });
 }
 
@@ -2038,7 +2201,7 @@ async fn caller_timeout_after_setup_wait_keeps_the_healthy_connection() {
     );
     assert_eq!(parent.check(), Ok(()));
     assert_eq!(
-        server.command_count("GET", Some("setup_wait:slow")),
+        server.command_count("GETRANGE", Some("setup_wait:slow")),
         1,
         "command must dispatch after setup before exhausting the caller deadline"
     );
@@ -2088,7 +2251,7 @@ async fn commands_fail_fast_while_a_background_setup_retry_is_in_flight() {
         futures_util::poll!(command.as_mut()),
         Poll::Ready(Err(OperationError::Unavailable))
     );
-    assert_eq!(server.command_count("GET", None), 0);
+    assert_eq!(server.command_count("GETRANGE", None), 0);
 }
 
 #[tokio::test]

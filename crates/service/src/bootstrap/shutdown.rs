@@ -96,33 +96,51 @@ impl Dependencies {
             object_storage,
             // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
         } = self;
-        // template:begin cache:service-shutdown-dependencies-cache-close
-        drop(cache);
-        // template:end cache:service-shutdown-dependencies-cache-close
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
         // template:end object-storage:service-shutdown-dependencies-object-storage-close
         async move {
-            // template:begin postgres:shutdown-dependencies-postgres-close
-            if let Some(pool) = postgres {
-                return match infra_postgres::close(
-                    &pool,
-                    deadline.saturating_duration_since(Instant::now()),
-                )
-                .await
-                {
-                    CloseOutcome::Complete => {
-                        tracing::info!("postgres_pool_closed");
-                        false
-                    }
-                    CloseOutcome::TimedOut => {
-                        tracing::warn!("postgres pool outlived its close budget");
-                        true
-                    }
-                };
-            }
-            // template:end postgres:shutdown-dependencies-postgres-close
-            false
+            let cache_close = async {
+                // template:begin cache:service-shutdown-dependencies-cache-close
+                if let Some(cache) = cache {
+                    return match cache.close(deadline).await {
+                        infra_cache::CloseOutcome::Complete => {
+                            tracing::info!("cache_closed");
+                            false
+                        }
+                        infra_cache::CloseOutcome::TimedOut => {
+                            tracing::warn!("cache outlived its close budget");
+                            true
+                        }
+                    };
+                }
+                // template:end cache:service-shutdown-dependencies-cache-close
+                false
+            };
+            let postgres_close = async {
+                // template:begin postgres:shutdown-dependencies-postgres-close
+                if let Some(pool) = postgres {
+                    return match infra_postgres::close(
+                        &pool,
+                        deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .await
+                    {
+                        CloseOutcome::Complete => {
+                            tracing::info!("postgres_pool_closed");
+                            false
+                        }
+                        CloseOutcome::TimedOut => {
+                            tracing::warn!("postgres pool outlived its close budget");
+                            true
+                        }
+                    };
+                }
+                // template:end postgres:shutdown-dependencies-postgres-close
+                false
+            };
+            let (cache_degraded, postgres_degraded) = tokio::join!(cache_close, postgres_close);
+            cache_degraded || postgres_degraded
         }
     }
 }

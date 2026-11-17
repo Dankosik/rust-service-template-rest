@@ -4,6 +4,8 @@ pub enum Error {
     InvalidFileDescriptorSet,
     #[error("gRPC descriptors disagree on the methods of service {0}")]
     ConflictingServiceDescription(String),
+    #[error("gRPC reflection descriptors disagree on the contents of file {0}")]
+    ConflictingFileDescription(String),
     #[error("gRPC service {0} is registered twice")]
     DuplicateService(&'static str),
     #[error("gRPC service {0} is in no described file descriptor set")]

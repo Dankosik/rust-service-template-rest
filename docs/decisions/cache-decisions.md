@@ -15,4 +15,24 @@ alternatives, external protocol/server constraints, and reopen conditions.
 | Distributed bytes-only cache beside `moka`, never a readiness gate or generic `Cache<K, V>` | Replica count alone does not require shared state when `moka` suffices; gating readiness on a cache turns cache loss into a full service outage. | An accepted operation cannot degrade when shared cache state is unreachable. |
 | Live `AUTH` on the open connection when `password_file` changes, over re-reading the file only for new connections (as `infra-postgres` does) | Valkey and Redis keep an authenticated session after its password changes ([ACL](https://valkey.io/commands/acl-setuser/)), so a re-read-only client would detect a bad rotated password only at the next reconnect, during an incident; token-file platforms such as [ElastiCache IAM](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/auth-iam.html) disconnect after 12 hours unless the session re-authenticates, and Lettuce re-authenticates on credential change for the same reasons. | No supported deployment rotates the password by rewriting a file, or the server drops sessions on every password change. |
 | Startup-admitted client TLS material | Valkey/Redis TLS defaults to `tls-auth-clients yes`; validating the key pair at startup avoids lazy dial failures, while rolling restarts handle certificate rotation without background file watchers. | Client certificates rotate faster than rolling restarts can follow. |
+| Atomic `EXISTS` and `GETRANGE` for bounded reads over plain `GET` or separate queries | Existing writers and earlier releases can leave large values. Checking after `GET` already allocated the reply. A range alone collapses empty and missing values. Both observations must describe the same value during replacement or expiry. | The server or driver offers one bounded read that distinguishes missing and empty while preserving the wire format. |
+
+## Rollout
+
+Grant the cache identity `MULTI`, `EXISTS`, `GETRANGE` and `EXEC` on its
+existing key patterns before starting the new client. Retain the previous
+read permission during mixed-version operation and rollback. Existing keys,
+values and TTLs remain readable. A value above the new limit produces a size
+error so the feature can use its source of truth.
+
+Choose `cache.max_key_bytes` for the encoded namespace, separator and key.
+Choose `cache.max_value_bytes` against the service memory budget at full
+concurrency, allowing for protocol buffers, copies and values still held by
+callers. Budget source capacity for entries that now exceed the limit.
+
+For a cache-aside read, reserve the time the source needs from the parent
+operation's remaining budget. Skip the lookup when the reserve consumes that
+budget. Otherwise pass a child context capped at the remainder to `get`.
+After a miss, size refusal, or lookup timeout, check the original context
+before calling the source. Propagate cancellation of the original operation.
 <!-- template:end cache:docs-cache-decisions -->

@@ -9,7 +9,7 @@ use axum::http::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::on;
 use http_body_util::{BodyExt, Collected, Full};
-use infra_idempotency_store::Store;
+use infra_idempotency_store::{ScopeKey, Store};
 use utoipa::OpenApi as _;
 
 use super::KEY_HEADER;
@@ -111,7 +111,7 @@ async fn capture_attempt(
             .iter()
             .map(HeaderValue::as_bytes),
     )
-    .map(|key| identity::scope_key(&caller, &key)) else {
+    .map(|key| ScopeKey::new(caller, &key)) else {
         Outcome::InvalidKey.record();
         return ControlFlow::Break(invalid_key());
     };
@@ -140,7 +140,6 @@ async fn capture_attempt(
     let attempt = Attempt {
         store,
         scope,
-        caller,
         fingerprint,
         operation_id,
         deadline,
