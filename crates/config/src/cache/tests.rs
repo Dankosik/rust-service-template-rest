@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use secrecy::ExposeSecret as _;
+
 use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
@@ -9,12 +11,13 @@ use crate::test_support::{
 use crate::validate::{ValidationErrors, admit_with};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const CACHE_DSN_ENV: (&str, &str) = ("APP__CACHE__DSN", "rediss://:hunter2@cache.example:6379");
 
 fn admit(
     input: CacheInput,
     app_env: &str,
     request_timeout: Duration,
-) -> Result<CacheConfig, ValidationErrors> {
+) -> Result<Option<CacheConfig>, ValidationErrors> {
     admit_with(|v| input.admit(app_env, Some(request_timeout), v))
 }
 
@@ -27,24 +30,30 @@ fn rejected_keys(input: CacheInput, app_env: &str) -> Vec<String> {
 }
 
 #[test]
-fn defaults_are_inert() {
-    let config = admit(CacheInput::default(), "production", REQUEST_TIMEOUT).unwrap();
-    assert!(config.dsn.is_none());
+fn only_a_nonblank_dsn_enables_the_cache() {
+    assert!(load_env(&[]).cache.is_none());
+    for dsn in ["", " \t "] {
+        let config = load_env(&[
+            ("APP__CACHE__DSN", dsn),
+            ("APP__CACHE__ROOT_CA_PATH", "/run/tls/root-ca.pem"),
+        ]);
+        assert!(config.cache.is_none());
+    }
+
+    let config = load_env(&[CACHE_DSN_ENV]);
+    let config = config.cache.as_ref().unwrap();
     assert_eq!(config.password_file, None);
+    assert_eq!(config.root_ca_path, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
     assert!(config.client_certificate.is_none());
+    assert!(!config.allow_plaintext && !config.allow_unauthenticated);
 }
 
 #[test]
-fn debug_output_redacts_the_dsn() {
-    let config = CacheConfig {
-        dsn: Some(SecretString::from(
-            "redis://:hunter2@127.0.0.1:6379".to_owned(),
-        )),
-        ..CacheConfig::default()
-    };
-    let rendered = format!("{config:?}");
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+fn admission_leaves_dsn_parsing_to_the_driver() {
+    let raw_dsn = "opaque-cache-dsn";
+    let config = load_env(&[("APP__CACHE__DSN", raw_dsn)]);
+    assert_eq!(config.cache.as_ref().unwrap().dsn.expose_secret(), raw_dsn);
 }
 
 #[test]
@@ -66,11 +75,12 @@ fn allow_flags_are_refused_outside_local_development() {
     }
     for app_env in ["local", "development"] {
         let local = CacheInput {
+            dsn: Some(SecretString::from(CACHE_DSN_ENV.1.to_owned())),
             allow_plaintext: true,
             allow_unauthenticated: true,
             ..CacheInput::default()
         };
-        let admitted = admit(local, app_env, REQUEST_TIMEOUT).unwrap();
+        let admitted = admit(local, app_env, REQUEST_TIMEOUT).unwrap().unwrap();
         assert!(admitted.allow_plaintext && admitted.allow_unauthenticated);
     }
 }
@@ -94,11 +104,13 @@ fn a_client_certificate_and_its_key_are_set_together() {
         ["cache.client_cert_path"]
     );
     let both = CacheInput {
+        dsn: Some(SecretString::from(CACHE_DSN_ENV.1.to_owned())),
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
         ..CacheInput::default()
     };
     let certificate = admit(both, "production", REQUEST_TIMEOUT)
+        .unwrap()
         .unwrap()
         .client_certificate
         .unwrap();
@@ -140,40 +152,42 @@ fn command_timeout_is_bounded() {
         command_timeout: Duration::from_secs(10),
         ..CacheInput::default()
     };
-    admit(edges, "production", REQUEST_TIMEOUT).unwrap();
+    assert!(
+        admit(edges, "production", REQUEST_TIMEOUT)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn an_active_cache_must_leave_half_the_request_budget() {
     let active = || CacheInput {
-        dsn: Some(SecretString::from(
-            "rediss://:secret@cache.example:6379".to_owned(),
-        )),
+        dsn: Some(SecretString::from(CACHE_DSN_ENV.1.to_owned())),
         command_timeout: Duration::from_millis(100),
         ..CacheInput::default()
     };
     let errors = admit(active(), "production", Duration::from_millis(150)).unwrap_err();
     assert!(errors.names("cache.command_timeout"));
 
-    admit(active(), "production", Duration::from_millis(200)).unwrap();
+    assert!(
+        admit(active(), "production", Duration::from_millis(200))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn cache_environment_reads_the_dsn_and_redacts_it() {
-    use secrecy::ExposeSecret as _;
-
     let cfg = load_env(&[
-        ("APP__CACHE__DSN", "redis://:hunter2@127.0.0.1:6379"),
+        CACHE_DSN_ENV,
         ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
         ("APP__APP__ENV", "local"),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
     ]);
-    assert_eq!(
-        cfg.cache.dsn.as_ref().unwrap().expose_secret(),
-        "redis://:hunter2@127.0.0.1:6379"
-    );
-    assert_eq!(cfg.cache.command_timeout, Duration::from_millis(200));
+    let cache = cfg.cache.as_ref().unwrap();
+    assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
+    assert_eq!(cache.command_timeout, Duration::from_millis(200));
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }
 
@@ -189,13 +203,18 @@ fn cache_empty_root_ca_path_unsets_the_file_value() {
         config: Some(file),
         ..LoadOptions::default()
     };
-    let set = load_from(&options, BUILD, env(&[])).unwrap();
+    let set = load_from(&options, BUILD, env(&[CACHE_DSN_ENV])).unwrap();
     assert_eq!(
-        set.cache.root_ca_path.as_deref(),
+        set.cache.as_ref().unwrap().root_ca_path.as_deref(),
         Some(Path::new("/etc/cache/root-ca.pem"))
     );
-    let unset = load_from(&options, BUILD, env(&[("APP__CACHE__ROOT_CA_PATH", " ")])).unwrap();
-    assert_eq!(unset.cache.root_ca_path, None);
+    let unset = load_from(
+        &options,
+        BUILD,
+        env(&[CACHE_DSN_ENV, ("APP__CACHE__ROOT_CA_PATH", " ")]),
+    )
+    .unwrap();
+    assert_eq!(unset.cache.as_ref().unwrap().root_ca_path, None);
 }
 
 #[test]
@@ -218,34 +237,49 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
         config: Some(overlay),
         ..LoadOptions::default()
     };
-    let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+    let cfg = load_from(&options, BUILD, env(&[CACHE_DSN_ENV])).unwrap();
     assert_eq!(
-        cfg.cache.password_file.as_deref(),
-        Some(std::path::Path::new("/run/secrets/from-file"))
+        cfg.cache.as_ref().unwrap().password_file.as_deref(),
+        Some(Path::new("/run/secrets/from-file"))
     );
 
     let cfg = load_from(
         &options,
         BUILD,
-        env(&[("APP__CACHE__PASSWORD_FILE", "/run/secrets/cache-password")]),
+        env(&[
+            CACHE_DSN_ENV,
+            ("APP__CACHE__PASSWORD_FILE", "/run/secrets/cache-password"),
+        ]),
     )
     .unwrap();
     assert_eq!(
-        cfg.cache.password_file.as_deref(),
-        Some(std::path::Path::new("/run/secrets/cache-password"))
+        cfg.cache.as_ref().unwrap().password_file.as_deref(),
+        Some(Path::new("/run/secrets/cache-password"))
     );
 
-    let cfg = load_from(&options, BUILD, env(&[("APP__CACHE__PASSWORD_FILE", " ")])).unwrap();
-    assert_eq!(cfg.cache.password_file, None);
+    let cfg = load_from(
+        &options,
+        BUILD,
+        env(&[CACHE_DSN_ENV, ("APP__CACHE__PASSWORD_FILE", " ")]),
+    )
+    .unwrap();
+    assert_eq!(cfg.cache.as_ref().unwrap().password_file, None);
 }
 
 #[test]
 fn cache_client_certificate_paths_are_set_from_the_environment_together() {
     let cfg = load_env(&[
+        CACHE_DSN_ENV,
         ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
         ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
     ]);
-    let certificate = cfg.cache.client_certificate.as_ref().unwrap();
+    let certificate = cfg
+        .cache
+        .as_ref()
+        .unwrap()
+        .client_certificate
+        .as_ref()
+        .unwrap();
     assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
     assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));
 

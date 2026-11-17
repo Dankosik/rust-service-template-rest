@@ -181,46 +181,13 @@ impl MigrationPostgresInput {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct MigrationInput {
     #[serde(deserialize_with = "crate::app::deserialize_migration_app")]
     pub(crate) app: AppConfig,
-    // template:begin authn:migration-input-authn
-    authn: IgnoredSection,
-    // template:end authn:migration-input-authn
-    // template:begin cache:migration-input-cache
-    cache: IgnoredSection,
-    // template:end cache:migration-input-cache
-    // template:begin grpc:migration-input-grpc
-    grpc: IgnoredSection,
-    // template:end grpc:migration-input-grpc
-    health: IgnoredSection,
-    http: IgnoredSection,
-    // template:begin http-idempotency:migration-input-http-idempotency
-    http_idempotency: IgnoredSection,
-    // template:end http-idempotency:migration-input-http-idempotency
-    // template:begin inbound-webhooks:migration-input-inbound-webhooks
-    inbound_webhooks: IgnoredSection,
-    // template:end inbound-webhooks:migration-input-inbound-webhooks
-    // template:begin jobs:migration-input-jobs
-    jobs: IgnoredSection,
-    // template:end jobs:migration-input-jobs
     log: LogConfig,
-    // template:begin messaging:migration-input-messaging
-    messaging: IgnoredSection,
-    // template:end messaging:migration-input-messaging
-    // template:begin object-storage:migration-input-object-storage
-    object_storage: IgnoredSection,
-    // template:end object-storage:migration-input-object-storage
     observability: MigrationObservabilityInput,
     postgres: MigrationPostgresInput,
-    runtime: IgnoredSection,
-    // template:begin service-auth:migration-input-service-auth
-    service_auth: IgnoredSection,
-    // template:end service-auth:migration-input-service-auth
-    // template:begin webhooks:migration-input-webhooks
-    webhooks: IgnoredSection,
-    // template:end webhooks:migration-input-webhooks
 }
 
 #[derive(Debug, Default, Deserialize)]

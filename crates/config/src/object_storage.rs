@@ -40,7 +40,7 @@ enum CredentialsKind {
     WorkloadIdentity,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, derive_more::Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ObjectStorageInput {
     #[serde(deserialize_with = "crate::de::string_enum")]
@@ -53,6 +53,7 @@ pub(crate) struct ObjectStorageInput {
     #[serde(deserialize_with = "crate::de::string")]
     region: String,
     #[serde(deserialize_with = "crate::de::string")]
+    #[debug(skip)]
     endpoint: String,
     #[serde(deserialize_with = "crate::de::string")]
     expected_bucket_owner: String,
@@ -94,25 +95,29 @@ impl Default for ObjectStorageInput {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, derive_more::Debug, PartialEq, Eq)]
 pub enum ObjectStorageProvider {
     AmazonS3 {
         region: String,
         expected_bucket_owner: String,
     },
     CloudflareR2 {
+        #[debug(skip)]
         endpoint: String,
     },
     Railway {
+        #[debug(skip)]
         endpoint: String,
         region: Option<String>,
     },
     S3Compatible {
+        #[debug(skip)]
         endpoint: String,
         region: Option<String>,
         path_style: bool,
     },
     Local {
+        #[debug(skip)]
         endpoint: String,
         region: Option<String>,
     },

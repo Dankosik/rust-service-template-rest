@@ -6,11 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
-use http_body_util::{BodyExt, Limited};
 use infra_http::extract::Path;
-use infra_http::problem::responses::{
-    GatewayTimeout, InternalServerError, RequestEntityTooLarge, RequestTimeout,
-};
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use metrics::{Counter, SharedString};
@@ -128,9 +124,6 @@ struct WebhookRejected(Problem);
 #[response(content_type = "application/problem+json")]
 struct ServiceUnavailable(Problem);
 
-/// The non-success webhook admission outcomes.  The route itself owns
-/// the signature requirement; OpenAPI's empty security array means only
-/// that bearer authentication is not the operation's authentication.
 #[derive(Debug, IntoResponses)]
 #[expect(dead_code, reason = "The variants exist only for the OpenAPI derive")]
 enum WebhookProblemResponses {
@@ -138,26 +131,12 @@ enum WebhookProblemResponses {
     Rejected(#[ref_response] WebhookRejected),
     #[response(status = 404)]
     NotFound(#[ref_response] NotFound),
-    #[response(status = 408)]
-    RequestTimeout(#[ref_response] RequestTimeout),
-    #[response(status = 413)]
-    RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-    #[response(status = 500)]
-    InternalServerError(#[ref_response] InternalServerError),
     #[response(status = 503)]
     Unavailable(#[ref_response] ServiceUnavailable),
-    #[response(status = 504)]
-    Timeout(#[ref_response] GatewayTimeout),
 }
 
 #[derive(OpenApi)]
-#[openapi(components(responses(
-    NotFound,
-    WebhookRejected,
-    ServiceUnavailable,
-    GatewayTimeout,
-    RequestTimeout
-)))]
+#[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
 struct WebhookComponents;
 
 #[must_use]
@@ -216,12 +195,9 @@ async fn receive(
         );
         return sanitized_problem().into_response();
     };
-    let body = match context
-        .read_body(Limited::new(body, MAX_BODY_BYTES).collect())
-        .await
-    {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) if caused_by_length_limit(&*error) => {
+    let body = match context.read_body_bytes(body, MAX_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) if caused_by_length_limit(&error) => {
             metrics.record(OutcomeSlot::BodyTooLarge);
             return body_too_large().into_response();
         }
@@ -389,6 +365,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::header::CONTENT_TYPE;
+    use http_body_util::BodyExt as _;
     use metrics::Label;
     use tower::ServiceExt;
 

@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: rust-service-template-rest
-  description: 'HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog.'
+  description: 'HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog. An unknown path returns a 404 Problem. An unsupported method returns a 405 Problem with Allow. The HTTP listener can reject oversized request headers with 431 before routing.'
   license:
     name: MIT
     identifier: MIT
@@ -25,12 +25,12 @@ paths:
               schema:
                 type: string
               example: ok
-        '400':
-          $ref: '#/components/responses/BadRequest'
         '413':
           $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
       security: []
       x-security-decision:
         exposure: public
@@ -49,8 +49,6 @@ paths:
               schema:
                 type: string
               example: ok
-        '400':
-          $ref: '#/components/responses/BadRequest'
         '413':
           $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
@@ -62,6 +60,8 @@ paths:
               schema:
                 type: string
               example: not ready
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
       security: []
       x-security-decision:
         exposure: public
@@ -116,7 +116,21 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          description: |-
+            durable webhook receipt storage is unavailable
+
+            request admission is at capacity
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+              description: seconds to wait before retrying when admission rejects the request at capacity
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '504':
           $ref: '#/components/responses/GatewayTimeout'
       security: []
@@ -195,20 +209,48 @@ components:
           example: about:blank
       additionalProperties: false
   responses:
+    AdmissionUnavailable:
+      description: request admission is at capacity
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          description: seconds to wait before retrying when admission rejects the request at capacity
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     AuthenticationForbidden:
       description: the verified principal lacks the operation's scopes, or the handler denied it
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Bearer challenge with insufficient_scope when the verified principal lacks the required scopes
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     AuthenticationMalformed:
       description: bearer authentication is malformed
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Bearer challenge with invalid_request when the Authorization header is malformed
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     AuthenticationUnauthorized:
       description: bearer authentication is required or invalid
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Bearer challenge for missing credentials or invalid_token for an invalid token
       content:
         application/problem+json:
           schema:
@@ -227,53 +269,6 @@ components:
             $ref: '#/components/schemas/Problem'
     GatewayTimeout:
       description: the request budget was exhausted
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
-    IdempotencyBadRequest:
-      description: |-
-        bearer authentication is malformed, the Idempotency-Key header is missing
-        or invalid, or the request is otherwise malformed or invalid
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
-    IdempotencyKeyMismatch:
-      description: |-
-        the Idempotency-Key is bound to a different request, or the operation
-        cannot process the request content
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
-    IdempotencyRequestInProgress:
-      description: |-
-        A request with this Idempotency-Key is still in progress, or the operation
-        reports a conflict. For `idempotency_request_in_progress`, retry with the
-        same key after the Retry-After interval.
-      headers:
-        Retry-After:
-          schema:
-            type: integer
-            format: int64
-            minimum: 0
-          description: seconds to wait before retrying an in-progress request with the same Idempotency-Key
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'
-    IdempotencyUnavailable:
-      description: |-
-        bearer authentication trust or idempotent request processing is unavailable,
-        or the committed outcome is uncertain; retry with the same Idempotency-Key
-      headers:
-        Retry-After:
-          schema:
-            type: integer
-            format: int64
-            minimum: 0
-          description: seconds to wait before retrying with the same Idempotency-Key
       content:
         application/problem+json:
           schema:
@@ -298,6 +293,11 @@ components:
             $ref: '#/components/schemas/Problem'
     RequestTimeout:
       description: request body was not received within the request budget
+      headers:
+        Connection:
+          schema:
+            type: string
+          description: close when the upload times out over HTTP/1.x
       content:
         application/problem+json:
           schema:

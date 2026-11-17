@@ -35,11 +35,17 @@ fn non_blank(value: OsString) -> Option<OsString> {
     (!is_blank(&value)).then_some(value)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) enum Endpoint<'a> {
     Typed(&'a str),
     Environment,
     EnvironmentRoot(String),
+}
+
+impl std::fmt::Debug for Endpoint<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.source(), f)
+    }
 }
 
 impl Endpoint<'_> {

@@ -24,8 +24,7 @@ use infra_bearerauthn::{
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
-    Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, ReplayableResponse,
-    Rollback, Tx,
+    self, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse, Rollback, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{
@@ -180,41 +179,33 @@ impl CreateWidgets for SqlWidgets {
         ProtectedOperationProblemResponses
     )
 )]
-async fn create_widget(
-    idempotency: Idempotency,
-    principal: VerifiedPrincipal,
-    State(widgets): State<Arc<dyn CreateWidgets>>,
-    headers: axum::http::HeaderMap,
-    Json(mut input): Json<NewWidget>,
-) -> Response {
+async fn create_widget(input: CreateInput) -> Result<CreateWidget, Box<Problem>> {
+    let (principal, State(widgets), headers, Json(mut input)) = input;
     if !may_create(&principal) {
-        return forbidden();
+        return Err(Box::new(forbidden()));
     }
     if let Some(name) = headers.get("x-widget-name") {
-        let Ok(name) = name.to_str() else {
-            return Problem::new(Code::BadRequest).into_response();
-        };
+        let name = name.to_str().map_err(|_| Problem::new(Code::BadRequest))?;
         name.clone_into(&mut input.name);
     }
     let handler_timeout = input.color == HANDLER_TIMEOUT_COLOR;
-    let execution =
-        idempotency.execute(
-            async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
-                Ok(widget) => created_response(&widget),
-                Err(err) => Err(Rollback::refuse(err.into_problem())),
-            },
-        );
-    if handler_timeout {
-        return tokio::time::timeout(Duration::from_secs(1), execution)
-            .await
-            .unwrap_or_else(|_| {
-                Problem::new(Code::GatewayTimeout)
-                    .detail("widget handler deadline expired")
-                    .into_response()
-            });
-    }
-    execution.await
+    Ok(CreateWidget {
+        widgets,
+        input,
+        handler_timeout,
+    })
 }
+
+type CreateInput = (
+    VerifiedPrincipal,
+    State<Arc<dyn CreateWidgets>>,
+    axum::http::HeaderMap,
+    Json<NewWidget>,
+);
+
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(create_widget))]
+struct CreateDocument;
 
 #[utoipa::path(
     put,
@@ -235,24 +226,53 @@ async fn create_widget(
         ProtectedOperationProblemResponses
     )
 )]
-async fn replace_widget(
-    Path(_id): Path<i64>,
-    idempotency: Idempotency,
-    principal: VerifiedPrincipal,
-    State(widgets): State<Arc<dyn CreateWidgets>>,
-    Json(input): Json<NewWidget>,
-) -> Response {
+async fn replace_widget(input: ReplaceInput) -> Result<CreateWidget, Box<Problem>> {
+    let (Path(_id), principal, State(widgets), Json(input)) = input;
     if !may_create(&principal) {
-        return forbidden();
+        return Err(Box::new(forbidden()));
     }
-    idempotency
-        .execute(
-            async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
-                Ok(widget) => created_response(&widget),
-                Err(err) => Err(Rollback::refuse(err.into_problem())),
-            },
-        )
-        .await
+    Ok(CreateWidget {
+        widgets,
+        input,
+        handler_timeout: false,
+    })
+}
+
+type ReplaceInput = (
+    Path<i64>,
+    VerifiedPrincipal,
+    State<Arc<dyn CreateWidgets>>,
+    Json<NewWidget>,
+);
+
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(replace_widget))]
+struct ReplaceDocument;
+
+struct CreateWidget {
+    widgets: Arc<dyn CreateWidgets>,
+    input: NewWidget,
+    handler_timeout: bool,
+}
+
+impl FreshCommand for CreateWidget {
+    async fn execute(self, tx: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
+        let widget = self
+            .widgets
+            .create(tx, &self.input)
+            .await
+            .map_err(|err| Rollback::refuse(err.into_problem()))?;
+        created_response(&widget)
+    }
+
+    fn attempt_timeout(&self) -> Option<(Duration, Problem)> {
+        self.handler_timeout.then(|| {
+            (
+                Duration::from_secs(1),
+                Problem::new(Code::GatewayTimeout).detail("widget handler deadline expired"),
+            )
+        })
+    }
 }
 
 fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
@@ -293,10 +313,8 @@ fn may_create(principal: &VerifiedPrincipal) -> bool {
     principal.client_id() != Some(REVOKED_CLIENT)
 }
 
-fn forbidden() -> Response {
-    Problem::new(Code::Forbidden)
-        .detail("widget creation is not permitted")
-        .into_response()
+fn forbidden() -> Problem {
+    Problem::new(Code::Forbidden).detail("widget creation is not permitted")
 }
 
 struct Provider {
@@ -539,30 +557,31 @@ fn options(budget: Duration) -> HardenOptions {
     }
 }
 
-fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
-    OpenApiRouter::with_openapi(bearer_document())
-        .routes(
-            composer
-                .route(routes!(create_widget))
-                .expect("the create route composes"),
+fn widget_contract() -> HttpContract<WidgetState> {
+    use utoipa::OpenApi as _;
+
+    HttpContract::new(OpenApiRouter::with_openapi(bearer_document()))
+        .merge(
+            idempotency::route(CreateDocument::openapi(), create_widget).expect("create composes"),
         )
-        .routes(
-            composer
-                .route(routes!(replace_widget))
-                .expect("the replace route composes"),
+        .unwrap()
+        .merge(
+            idempotency::route(ReplaceDocument::openapi(), replace_widget)
+                .expect("replace composes"),
         )
-        .merge(OpenApiRouter::with_openapi(composer.components()))
+        .unwrap()
 }
 
 #[test]
 fn widget_contract_declares_supported_protected_security() {
-    let mut composer = Composer::inert();
-    let contract = widget_contract(&mut composer);
-    std::assert_matches!(
-        HttpContract::new(OpenApiRouter::with_openapi(contract.into_openapi()))
-            .build((), Authentication::Public, &options(BUDGET))
-            .unwrap_err(),
-        infra_http::FinalizeError::ProtectedOperation { .. },
+    let document = serde_json::to_value(widget_contract().into_openapi().unwrap()).unwrap();
+    assert_eq!(
+        document["paths"][WIDGETS]["post"]["security"],
+        json!([{ "bearerAuth": ["widgets:write"] }])
+    );
+    assert_eq!(
+        document["paths"]["/widgets/{id}"]["put"]["security"],
+        json!([{ "bearerAuth": [] }])
     );
 }
 
@@ -580,23 +599,26 @@ impl Mounted {
             hold: Arc::clone(&hold),
         });
         let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
-        let mut composer = Composer::new(store);
-        let contract = widget_contract(&mut composer);
-        let activation = composer.finish();
-        std::assert_matches!(activation, Activation::Active { .. }, "{activation:?}");
-        let mounted = OpenApiRouter::with_openapi(bearer_document())
+        let contract = widget_contract();
+        let mounted = HttpContract::new(OpenApiRouter::with_openapi(bearer_document()))
             .nest(PRIMARY_PREFIX, contract.clone())
-            .nest(SECONDARY_PREFIX, contract);
-        let app = HttpContract::new(mounted)
+            .unwrap()
+            .nest(SECONDARY_PREFIX, contract)
+            .unwrap();
+        assert_eq!(mounted.idempotent_operations(), 4);
+        let app = mounted
             .with_probes(PRIMARY_PREFIX)
+            .unwrap()
             .with_probes(SECONDARY_PREFIX)
-            .build(
+            .unwrap()
+            .build_with_idempotency_store(
                 WidgetState {
                     readiness: readiness_reader(),
                     widgets,
                 },
                 Authentication::Bearer(Box::new(provider.verifier())),
                 &options(budget),
+                store,
             )
             .expect("the mounted auth contract builds");
         Self {
@@ -950,6 +972,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .routes(routes!(inherited_get));
     let app = HttpContract::new(contract)
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1100,6 +1123,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
         OpenApiRouter::with_openapi(root_policy).routes(routes!(authorized_without_idempotency));
     let app = HttpContract::new(contract)
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1174,6 +1198,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         OpenApiRouter::with_openapi(bearer_document()).routes(routes!(scoped_alternatives));
     let app = HttpContract::new(contract.layer(Extension(Arc::clone(&calls))))
         .with_probes("/")
+        .unwrap()
         .build(
             readiness_reader(),
             Authentication::Bearer(Box::new(provider.verifier())),
@@ -1547,11 +1572,11 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .await
         .unwrap();
     let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
-    let mut composer = Composer::new(Store::new(pool, RETENTION).unwrap());
-    let contract = HttpContract::new(widget_contract(&mut composer)).with_probes("");
-    let document = serde_json::to_value(contract.get_openapi()).unwrap();
+    let store = Store::new(pool, RETENTION).unwrap();
+    let contract = widget_contract().with_probes("").unwrap();
+    let document = serde_json::to_value(contract.clone().into_openapi().unwrap()).unwrap();
     let app = contract
-        .build(
+        .build_with_idempotency_store(
             WidgetState {
                 readiness: readiness_reader(),
                 widgets: Arc::new(SqlWidgets {
@@ -1567,6 +1592,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
                 log_health_probes: false,
                 draining: None,
             },
+            store,
         )
         .unwrap();
     let upload =
@@ -1793,16 +1819,48 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     );
     assert_eq!(body["detail"], "widget handler deadline expired");
     tokio::time::resume();
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    let (stored, retry_conflicts) =
+        until_free(|| mounted.create(ALICE, "k-handler", &input, "req-recovered")).await;
+    created(&stored, "req-recovered");
+    let mut connections = Vec::new();
+    for _ in 0..mounted.store_pool.options().get_max_connections() {
+        connections.push(
+            infra_postgres::acquire(&mounted.store_pool, "hold every idempotency connection")
+                .await
+                .unwrap(),
+        );
+    }
+    let blocked = mounted
+        .create(ALICE, "k-handler", &input, "req-acquiring")
+        .await;
+    drop(connections);
+    let body = problem(
+        &blocked,
+        StatusCode::GATEWAY_TIMEOUT,
+        "gateway_timeout",
+        "req-acquiring",
+    );
+    assert_eq!(body["detail"], "widget handler deadline expired");
+    let replay = mounted
+        .create(ALICE, "k-handler", &input, "req-replay")
+        .await;
+    assert_eq!(replay.as_bytes(), stored.as_bytes());
+    assert_eq!(
+        replay.maybe_header("idempotent-replayed"),
+        Some(HeaderValue::from_static("true"))
+    );
     assert_eq!(
         outcomes(&captured),
         counts(&[
             ("unavailable", 1),
-            ("in_progress", conflicts),
-            ("executed", 1),
-            ("abandoned", 1)
+            ("in_progress", conflicts + retry_conflicts),
+            ("executed", 2),
+            ("replayed", 1),
+            ("abandoned", 2)
         ])
     );
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 2);
     mounted.finish().await;
 }
 

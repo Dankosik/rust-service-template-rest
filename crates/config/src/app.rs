@@ -35,7 +35,7 @@ pub(crate) fn local_development_only(
     if enabled && !is_local_development(app_env) {
         return Err(ValidationError::new(
             key,
-            format!("is local/development-only, but app.env is \"{app_env}\""),
+            "requires app.env to be local or development",
         ));
     }
     Ok(())

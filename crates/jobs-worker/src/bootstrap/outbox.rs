@@ -74,19 +74,11 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
-        use infra_messaging::Registry;
-
         let config =
             service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
         let background = Background::new();
-        let mut registration = crate::Registration {
-            jobs: infra_jobs::KindsBuilder::new(),
-            messages: Registry::try_new([]).unwrap(),
-            postgres_messages: None,
-            config: &config,
-            background: &background,
-        };
+        let mut registration = crate::Registration::new(&config, &background).unwrap();
         let (handed, received) = tokio::sync::oneshot::channel();
         registration
             .with_postgres_messages(move |pool, _| {

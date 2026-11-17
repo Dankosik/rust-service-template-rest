@@ -3,13 +3,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::extract::{FromRequestParts, Request, State};
+use axum::body::{Body, Bytes, to_bytes};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{FromRequest, FromRequestParts, Request, State};
 use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Version};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
-use http_body::Body as _;
+use http_body::{Body as _, Frame};
+use http_body_util::BodyExt as _;
+// template:begin http-idempotency:http-idempotency-collected-import
+use http_body_util::Collected;
+// template:end http-idempotency:http-idempotency-collected-import
 use operation_context::{Deadline, OperationContext, Stopped};
 use tower_http::request_id::RequestId;
 
@@ -29,12 +35,33 @@ impl RequestContext {
         &self.operation
     }
 
-    pub async fn read_body<F: Future>(&self, read: F) -> F::Output {
-        read_body(Some(self), read).await
+    pub async fn read_body_frame(
+        &self,
+        body: &mut Body,
+    ) -> Option<Result<Frame<Bytes>, axum::Error>> {
+        track_body_read(Some(self), body.frame()).await
+    }
+
+    pub async fn read_body_bytes(&self, body: Body, limit: usize) -> Result<Bytes, axum::Error> {
+        track_body_read(Some(self), to_bytes(body, limit)).await
     }
 }
 
-pub(crate) async fn read_body<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
+pub(crate) async fn read_request_bytes(request: Request) -> Result<Bytes, BytesRejection> {
+    let context = request.extensions().get::<RequestContext>().cloned();
+    track_body_read(context.as_ref(), Bytes::from_request(request, &())).await
+}
+
+// template:begin http-idempotency:http-idempotency-collect-body
+pub(crate) async fn collect_body(
+    context: Option<&RequestContext>,
+    body: Body,
+) -> Result<Collected<Bytes>, axum::Error> {
+    track_body_read(context, body.collect()).await
+}
+// template:end http-idempotency:http-idempotency-collect-body
+
+async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
     let _upload_read = context
         .and_then(|context| context.upload_reads.as_deref())
         .map(|reads| {
@@ -233,7 +260,6 @@ pub(crate) fn cancelled_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, Bytes};
     use axum::routing::get;
     use tower::ServiceExt as _;
 

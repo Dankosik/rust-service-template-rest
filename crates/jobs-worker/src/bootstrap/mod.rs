@@ -387,19 +387,7 @@ fn register_capabilities(
     register: Register<'_>,
     background: &Background,
 ) -> Result<RetainedCapabilities, WorkerError> {
-    let mut registration = Registration {
-        // template:begin jobs:worker-bootstrap-register-jobs
-        jobs: infra_jobs::KindsBuilder::new(),
-        // template:end jobs:worker-bootstrap-register-jobs
-        // template:begin messaging:worker-bootstrap-register-messaging
-        messages: infra_messaging::Registry::try_new([])?,
-        // template:end messaging:worker-bootstrap-register-messaging
-        // template:begin outbox:worker-bootstrap-postgres-messages-initial
-        postgres_messages: None,
-        // template:end outbox:worker-bootstrap-postgres-messages-initial
-        config,
-        background,
-    };
+    let mut registration = Registration::new(config, background)?;
     register(&mut registration).map_err(WorkerError::Registration)?;
     #[allow(
         unused_variables,

@@ -111,7 +111,7 @@ pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 pub use validate::{ValidationError, ValidationErrors};
 
 #[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(default)]
 pub(crate) struct ConfigInput {
     pub(crate) app: AppConfig,
     http: http::HttpInput,
@@ -125,9 +125,6 @@ pub(crate) struct ConfigInput {
     log: LogConfig,
     runtime: RuntimeConfig,
     observability: ObservabilityConfig,
-    // template:begin messaging:config-input-field
-    messaging: serde::de::IgnoredAny,
-    // template:end messaging:config-input-field
     // template:begin cache:config-input-field
     cache: cache::CacheInput,
     // template:end cache:config-input-field
@@ -146,12 +143,6 @@ pub(crate) struct ConfigInput {
     // template:begin http-idempotency:config-http-idempotency-input-field
     http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-input-field
-    // template:begin jobs:config-jobs-input-field
-    jobs: serde::de::IgnoredAny,
-    // template:end jobs:config-jobs-input-field
-    // template:begin webhooks:config-webhooks-input-field
-    webhooks: serde::de::IgnoredAny,
-    // template:end webhooks:config-webhooks-input-field
 }
 
 impl ConfigInput {
@@ -266,7 +257,7 @@ pub struct ServiceSections {
     pub runtime: RuntimeConfig,
     pub observability: ObservabilityConfig,
     // template:begin cache:config-field
-    pub cache: CacheConfig,
+    pub cache: Option<CacheConfig>,
     // template:end cache:config-field
     // template:begin object-storage:config-field
     pub object_storage: Option<ObjectStorageConfig>,

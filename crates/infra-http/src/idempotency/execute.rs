@@ -1,17 +1,15 @@
 use std::fmt;
 use std::mem::DropGuard;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
+use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
 use tokio::time::Instant;
 
-use super::Tx;
 use super::stored::ReplayableResponse;
+use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
@@ -63,70 +61,46 @@ impl Outcome {
     }
 }
 
-#[derive(Clone)]
 pub(super) struct Attempt {
     pub(super) store: Store,
     pub(super) scope: ScopeKey,
     pub(super) fingerprint: Digest,
     pub(super) operation_id: Arc<str>,
     pub(super) deadline: RequestDeadline,
-    pub(super) outcome: AttemptOutcome,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Provenance {
-    Executed,
-    Replayed,
-}
+pub trait FreshCommand: Send {
+    fn execute(
+        self,
+        tx: &mut Tx<'_>,
+    ) -> impl Future<Output = Result<ReplayableResponse, Rollback>> + Send;
 
-pub struct Idempotency {
-    attempt: Attempt,
-}
-
-impl fmt::Debug for Idempotency {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Idempotency")
-            .field("operation_id", &self.attempt.operation_id)
-            .finish_non_exhaustive()
+    fn attempt_timeout(&self) -> Option<(Duration, Problem)> {
+        None
     }
 }
 
-impl<S> FromRequestParts<S> for Idempotency
-where
-    S: Send + Sync,
-{
-    type Rejection = Response;
-
-    fn from_request_parts(
-        parts: &mut Parts,
-        _: &S,
-    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let attempt = parts.extensions.remove::<Attempt>();
-        std::future::ready(attempt.map(|attempt| Self { attempt }).ok_or_else(|| {
-            tracing::error!(
-                failure = "attempt_missing",
-                "http_idempotency_wiring_failed"
-            );
-            sanitized_internal_error()
-        }))
+impl Attempt {
+    pub(super) async fn run(self, command: impl FreshCommand) -> Response {
+        let timeout = command.attempt_timeout();
+        let execution = self.execute(command);
+        match timeout {
+            Some((budget, problem)) => tokio::time::timeout(budget, execution)
+                .await
+                .unwrap_or_else(|_| problem.into_response()),
+            None => execution.await,
+        }
     }
-}
 
-impl Idempotency {
-    pub async fn execute<W>(self, work: W) -> Response
-    where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<ReplayableResponse, Rollback>,
-    {
+    async fn execute(self, command: impl FreshCommand) -> Response {
         let Attempt {
             store,
             scope,
             fingerprint,
             operation_id,
             deadline,
-            outcome,
-        } = self.attempt;
-        let guard = DropGuard::new(&outcome, |outcome| outcome.record(Outcome::Abandoned));
+        } = self;
+        let guard = DropGuard::new((), |()| Outcome::Abandoned.record());
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
@@ -134,7 +108,12 @@ impl Idempotency {
                     &scope,
                     &fingerprint,
                     attempt_end,
-                    async |tx: &mut Tx<'_>| work(tx).await.map(ReplayableResponse::into_record),
+                    async |tx: &mut Tx<'_>| {
+                        command
+                            .execute(tx)
+                            .await
+                            .map(ReplayableResponse::into_record)
+                    },
                 );
                 tokio::time::timeout_at(attempt_end, attempt)
                     .await
@@ -191,15 +170,12 @@ impl Answer {
         }
     }
 
-    async fn settle<'a>(
-        self,
-        deadline: Instant,
-        guard: DropGuard<&'a AttemptOutcome, impl FnOnce(&'a AttemptOutcome)>,
-    ) -> Response {
+    async fn settle(self, deadline: Instant, guard: DropGuard<(), impl FnOnce(())>) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
             return std::future::pending().await;
         }
-        DropGuard::dismiss(guard).record(self.outcome);
+        DropGuard::dismiss(guard);
+        self.outcome.record();
         self.response
     }
 }
@@ -217,7 +193,7 @@ fn map_attempted(
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
         }
         Ok(Attempted::RolledBack(Rollback::Refused(response))) => {
-            Answer::operation_response(*response, Outcome::NotStored)
+            Answer::operation_response(refusal(*response), Outcome::NotStored)
         }
         Ok(Attempted::RolledBack(error)) => {
             tracing::warn!(
@@ -237,28 +213,32 @@ fn map_attempted(
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
         }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
-        Ok(Attempted::Replay(record)) => Answer::operation_response(
-            mark_provenance(
-                ReplayableResponse::from_record(record).into_response(),
-                Provenance::Replayed,
-            ),
-            Outcome::Replayed,
-        ),
+        Ok(Attempted::Replay(record)) => {
+            let mut response = ReplayableResponse::from_record(record).into_response();
+            response
+                .headers_mut()
+                .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
+            Answer::operation_response(response, Outcome::Replayed)
+        }
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
         }
         Ok(Attempted::Committed(record)) => Answer::operation_response(
-            mark_provenance(
-                ReplayableResponse::from_record(record).into_response(),
-                Provenance::Executed,
-            ),
+            ReplayableResponse::from_record(record).into_response(),
             Outcome::Executed,
         ),
     }
 }
 
-pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) -> Response {
-    response.extensions_mut().insert(provenance);
+pub(super) fn refusal(mut response: Response) -> Response {
+    if response.status().is_success() {
+        tracing::error!(
+            failure = "successful_refusal",
+            "http_idempotency_wiring_failed"
+        );
+        return sanitized_internal_error();
+    }
+    response.headers_mut().remove(REPLAYED_HEADER);
     response
 }
 
@@ -295,17 +275,6 @@ impl fmt::Display for ScopeDigest<'_> {
     }
 }
 
-#[derive(Clone, Default)]
-pub(super) struct AttemptOutcome(Arc<AtomicBool>);
-
-impl AttemptOutcome {
-    pub(super) fn record(&self, outcome: Outcome) {
-        if !self.0.swap(true, Ordering::Relaxed) {
-            outcome.record();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
@@ -325,6 +294,14 @@ mod tests {
         )
     }
 
+    struct UnreachableCommand;
+
+    impl FreshCommand for UnreachableCommand {
+        async fn execute(self, _: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
+            panic!("exhausted requests must not execute work");
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
         use futures_util::FutureExt as _;
@@ -336,25 +313,20 @@ mod tests {
             let origin = Instant::now()
                 .checked_sub(elapsed)
                 .expect("the deadline origin fits");
-            let idempotency = Idempotency {
-                attempt: Attempt {
-                    store: Store::new(pool.clone(), Duration::from_mins(1))
-                        .expect("retention fits PostgreSQL"),
-                    scope: scope(),
-                    fingerprint: [9; 32],
-                    operation_id: "test".into(),
-                    deadline: RequestDeadline::from_deadline(
-                        operation_context::Deadline::new(origin, budget),
-                        budget,
-                    )
-                    .expect("the deadline fits"),
-                    outcome: AttemptOutcome::default(),
-                },
+            let attempt = Attempt {
+                store: Store::new(pool.clone(), Duration::from_mins(1))
+                    .expect("retention fits PostgreSQL"),
+                scope: scope(),
+                fingerprint: [9; 32],
+                operation_id: "test".into(),
+                deadline: RequestDeadline::from_deadline(
+                    operation_context::Deadline::new(origin, budget),
+                    budget,
+                )
+                .expect("the deadline fits"),
             };
-            let response = idempotency
-                .execute(async |_: &mut Tx<'_>| {
-                    panic!("exhausted requests must not execute work");
-                })
+            let response = attempt
+                .run(UnreachableCommand)
                 .now_or_never()
                 .expect("the reserve leaves no database attempt to poll");
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -377,5 +349,18 @@ mod tests {
         assert!(answer.response.headers().get(RETRY_AFTER).is_none());
         let problem = body_json(answer.response).await;
         assert_eq!(problem["code"], "internal_error");
+    }
+
+    #[test]
+    fn a_rollback_cannot_claim_success_or_replay() {
+        for (status, expected) in [
+            (StatusCode::CREATED, StatusCode::INTERNAL_SERVER_ERROR),
+            (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST),
+        ] {
+            let rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
+            let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), "test");
+            assert_eq!(answer.response.status(), expected);
+            assert!(!answer.response.headers().contains_key(REPLAYED_HEADER));
+        }
     }
 }

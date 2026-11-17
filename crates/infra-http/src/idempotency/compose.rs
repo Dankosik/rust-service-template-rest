@@ -1,149 +1,96 @@
 use std::convert::Infallible;
-use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
-use axum::extract::{OriginalUri, Request, State};
+use axum::extract::{FromRequest, OriginalUri, Request, State};
 use axum::http::{HeaderName, HeaderValue};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::routing::on;
 use http_body_util::{BodyExt, Collected, Full};
 use infra_idempotency_store::{ScopeKey, Store};
 use utoipa::OpenApi as _;
 
+use super::KEY_HEADER;
 use super::declaration::{self, CompositionError};
-use super::execute::{
-    Attempt, AttemptOutcome, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance,
-};
+use super::execute::{Attempt, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, refusal};
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::IdempotencyComponents;
-use super::{KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
+use crate::HttpContract;
 use crate::authn::VerifiedPrincipal;
-use crate::context::{RequestContext, RequestDeadline, read_body};
+use crate::context::{RequestContext, RequestDeadline, collect_body};
 use crate::problem::{
     Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
     sanitized_internal_error,
 };
-use utoipa_axum::router::UtoipaMethodRouter;
+use utoipa_axum::router::OpenApiRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 
-#[derive(Debug)]
-pub struct Composer {
-    store: Option<Store>,
-    operations: usize,
-}
-
-#[derive(Debug)]
-pub enum Activation {
-    Inactive,
-    Active {
-        store: Store,
-        operations: NonZeroUsize,
-    },
-    Unconfigured {
-        operations: NonZeroUsize,
-    },
-}
-
-impl Composer {
-    #[must_use]
-    pub fn new(store: Store) -> Self {
-        Self {
-            store: Some(store),
-            operations: 0,
-        }
-    }
-
-    #[must_use]
-    pub fn inert() -> Self {
-        Self {
-            store: None,
-            operations: 0,
-        }
-    }
-
-    pub fn route<S>(
-        &mut self,
-        routes: UtoipaMethodRouter<S>,
-    ) -> Result<UtoipaMethodRouter<S>, CompositionError>
-    where
-        S: Clone + Send + Sync + 'static,
-    {
-        metrics::describe_counter!(
-            HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
-            metrics::Unit::Count,
-            "Idempotency capture refusals, handler refusals, and execution outcomes."
-        );
-        let (schemas, mut paths, method_router) = routes;
-        let operation = declaration::prepare(&mut paths)?;
-        let state = RouteState {
-            store: self.store.clone(),
-            operation_id: Arc::from(operation.id),
-            fingerprint_headers: Arc::from(operation.fingerprint_headers),
-        };
-        self.operations += 1;
-        Ok((
-            schemas,
-            paths,
-            method_router.route_layer(middleware::from_fn_with_state(state, run_attempt)),
-        ))
-    }
-
-    #[must_use]
-    pub fn components(&self) -> utoipa::openapi::OpenApi {
-        IdempotencyComponents::openapi()
-    }
-
-    #[must_use]
-    pub fn finish(self) -> Activation {
-        let Some(operations) = NonZeroUsize::new(self.operations) else {
-            return Activation::Inactive;
-        };
-        match self.store {
-            Some(store) => Activation::Active { store, operations },
-            None => Activation::Unconfigured { operations },
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RouteState {
-    store: Option<Store>,
-    operation_id: Arc<str>,
-    fingerprint_headers: Arc<[HeaderName]>,
-}
-
-async fn run_attempt(State(state): State<RouteState>, request: Request, next: Next) -> Response {
-    let operation_id = Arc::clone(&state.operation_id);
-    match capture_attempt(state, request).await {
-        ControlFlow::Continue((request, outcome)) => {
-            let response = next.run(request).await;
-            if !response.status().is_success() {
-                outcome.record(Outcome::NotStored);
+pub fn route<S, I, M, C, F>(
+    mut document: utoipa::openapi::OpenApi,
+    prepare: impl Fn(I) -> F + Clone + Send + Sync + 'static,
+) -> Result<HttpContract<S>, CompositionError>
+where
+    S: Clone + Send + Sync + 'static,
+    I: FromRequest<S, M> + Send + 'static,
+    M: 'static,
+    C: FreshCommand + 'static,
+    F: Future<Output = Result<C, Box<Problem>>> + Send + 'static,
+{
+    let mut paths = std::mem::take(&mut document.paths);
+    let operation = declaration::prepare(&mut paths)?;
+    metrics::describe_counter!(
+        HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
+        metrics::Unit::Count,
+        "Idempotency capture refusals, handler refusals, and execution outcomes."
+    );
+    let method = operation.method;
+    let operation_id: Arc<str> = operation.id.into();
+    let fingerprint_headers: Arc<[HeaderName]> = operation.fingerprint_headers.into();
+    let handler = move |State(state): State<S>, request: Request| {
+        let operation_id = operation_id.clone();
+        let fingerprint_headers = fingerprint_headers.clone();
+        let prepare = prepare.clone();
+        async move {
+            let (request, attempt) =
+                match capture_attempt(operation_id, &fingerprint_headers, request).await {
+                    ControlFlow::Continue(captured) => captured,
+                    ControlFlow::Break(response) => return response,
+                };
+            let input = match I::from_request(request, &state).await {
+                Ok(input) => input,
+                Err(rejected) => {
+                    Outcome::NotStored.record();
+                    return refusal(rejected.into_response());
+                }
+            };
+            match prepare(input).await {
+                Ok(command) => attempt.run(command).await,
+                Err(problem) => {
+                    Outcome::NotStored.record();
+                    problem.into_response()
+                }
             }
-            seal_replay_metadata(response, &operation_id)
         }
-        ControlFlow::Break(refusal) => refusal,
-    }
+    };
+    document.merge(IdempotencyComponents::openapi());
+    let routes =
+        OpenApiRouter::with_openapi(document).routes((Vec::new(), paths, on(method, handler)));
+    Ok(HttpContract::from_idempotent(routes))
 }
 
 async fn capture_attempt(
-    state: RouteState,
+    operation_id: Arc<str>,
+    fingerprint_headers: &[HeaderName],
     request: Request,
-) -> ControlFlow<Response, (Request, AttemptOutcome)> {
-    let RouteState {
-        store,
-        operation_id,
-        fingerprint_headers,
-    } = state;
-    let Some(store) = store else {
+) -> ControlFlow<Response, (Request, Attempt)> {
+    let Some(store) = request.extensions().get::<Store>().cloned() else {
         return ControlFlow::Break(wiring_failure(&operation_id, "store_missing"));
     };
     let request = request.with_limited_body();
-    let (mut parts, body) = request.into_parts();
+    let (parts, body) = request.into_parts();
     let Some(deadline) = parts.extensions.get::<RequestDeadline>().copied() else {
         return ControlFlow::Break(wiring_failure(&operation_id, "deadline_missing"));
     };
@@ -169,7 +116,7 @@ async fn capture_attempt(
         return ControlFlow::Break(invalid_key());
     };
     let context = parts.extensions.get::<RequestContext>();
-    let collected = match read_body(context, buffer_body(body)).await {
+    let collected = match buffer_body(context, body).await {
         Ok(collected) => collected,
         Err(refusal) => {
             Outcome::NotStored.record();
@@ -186,22 +133,20 @@ async fn capture_attempt(
         &parts.method,
         uri,
         &parts.headers,
-        &fingerprint_headers,
+        fingerprint_headers,
         &body,
         trailers.as_ref(),
     );
-    let outcome = AttemptOutcome::default();
-    parts.extensions.insert(Attempt {
+    let attempt = Attempt {
         store,
         scope,
         fingerprint,
         operation_id,
         deadline,
-        outcome: outcome.clone(),
-    });
+    };
     ControlFlow::Continue((
         Request::from_parts(parts, restore_body(body, trailers)),
-        outcome,
+        attempt,
     ))
 }
 
@@ -209,8 +154,11 @@ async fn capture_attempt(
     clippy::result_large_err,
     reason = "the error is the refusal response the middleware returns"
 )]
-async fn buffer_body(body: Body) -> Result<Collected<Bytes>, Response> {
-    body.collect().await.map_err(|error| {
+async fn buffer_body(
+    context: Option<&RequestContext>,
+    body: Body,
+) -> Result<Collected<Bytes>, Response> {
+    collect_body(context, body).await.map_err(|error| {
         let problem = if caused_by_length_limit(&error) {
             body_too_large()
         } else {
@@ -244,24 +192,6 @@ fn invalid_key() -> Response {
         .into_response()
 }
 
-fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response {
-    let provenance = response.extensions_mut().remove::<Provenance>();
-    response.headers_mut().remove(REPLAYED_HEADER);
-    if !response.status().is_success() {
-        return response;
-    }
-    match provenance {
-        Some(Provenance::Executed) => response,
-        Some(Provenance::Replayed) => {
-            response
-                .headers_mut()
-                .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
-            response
-        }
-        None => wiring_failure(operation_id, "seam_unused"),
-    }
-}
-
 fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
     tracing::error!(
         operation = operation_id,
@@ -273,7 +203,7 @@ fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, StatusCode};
+    use axum::http::HeaderMap;
 
     use super::*;
 
@@ -292,31 +222,5 @@ mod tests {
             Some(&HeaderValue::from_static("kept"))
         );
         assert_eq!(collected.to_bytes(), Bytes::from_static(b"raw bytes"));
-    }
-
-    #[test]
-    fn sealing_replay_metadata_after_the_handler_trusts_only_provenance() {
-        let replay = (StatusCode::CREATED, [(REPLAYED_HEADER, "forged")]).into_response();
-        let replay = super::super::execute::mark_provenance(replay, Provenance::Replayed);
-        let replay = seal_replay_metadata(replay, "test");
-        assert_eq!(
-            replay.headers().get(REPLAYED_HEADER),
-            Some(&HeaderValue::from_static("true"))
-        );
-        assert_eq!(replay.headers().get_all(REPLAYED_HEADER).iter().count(), 1);
-
-        let executed = (StatusCode::CREATED, [(REPLAYED_HEADER, "forged")]).into_response();
-        let executed = super::super::execute::mark_provenance(executed, Provenance::Executed);
-        let executed = seal_replay_metadata(executed, "test");
-        assert!(!executed.headers().contains_key(REPLAYED_HEADER));
-
-        let failure = (StatusCode::BAD_REQUEST, [(REPLAYED_HEADER, "forged")]).into_response();
-        let failure = seal_replay_metadata(failure, "test");
-        assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
-        assert!(!failure.headers().contains_key(REPLAYED_HEADER));
-
-        let missing = seal_replay_metadata(Response::new(Body::empty()), "test");
-        assert_eq!(missing.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(!missing.headers().contains_key(REPLAYED_HEADER));
     }
 }

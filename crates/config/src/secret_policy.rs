@@ -59,12 +59,13 @@ pub(crate) fn first_secret_key(table: &toml::Table) -> Option<String> {
 fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
     for (key, value) in table {
         path.push(key);
-        let found = match value {
-            toml::Value::Table(nested) => find_secret(nested, path),
-            leaf => {
-                let dotted = path.join(".");
-                (is_secret_key(&dotted) && has_non_empty_leaf_value(leaf)).then_some(dotted)
-            }
+        let dotted = path.join(".");
+        let found = if is_secret_key(&dotted) && has_value(value) {
+            Some(dotted)
+        } else {
+            value
+                .as_table()
+                .and_then(|nested| find_secret(nested, path))
         };
         path.pop();
         if found.is_some() {
@@ -74,10 +75,11 @@ fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<St
     None
 }
 
-fn has_non_empty_leaf_value(value: &toml::Value) -> bool {
+fn has_value(value: &toml::Value) -> bool {
     match value {
         toml::Value::String(text) => !text.trim().is_empty(),
         toml::Value::Array(items) => !items.is_empty(),
+        toml::Value::Table(table) => !table.is_empty(),
         _ => true,
     }
 }

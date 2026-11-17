@@ -1,3 +1,4 @@
+use infra_bearerauthn::Verifier;
 use service_config::{AuthnConfig, Config};
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use service_config::{JwtAlgorithm, TokenProfile};
@@ -5,7 +6,6 @@ use service_config::{JwtAlgorithm, TokenProfile};
 use super::background::Background;
 
 use super::BootstrapError;
-use infra_http::Authentication;
 
 #[allow(
     unused_variables,
@@ -15,7 +15,7 @@ use infra_http::Authentication;
 pub(super) async fn prepare(
     config: &Config,
     background: &mut Background,
-) -> Result<Authentication, BootstrapError> {
+) -> Result<Option<Verifier>, BootstrapError> {
     let mode = config.authn.mode();
     match &config.authn {
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
@@ -45,7 +45,7 @@ pub(super) async fn prepare(
             .await
             .map_err(|source| authentication_preparation_error(mode, jwks_uri.is_some(), source))?;
             background.spawn("jwt_refresh", refresh);
-            Ok(Authentication::Bearer(Box::new(verifier)))
+            Ok(Some(verifier))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
         // template:begin oidc-introspection:bootstrap-prepare-auth-introspection
@@ -91,7 +91,7 @@ pub(super) async fn prepare(
                 provider_concurrency,
                 cache: cache_enabled.then_some(cache),
             })
-            .map(|verifier| Authentication::Bearer(Box::new(verifier)))
+            .map(Some)
             .map_err(|source| BootstrapError::AuthenticationPreparation {
                 mode,
                 key: "authn.introspection_endpoint",
@@ -99,7 +99,7 @@ pub(super) async fn prepare(
             })
         }
         // template:end oidc-introspection:bootstrap-prepare-auth-introspection
-        AuthnConfig::None => Ok(Authentication::Public),
+        AuthnConfig::None => Ok(None),
     }
 }
 
