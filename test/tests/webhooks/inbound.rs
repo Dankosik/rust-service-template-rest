@@ -51,9 +51,9 @@ fn mounted_receiver_with_limit(
     budget: Duration,
     max_body_bytes: usize,
 ) -> axum::Router {
-    let app = infra_http::finalize_public(infra_http::webhooks::router())
+    let app = infra_http::finalize_public(service::webhooks::router())
         .expect("webhook operation is public")
-        .with_state(infra_http::webhooks::WebhookState::active(receiver));
+        .with_state(service::webhooks::WebhookState::active(receiver));
     infra_http::harden(
         app,
         &infra_http::HardenOptions {

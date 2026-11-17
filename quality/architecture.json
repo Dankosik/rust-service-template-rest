@@ -146,10 +146,6 @@
         "crates/infra-postgres/Cargo.toml": {
           "reason": "The idempotency inbound contract re-exports PostgreSQL Tx.",
           "authority": "docs/repo-architecture.md#global-invariants"
-        },
-        "crates/infra-webhooks/Cargo.toml": {
-          "reason": "Inbound webhook route policy consumes verification and receipt contracts.",
-          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },

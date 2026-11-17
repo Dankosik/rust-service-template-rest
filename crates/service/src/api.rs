@@ -80,7 +80,7 @@ fn assemble() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(infra_http::router())
         // template:begin inbound-webhooks:service-api-webhooks-router
-        .merge(infra_http::webhooks::router())
+        .merge(crate::webhooks::router())
     // template:end inbound-webhooks:service-api-webhooks-router
 }
 

@@ -7,6 +7,10 @@ use axum::response::{IntoResponse, Response};
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http_body_util::{BodyExt, Limited};
+use infra_http::extract::Path;
+use infra_http::problem::responses::{GatewayTimeout, InternalServerError, RequestEntityTooLarge};
+use infra_http::problem::{SANITIZED_DETAIL, body_too_large, caused_by_length_limit};
+use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
 use metrics::{Counter, SharedString};
@@ -15,14 +19,7 @@ use utoipa::{IntoResponses, OpenApi, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::context::{RequestContext, RequestDeadline, read_body};
-use crate::extract::Path;
-use crate::problem::responses::{
-    GatewayTimeout, InternalServerError, ProblemComponents, RequestEntityTooLarge,
-};
-use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
-
-pub(crate) const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
+const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
 #[derive(Clone, derive_more::Debug)]
 pub struct WebhookState {
@@ -163,9 +160,7 @@ where
         metrics::Unit::Count,
         "Inbound webhook deliveries by admission outcome."
     );
-    let mut document = ProblemComponents::openapi();
-    document.merge(WebhookComponents::openapi());
-    OpenApiRouter::with_openapi(document).routes(routes!(receive))
+    OpenApiRouter::with_openapi(WebhookComponents::openapi()).routes(routes!(receive))
 }
 
 #[utoipa::path(
@@ -199,16 +194,23 @@ async fn receive(
         return state.unknown_endpoint();
     };
     let (parts, body) = request.into_parts();
-    let Some(deadline) = parts.extensions.get::<RequestDeadline>() else {
+    let (Some(deadline), Some(context)) = (
+        parts.extensions.get::<RequestDeadline>(),
+        parts.extensions.get::<RequestContext>(),
+    ) else {
         tracing::error!(
             endpoint = %endpoint_id,
             failure = "deadline_missing",
             "webhook_wiring_failed"
         );
-        return sanitized_internal_error();
+        return Problem::new(Code::InternalServerError)
+            .detail(SANITIZED_DETAIL)
+            .into_response();
     };
-    let context = parts.extensions.get::<RequestContext>();
-    let body = match read_body(context, Limited::new(body, MAX_BODY_BYTES).collect()).await {
+    let body = match context
+        .read_body(Limited::new(body, MAX_BODY_BYTES).collect())
+        .await
+    {
         Ok(collected) => collected.to_bytes(),
         Err(error) if caused_by_length_limit(&*error) => {
             metrics.record(OutcomeSlot::BodyTooLarge);
@@ -373,11 +375,6 @@ impl EndpointMetrics {
     }
 }
 
-fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
-    shared_rules::error_chain::causes(error)
-        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
-}
-
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -387,7 +384,16 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::test_support::body_json;
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("JSON body")
+    }
 
     #[tokio::test]
     async fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
@@ -493,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn inert_receiver_returns_a_problem_before_reading_or_authenticating_the_body() {
-        let app = crate::finalize_public(router())
+        let app = infra_http::finalize_public(router())
             .expect("the webhook operation is explicitly public")
             .with_state(WebhookState::inert());
         let response = app
@@ -518,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_undecodable_endpoint_id_is_a_problem() {
-        let app = crate::finalize_public(router())
+        let app = infra_http::finalize_public(router())
             .expect("the webhook operation is explicitly public")
             .with_state(WebhookState::inert());
         let response = app

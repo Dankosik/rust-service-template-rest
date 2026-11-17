@@ -1,7 +1,7 @@
 use axum::extract::FromRef;
 use health::ReadinessReader;
 // template:begin inbound-webhooks:service-state-webhooks-import
-use infra_http::webhooks::WebhookState;
+use crate::webhooks::WebhookState;
 // template:end inbound-webhooks:service-state-webhooks-import
 
 #[derive(Clone, Debug, FromRef)]

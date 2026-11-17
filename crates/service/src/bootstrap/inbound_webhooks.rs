@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::background::Background;
-use infra_http::webhooks::WebhookState;
+use crate::webhooks::WebhookState;
 use infra_postgres::PgPool;
 use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{KeyRing, SigningKey};

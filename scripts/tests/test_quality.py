@@ -89,7 +89,7 @@ class Architecture(unittest.TestCase):
     def test_documented_exceptions_and_dev_composition(self) -> None:
         for owner, target, kind in (
             ("infra-http", "infra-postgres", None),
-            ("infra-http", "infra-webhooks", "build"),
+            ("infra-http", "infra-idempotency-store", "build"),
             ("infra-messaging", "infra-jobs", None),
             ("infra-grpc", "grpc-contracts", "dev"),
         ):

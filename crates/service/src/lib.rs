@@ -4,6 +4,9 @@ mod bootstrap;
 pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration};
 mod state;
 pub use state::AppState;
+// template:begin inbound-webhooks:service-webhooks-module
+pub mod webhooks;
+// template:end inbound-webhooks:service-webhooks-module
 // template:begin grpc:service-registration-module
 pub use bootstrap::GrpcRegistration;
 // template:end grpc:service-registration-module
