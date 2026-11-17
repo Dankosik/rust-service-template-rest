@@ -3,7 +3,7 @@ mod outcome;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
 use metrics::Unit;
@@ -25,6 +25,7 @@ const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
 const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
+const LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC: &str = "jobs_last_terminal_attempt_timestamp_seconds";
 const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
 pub const ATTEMPT_DURATION_METRIC: &str = "jobs_attempt_duration_seconds";
 pub(crate) const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
@@ -49,6 +50,11 @@ pub(crate) fn describe_metrics() {
         ATTEMPTS_METRIC,
         Unit::Count,
         "Observed attempt outcomes. Terminal failures count only after an acknowledged write."
+    );
+    metrics::describe_gauge!(
+        LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC,
+        Unit::Seconds,
+        "Unix timestamp of the last acknowledged terminal failure by job kind"
     );
     metrics::describe_histogram!(
         ATTEMPT_DURATION_METRIC,
@@ -193,6 +199,10 @@ fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transitio
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_failed");
         }
         Transition::Fail { summary, .. } => {
+            if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+                metrics::gauge!(LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC, "kind" => attempt.kind)
+                    .set(timestamp.as_secs_f64());
+            }
             tracing::warn!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, job.failure_reason = outcome, error = summary.as_str(), "job_failed");
         }
     }

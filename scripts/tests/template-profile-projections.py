@@ -491,34 +491,7 @@ def _assert_profile_output(initializer, nodes: dict[str, Node], profile: str, pa
             raise initializer.Refusal(f"{profile} selection omitted profile output: {relative}")
 
 
-def _assert_tls_fixture_ownership(initializer, nodes: dict[str, Node], paths: Iterable[str]) -> None:
-    # This owner carries both the fixture source and its workspace PKI producer.
-    # Retained workspace consumers determine whether both must remain available.
-    consumers: list[str] = []
-    for relative, node in nodes.items():
-        if relative != "test/Cargo.toml" and not (
-            relative.startswith("crates/") and relative.count("/") == 2 and relative.endswith("/Cargo.toml")
-        ):
-            continue
-        assert isinstance(node.payload, bytes)
-        manifest = tomllib.loads(node.payload.decode())
-        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
-            dependency = manifest.get(table, {}).get("rcgen")
-            if isinstance(dependency, dict) and dependency.get("workspace") is True:
-                consumers.append(relative)
-                break
-    workspace = nodes["Cargo.toml"]
-    assert isinstance(workspace.payload, bytes)
-    dependencies = tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]
-    if ("rcgen" in dependencies) != bool(consumers):
-        raise initializer.Refusal("TLS fixture producer does not match its retained workspace consumers")
-    assertion = _assert_profile_output if consumers else _assert_no_profile_output
-    assertion(initializer, nodes, "tls-fixtures", paths)
-
-
 def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]) -> None:
-    # The derived service's `make unused-deps` rejects a workspace declaration
-    # that no retained member inherits.
     inherited: set[str] = set()
     for relative, node in nodes.items():
         if relative != "test/Cargo.toml" and not (
@@ -527,16 +500,19 @@ def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]
             continue
         assert isinstance(node.payload, bytes)
         manifest = tomllib.loads(node.payload.decode())
-        for table in ("dependencies", "dev-dependencies", "build-dependencies"):
+        for table in initializer._dependency_sections(manifest):
             inherited.update(
-                name for name, definition in manifest.get(table, {}).items()
+                name for name, definition in table.items()
                 if isinstance(definition, dict) and definition.get("workspace") is True
             )
     workspace = nodes["Cargo.toml"]
     assert isinstance(workspace.payload, bytes)
-    unused = set(tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]) - inherited
-    if unused:
-        raise initializer.Refusal(f"workspace declares dependencies no retained member inherits: {sorted(unused)}")
+    declared = set(tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"])
+    if declared != inherited:
+        raise initializer.Refusal(f"workspace and inherited dependencies differ: {sorted(declared ^ inherited)}")
+    for package in ("tls-test-support", "json-payload"):
+        if (f"crates/{package}/Cargo.toml" in nodes) != (package in inherited):
+            raise initializer.Refusal(f"{package} must follow its retained consumers")
 
 
 def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
@@ -631,9 +607,6 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     nodes = _tree(destination, initializer)
     if ("crates/config/src/worker.rs" in nodes) != ("crates/jobs-worker/Cargo.toml" in nodes):
         raise initializer.Refusal("worker configuration must follow the worker binary")
-    _assert_tls_fixture_ownership(
-        initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
-    )
     _assert_workspace_dependencies_inherited(initializer, nodes)
     transport = tomllib.loads(nodes["crates/infra-http-transport/Cargo.toml"].payload.decode())
     grpc_enabled = inputs.grpc == "enabled"
@@ -1443,8 +1416,8 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
     for label, database, messaging, storage, expected in (
         ("none", "none", "none", "none", False),
         ("postgres-only", "postgres", "none", "none", True),
-        ("nats-only", "none", "nats-jetstream", "none", True),
-        ("s3-only", "none", "none", "s3", True),
+        ("nats-only", "none", "nats-jetstream", "none", False),
+        ("s3-only", "none", "none", "s3", False),
     ):
         inputs = _inputs(initializer, database, "none", "none", "none", "none", "none", "none", "core",
                          messaging=messaging, object_storage=storage)

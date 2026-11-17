@@ -208,7 +208,7 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 		--network none \
 		--entrypoint /jobs-worker \
 		"${image}" >/dev/null
-	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
+	expected="is registered: register this service's retained capabilities"
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none || ${outbox} == postgres ]]; then
 		expected='postgres.enabled must be true to run the jobs worker'
 	fi

@@ -15,7 +15,7 @@ use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_messaging::wire::{DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, restore_dead_letter};
 use infra_messaging::{
-    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
+    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, EnvelopeError, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError,
 };
 use operation_context::{Deadline, OperationContext};
@@ -56,6 +56,28 @@ struct Record {
     payload_sha256: String,
 }
 
+#[derive(Debug)]
+enum RestoreError {
+    Record(&'static str),
+    Envelope(EnvelopeError),
+}
+
+impl RestoreError {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Record(reason) => reason,
+            Self::Envelope(_) => "unrestorable",
+        }
+    }
+
+    fn write_report_fields(&self, report: &mut serde_json::Value) {
+        report["reason"] = json!(self.reason());
+        if let Self::Envelope(cause) = self {
+            report["detail"] = json!(cause.to_string());
+        }
+    }
+}
+
 impl Record {
     fn from_native(stream: String, message: RawMessage) -> Result<Self> {
         let payload = STANDARD
@@ -72,22 +94,23 @@ impl Record {
         })
     }
 
-    fn restore_event(&self) -> Result<PreparedEvent> {
+    fn restore_event(&self) -> std::result::Result<PreparedEvent, RestoreError> {
         let payload = STANDARD
             .decode(&self.payload_base64)
-            .map_err(|_| "payload_encoding")?;
+            .map_err(|_| RestoreError::Record("payload_encoding"))?;
         if digest(&payload) != self.payload_sha256 {
-            return Err("payload_digest");
+            return Err(RestoreError::Record("payload_digest"));
         }
-        let headers = stored_headers(&self.headers_base64)?;
+        let headers = stored_headers(&self.headers_base64).map_err(RestoreError::Record)?;
         restore_dead_letter(DeadLetterRecord {
             headers,
             payload: payload.into(),
             stream: self.stream.clone(),
             stream_sequence: self.sequence,
-            stored_at: OffsetDateTime::parse(&self.stored_at, &Rfc3339).map_err(|_| "timestamp")?,
+            stored_at: OffsetDateTime::parse(&self.stored_at, &Rfc3339)
+                .map_err(|_| RestoreError::Record("timestamp"))?,
         })
-        .map_err(|_| "unrestorable")
+        .map_err(RestoreError::Envelope)
     }
 }
 
@@ -395,9 +418,9 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         );
         return Ok(());
     };
-    let (inspection, publication_id, reason) = match record.restore_event() {
+    let (inspection, publication_id, failure) = match record.restore_event() {
         Ok(event) => ("restorable", Some(event.publication_id().to_owned()), None),
-        Err(reason) => ("malformed_unrestorable", None, Some(reason)),
+        Err(error) => ("malformed_unrestorable", None, Some(error)),
     };
     let selection = Selection {
         version: 1,
@@ -416,8 +439,8 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         "publication": Publication::NotAttempted,
         "retirement": Retirement::Retained,
     });
-    if let Some(reason) = reason {
-        report["reason"] = json!(reason);
+    if let Some(error) = failure {
+        error.write_report_fields(&mut report);
     }
     if include_payload {
         report["payload_base64"] = json!(selection.record.payload_base64);
@@ -497,7 +520,10 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_version");
     }
     let config = owned_connection(&selection, &selection_hash)?;
-    let prepared = selection.record.restore_event()?;
+    let prepared = selection
+        .record
+        .restore_event()
+        .map_err(|error| error.reason())?;
     if selection.publication_id.as_deref() != Some(prepared.publication_id()) {
         return Err("selection_identity");
     }
@@ -714,7 +740,13 @@ mod tests {
             if restorable {
                 assert_eq!(record.restore_event().unwrap().message_id(), "event-1");
             } else {
-                assert_eq!(record.restore_event(), Err("unrestorable"));
+                let error = record.restore_event().unwrap_err();
+                let mut report = json!({});
+                error.write_report_fields(&mut report);
+                assert_eq!(
+                    report,
+                    json!({"reason": "unrestorable", "detail": "event identity is invalid"})
+                );
             }
         }
     }

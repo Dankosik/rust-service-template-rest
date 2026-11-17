@@ -30,7 +30,7 @@ fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 #[test]
 #[expect(
     clippy::disallowed_methods,
-    reason = "synchronous process fixture inspects its local template marker before teardown"
+    reason = "the shipped worker's registration hint depends on the retained packages"
 )]
 fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
     let output = output(&[]);
@@ -65,22 +65,29 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
         "{diagnostics}"
     );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if root.join("template.lock").exists() {
+    let failure = failures[0].1;
+    if root.join("template.lock").exists()
+        && !failure.contains("postgres.enabled must be true to run the jobs worker")
+    {
         assert!(
-            diagnostics.contains("no job kind or typed message handler is registered")
-                || diagnostics.contains("postgres.enabled must be true to run the jobs worker"),
-            "diagnostics: {diagnostics}"
+            failure.contains("callback passed to jobs_worker::run"),
+            "{failure}"
         );
+        for (field, manifest) in [
+            ("registration.jobs", "crates/infra-jobs/Cargo.toml"),
+            ("registration.messages", "crates/infra-messaging/Cargo.toml"),
+        ] {
+            assert_eq!(
+                failure.contains(field),
+                root.join(manifest).is_file(),
+                "{failure}"
+            );
+        }
     } else {
-        #[allow(
-            unused_variables,
-            reason = "retained profiles replace the source expectation"
-        )]
-        let expected = "no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs";
-        // template:begin jobs:worker-process-jobs-expectation
-        let expected = "postgres.enabled must be true to run the jobs worker";
-        // template:end jobs:worker-process-jobs-expectation
-        assert!(diagnostics.contains(expected), "diagnostics: {diagnostics}");
+        assert!(
+            failure.contains("postgres.enabled must be true to run the jobs worker"),
+            "{failure}"
+        );
     }
 }
 

@@ -371,7 +371,7 @@ impl ReadinessRefresher {
             let previous = state.last_check.as_ref();
             let was_ready = previous.is_some_and(|check| check.is_ready_at(at, stale_after));
             let (next, absorbed) =
-                apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
+                apply_failure_threshold(previous, observed, failure_threshold, at, was_ready);
             let now_ready = next.verdict.is_ok();
             let changed = if now_ready {
                 !was_ready
@@ -471,7 +471,7 @@ fn apply_failure_threshold(
     observed: Result<(), ProbeFailure>,
     failure_threshold: NonZeroU32,
     at: Instant,
-    stale_after: Duration,
+    was_ready: bool,
 ) -> (Check, Option<ProbeFailure>) {
     match observed {
         Ok(()) => (
@@ -486,14 +486,12 @@ fn apply_failure_threshold(
             let consecutive_failures = previous
                 .map_or(0, |p| p.consecutive_failures)
                 .saturating_add(1);
-            let was_published_ready =
-                previous.is_some_and(|check| check.is_ready_at(at, stale_after));
-            let (verdict, absorbed) =
-                if was_published_ready && consecutive_failures < failure_threshold.get() {
-                    (Ok(()), Some(reason))
-                } else {
-                    (Err(reason), None)
-                };
+            let (verdict, absorbed) = if was_ready && consecutive_failures < failure_threshold.get()
+            {
+                (Ok(()), Some(reason))
+            } else {
+                (Err(reason), None)
+            };
             (
                 Check {
                     at,

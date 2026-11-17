@@ -257,9 +257,9 @@ rstest = { version = "0.28.0", default-features = false }
 tempfile = { version = "3", default-features = false }
 nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
-# template:begin tls-fixtures:workspace-tls-fixtures
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
+# template:begin tls-fixtures:workspace-tls-fixtures
 tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures
 
