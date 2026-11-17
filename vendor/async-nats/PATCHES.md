@@ -14,13 +14,16 @@ discovery and INFO handling fixes from 0.53.0, upstream revision
 [`808c149`](https://github.com/nats-io/nats.rs/releases/tag/async-nats/v0.53.0),
 archive SHA-256 `486635b3139935dcea5b88d219c5998aefa3c5b99e9a204312b93ac3aa10b30f`.
 DNS, TCP, TLS and the authenticated INFO exchange share the local attempt
-deadline. CI runs the upstream connector regressions alongside the native
+deadline. Ordinary TLS consumes the authenticated INFO even when peer
+discovery is disabled, so admission sees the negotiated payload limit.
+CI runs the upstream connector regressions alongside the native
 ownership tests. TLS settings, including a root CA or a TLS seed, require TLS
 across the pool. Configure DNS seed names covered by the cluster certificate
 when discovering peers by IP over TLS.
 
 The client exports its own credentials parser so rotating file challenges use
-the same grammar and key parser as inline credentials. Mounted file reads are
+the same grammar and key parser as inline credentials. The final credential
+marker may end at EOF. Mounted file reads are
 limited to 1 MiB by the adapter. A replacement release must support this
 shared parser or native per-challenge credential loading with equivalent bounds.
 

@@ -72,7 +72,7 @@ pub fn parse_jwt_and_key_from_creds(contents: &str) -> io::Result<(&str, KeyPair
 // ```
 #[cfg(feature = "nkeys")]
 static USER_CONFIG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\s*(?:(?:[-]{3,}.*[-]{3,}\r?\n)([\w\-.=]+)(?:\r?\n[-]{3,}.*[-]{3,}\r?\n))")
+    Regex::new(r"\s*(?:(?:[-]{3,}.*[-]{3,}\r?\n)([\w\-.=]+)(?:\r?\n[-]{3,}.*[-]{3,}(?:\r?\n|\z)))")
         .unwrap()
 });
 

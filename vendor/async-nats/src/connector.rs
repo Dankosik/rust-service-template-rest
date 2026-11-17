@@ -1008,9 +1008,12 @@ impl Connector {
                         info,
                         mut connection,
                         tls,
-                    } = self
-                        .try_connect_to(&socket_addr, tls_required, server_addr.clone())
-                        .await?;
+                    } = Box::pin(self.try_connect_to(
+                        &socket_addr,
+                        tls_required,
+                        server_addr.clone(),
+                    ))
+                    .await?;
                     let info = self
                         .info_after_first_pong(
                             server_addr,
@@ -1539,10 +1542,7 @@ impl Connector {
         deadline: Instant,
     ) -> Result<ServerInfo, ConnectError> {
         let tls_after_info = tls && !self.options.tls_first && !server_addr.is_websocket();
-        if !tls_after_info
-            || self.options.ignore_discovered_servers
-            || !sends_info_after_first_pong(&info.version)
-        {
+        if !tls_after_info || !sends_info_after_first_pong(&info.version) {
             return Ok(info);
         }
         let next_info = async {
@@ -1558,7 +1558,9 @@ impl Connector {
                 if next_info.lame_duck_mode {
                     self.events_tx.try_send(Event::LameDuckMode).ok();
                 }
-                self.replace_discovered_servers(&next_info.connect_urls, server_addr, true);
+                if !self.options.ignore_discovered_servers {
+                    self.replace_discovered_servers(&next_info.connect_urls, server_addr, true);
+                }
                 Ok(*next_info)
             }
             Err(_) => {

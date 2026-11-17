@@ -207,7 +207,10 @@ fn tls_fixture(name: &str) -> (tempfile::NamedTempFile, tokio_rustls::TlsAccepto
     (root, acceptor)
 }
 
-async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin) {
+async fn serve_until_topology(
+    socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    mut post_pong_info: Option<Vec<u8>>,
+) {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     let mut socket = tokio::io::BufReader::new(socket);
@@ -217,18 +220,25 @@ async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::Asy
         assert!(socket.read_line(&mut line).await.expect("NATS client line") > 0);
         if line == "PING\r\n" {
             socket.get_mut().write_all(b"PONG\r\n").await.expect("PONG");
+            if let Some(info) = post_pong_info.take() {
+                socket
+                    .get_mut()
+                    .write_all(&info)
+                    .await
+                    .expect("authenticated INFO");
+            }
         } else if line.starts_with("PUB $JS.API.") || line.starts_with("HPUB $JS.API.") {
             return;
         }
     }
 }
 
-fn info(discovered: &str) -> Vec<u8> {
+fn info(discovered: &str, max_payload: usize) -> Vec<u8> {
     format!(
         "INFO {}\r\n",
         serde_json::json!({
             "server_id": "fixture", "version": "2.12.3", "headers": true,
-            "jetstream": true, "max_payload": 1_048_576, "proto": 1, "tls_available": true,
+            "jetstream": true, "max_payload": max_payload, "proto": 1, "tls_available": true,
             "connect_urls": [discovered],
         })
     )
@@ -276,11 +286,11 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
         let mut server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("seed connection");
             socket
-                .write_all(&info("http://untrusted.invalid"))
+                .write_all(&info("http://untrusted.invalid", 32))
                 .await
                 .expect("INFO");
             let socket = tls.accept(socket).await.expect("ordinary TLS handshake");
-            serve_until_topology(socket).await;
+            serve_until_topology(socket, Some(info("http://untrusted.invalid", 1_048_576))).await;
         });
         let mut options = trust_options(seeds);
         options.allow_plaintext = mixed;
@@ -340,16 +350,16 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             if tls_first {
                 let mut socket = seed_tls.accept(socket).await.expect("TLS precedes INFO");
                 socket
-                    .write_all(&info(&advertised))
+                    .write_all(&info(&advertised, 1_048_576))
                     .await
                     .expect("authenticated INFO");
-                serve_until_topology(socket).await;
+                serve_until_topology(socket, None).await;
             } else {
                 socket
-                    .write_all(&info(&advertised))
+                    .write_all(&info(&advertised, 1_048_576))
                     .await
                     .expect("trusted network INFO");
-                serve_until_topology(socket).await;
+                serve_until_topology(socket, None).await;
             }
         });
         let mut options = trust_options(vec![seed]);

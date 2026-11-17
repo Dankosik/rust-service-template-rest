@@ -179,7 +179,15 @@ mod tests {
                 .is_ok()
         );
 
-        let (jwt, key) = parse(&content.replace('\n', "\r\n")).unwrap();
+        let crlf = content.replace('\n', "\r\n");
+        let at_eof = crlf.trim_end_matches(['\r', '\n', '*']);
+        assert!(at_eof.ends_with("------END USER NKEY SEED------"));
+        let (jwt, key) = parse(at_eof).unwrap();
+        assert!(
+            async_nats::ConnectOptions::new()
+                .credentials(at_eof)
+                .is_ok()
+        );
         assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
 
