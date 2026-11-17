@@ -1,5 +1,5 @@
 use axum::body::{Body, Bytes};
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use bytes::{BufMut as _, BytesMut};
@@ -19,6 +19,7 @@ impl ReplayableResponse {
             .map(Self)
             .map_err(|error| match error {
                 CaptureError::InvalidStatus => Rollback::InvalidStatus,
+                CaptureError::BodyForbidden => Rollback::BodyForbidden,
                 CaptureError::BodyLimit => Rollback::BodyLimit,
                 CaptureError::HeaderLimit => Rollback::HeaderLimit,
             })
@@ -29,6 +30,16 @@ impl ReplayableResponse {
         mut headers: HeaderMap,
         value: &T,
     ) -> Result<Self, Rollback> {
+        if headers
+            .get_all(CONTENT_ENCODING)
+            .iter()
+            .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+            .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(Rollback::ContentEncoding);
+        }
+        headers.remove(CONTENT_ENCODING);
+
         let mut body = BytesMut::new();
         let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
         serde_json::to_writer(&mut writer, value).map_err(|error| {
@@ -97,6 +108,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn admission_rejects_nonempty_bodies_for_no_content_and_reset_content() {
+        for status in [StatusCode::NO_CONTENT, StatusCode::RESET_CONTENT] {
+            std::assert_matches!(
+                ReplayableResponse::bytes(status, &HeaderMap::new(), Bytes::from_static(b"body")),
+                Err(Rollback::BodyForbidden)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn json_requires_uncoded_content() {
+        for headers in [
+            header_map(&[("content-encoding", "gzip")]),
+            header_map(&[("content-encoding", "identity, gzip")]),
+            header_map(&[("content-encoding", "identity"), ("content-encoding", "br")]),
+        ] {
+            std::assert_matches!(
+                ReplayableResponse::json(StatusCode::OK, headers, &1),
+                Err(Rollback::ContentEncoding)
+            );
+        }
+
+        let response = ReplayableResponse::json(
+            StatusCode::OK,
+            header_map(&[("content-encoding", "IDENTITY")]),
+            &1,
+        )
+        .unwrap()
+        .into_response();
+        assert!(!response.headers().contains_key(CONTENT_ENCODING));
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"1")
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
@@ -119,6 +168,7 @@ mod tests {
             let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
             let pairs: Vec<(&str, &str)> =
                 headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
+            let body = if matches!(status, 204 | 205) { Vec::new() } else { body };
             let captured = ReplayableResponse::bytes(
                 StatusCode::from_u16(status).unwrap(), &header_map(&pairs), Bytes::from(body.clone())
             ).unwrap();

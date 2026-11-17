@@ -148,7 +148,6 @@ fn success(body: &str) -> Record {
     let mut headers = HeaderMap::new();
     for (name, value) in [
         (CONTENT_TYPE, "application/json"),
-        (CONTENT_ENCODING, "br"),
         (CONTENT_LANGUAGE, "en"),
         (CONTENT_LANGUAGE, "fr"),
         (CONTENT_DISPOSITION, "attachment; filename=widget.json"),
@@ -496,6 +495,7 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
+    const GZIP_BODY: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xabV\xcaLQ\xb22\xac\x05\x00\xc5\xf8]D\x08\x00\x00\x00";
     let fingerprint: Digest = [
         0x2e, 0x4f, 0xb5, 0x7a, 0x46, 0x09, 0x5c, 0x45, 0xe8, 0x86, 0xd2, 0x90, 0x70, 0x7b, 0xf6,
         0x45, 0x41, 0x23, 0x66, 0x96, 0x6b, 0xf1, 0x00, 0x09, 0x31, 0x40, 0x01, 0xfd, 0x08, 0x7e,
@@ -507,41 +507,59 @@ async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
          VALUES (decode('98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94', 'hex'), \
          $1, 201, ARRAY[ \
            ROW('content-type', convert_to('application/json', 'UTF8'))::http_idempotency_header_pair, \
+           ROW('content-encoding', convert_to('gzip', 'UTF8'))::http_idempotency_header_pair, \
            ROW('content-language', convert_to('en', 'UTF8'))::http_idempotency_header_pair, \
            ROW('content-language', convert_to('fr', 'UTF8'))::http_idempotency_header_pair, \
            ROW('etag', decode('228022', 'hex'))::http_idempotency_header_pair \
          ], $2, 'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')",
     )
     .bind(fingerprint)
-    .bind(br#"{"id":1}"#.as_slice())
+    .bind(GZIP_BODY)
     .execute(&pool)
     .await
     .expect("seed a record in the existing format");
 
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
-    let replay: Outcome<()> = store
-        .attempt(&scope, &fingerprint, async |_: &mut Tx<'_>| {
-            panic!("an existing row must replay without running work")
-        })
-        .await;
-    let Ok(Attempted::Replay(record)) = replay else {
-        panic!("expected a replay of the existing record, got {replay:?}");
-    };
-    let (status, headers, body) = record.into_parts();
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body.as_ref(), br#"{"id":1}"#);
-    assert_eq!(headers.len(), 4);
-    assert_eq!(headers[CONTENT_TYPE], "application/json");
-    assert_eq!(
-        headers
-            .get_all(CONTENT_LANGUAGE)
-            .iter()
-            .map(HeaderValue::as_bytes)
-            .collect::<Vec<_>>(),
-        [b"en".as_slice(), b"fr".as_slice()]
-    );
-    assert_eq!(headers[ETAG].as_bytes(), b"\"\x80\"");
+    for (status, expected_body) in [
+        (StatusCode::CREATED, GZIP_BODY),
+        (StatusCode::NO_CONTENT, b"".as_slice()),
+        (StatusCode::RESET_CONTENT, b"".as_slice()),
+    ] {
+        if status != StatusCode::CREATED {
+            let changed =
+                sqlx::query("UPDATE http_idempotency_records SET status = $2 WHERE scope_key = $1")
+                    .bind(scope.digest())
+                    .bind(status.as_u16().cast_signed())
+                    .execute(&pool)
+                    .await
+                    .expect("seed legacy content under a status that forbids it");
+            assert_eq!(changed.rows_affected(), 1);
+        }
+        let replay: Outcome<()> = store
+            .attempt(&scope, &fingerprint, async |_: &mut Tx<'_>| {
+                panic!("an existing row must replay without running work")
+            })
+            .await;
+        let Ok(Attempted::Replay(record)) = replay else {
+            panic!("expected a replay of the existing record, got {replay:?}");
+        };
+        let (replayed_status, headers, body) = record.into_parts();
+        assert_eq!(replayed_status, status);
+        assert_eq!(body.as_ref(), expected_body);
+        assert_eq!(headers.len(), 5);
+        assert_eq!(headers[CONTENT_TYPE], "application/json");
+        assert_eq!(headers[CONTENT_ENCODING], "gzip");
+        assert_eq!(
+            headers
+                .get_all(CONTENT_LANGUAGE)
+                .iter()
+                .map(HeaderValue::as_bytes)
+                .collect::<Vec<_>>(),
+            [b"en".as_slice(), b"fr".as_slice()]
+        );
+        assert_eq!(headers[ETAG].as_bytes(), b"\"\x80\"");
+    }
     close_pools(&[&store_pool]).await;
 }
 

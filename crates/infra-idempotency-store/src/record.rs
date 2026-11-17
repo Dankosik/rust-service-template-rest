@@ -51,6 +51,8 @@ impl fmt::Debug for Record {
 pub enum CaptureError {
     #[error("status")]
     InvalidStatus,
+    #[error("body_forbidden")]
+    BodyForbidden,
     #[error("body_limit")]
     BodyLimit,
     #[error("header_limit")]
@@ -86,6 +88,9 @@ impl Record {
     ) -> Result<Self, CaptureError> {
         if !status.is_success() {
             return Err(CaptureError::InvalidStatus);
+        }
+        if forbids_body(status) && !body.is_empty() {
+            return Err(CaptureError::BodyForbidden);
         }
         if body.len() > MAX_STORED_BODY_BYTES {
             return Err(CaptureError::BodyLimit);
@@ -143,7 +148,11 @@ impl Record {
         Ok(Self {
             status,
             headers: admitted,
-            body,
+            body: if forbids_body(status) {
+                Bytes::new()
+            } else {
+                body
+            },
         })
     }
 
@@ -182,6 +191,10 @@ fn replayable_headers(
 
 fn header_size(name: &HeaderName, value: &HeaderValue) -> usize {
     name.as_str().len().saturating_add(value.len())
+}
+
+fn forbids_body(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NO_CONTENT | StatusCode::RESET_CONTENT)
 }
 
 #[cfg(test)]
@@ -238,7 +251,7 @@ mod tests {
     fn decoding_rejects_corrupt_records() {
         let large_body = Bytes::from(vec![0; MAX_STORED_BODY_BYTES + 1]);
         for (status, headers, body, reason) in [
-            (200, vec![], large_body, Undecodable::BodyLimit),
+            (205, vec![], large_body, Undecodable::BodyLimit),
             (199, vec![], Bytes::new(), Undecodable::Status),
             (
                 200,
@@ -253,9 +266,9 @@ mod tests {
                 Undecodable::HeaderName,
             ),
             (
-                200,
+                204,
                 vec![pair("content-type", b"\n")],
-                Bytes::new(),
+                Bytes::from_static(b"legacy body"),
                 Undecodable::HeaderValue,
             ),
             (

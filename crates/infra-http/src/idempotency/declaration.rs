@@ -47,6 +47,8 @@ enum Rule {
         "request parameters must be inline and header parameters must have valid HTTP field names"
     )]
     FingerprintParameter,
+    #[error("cookie parameter {0} is outside the idempotent request fingerprint")]
+    CookieParameter(String),
     #[error("an idempotent operation must not declare informational or redirect response {status}")]
     InformationalOrRedirectResponse { status: String },
     #[error("an idempotent operation must declare a 2xx response")]
@@ -126,6 +128,12 @@ fn collect_fingerprint_headers(
         let RefOr::T(parameter) = parameter else {
             return Err(invalid());
         };
+        if parameter.parameter_in == ParameterIn::Cookie {
+            return Err(CompositionError::new(
+                subject,
+                Rule::CookieParameter(parameter.name.clone()),
+            ));
+        }
         if parameter.parameter_in == ParameterIn::Header
             && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         {
@@ -414,6 +422,30 @@ mod tests {
                 "schema": { "type": "string", "enum": ["true"] }
             })
         );
+    }
+
+    #[test]
+    fn a_declared_cookie_is_rejected_at_either_parameter_location() {
+        for path_level in [true, false] {
+            let (_, mut paths, _): UtoipaMethodRouter = route();
+            let item = paths.paths.get_mut(WIDGETS).unwrap();
+            let parameters = if path_level {
+                &mut item.parameters
+            } else {
+                &mut item.post.as_mut().unwrap().parameters
+            };
+            parameters.get_or_insert_default().push(
+                Parameter::builder()
+                    .name("region")
+                    .parameter_in(ParameterIn::Cookie)
+                    .build()
+                    .into(),
+            );
+            assert_eq!(
+                prepare(&mut paths).unwrap_err().rule(),
+                &Rule::CookieParameter("region".to_owned())
+            );
+        }
     }
 
     #[test]
