@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routing::get};
-use health::{Readiness, RefreshPolicy};
+use health::{Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::{Drained, HardenOptions, Server, ServerOptions};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
 use integration_tests::poll_until;
@@ -53,7 +53,7 @@ async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
     clippy::disallowed_methods,
     reason = "non-shipped fixture operation; platform probes retain their canonical contract"
 )]
-fn http_router(pool: PgPool, readiness: &Readiness) -> axum::Router {
+fn http_router(pool: PgPool, readiness: &ReadinessControl) -> axum::Router {
     let probes = infra_http::finalize_public(infra_http::router())
         .unwrap()
         .with_state(readiness.reader());
@@ -75,7 +75,7 @@ fn http_router(pool: PgPool, readiness: &Readiness) -> axum::Router {
 
 struct Instance {
     pool: PgPool,
-    readiness: Readiness,
+    readiness: ReadinessControl,
     cancel: CancellationToken,
     refresh: JoinHandle<()>,
     server: Server,
@@ -89,15 +89,16 @@ struct Instance {
 
 impl Instance {
     async fn start(pool: PgPool) -> Self {
-        let readiness = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
-        readiness.refresh().await;
+        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+        let readiness = probes.control();
+        let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());
         let cancel = CancellationToken::new();
         let events = PoolEvents::default();
         let refresh = tokio::spawn({
-            let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.refresh_until(cancel).await }
+            refresher
+                .refresh_until(cancel)
                 .with_subscriber(events.subscriber())
         });
         let server = Server::bind(

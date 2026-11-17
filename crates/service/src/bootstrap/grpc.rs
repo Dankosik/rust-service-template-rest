@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use health::Readiness;
 use infra_grpc::ServerTlsMaterial;
 use infra_http::ServerOptions;
 use rustls::ServerConfig;
@@ -31,7 +30,6 @@ pub(super) fn prepare(
     grpc: &GrpcConfig,
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
-    readiness: &Readiness,
     #[allow(unused_variables, reason = "bearer authentication alone reads it")] auth: &PreparedAuth,
     // template:begin service-auth:bootstrap-grpc-service-auth-parameter
     service_auth: &PreparedServiceAuth,
@@ -79,7 +77,7 @@ pub(super) fn prepare(
     // template:end service-auth:bootstrap-grpc-service-auth
     let router = infra_grpc::router(
         services,
-        readiness.reader(),
+        state.readiness.clone(),
         // template:begin grpc-authn:bootstrap-grpc-verifier-argument
         verifier,
         // template:end grpc-authn:bootstrap-grpc-verifier-argument

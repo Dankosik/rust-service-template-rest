@@ -1891,5 +1891,6 @@ fn readiness_reader() -> health::ReadinessReader {
         )
         .unwrap(),
     )
+    .control()
     .reader()
 }

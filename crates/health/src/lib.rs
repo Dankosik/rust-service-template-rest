@@ -152,12 +152,7 @@ impl State {
         let Some(check) = &self.last_check else {
             return Err(NotReady::NotEvaluated);
         };
-        if !check.is_fresh_at(now, stale_after) {
-            return Err(NotReady::Stale {
-                age: now.duration_since(check.at),
-                stale_after,
-            });
-        }
+        freshness(check.at, now, stale_after)?;
         Ok(check)
     }
 
@@ -184,29 +179,49 @@ struct Check {
 
 impl Check {
     fn is_ready_at(&self, now: Instant, stale_after: Duration) -> bool {
-        self.verdict.is_ok() && self.is_fresh_at(now, stale_after)
-    }
-
-    fn is_fresh_at(&self, now: Instant, stale_after: Duration) -> bool {
-        now.duration_since(self.at) <= stale_after
+        self.verdict.is_ok() && freshness(self.at, now, stale_after).is_ok()
     }
 }
 
-#[derive(Clone)]
+fn freshness(at: Instant, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+    let age = now.duration_since(at);
+    if age > stale_after {
+        return Err(NotReady::Stale { age, stale_after });
+    }
+    Ok(())
+}
+
 pub struct Readiness {
+    control: ReadinessControl,
+    probes: Vec<Box<dyn Probe>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReadinessControl {
     tx: watch::Sender<State>,
     draining: Arc<AtomicBool>,
-    probes: Arc<[Box<dyn Probe>]>,
     policy: RefreshPolicy,
+}
+
+#[derive(Debug)]
+pub struct PreparedReadiness {
+    readiness: Readiness,
+    checked_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct ReadinessRefresher {
+    readiness: Readiness,
+    first_tick: Instant,
 }
 
 impl fmt::Debug for Readiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names: Vec<&str> = self.probes.iter().map(|probe| probe.name()).collect();
         f.debug_struct("Readiness")
-            .field("draining", &self.draining.load(Ordering::Acquire))
+            .field("draining", &self.control.draining.load(Ordering::Acquire))
             .field("probes", &names)
-            .field("policy", &self.policy)
+            .field("policy", &self.control.policy)
             .finish_non_exhaustive()
     }
 }
@@ -232,16 +247,41 @@ impl Readiness {
             "Completed readiness probe checks by probe and outcome."
         );
         Self {
-            tx: watch::Sender::new(State {
-                draining: false,
-                last_check: None,
-            }),
-            draining: Arc::new(AtomicBool::new(false)),
-            probes: probes.into(),
-            policy,
+            control: ReadinessControl {
+                tx: watch::Sender::new(State {
+                    draining: false,
+                    last_check: None,
+                }),
+                draining: Arc::new(AtomicBool::new(false)),
+                policy,
+            },
+            probes,
         }
     }
 
+    #[must_use]
+    pub fn control(&self) -> ReadinessControl {
+        self.control.clone()
+    }
+
+    pub async fn prepare(self) -> Result<PreparedReadiness, NotReady> {
+        let checked_at = self.check_startup().await?;
+        Ok(PreparedReadiness {
+            readiness: self,
+            checked_at,
+        })
+    }
+
+    async fn check_startup(&self) -> Result<Instant, NotReady> {
+        self.control.ensure_running()?;
+        let observed = self.check_probes().await;
+        self.control.ensure_running()?;
+        observed?;
+        Ok(Instant::now())
+    }
+}
+
+impl ReadinessControl {
     #[must_use]
     pub fn reader(&self) -> ReadinessReader {
         ReadinessReader {
@@ -262,38 +302,88 @@ impl Readiness {
         });
     }
 
-    pub async fn admit(&self) -> Result<(), NotReady> {
-        self.refresh().await;
-        self.tx
-            .borrow()
-            .verdict(Instant::now(), self.policy.stale_after())
+    fn ensure_running(&self) -> Result<(), NotReady> {
+        if self.draining.load(Ordering::Acquire) {
+            return Err(NotReady::Draining);
+        }
+        Ok(())
+    }
+}
+
+impl PreparedReadiness {
+    pub async fn ensure_fresh(&mut self) -> Result<(), NotReady> {
+        self.readiness.control.ensure_running()?;
+        let stale_after = self.readiness.control.policy.stale_after();
+        if freshness(self.checked_at, Instant::now(), stale_after).is_err() {
+            self.checked_at = self.readiness.check_startup().await?;
+        }
+        Ok(())
     }
 
-    pub async fn refresh(&self) {
-        let observed = self.check_probes().await;
-        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
-        let failure_threshold = self.policy.failure_threshold;
-        let stale_after = self.policy.stale_after();
+    pub fn activate(self) -> Result<ReadinessRefresher, NotReady> {
+        let control = &self.readiness.control;
+        let mut admission = Ok(());
+        control.tx.send_if_modified(|state| {
+            admission = if state.draining {
+                Err(NotReady::Draining)
+            } else {
+                freshness(
+                    self.checked_at,
+                    Instant::now(),
+                    control.policy.stale_after(),
+                )
+            };
+            if admission.is_err() {
+                return false;
+            }
+            state.last_check = Some(Check {
+                at: self.checked_at,
+                verdict: Ok(()),
+                consecutive_failures: 0,
+            });
+            true
+        });
+        admission?;
+        Ok(ReadinessRefresher {
+            first_tick: self.checked_at + control.policy.interval,
+            readiness: self.readiness,
+        })
+    }
+}
+
+impl ReadinessRefresher {
+    async fn refresh(&mut self) {
+        let observed = self.readiness.check_probes().await;
+        let control = &self.readiness.control;
+        let failure_threshold = control.policy.failure_threshold;
+        let stale_after = control.policy.stale_after();
         let mut transition_to_log = None;
         let mut absorbed_failure = None;
         let mut late_by = None;
-        self.tx.send_if_modified(|state| {
+        control.tx.send_if_modified(|state| {
+            if state.draining {
+                return false;
+            }
             let at = Instant::now();
             let previous = state.last_check.as_ref();
-            let was_ready = state.ready_check(at, stale_after).is_some();
+            let was_ready = previous.is_some_and(|check| check.is_ready_at(at, stale_after));
             let (next, absorbed) =
                 apply_failure_threshold(previous, observed, failure_threshold, at, stale_after);
-            if !state.draining {
-                transition_to_log = readiness_transition(previous, &next);
-                absorbed_failure = absorbed.map(|reason| (reason, next.consecutive_failures));
-                late_by = previous
-                    .filter(|previous| !previous.is_fresh_at(at, stale_after))
-                    .map(|previous| at.duration_since(previous.at));
+            let now_ready = next.verdict.is_ok();
+            let changed = if now_ready {
+                !was_ready
+            } else {
+                previous.is_some_and(|check| check.verdict.is_ok())
+            };
+            if changed {
+                transition_to_log = Some(next.verdict.clone());
             }
-            let now_ready = !state.draining && next.verdict.is_ok();
-            let notify = !state.draining && (previous.is_none() || was_ready != now_ready);
+            absorbed_failure = absorbed.map(|reason| (reason, next.consecutive_failures));
+            late_by = previous
+                .map(|previous| at.duration_since(previous.at))
+                .filter(|age| *age > stale_after);
             state.last_check = Some(next);
-            notify
+            was_ready != now_ready
         });
         if let Some(age) = late_by {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
@@ -317,15 +407,12 @@ impl Readiness {
         }
     }
 
-    pub async fn refresh_until(&self, cancel: CancellationToken) {
+    pub async fn refresh_until(mut self, cancel: CancellationToken) {
         let _ = cancel
             .run_until_cancelled(async {
-                if self.tx.borrow().last_check.is_none() {
-                    self.refresh().await;
-                }
                 let mut ticker = tokio::time::interval_at(
-                    Instant::now() + self.policy.interval,
-                    self.policy.interval,
+                    self.first_tick,
+                    self.readiness.control.policy.interval,
                 );
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
@@ -335,9 +422,11 @@ impl Readiness {
             })
             .await;
     }
+}
 
+impl Readiness {
     async fn check_probes(&self) -> Result<(), ProbeFailure> {
-        let budget = self.policy.probe_budget;
+        let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
             let probe_name = probe.name();
@@ -367,7 +456,9 @@ impl Readiness {
             outcome
         }))
         .await;
-        outcomes.into_iter().collect()
+        let observed = outcomes.into_iter().collect();
+        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
+        observed
     }
 }
 
@@ -409,14 +500,6 @@ fn apply_failure_threshold(
             )
         }
     }
-}
-
-fn readiness_transition(
-    previous: Option<&Check>,
-    next: &Check,
-) -> Option<Result<(), ProbeFailure>> {
-    let previous = previous?;
-    (previous.verdict.is_ok() != next.verdict.is_ok()).then(|| next.verdict.clone())
 }
 
 impl ReadinessReader {
