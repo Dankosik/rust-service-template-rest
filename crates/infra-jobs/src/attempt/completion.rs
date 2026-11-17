@@ -200,7 +200,9 @@ pub(super) async fn complete_batched(
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Instant) {
     batch.prune(|entry| entry.reply.is_closed());
-    if batch.queued.is_empty() || deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
+    if batch.queued.is_empty()
+        || deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline)
+    {
         return;
     }
     let result = {
@@ -210,13 +212,13 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
             .map(|queued| (queued.fence.job_id.0, queued.fence.generation))
             .unzip();
         within(
-            &shared.cleanup,
+            &shared.lifecycle.cleanup,
             deadline,
             backstop(Box::pin(async {
                 let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
                     .await
                     .map_err(OperationError::Acquire)?;
-                if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
+                if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
                     return Err(OperationError::TimedOut);
                 }
                 observed(

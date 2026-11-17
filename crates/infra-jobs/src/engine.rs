@@ -11,12 +11,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::Kinds;
 use crate::claim;
 use crate::listener;
 use crate::maintenance;
-use crate::peers::{PeerRegistration, PeerRegistry};
 use crate::session::StartupError;
+use crate::{KindError, Kinds};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
@@ -27,11 +26,12 @@ const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 pub struct Engine {
     shared: Arc<Shared>,
-    peer: PeerRegistration,
+    additional: Vec<Arc<Shared>>,
 }
 
 pub struct Started {
-    shared: Arc<Shared>,
+    lifecycle: Arc<AttemptLifecycle>,
+    _background: tokio_util::sync::DropGuard,
     stop: CancellationToken,
     failure: CancellationToken,
 }
@@ -80,50 +80,37 @@ impl From<infra_postgres::TxError> for OperationError {
 impl Engine {
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
-        Self::build(pool, registry, max_workers, Role::Owner)
-    }
-
-    #[must_use]
-    pub fn beside(&self, registry: Kinds, max_workers: NonZeroU32) -> Self {
-        Self::build(
-            self.shared.pool.clone(),
-            registry,
-            max_workers,
-            Role::Beside(&self.shared),
-        )
-    }
-
-    fn build(pool: PgPool, registry: Kinds, max_workers: NonZeroU32, role: Role<'_>) -> Self {
-        let (worker_id, peers, owns_process_duties) = match role {
-            Role::Owner => (uuid::Uuid::new_v4(), Arc::default(), true),
-            Role::Beside(owner) => (owner.worker_id, Arc::clone(&owner.peers), false),
-        };
-        let claim_wake = Arc::new(Notify::new());
-        let peer = peers.register(&registry, &claim_wake);
         Self {
-            peer,
-            shared: Arc::new(Shared {
+            shared: Arc::new(Shared::new(
                 pool,
-                worker_id,
                 registry,
                 max_workers,
-                slots: Arc::new(claim::admission_slots(max_workers)),
-                statement_turn: tokio::sync::Mutex::new(()),
-                cleanup: ForcedCleanup::default(),
-                counters: Counters::default(),
-                drain: Arc::default(),
-                failing: EnumMap::default(),
-                completions: crate::attempt::Completions::default(),
-                owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
-                claim_wake,
-                peers,
-                owns_process_duties,
-            }),
+                uuid::Uuid::new_v4(),
+                Arc::default(),
+            )),
+            additional: Vec::new(),
         }
     }
 
-    pub fn kinds(&self) -> impl Iterator<Item = &'static str> {
-        self.shared.registry.names()
+    pub fn add_group(&mut self, registry: Kinds, max_workers: NonZeroU32) -> Result<(), KindError> {
+        if let Some(duplicate) = registry.names().find(|name| {
+            self.groups()
+                .any(|group| group.registry.get(name).is_some())
+        }) {
+            return Err(KindError::Duplicate(duplicate));
+        }
+        self.additional.push(Arc::new(Shared::new(
+            self.shared.pool.clone(),
+            registry,
+            max_workers,
+            self.shared.worker_id,
+            Arc::clone(&self.shared.lifecycle),
+        )));
+        Ok(())
+    }
+
+    pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<Shared>> {
+        std::iter::once(&self.shared).chain(&self.additional)
     }
 
     pub async fn check_startup(&self) -> Result<(), StartupError> {
@@ -137,46 +124,60 @@ impl Engine {
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
-        self.shared.owned_attempts.bind();
-        self.shared.completions.memberships.bind();
-        for registered in self.shared.registry.iter() {
-            registered.metrics();
+        for group in self.groups() {
+            group.owned_attempts.bind();
+            group.completions.memberships.bind();
+            for registered in group.registry.iter() {
+                registered.metrics();
+            }
         }
         claim::describe_metrics();
-        if self.shared.owns_process_duties {
-            maintenance::init_metrics(&self.shared.peers.sampling_kinds().0);
-        }
+        let kinds: Vec<_> = self
+            .groups()
+            .flat_map(|group| group.registry.names())
+            .collect();
+        maintenance::init_metrics(&kinds);
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
             metrics::Unit::Count,
             "Failed worker database operations"
         );
-        tracing::info!(worker.id = %self.shared.worker_id, "jobs_engine_starting");
-        let stop = cancel.child_token();
+        let groups = 1 + self.additional.len();
+        tracing::info!(worker.id = %self.shared.worker_id, groups, "jobs_engine_starting");
+        let engine = Arc::new(self);
+        let background = cancel.child_token();
+        let stop = background.child_token();
         let failure = CancellationToken::new();
-        let spawn = |run, token| {
+        let lifecycle = Arc::clone(&engine.shared.lifecycle);
+        lifecycle.drain.start_claim_loops(groups);
+        for group in engine.groups() {
             spawn_guarded(
                 tracker,
-                Arc::clone(&self.shared),
-                run,
-                token,
+                Arc::clone(group),
+                Run::Claim {
+                    _exit: DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain)),
+                },
+                stop.clone(),
                 failure.clone(),
             );
-        };
-        spawn(
-            Run::Claim {
-                _peer: self.peer,
-                _exit: DrainParticipant::ClaimLoop(Arc::clone(&self.shared.drain)),
-            },
-            stop.clone(),
-        );
-        if self.shared.owns_process_duties {
-            spawn(Run::Retention, cancel.child_token());
-            spawn(Run::Listener, cancel.child_token());
-            spawn(Run::Sampling, cancel.child_token());
+        }
+        let background_tasks = [
+            Run::Retention,
+            Run::Listener(Arc::clone(&engine)),
+            Run::Sampling(kinds),
+        ];
+        for run in background_tasks {
+            spawn_guarded(
+                tracker,
+                Arc::clone(&engine.shared),
+                run,
+                background.clone(),
+                failure.clone(),
+            );
         }
         Started {
-            shared: Arc::clone(&self.shared),
+            lifecycle,
+            _background: background.drop_guard(),
             stop,
             failure,
         }
@@ -187,13 +188,20 @@ impl fmt::Debug for Engine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kinds = fmt::from_fn(|f| {
             f.debug_list()
-                .entries(self.shared.registry.names())
+                .entries(self.groups().flat_map(|group| group.registry.names()))
                 .finish()
         });
         formatter
             .debug_struct("Engine")
             .field("kinds", &kinds)
-            .field("max_workers", &self.shared.max_workers)
+            .field(
+                "group_limits",
+                &fmt::from_fn(|f| {
+                    f.debug_list()
+                        .entries(self.groups().map(|group| group.max_workers))
+                        .finish()
+                }),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -205,28 +213,28 @@ impl Started {
 
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.shared.drain.in_flight()
+        self.lifecycle.drain.in_flight()
     }
 
     pub async fn drained(&self) {
-        self.shared.drain.wait().await;
+        self.lifecycle.drain.wait().await;
     }
 
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
-        let deadline = self.shared.cleanup.begin(budget);
+        let deadline = self.lifecycle.cleanup.begin(budget);
         tokio::select! {
             biased;
             () = self.drained() => {}
             () = tokio::time::sleep_until(deadline) => {}
         }
         let timed_out = *self
-            .shared
+            .lifecycle
             .cleanup
             .timed_out
-            .get_or_init(|| !self.shared.drain.completed_by(deadline));
-        let counters = &self.shared.counters;
+            .get_or_init(|| !self.lifecycle.drain.completed_by(deadline));
+        let counters = &self.lifecycle.counters;
         DrainEnd {
             known_results: counters.known_results.load(Ordering::Relaxed),
             cancelled: counters.cancelled.load(Ordering::Relaxed),
@@ -250,20 +258,11 @@ impl fmt::Debug for Started {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Role<'a> {
-    Owner,
-    Beside(&'a Shared),
-}
-
 enum Run {
-    Claim {
-        _peer: PeerRegistration,
-        _exit: DrainParticipant,
-    },
+    Claim { _exit: DrainParticipant },
     Retention,
-    Listener,
-    Sampling,
+    Listener(Arc<Engine>),
+    Sampling(Vec<&'static str>),
 }
 
 impl Run {
@@ -271,8 +270,8 @@ impl Run {
         match self {
             Self::Claim { .. } => "claim",
             Self::Retention => "retention",
-            Self::Listener => "listener",
-            Self::Sampling => "sampling",
+            Self::Listener(_) => "listener",
+            Self::Sampling(_) => "sampling",
         }
     }
 }
@@ -290,8 +289,8 @@ fn spawn_guarded(
         match run {
             _claim @ Run::Claim { .. } => claim::run_claim_loop(shared, token, failure).await,
             Run::Retention => maintenance::run_retention(shared, token).await,
-            Run::Listener => listener::run_listener(shared, token).await,
-            Run::Sampling => maintenance::run_sampling(shared, token).await,
+            Run::Listener(engine) => listener::run_listener(&shared, &engine, token).await,
+            Run::Sampling(kinds) => maintenance::run_sampling(shared, &kinds, token).await,
         }
     });
 }
@@ -299,7 +298,7 @@ fn spawn_guarded(
 #[derive(Default)]
 struct DrainState {
     in_flight: usize,
-    claim_loop_exited: bool,
+    claim_loops: usize,
     completed_at: Option<Instant>,
 }
 
@@ -312,6 +311,10 @@ impl Default for AttemptDrain {
 }
 
 impl AttemptDrain {
+    fn start_claim_loops(&self, count: usize) {
+        self.0.send_modify(|state| state.claim_loops = count);
+    }
+
     fn in_flight(&self) -> usize {
         self.0.borrow().in_flight
     }
@@ -342,7 +345,7 @@ impl AttemptDrain {
     fn finish(&self, retire: impl FnOnce(&mut DrainState)) {
         self.0.send_if_modified(|state| {
             retire(state);
-            if state.claim_loop_exited && state.in_flight == 0 {
+            if state.claim_loops == 0 && state.in_flight == 0 {
                 state.completed_at = Some(Instant::now());
                 true
             } else {
@@ -360,7 +363,7 @@ enum DrainParticipant {
 impl Drop for DrainParticipant {
     fn drop(&mut self) {
         match self {
-            Self::ClaimLoop(drain) => drain.finish(|state| state.claim_loop_exited = true),
+            Self::ClaimLoop(drain) => drain.finish(|state| state.claim_loops -= 1),
             Self::Supervisor(drain) => drain.finish(|state| state.in_flight -= 1),
         }
     }
@@ -441,25 +444,42 @@ pub(crate) struct Shared {
     max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
-    pub(crate) cleanup: ForcedCleanup,
-    pub(crate) counters: Counters,
-    pub(crate) drain: Arc<AttemptDrain>,
+    pub(crate) lifecycle: Arc<AttemptLifecycle>,
     failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
     pub(crate) owned_attempts: crate::attempt::MembershipGauge,
     pub(crate) claim_wake: Arc<Notify>,
-    pub(crate) peers: Arc<PeerRegistry>,
-    owns_process_duties: bool,
 }
 
-impl fmt::Debug for Shared {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Shared")
-            .field("max_workers", &self.max_workers)
-            .field("in_flight", &self.drain.in_flight())
-            .finish_non_exhaustive()
+impl Shared {
+    fn new(
+        pool: PgPool,
+        registry: Kinds,
+        max_workers: NonZeroU32,
+        worker_id: uuid::Uuid,
+        lifecycle: Arc<AttemptLifecycle>,
+    ) -> Self {
+        Self {
+            pool,
+            worker_id,
+            registry,
+            max_workers,
+            lifecycle,
+            slots: Arc::new(claim::admission_slots(max_workers)),
+            statement_turn: tokio::sync::Mutex::new(()),
+            failing: EnumMap::default(),
+            completions: crate::attempt::Completions::default(),
+            owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
+            claim_wake: Arc::default(),
+        }
     }
+}
+
+#[derive(Default)]
+pub(crate) struct AttemptLifecycle {
+    pub(crate) cleanup: ForcedCleanup,
+    pub(crate) counters: Counters,
+    pub(crate) drain: Arc<AttemptDrain>,
 }
 
 #[derive(Default)]
@@ -631,7 +651,7 @@ mod tests {
                 .split_once("\"publisher\"")
                 .expect("first registered kind");
             assert!(remaining.contains("\"ordinary\""), "{output}");
-            assert!(output.contains("max_workers: 1"), "{output}");
+            assert!(output.contains("group_limits"), "{output}");
             assert!(output.contains(".."), "{output}");
         }
     }
@@ -659,7 +679,7 @@ mod tests {
             let shared = &engine.shared;
             let job_id = crate::JobId(uuid::Uuid::nil());
             let guard = SupervisorGuard::new(
-                Arc::clone(&shared.drain),
+                Arc::clone(&shared.lifecycle.drain),
                 CancellationToken::new(),
                 CancellationToken::new(),
                 job_id,
@@ -688,15 +708,19 @@ mod tests {
             if !force_before_timeout {
                 tokio::time::advance(Duration::from_secs(2)).await;
             }
-            let cleanup_deadline = shared.cleanup.begin(Duration::from_secs(4));
+            let cleanup_deadline = shared.lifecycle.cleanup.begin(Duration::from_secs(4));
             if force_before_timeout {
                 tokio::time::advance(Duration::from_secs(2)).await;
             }
             assert!(futures_util::poll!(supervisor.as_mut()).is_pending());
             assert_eq!(
                 (
-                    shared.counters.known_results.load(Ordering::Relaxed),
-                    shared.counters.cancelled.load(Ordering::Relaxed),
+                    shared
+                        .lifecycle
+                        .counters
+                        .known_results
+                        .load(Ordering::Relaxed),
+                    shared.lifecycle.counters.cancelled.load(Ordering::Relaxed),
                 ),
                 expected,
             );
@@ -719,14 +743,17 @@ mod tests {
                 Ok(())
             });
             let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
-            let claim_loop = DrainParticipant::ClaimLoop(Arc::clone(&engine.shared.drain));
+            engine.shared.lifecycle.drain.start_claim_loops(1);
+            let claim_loop =
+                DrainParticipant::ClaimLoop(Arc::clone(&engine.shared.lifecycle.drain));
             let started = Started {
-                shared: engine.shared,
+                lifecycle: Arc::clone(&engine.shared.lifecycle),
+                _background: CancellationToken::new().drop_guard(),
                 stop: CancellationToken::new(),
                 failure: CancellationToken::new(),
             };
             let mut supervisor = SupervisorGuard::new(
-                Arc::clone(&started.shared.drain),
+                Arc::clone(&started.lifecycle.drain),
                 started.stop.clone(),
                 started.failure.clone(),
                 crate::JobId(uuid::Uuid::nil()),
@@ -758,107 +785,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_peer_invalidates_freshness_and_rejects_an_in_flight_old_union() {
+    async fn two_groups_cannot_claim_the_same_kind() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
-        let gauges = Gauges::default();
-        metrics::with_local_recorder(gauges.recorder(), || {
-            let mut kinds = crate::KindsBuilder::new();
-            kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+        let kinds = || {
+            let mut registry = crate::KindsBuilder::new();
+            registry.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
             });
-            let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
-            let peers = &engine.shared.peers;
-            let (sampled_kinds, sampled_revision) = peers.sampling_kinds();
-            assert!(peers.publish_if_current(&sampled_revision, || {
-                metrics::gauge!(maintenance::FAILED_JOBS_METRIC, "kind" => "ordinary").set(3.0);
-                metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(100.0);
-            }));
-
-            let make_publisher = || {
-                let mut kinds = crate::KindsBuilder::new();
-                kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
-                    Ok(())
-                });
-                engine.beside(kinds.validate().unwrap(), NonZeroU32::MIN)
-            };
-            let publisher = make_publisher();
-            assert_eq!(
-                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
-                0.0
-            );
-            assert_eq!(
-                gauges.get(maintenance::FAILED_JOBS_METRIC, Some("ordinary")),
-                3.0
-            );
-            assert_eq!(
-                gauges.get(maintenance::FAILED_JOBS_METRIC, Some("publisher")),
-                0.0
-            );
-            assert!(!peers.publish_if_current(&sampled_revision, || {
-                panic!("an observation from before peer admission must not publish");
-            }));
-            assert_eq!(
-                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
-                0.0
-            );
-
-            let (current_kinds, current_revision) = peers.sampling_kinds();
-            assert!(peers.publish_if_current(&current_revision, || {
-                metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(200.0);
-            }));
-            assert_eq!(
-                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
-                200.0
-            );
-
-            drop(publisher);
-            assert_eq!(peers.sampling_kinds().0, sampled_kinds);
-            assert!(!peers.publish_if_current(&current_revision, || {
-                panic!("an observation that still includes the retired peer must not publish");
-            }));
-            let _replacement = make_publisher();
-            assert_eq!(peers.sampling_kinds().0, current_kinds);
-            assert!(!peers.publish_if_current(&current_revision, || {
-                panic!("an observation from before peer replacement must not publish");
-            }));
-            assert_eq!(
-                gauges.get(maintenance::OBSERVATION_TIMESTAMP_METRIC, None),
-                0.0
-            );
-        });
-        pool.close().await;
-    }
-
-    #[tokio::test]
-    async fn drained_peer_retires_its_registration_while_started_is_still_held() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let mut kinds = crate::KindsBuilder::new();
-        kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
-            Ok(())
-        });
-        let owner = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
-        let mut kinds = crate::KindsBuilder::new();
-        kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
-            Ok(())
-        });
-        let peer = owner.beside(kinds.validate().unwrap(), NonZeroU32::MIN);
-        let tracker = TaskTracker::new();
-        let stop = CancellationToken::new();
-        stop.cancel();
-        let started = peer.start(&tracker, &stop);
-        tokio::time::timeout(Duration::from_secs(1), started.drained())
-            .await
-            .unwrap();
-        assert_eq!(owner.shared.peers.sampling_kinds().0, ["ordinary"]);
-        tracker.close();
-        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
-            .await
-            .unwrap();
-        pool.close().await;
+            registry.validate().unwrap()
+        };
+        let mut engine = Engine::new(pool, kinds(), NonZeroU32::MIN);
+        assert_eq!(
+            engine.add_group(kinds(), NonZeroU32::MIN),
+            Err(KindError::Duplicate("ordinary"))
+        );
     }
 
     #[test]
@@ -981,7 +923,7 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
-                    Arc::clone(&engine.shared.drain),
+                    Arc::clone(&engine.shared.lifecycle.drain),
                     stop.clone(),
                     failure.clone(),
                     crate::JobId(uuid::Uuid::nil()),
@@ -1013,7 +955,12 @@ mod tests {
             assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
         }
         assert_eq!(
-            engine.shared.counters.uncertain.load(Ordering::Relaxed),
+            engine
+                .shared
+                .lifecycle
+                .counters
+                .uncertain
+                .load(Ordering::Relaxed),
             1,
             "only explicit expiry reports database uncertainty"
         );

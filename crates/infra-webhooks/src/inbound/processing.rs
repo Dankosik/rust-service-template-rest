@@ -3,8 +3,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use foldhash::HashMap;
-use infra_jobs::{CompleteError, Handler, Job, JobError, KindsBuilder, Policy};
-use infra_postgres::{Tx, TxError, TxOptions, in_tx_with_acquire_deadline};
+use infra_jobs::{JobError, KindsBuilder, Policy, TransactionalHandler, TransactionalJob};
+use infra_postgres::Tx;
 
 use super::{Incoming, async_trait};
 
@@ -92,12 +92,12 @@ impl Processor {
     }
 
     pub fn register(self, kinds: &mut KindsBuilder) -> &mut KindsBuilder {
-        kinds.register(Policy::default(), self)
+        kinds.register_transactional(Policy::default(), self)
     }
 }
 
-impl Handler<Incoming> for Processor {
-    async fn run(&self, job: Job<Incoming>) -> Result<(), JobError> {
+impl TransactionalHandler<Incoming> for Processor {
+    async fn run(&self, job: TransactionalJob<Incoming>, tx: &mut Tx<'_>) -> Result<(), JobError> {
         let endpoint_id = job.payload().endpoint_id();
         let Some(consumer) = self.consumers.get(endpoint_id) else {
             tracing::warn!(
@@ -109,45 +109,17 @@ impl Handler<Incoming> for Processor {
                 "inbound webhook consumer is unavailable",
             ));
         };
-        let completed = in_tx_with_acquire_deadline(
-            job.pool(),
-            job.deadline(),
-            TxOptions::default(),
-            async |tx| -> Result<(), ProcessFailure> {
-                consumer
-                    .process(tx, job.payload())
-                    .await
-                    .map_err(ProcessFailure::Consumer)?;
-                job.complete_in_tx(tx)
-                    .await
-                    .map_err(ProcessFailure::Completion)?;
-                Ok(())
-            },
-        )
-        .await;
-        match completed {
-            Ok(()) => Ok(()),
-            Err(ProcessFailure::Consumer(error)) => {
+        consumer
+            .process(tx, job.payload())
+            .await
+            .inspect_err(|error| {
                 tracing::info!(
                     webhook.endpoint = endpoint_id,
                     permanent = error.is_permanent(),
                     "webhook_consumer_incomplete"
                 );
-                Err(error)
-            }
-            Err(other) => Err(JobError::from(other)),
-        }
+            })
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum ProcessFailure {
-    #[error("inbound webhook consumer failed")]
-    Consumer(JobError),
-    #[error("inbound webhook completion failed")]
-    Completion(#[source] CompleteError),
-    #[error("inbound webhook processing is unavailable")]
-    Transaction(#[from] TxError),
 }
 
 #[cfg(test)]
@@ -187,18 +159,6 @@ mod tests {
         assert_eq!(
             format!("{processor:?}"),
             "Processor { consumers: Consumers { binding_count: 0 } }"
-        );
-    }
-
-    #[test]
-    fn a_processing_failure_summary_keeps_its_cause() {
-        let summary = JobError::from(ProcessFailure::Transaction(TxError::CommitUnknown(
-            sqlx::Error::PoolClosed,
-        )))
-        .to_string();
-        assert!(
-            summary.contains("commit outcome unknown"),
-            "summary names the cause: {summary}"
         );
     }
 }

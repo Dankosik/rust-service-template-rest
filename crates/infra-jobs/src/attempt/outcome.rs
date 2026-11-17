@@ -130,7 +130,7 @@ pub(super) async fn send_outcome(
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
             return Err(OperationError::TimedOut);
         }
         execute(&mut connection, fence, write)
@@ -223,7 +223,7 @@ async fn execute(
 
 #[derive(Debug)]
 pub(super) enum Ended {
-    Success,
+    Success(crate::kind::Completion),
     Error(JobError),
     Panic,
     Payload(serde_json::Error),
@@ -234,25 +234,25 @@ pub(super) enum Ended {
 pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> Transition {
     let number = attempt.number;
     match ended {
-        Ended::Success => Transition::Complete,
+        Ended::Success(_) => Transition::Complete,
         Ended::Cancelled => Transition::Release,
         Ended::Error(error) => match error.disposition {
             Disposition::Snooze { delay_micros } => Transition::Snooze {
                 delay_micros,
-                summary: sanitize_summary(&error.summary),
+                summary: sanitize_summary(error.summary),
             },
             Disposition::Permanent => Transition::Fail {
                 reason: FailureReason::Permanent,
-                summary: sanitize_summary(&error.summary),
+                summary: sanitize_summary(error.summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
                 number,
                 policy,
-                &error.summary,
+                error.summary,
                 RetryCause::Failure { floor_micros },
             ),
             Disposition::Retry => {
-                retry_or_exhaust(number, policy, &error.summary, RetryCause::FAILURE)
+                retry_or_exhaust(number, policy, error.summary, RetryCause::FAILURE)
             }
         },
         Ended::Panic => retry_or_exhaust(number, policy, "handler panicked", RetryCause::FAILURE),
@@ -353,7 +353,10 @@ mod tests {
     #[test]
     #[expect(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
     fn dispositions_preserve_cap_and_snooze() {
-        std::assert_matches!(outcome(Ended::Success, 25), Transition::Complete);
+        std::assert_matches!(
+            outcome(Ended::Success(crate::kind::Completion::Pending), 25),
+            Transition::Complete
+        );
         std::assert_matches!(
             outcome(Ended::Error(JobError::retryable("fail")), 25),
             Transition::Fail {

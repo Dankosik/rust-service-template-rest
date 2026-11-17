@@ -7,31 +7,27 @@ use super::WorkerError;
 use super::messaging::RetainedMessages;
 use crate::resources::Resources;
 
-pub(super) async fn publisher(
+pub(super) fn with_publisher(
     resources: &Resources,
-    ordinary: Option<&Engine>,
+    ordinary: Option<Engine>,
 ) -> Result<Engine, WorkerError> {
     let messaging = resources
         .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
     let kinds = infra_messaging::outbox::kinds(messaging.producer())?;
-    if ordinary.is_some_and(|ordinary| {
-        kinds
-            .names()
-            .any(|reserved| ordinary.kinds().any(|name| name == reserved))
-    }) {
-        return Err(WorkerError::PublisherKindConflict);
-    }
-    let publisher = match ordinary {
-        Some(ordinary) => ordinary.beside(kinds, NonZeroU32::MIN),
-        None => Engine::new(
+    match ordinary {
+        Some(mut engine) => {
+            engine
+                .add_group(kinds, NonZeroU32::MIN)
+                .map_err(|_| WorkerError::PublisherKindConflict)?;
+            Ok(engine)
+        }
+        None => Ok(Engine::new(
             super::postgres::admitted_pool(resources)?,
             kinds,
             NonZeroU32::MIN,
-        ),
-    };
-    publisher.check_startup().await?;
-    Ok(publisher)
+        )),
+    }
 }
 
 impl RetainedMessages {

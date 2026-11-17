@@ -1,5 +1,4 @@
 use std::fmt;
-use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -68,15 +67,17 @@ pub(crate) struct Attempt {
     )]
     pub(crate) attempt_deadline: Instant,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) pool: PgPool,
 }
 
-pub struct Job<K> {
+pub struct Job<K, P = PgPool> {
     attempt: Attempt,
     payload: K,
+    pool: P,
 }
 
-impl<K: JobKind> Job<K> {
+pub type TransactionalJob<K> = Job<K, ()>;
+
+impl<K: JobKind, P> Job<K, P> {
     #[must_use]
     pub const fn id(&self) -> JobId {
         self.attempt.job_id
@@ -109,29 +110,16 @@ impl<K: JobKind> Job<K> {
             self.attempt.cancellation.child_token(),
         )
     }
+}
 
-    pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
-        let complete = crate::attempt::complete_query(crate::attempt::ClaimFence {
-            job_id: self.attempt.job_id,
-            generation: self.attempt.generation,
-        });
-        let affected = observed("complete job", complete.execute(&mut *tx))
-            .await?
-            .rows_affected();
-        if affected == 1 {
-            Ok(())
-        } else {
-            Err(CompleteError::StaleClaim)
-        }
-    }
-
+impl<K: JobKind> Job<K> {
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
-        &self.attempt.pool
+        &self.pool
     }
 }
 
-impl<K: JobKind> fmt::Debug for Job<K> {
+impl<K: JobKind, P> fmt::Debug for Job<K, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
@@ -140,14 +128,6 @@ impl<K: JobKind> fmt::Debug for Job<K> {
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CompleteError {
-    #[error("job claim is stale")]
-    StaleClaim,
-    #[error("complete job")]
-    Database(#[from] sqlx::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,28 +142,28 @@ pub(crate) enum Disposition {
 #[display("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
-    pub(crate) summary: String,
+    pub(crate) summary: &'static str,
 }
 
 impl JobError {
     #[must_use]
-    pub fn retryable(error: impl fmt::Display) -> Self {
+    pub const fn retryable(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Retry,
-            summary: error.to_string(),
+            summary: reason,
         }
     }
 
     #[must_use]
-    pub fn permanent(error: impl fmt::Display) -> Self {
+    pub const fn permanent(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Permanent,
-            summary: error.to_string(),
+            summary: reason,
         }
     }
 
     pub fn retry_after_at_least(
-        error: impl fmt::Display,
+        reason: &'static str,
         delay: Duration,
     ) -> Result<Self, InvalidDelay> {
         let whole_micros = checked_delay_micros(delay)?;
@@ -191,7 +171,7 @@ impl JobError {
         let floor_micros = whole_micros + i64::from(has_fraction);
         Ok(Self {
             disposition: Disposition::RetryAfterAtLeast { floor_micros },
-            summary: error.to_string(),
+            summary: reason,
         })
     }
 
@@ -200,17 +180,17 @@ impl JobError {
             disposition: Disposition::Snooze {
                 delay_micros: checked_delay_micros(delay)?,
             },
-            summary: String::new(),
+            summary: "",
         })
     }
 
     #[must_use]
-    pub fn unavailable(error: impl fmt::Display) -> Self {
+    pub const fn unavailable(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Snooze {
                 delay_micros: UNAVAILABLE_DELAY_MICROS,
             },
-            summary: error.to_string(),
+            summary: reason,
         }
     }
 
@@ -220,44 +200,29 @@ impl JobError {
     }
 }
 
-impl<E> From<E> for JobError
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(error: E) -> Self {
-        let summary = with_sources(&error);
-        if pool_timed_out(&error) {
-            return Self::unavailable(summary);
-        }
-        Self {
-            disposition: Disposition::Retry,
-            summary,
-        }
-    }
+pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
+    fn run(
+        &self,
+        job: TransactionalJob<K>,
+        tx: &mut Tx<'_>,
+    ) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
-fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
-    shared_rules::error_chain::causes(error).any(|error| {
-        matches!(
-            error.downcast_ref::<sqlx::Error>(),
-            Some(sqlx::Error::PoolTimedOut)
-        )
-    })
-}
+struct TransactionFailure(JobError);
 
-fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut summary = error.to_string();
-    let mut sources = shared_rules::error_chain::sources(error);
-    while summary.len() < MAX_ERROR_SUMMARY_BYTES
-        && let Some(cause) = sources.next()
-    {
-        let text = cause.to_string();
-        if !text.is_empty() && !summary.contains(&text) {
-            summary.push_str(": ");
-            summary.push_str(&text);
-        }
+impl From<infra_postgres::TxError> for TransactionFailure {
+    fn from(error: infra_postgres::TxError) -> Self {
+        use infra_postgres::TxError;
+        Self(match error {
+            TxError::Acquire(sqlx::Error::PoolTimedOut) => {
+                JobError::unavailable("postgres pool timed out")
+            }
+            TxError::Acquire(_) => JobError::retryable("postgres connection unavailable"),
+            TxError::Begin(_) => JobError::retryable("postgres transaction did not begin"),
+            TxError::CommitFailed(_) => JobError::retryable("postgres transaction not committed"),
+            TxError::CommitUnknown(_) => JobError::retryable("postgres commit outcome unknown"),
+        })
     }
-    summary
 }
 
 pub trait Handler<K: JobKind>: Send + Sync + 'static {
@@ -306,15 +271,80 @@ impl KindsBuilder {
     }
 
     pub fn register<K: JobKind>(&mut self, policy: Policy, handler: impl Handler<K>) -> &mut Self {
+        let handler = Arc::new(handler);
+        self.register_dispatch::<K>(policy, move |job| {
+            let handler = Arc::clone(&handler);
+            Box::pin(async move { handler.run(job).await.map(|()| Completion::Pending) })
+        })
+    }
+
+    pub fn register_transactional<K: JobKind>(
+        &mut self,
+        policy: Policy,
+        handler: impl TransactionalHandler<K>,
+    ) -> &mut Self {
+        let handler = Arc::new(handler);
+        self.register_dispatch::<K>(policy, move |job| {
+            let handler = Arc::clone(&handler);
+            Box::pin(async move {
+                let Job {
+                    attempt,
+                    payload,
+                    pool,
+                } = job;
+                let job = Job {
+                    attempt,
+                    payload,
+                    pool: (),
+                };
+                let fence = crate::attempt::ClaimFence {
+                    job_id: job.id(),
+                    generation: job.attempt.generation,
+                };
+                infra_postgres::in_tx_with_acquire_deadline(
+                    &pool,
+                    job.deadline(),
+                    infra_postgres::TxOptions::default(),
+                    async move |tx| {
+                        handler.run(job, tx).await.map_err(TransactionFailure)?;
+                        let complete = crate::attempt::complete_query(fence);
+                        let rows = observed("complete job", complete.execute(&mut *tx))
+                            .await
+                            .map_err(|_| {
+                                TransactionFailure(JobError::retryable("job completion failed"))
+                            })?;
+                        if rows.rows_affected() == 0 {
+                            return Err(TransactionFailure(JobError::retryable(
+                                "job claim is stale",
+                            )));
+                        }
+                        Ok(Completion::Committed)
+                    },
+                )
+                .await
+                .map_err(|failure| failure.0)
+            })
+        })
+    }
+
+    fn register_dispatch<K: JobKind>(
+        &mut self,
+        policy: Policy,
+        run: impl Fn(Job<K>) -> HandlerFuture + Send + Sync + 'static,
+    ) -> &mut Self {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
             running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
-            dispatch: Box::new(Typed {
-                handler: Arc::new(handler),
-                _kind: PhantomData,
+            dispatch: Box::new(move |attempt, pool, payload| {
+                let payload = serde_json::from_slice::<K>(payload)?;
+                Ok(run(Job {
+                    attempt,
+                    payload,
+                    pool,
+                }))
             }),
             metrics: std::sync::OnceLock::new(),
         });
@@ -437,7 +467,7 @@ pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
-    pub(crate) dispatch: Box<dyn Dispatch>,
+    pub(crate) dispatch: Box<Dispatch>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
 }
 
@@ -448,42 +478,20 @@ impl Registered {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Completion {
+    Pending,
+    Committed,
+}
+
 pub(crate) type HandlerFuture =
-    Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<Completion, JobError>> + Send + 'static>>;
 
-pub(crate) trait Dispatch: Send + Sync {
-    fn prepare(&self, attempt: Attempt, payload: &[u8])
-    -> Result<HandlerFuture, serde_json::Error>;
-}
-
-struct Typed<K, H> {
-    handler: Arc<H>,
-    _kind: PhantomData<fn() -> K>,
-}
-
-impl<K, H> Dispatch for Typed<K, H>
-where
-    K: JobKind,
-    H: Handler<K>,
-{
-    fn prepare(
-        &self,
-        attempt: Attempt,
-        payload: &[u8],
-    ) -> Result<HandlerFuture, serde_json::Error> {
-        let decoded = serde_json::from_slice::<K>(payload)?;
-        let job = Job {
-            attempt,
-            payload: decoded,
-        };
-        let handler = Arc::clone(&self.handler);
-        Ok(Box::pin(async move { handler.run(job).await }))
-    }
-}
+pub(crate) type Dispatch =
+    dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::PgPoolOptions;
@@ -726,33 +734,31 @@ mod tests {
         let registry = kinds.validate().unwrap();
         let registered = registry.get(Sample::NAME).unwrap();
         let token = CancellationToken::new();
-        let future = registered
-            .dispatch
-            .prepare(
-                Attempt {
-                    job_id: id,
-                    number: 3,
-                    generation: 99,
-                    attempt_deadline: deadline,
-                    cancellation: token,
-                    pool: lazy_pool(),
-                },
-                br#"{"n":7,"secret":"payload-secret"}"#,
-            )
-            .unwrap();
+        let future = (registered.dispatch)(
+            Attempt {
+                job_id: id,
+                number: 3,
+                generation: 99,
+                attempt_deadline: deadline,
+                cancellation: token,
+            },
+            lazy_pool(),
+            br#"{"n":7,"secret":"payload-secret"}"#,
+        )
+        .unwrap();
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
         future.await.unwrap();
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
-        let err = registered.dispatch.prepare(
+        let err = (registered.dispatch)(
             Attempt {
                 job_id: id,
                 number: 1,
                 generation: 99,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
-                pool: lazy_pool(),
             },
+            lazy_pool(),
             b"null",
         );
         assert!(err.is_err());
@@ -767,8 +773,8 @@ mod tests {
                 generation: 99,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
-                pool: lazy_pool(),
             },
+            pool: lazy_pool(),
             payload: Sample {
                 n: 7,
                 secret: "payload-secret".to_owned(),
@@ -783,102 +789,18 @@ mod tests {
     }
 
     #[test]
-    fn job_error_from_std_is_retryable_and_permanent_is_permanent() {
-        let err = JobError::from(std::io::Error::other("disk failed"));
-        assert!(!err.is_permanent());
-        assert_eq!(err.to_string(), "disk failed");
-
-        let err = JobError::permanent("stop");
-        assert!(err.is_permanent());
-        assert_eq!(err.to_string(), "stop");
-    }
-
-    #[test]
-    fn cyclic_error_source_remains_a_retryable_failure() {
-        #[derive(Debug, derive_more::Display)]
-        #[display("cyclic error")]
-        struct CyclicError(AtomicUsize);
-
-        impl std::error::Error for CyclicError {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                let calls = self.0.fetch_add(1, Ordering::Relaxed);
-                assert!(calls < 256, "walking the cycle did not stop");
-                Some(self)
-            }
-        }
-
-        let error = JobError::from(CyclicError(AtomicUsize::new(0)));
-        assert_eq!(error.disposition, Disposition::Retry);
-        assert_eq!(error.to_string(), "cyclic error");
-    }
-
-    #[test]
-    fn a_pool_timeout_in_the_chain_is_unavailable_not_a_failure() {
-        let direct = JobError::from(sqlx::Error::PoolTimedOut);
+    fn transaction_diagnostics_preserve_the_stage_and_withhold_driver_text() {
+        use infra_postgres::TxError;
+        let TransactionFailure(overload) = TxError::Acquire(sqlx::Error::PoolTimedOut).into();
         assert_eq!(
-            direct.disposition,
+            overload.disposition,
             Disposition::Snooze {
-                delay_micros: UNAVAILABLE_DELAY_MICROS,
+                delay_micros: UNAVAILABLE_DELAY_MICROS
             }
         );
-        let wrapped = JobError::from(infra_postgres::TxError::Acquire(sqlx::Error::PoolTimedOut));
-        assert_eq!(
-            wrapped.disposition,
-            Disposition::Snooze {
-                delay_micros: UNAVAILABLE_DELAY_MICROS,
-            }
-        );
-        assert_eq!(
-            wrapped.to_string(),
-            "postgres transaction: acquire connection: pool timed out while waiting for an open connection"
-        );
-        let other = JobError::from(sqlx::Error::PoolClosed);
-        assert_eq!(other.disposition, Disposition::Retry);
-        let explicit = JobError::retryable(sqlx::Error::PoolTimedOut);
-        assert_eq!(explicit.disposition, Disposition::Retry);
-        let refusal = JobError::unavailable("rpc refused");
-        assert_eq!(
-            refusal.disposition,
-            Disposition::Snooze {
-                delay_micros: UNAVAILABLE_DELAY_MICROS,
-            }
-        );
-        assert_eq!(refusal.to_string(), "rpc refused");
-        assert!(Duration::from_micros(UNAVAILABLE_DELAY_MICROS.unsigned_abs()) <= crate::MAX_DELAY);
-    }
-
-    #[derive(Debug, thiserror::Error)]
-    enum Layered {
-        #[error("commit outcome unknown")]
-        Hidden(#[source] std::io::Error),
-        #[error("complete job: {0}")]
-        Printed(#[source] std::io::Error),
-    }
-
-    #[test]
-    fn job_error_from_std_keeps_each_source_once() {
-        let hidden = JobError::from(Layered::Hidden(std::io::Error::other("connection reset")));
-        assert_eq!(
-            hidden.to_string(),
-            "commit outcome unknown: connection reset"
-        );
-
-        let printed = JobError::from(Layered::Printed(std::io::Error::other("connection reset")));
-        assert_eq!(printed.to_string(), "complete job: connection reset");
-
-        let explicit = JobError::retryable(Layered::Hidden(std::io::Error::other("reset")));
-        assert_eq!(explicit.to_string(), "commit outcome unknown");
-    }
-
-    #[test]
-    fn complete_error_keeps_the_sqlx_cause_as_its_only_source() {
-        let error = CompleteError::Database(sqlx::Error::PoolClosed);
-        assert_eq!(error.to_string(), "complete job");
-        let job_error = JobError::from(error);
-        assert_eq!(
-            job_error.to_string(),
-            "complete job: attempted to acquire a connection on a closed pool"
-        );
-        assert_eq!(job_error.disposition, Disposition::Retry);
+        let TransactionFailure(unknown) =
+            TxError::CommitUnknown(sqlx::Error::Protocol("private-test-value".to_owned())).into();
+        assert_eq!(unknown.disposition, Disposition::Retry);
+        assert_eq!(unknown.to_string(), "postgres commit outcome unknown");
     }
 }

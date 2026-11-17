@@ -125,3 +125,26 @@ snapshot guarantee. Any multi-store recovery runbook must:
 4. Invalidate pre-restore tokens, operator commands, and receipts, re-inspecting
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
+
+<!-- template:begin jobs:production-contract-jobs-rollout -->
+### Rolling out exact background-job payloads
+
+For a service that uses PostgreSQL jobs, inventory every worker, outbox
+publisher, operator and rollback image that reads the jobs table. Before
+enabling a producer that writes only `payload_text`, move those readers to a
+release that prefers `payload_text` and accepts historical `payload` JSONB.
+Include tooling that compares a live duplicate, and exercise a retained failed
+job through redrive. If an older JSONB-only reader is still in the rollout or
+rollback window, deploy the dual-writing, dual-reading release first.
+
+Apply the forward migration that permits either representation before starting
+text-only producers. During overlap, exercise an old producer with a new worker
+and a new producer with the oldest supported worker. Roll back the application
+to the dual-reading release while keeping the expanded schema. Leave historical
+JSONB-only rows in their original format: reconstructing text from JSONB cannot
+recover the original encoding and changes how live duplicates are compared.
+
+For an incompatible handler payload, register the new kind under a new name
+before switching producers. Keep the old handler available until pending,
+running and recoverable failed jobs of the old kind have a disposition.
+<!-- template:end jobs:production-contract-jobs-rollout -->

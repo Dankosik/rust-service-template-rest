@@ -52,68 +52,56 @@ pub(super) fn validate_pool_capacity(
     Ok(())
 }
 
-pub(super) async fn build_engines(
+pub(super) async fn build_engine(
     config: &WorkerConfig,
     jobs: Option<Kinds>,
     resources: &Resources,
-) -> Result<Vec<Engine>, WorkerError> {
-    let mut engines = Vec::new();
-    if let Some(registry) = jobs {
-        let engine = Engine::new(
+) -> Result<Option<Engine>, WorkerError> {
+    let engine = match jobs {
+        Some(registry) => Some(Engine::new(
             super::postgres::admitted_pool(resources)?,
             registry,
             config.jobs.max_workers,
-        );
-        engine.check_startup().await?;
-        engines.push(engine);
-    }
+        )),
+        None => None,
+    };
     // template:begin outbox:worker-bootstrap-outbox-engine
-    let publisher = super::outbox::publisher(resources, engines.first()).await?;
-    engines.push(publisher);
+    let engine = Some(super::outbox::with_publisher(resources, engine)?);
     // template:end outbox:worker-bootstrap-outbox-engine
-    Ok(engines)
+    if let Some(engine) = &engine {
+        engine.check_startup().await?;
+    }
+    Ok(engine)
 }
 
-pub(super) fn start_engines(
-    engines: Vec<Engine>,
+pub(super) fn start_engine(
+    engine: Option<Engine>,
     resources: &mut Resources,
     background: &Background,
     signals: &mut Signals,
 ) -> Option<Ended> {
-    for engine in engines {
-        if let Some(ended) = pending_end(resources, background, signals) {
-            return Some(ended);
-        }
-        resources
-            .started_engines
-            .push(engine.start(&background.tracker, &background.cancel));
+    let engine = engine?;
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return Some(ended);
     }
-    tracing::info!(
-        engines = resources.started_engines.len(),
-        "jobs_claiming_started"
-    );
+    resources.started_engine = Some(engine.start(&background.tracker, &background.cancel));
+    tracing::info!("jobs_claiming_started");
     None
 }
 
 pub(super) fn engine_failure(resources: &Resources) -> Option<WorkerError> {
     resources
-        .started_engines
-        .iter()
-        .any(|engine| engine.failed().now_or_never().is_some())
-        .then_some(WorkerError::EngineStopped)
+        .started_engine
+        .as_ref()?
+        .failed()
+        .now_or_never()
+        .map(|()| WorkerError::EngineStopped)
 }
 
 pub(super) async fn engine_stopped(resources: &Resources) {
-    if resources.started_engines.is_empty() {
-        std::future::pending::<()>().await;
-    } else {
-        futures_util::future::select_all(
-            resources
-                .started_engines
-                .iter()
-                .map(|engine| Box::pin(engine.failed())),
-        )
-        .await;
+    match &resources.started_engine {
+        Some(engine) => engine.failed().await,
+        None => std::future::pending::<()>().await,
     }
 }
 
