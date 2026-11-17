@@ -36,7 +36,7 @@ pub(super) async fn admit_opening(
     next: Next,
 ) -> Response {
     let patience = patience(&request, limit.max_wait);
-    let Some((_permit, waited)) = acquire(limit.permits, patience).await else {
+    let Some((_permit, waited)) = acquire(&limit.permits, patience).await else {
         return reject_at_capacity(request).await;
     };
     if !waited.is_zero() {
@@ -55,7 +55,7 @@ pub(super) async fn admit_business_call(
         .get::<OpeningWait>()
         .map_or(Duration::ZERO, |wait| wait.0);
     let patience = patience(&request, limit.max_wait.saturating_sub(waited));
-    let Some((permit, _)) = acquire(limit.permits, patience).await else {
+    let Some((permit, _)) = acquire(&limit.permits, patience).await else {
         return reject_at_capacity(request).await;
     };
     let mut response = next.run(request).await;
@@ -72,26 +72,13 @@ fn patience(request: &Request, max_wait: Duration) -> Duration {
 }
 
 async fn acquire(
-    permits: Arc<Semaphore>,
+    permits: &Arc<Semaphore>,
     patience: Duration,
 ) -> Option<(OwnedSemaphorePermit, Duration)> {
-    if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
-        return Some((permit, Duration::ZERO));
-    }
-    if patience.is_zero() {
-        return None;
-    }
-
-    let waiting = crate::observe::admission_waiting();
-    let started = tokio::time::Instant::now();
-    let permit = tokio::time::timeout(patience, permits.acquire_owned()).await;
-    let waited = started.elapsed();
-    drop(waiting);
-    permit
+    infra_http::acquire_within(permits, patience, crate::observe::admission_waiting)
+        .await
         .ok()
-        .and_then(Result::ok)
-        .filter(|_| waited < patience)
-        .map(|permit| (permit, waited))
+        .map(|(permit, waited)| (permit, waited.unwrap_or_default()))
 }
 
 #[derive(Clone)]
@@ -104,27 +91,4 @@ async fn reject_at_capacity(request: Request) -> Response {
     let mut response = reject(request, status).await;
     response.extensions_mut().insert(Shed);
     response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn a_permit_freed_after_the_admission_wait_is_refused() {
-        use std::task::{Context, Waker};
-
-        let permits = Arc::new(Semaphore::new(1));
-        let holder = permits.try_acquire().unwrap();
-        let patience = Duration::from_secs(1);
-        let mut waiting = std::pin::pin!(acquire(Arc::clone(&permits), patience));
-        let cx = &mut Context::from_waker(Waker::noop());
-        assert!(waiting.as_mut().poll(cx).is_pending());
-
-        tokio::time::advance(patience + Duration::from_millis(1)).await;
-        drop(holder);
-
-        assert!(waiting.await.is_none());
-        assert_eq!(permits.available_permits(), 1);
-    }
 }

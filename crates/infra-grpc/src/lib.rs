@@ -20,7 +20,7 @@ mod tls;
 pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };
-pub use error::{Error, TlsMaterialError};
+pub use error::{ClientError, Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;
 pub use protocol::grpc_timeout;
 pub use router::{Limits, ResponseContext, router, server_options};
