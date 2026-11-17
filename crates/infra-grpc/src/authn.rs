@@ -103,7 +103,7 @@ pub(crate) async fn authenticate(
         return Err(server_stopped(reason).into_http());
     }
     let (principal, token) = match result {
-        Ok(verified) => verified,
+        Ok(presentation) => presentation,
         Err(failure) => {
             return Err(reject_with_budget(context, request, authentication_status(failure)).await);
         }
