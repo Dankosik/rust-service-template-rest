@@ -12,6 +12,7 @@ use infra_object_storage::{
     ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
     ObjectStorageOptions, Provider, PutOptions,
 };
+use operation_context::OperationContext;
 use secrecy::{ExposeSecret, SecretString};
 
 fn var(name: &str) -> String {
@@ -153,6 +154,7 @@ fn outcome<T, E: aws_sdk_s3::error::ProvideErrorMetadata>(result: &Result<T, E>)
 #[tokio::test]
 #[ignore = "writes to a live provider bucket; requires separate authorization"]
 async fn live_provider_conformance() {
+    let parent = OperationContext::unbounded();
     let target = Target::from_env();
     let storage = target.storage();
     let run = std::time::SystemTime::now()
@@ -168,34 +170,37 @@ async fn live_provider_conformance() {
     written.extend(record_facts(&target, &object, key).await);
 
     for written in &written {
-        storage.delete(written).await.unwrap();
+        storage.delete(&parent, written).await.unwrap();
     }
     assert_eq!(
-        storage.head(&object).await,
+        storage.head(&parent, &object).await,
         Err(ObjectStorageError::NotFound)
     );
-    storage.delete(&object).await.unwrap();
+    storage.delete(&parent, &object).await.unwrap();
 }
 
 async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
+    let parent = OperationContext::unbounded();
     let body = Bytes::from_static(br#"{"conformance":true}"#);
     let options = PutOptions::default()
         .content_type(ContentType::try_new("application/json").unwrap())
         .create_only();
     storage
-        .put(object, body.clone().into(), options.clone())
+        .put(&parent, object, body.clone().into(), options.clone())
         .await
         .unwrap();
     assert_eq!(
-        storage.put(object, body.clone().into(), options).await,
+        storage
+            .put(&parent, object, body.clone().into(), options)
+            .await,
         Err(ObjectStorageError::AlreadyExists),
         "If-None-Match: * must answer 412 on an existing key"
     );
-    let metadata = storage.head(object).await.unwrap();
+    let metadata = storage.head(&parent, object).await.unwrap();
     assert_eq!(metadata.size, body.len() as u64);
     assert_eq!(
         storage
-            .get(object)
+            .get(&parent, object)
             .await
             .unwrap()
             .into_bytes()
@@ -206,12 +211,12 @@ async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
 
     let http = reqwest::Client::new();
     let url = storage
-        .presign_get(object, Duration::from_mins(1))
+        .presign_get(&parent, object, Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(http.get(url.expose()).send().await.unwrap().status(), 200);
     let short = storage
-        .presign_get(object, Duration::from_secs(1))
+        .presign_get(&parent, object, Duration::from_secs(1))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;

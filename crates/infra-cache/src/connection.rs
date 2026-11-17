@@ -15,6 +15,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use zeroize::Zeroizing;
 
 use crate::credentials::{PasswordFile, ReadFailure};
@@ -24,7 +25,7 @@ use crate::observe::{
     ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
     RETIREMENTS_METRIC,
 };
-use crate::{MutationError, OperationError, ServerEndpoint, SetError};
+use crate::{CloseOutcome, MutationError, OperationError, ServerEndpoint, SetError};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,6 +50,7 @@ pub(crate) enum ErrorType {
     Auth,
     ServerErrorReply,
     Parse,
+    ValueTooLarge,
     Other,
 }
 
@@ -63,6 +65,7 @@ impl CommandFailure {
     fn operation_error(self) -> OperationError {
         match self {
             Self::Stopped(stopped) => OperationError::Stopped(stopped),
+            Self::Failed(ErrorType::ValueTooLarge) => OperationError::ValueTooLarge,
             Self::Failed(_) | Self::InvalidTtl => OperationError::Unavailable,
         }
     }
@@ -145,6 +148,7 @@ impl ErrorType {
             Self::Auth => "auth",
             Self::ServerErrorReply => "response",
             Self::Parse => "parse",
+            Self::ValueTooLarge => "value_too_large",
             Self::Other => "other",
         }
     }
@@ -187,6 +191,7 @@ struct Shared {
     write: Mutex<()>,
     changed: Notify,
     retirements: Counter,
+    tasks: TaskTracker,
 }
 
 enum State {
@@ -308,17 +313,49 @@ impl<T: Send + 'static> Drop for Exchange<'_, T> {
     }
 }
 
-async fn query<T: redis::FromRedisValue>(
+pub(super) async fn query_mutation(
     command: redis::Cmd,
     mut connection: MultiplexedConnection,
     operation: Operation,
-) -> redis::RedisResult<T> {
+) -> redis::RedisResult<()> {
     let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
     match (operation, reply_data(reply)?) {
-        (Operation::Get, value @ (redis::Value::Nil | redis::Value::BulkString(_)))
-        | (Operation::Set, value @ redis::Value::Okay)
-        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => Ok(T::from_redis_value(value)?),
+        (Operation::Set, redis::Value::Okay) | (Operation::Delete, redis::Value::Int(0 | 1)) => {
+            Ok(())
+        }
         _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
+    }
+}
+
+pub(super) async fn query_read(
+    pipeline: redis::Pipeline,
+    mut connection: MultiplexedConnection,
+    limit: usize,
+) -> redis::RedisResult<Option<Vec<u8>>> {
+    use redis::Value;
+
+    let replies =
+        tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
+    let unexpected =
+        || redis::RedisError::from((redis::ErrorKind::Parse, "unexpected cache read reply"));
+    let [multi, exists_queued, range_queued, exec] =
+        <[_; 4]>::try_from(replies).map_err(|_| unexpected())?;
+    if reply_data(multi)? != Value::Okay {
+        return Err(unexpected());
+    }
+    for queued in [exists_queued, range_queued] {
+        if !matches!(reply_data(queued)?, Value::SimpleString(status) if status == "QUEUED") {
+            return Err(unexpected());
+        }
+    }
+    let Value::Array(results) = reply_data(exec)? else {
+        return Err(unexpected());
+    };
+    let [exists, value] = <[_; 2]>::try_from(results).map_err(|_| unexpected())?;
+    match (reply_data(exists)?, reply_data(value)?) {
+        (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
+        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= limit + 1 => Ok(Some(bytes)),
+        _ => Err(unexpected()),
     }
 }
 
@@ -441,19 +478,22 @@ impl Link {
             write: Mutex::new(()),
             changed: Notify::new(),
             retirements,
+            tasks: TaskTracker::new(),
         });
         let exit = SupervisorExit {
             shared: shared.clone(),
             server: server.clone(),
         };
-        let supervisor = tokio::spawn(supervise(
-            exit,
-            dial,
-            settings,
-            password_file,
-            command_timeout,
-        ))
-        .abort_handle();
+        let supervisor = shared
+            .tasks
+            .spawn(supervise(
+                exit,
+                dial,
+                settings,
+                password_file,
+                command_timeout,
+            ))
+            .abort_handle();
         Self {
             server,
             command_timeout,
@@ -465,12 +505,30 @@ impl Link {
         }
     }
 
-    pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
+    pub(crate) async fn close(&self, deadline: Instant) -> CloseOutcome {
+        self.stop();
+        if timeout_at(deadline, self.shared.tasks.wait()).await.is_ok() {
+            CloseOutcome::Complete
+        } else {
+            CloseOutcome::TimedOut
+        }
+    }
+
+    fn stop(&self) {
+        self.shared.close();
+        self.supervisor.abort();
+        self.shared.tasks.close();
+    }
+
+    pub(crate) async fn command<T: Send + 'static, F>(
         &self,
-        build_command: impl FnOnce() -> redis::Cmd,
+        build_query: impl FnOnce(MultiplexedConnection) -> F,
         parent: &OperationContext,
         operation: Operation,
-    ) -> Result<T, CommandError> {
+    ) -> Result<T, CommandError>
+    where
+        F: Future<Output = redis::RedisResult<T>> + Send + 'static,
+    {
         let context = parent.child(self.command_timeout);
         let stop = |_: Stopped| {
             parent.stopped().map_or(
@@ -506,12 +564,12 @@ impl Link {
             Ok(())
         };
         check_dispatch()?;
-        let command = build_command();
+        let query = build_query(generation.connection.clone());
         check_dispatch()?;
         let mut exchange = Exchange::new(
             &generation,
             reservation,
-            query(command, generation.connection.clone(), operation),
+            query,
             Deadline::new(Instant::now(), self.command_timeout),
         );
         let reply = tokio::select! {
@@ -543,8 +601,7 @@ impl Link {
 
 impl Drop for Link {
     fn drop(&mut self) {
-        self.shared.close();
-        self.supervisor.abort();
+        self.stop();
     }
 }
 
@@ -675,7 +732,16 @@ async fn run_supervisor(
             return;
         }
         let retired = CancellationToken::new();
-        match setup_attempt(server, dial, settings, password_file, &retired).await {
+        match setup_attempt(
+            server,
+            dial,
+            settings,
+            password_file,
+            &retired,
+            &shared.tasks,
+        )
+        .await
+        {
             Ok((dialed, rotation)) => {
                 let _driver = dialed.driver;
                 let (abandoned, replies) = mpsc::unbounded_channel();
@@ -748,10 +814,12 @@ async fn setup_attempt<'a>(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
     retired: &CancellationToken,
+    tasks: &'a TaskTracker,
 ) -> Result<(Dialed, Option<Rotation<'a>>), ErrorType> {
     let setup = async {
-        let (settings, rotation) = credentialed_settings(server, settings, password_file).await?;
-        let dialed = connect(dial, &settings, retired.clone()).await?;
+        let (settings, rotation) =
+            credentialed_settings(server, settings, password_file, tasks).await?;
+        let dialed = connect(dial, &settings, retired.clone(), tasks).await?;
         Ok((dialed, rotation))
     };
     match timeout(SETUP_TIMEOUT, setup).await {
@@ -765,11 +833,12 @@ async fn credentialed_settings<'a>(
     server: &ServerEndpoint,
     admitted: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
+    tasks: &'a TaskTracker,
 ) -> Result<(redis::RedisConnectionInfo, Option<Rotation<'a>>), ErrorType> {
     let Some(file) = password_file else {
         return Ok((admitted.clone(), None));
     };
-    let password = file.read().await.map_err(|error| {
+    let password = file.read(tasks).await.map_err(|error| {
         warn_password_file_unreadable(server, error);
         ErrorType::Other
     })?;
@@ -777,7 +846,7 @@ async fn credentialed_settings<'a>(
         .clone()
         .set_username(file.username())
         .set_password(password.as_str());
-    Ok((settings, Some(Rotation::new(file, password))))
+    Ok((settings, Some(Rotation::new(file, tasks, password))))
 }
 
 fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
@@ -793,6 +862,7 @@ async fn connect(
     dial: &Dial,
     settings: &redis::RedisConnectionInfo,
     retired: CancellationToken,
+    tasks: &TaskTracker,
 ) -> Result<Dialed, ErrorType> {
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
@@ -804,7 +874,7 @@ async fn connect(
             }
             Ok::<(), redis::aio::SendError>(())
         });
-    dial.connect(settings, config)
+    dial.connect(settings, config, tasks)
         .await
         .map_err(|error| error_type(&error))
 }
@@ -856,6 +926,7 @@ async fn maintain(
 
 struct Rotation<'a> {
     file: &'a PasswordFile,
+    tasks: &'a TaskTracker,
     authenticated_password: Zeroizing<String>,
     unreadable_logged: bool,
     refused_logged: bool,
@@ -897,9 +968,14 @@ enum Disposition {
 }
 
 impl<'a> Rotation<'a> {
-    fn new(file: &'a PasswordFile, authenticated_password: Zeroizing<String>) -> Self {
+    fn new(
+        file: &'a PasswordFile,
+        tasks: &'a TaskTracker,
+        authenticated_password: Zeroizing<String>,
+    ) -> Self {
         Self {
             file,
+            tasks,
             authenticated_password,
             unreadable_logged: false,
             refused_logged: false,
@@ -927,7 +1003,7 @@ impl<'a> Rotation<'a> {
         command_timeout: Duration,
     ) -> RefreshOutcome {
         let read_deadline = Instant::now() + PASSWORD_READ_TIMEOUT;
-        let password = match timeout_at(read_deadline, self.file.read()).await {
+        let password = match timeout_at(read_deadline, self.file.read(self.tasks)).await {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
             Err(_elapsed) => return RefreshOutcome::ReadFailed(ReadFailure::TimedOut),

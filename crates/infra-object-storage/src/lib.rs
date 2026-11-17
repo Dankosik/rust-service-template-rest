@@ -214,20 +214,10 @@ impl ObjectStorage {
 
     pub async fn put(
         &self,
-        key: &ObjectKey,
-        body: PutBody,
-        options: PutOptions,
-    ) -> Result<(), ObjectStorageError> {
-        self.put_with_context(key, body, options, &OperationContext::unbounded())
-            .await
-    }
-
-    pub async fn put_with_context(
-        &self,
-        key: &ObjectKey,
-        body: PutBody,
-        options: PutOptions,
         parent: &OperationContext,
+        key: &ObjectKey,
+        body: PutBody,
+        options: PutOptions,
     ) -> Result<(), ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
@@ -286,15 +276,10 @@ impl ObjectStorage {
         }
     }
 
-    pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
-        self.get_with_context(key, &OperationContext::unbounded())
-            .await
-    }
-
-    pub async fn get_with_context(
+    pub async fn get(
         &self,
-        key: &ObjectKey,
         parent: &OperationContext,
+        key: &ObjectKey,
     ) -> Result<Download, ObjectStorageError> {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Get)?;
@@ -334,15 +319,10 @@ impl ObjectStorage {
         Ok(download)
     }
 
-    pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
-        self.head_with_context(key, &OperationContext::unbounded())
-            .await
-    }
-
-    pub async fn head_with_context(
+    pub async fn head(
         &self,
-        key: &ObjectKey,
         parent: &OperationContext,
+        key: &ObjectKey,
     ) -> Result<ObjectMetadata, ObjectStorageError> {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Head)?;
@@ -376,15 +356,10 @@ impl ObjectStorage {
         Ok(metadata)
     }
 
-    pub async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStorageError> {
-        self.delete_with_context(key, &OperationContext::unbounded())
-            .await
-    }
-
-    pub async fn delete_with_context(
+    pub async fn delete(
         &self,
-        key: &ObjectKey,
         parent: &OperationContext,
+        key: &ObjectKey,
     ) -> Result<(), ObjectStorageError> {
         let call = Call::UnconditionalMutation;
         let (context, mut guard) = self.begin(parent, Operation::Delete)?;
@@ -411,18 +386,9 @@ impl ObjectStorage {
 
     pub async fn presign_get(
         &self,
-        key: &ObjectKey,
-        expires_in: Duration,
-    ) -> Result<PresignedUrl, ObjectStorageError> {
-        self.presign_get_with_context(key, expires_in, &OperationContext::unbounded())
-            .await
-    }
-
-    pub async fn presign_get_with_context(
-        &self,
-        key: &ObjectKey,
-        expires_in: Duration,
         parent: &OperationContext,
+        key: &ObjectKey,
+        expires_in: Duration,
     ) -> Result<PresignedUrl, ObjectStorageError> {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;

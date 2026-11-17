@@ -330,7 +330,11 @@ impl Echo {
         Ok("ok".to_owned())
     }
 
-    async fn upload(&self) -> Result<String, Status> {
+    async fn upload(&self, request: &Request<UnaryRequest>) -> Result<String, Status> {
+        let context = request
+            .extensions()
+            .get()
+            .ok_or_else(|| Status::internal("missing operation context"))?;
         self.counts.upload_started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.upload_active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts
@@ -353,7 +357,10 @@ impl Echo {
         let body = PutBody::stream(UPLOAD_BYTES as u64, Body::from_stream(frames));
         let key = ObjectKey::try_new("runtime-progress")
             .map_err(|_| Status::internal("fixture key rejected"))?;
-        let result = self.storage.put(&key, body, PutOptions::default()).await;
+        let result = self
+            .storage
+            .put(context, &key, body, PutOptions::default())
+            .await;
         *work = true;
         if result == Ok(()) {
             self.counts.upload_completed.fetch_add(1, Ordering::SeqCst);
@@ -439,7 +446,7 @@ impl EchoService for Echo {
                 message
             }
             Some("cpu") => self.cpu().await?,
-            Some("upload") => self.upload().await?,
+            Some("upload") => self.upload(&request).await?,
             Some("prepare") => self.prepare()?,
             Some("log") => {
                 self.counts.log_attempted.fetch_add(1, Ordering::SeqCst);

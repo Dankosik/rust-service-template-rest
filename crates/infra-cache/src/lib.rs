@@ -28,6 +28,8 @@ pub struct CacheOptions {
     pub allow_plaintext: bool,
     pub allow_unauthenticated: bool,
     pub command_timeout: Duration,
+    pub max_key_bytes: usize,
+    pub max_value_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +40,8 @@ pub struct ClientCertificate {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
+    #[error("cache key or value size limit is outside the supported range")]
+    InvalidSizeLimit,
     #[error("cache DSN is invalid")]
     InvalidDsn,
     #[error("cache address is unsupported")]
@@ -76,8 +80,18 @@ pub enum CacheError {
     AdmissionTimedOut,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseOutcome {
+    Complete,
+    TimedOut,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OperationError {
+    #[error("cache key exceeds the configured size limit")]
+    KeyTooLarge,
+    #[error("cache value exceeds the configured size limit")]
+    ValueTooLarge,
     #[error("cache operation stopped by caller ({0:?})")]
     Stopped(operation_context::Stopped),
     #[error("cache unavailable")]
@@ -110,6 +124,8 @@ pub(crate) struct ServerEndpoint {
 #[derive(Clone, Debug)]
 pub struct Cache {
     link: Arc<Link>,
+    max_key_bytes: usize,
+    max_value_bytes: usize,
 }
 
 impl Cache {
@@ -120,6 +136,12 @@ impl Cache {
 
         let deadline = tokio::time::Instant::now() + ADMISSION_TIMEOUT;
         let command_timeout = options.command_timeout;
+        let max_key_bytes = options.max_key_bytes;
+        let max_value_bytes = options.max_value_bytes;
+        let supported = 1..=shared_rules::cache::MAX_ENTRY_BYTES;
+        if !supported.contains(&max_key_bytes) || !supported.contains(&max_value_bytes) {
+            return Err(CacheError::InvalidSizeLimit);
+        }
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             admission::admit(options)
         }));
@@ -134,6 +156,8 @@ impl Cache {
             .map_err(|_| CacheError::ClientBuild)??;
         observe::describe();
         Ok(Self {
+            max_key_bytes,
+            max_value_bytes,
             link: Arc::new(Link::start(
                 server,
                 dial,
@@ -142,6 +166,10 @@ impl Cache {
                 command_timeout,
             )),
         })
+    }
+
+    pub async fn close(&self, deadline: tokio::time::Instant) -> CloseOutcome {
+        self.link.close(deadline).await
     }
 }
 

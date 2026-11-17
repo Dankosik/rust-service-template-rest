@@ -224,7 +224,7 @@ impl<Propagation> HttpFields<Propagation> {
         &self,
         drain_budget: Option<Duration>,
         v: &mut Violations,
-    ) -> (HttpListenerConfig, Option<Duration>) {
+    ) -> HttpListenerConfig {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
@@ -267,7 +267,7 @@ impl<Propagation> HttpFields<Propagation> {
             "http.max_connection_age",
             self.max_connection_age,
         ));
-        let listener = HttpListenerConfig {
+        HttpListenerConfig {
             addr: self.addr,
             header_read_timeout: self.header_read_timeout,
             request_timeout: self.request_timeout,
@@ -279,11 +279,7 @@ impl<Propagation> HttpFields<Propagation> {
             max_connection_age: (!self.max_connection_age.is_zero())
                 .then_some(self.max_connection_age),
             access_log_health_probes: self.access_log_health_probes,
-        };
-        (
-            listener,
-            request_timeout_in_range.then_some(self.request_timeout),
-        )
+        }
     }
 }
 
@@ -292,7 +288,7 @@ impl HttpInput {
         self,
         tail: Option<ShutdownTail>,
         v: &mut Violations,
-    ) -> (HttpConfig, HttpTimings) {
+    ) -> (HttpConfig, Option<Duration>) {
         let drain = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let readiness_propagation_delay = self.readiness_propagation_delay.0;
         let mut propagation_fits_drain = false;
@@ -314,26 +310,14 @@ impl HttpInput {
             self.drain_timeout
                 .saturating_sub(readiness_propagation_delay)
         });
-        #[allow(
-            unused_variables,
-            reason = "only the cache profile consumes the validated HTTP request timeout"
-        )]
-        let (listener, request_timeout) = self.admit_listener(drain_budget, v);
+        let listener = self.admit_listener(drain_budget, v);
         let config = HttpConfig {
             listener,
             grace_period: self.grace_period,
             drain_timeout: self.drain_timeout,
             readiness_propagation_delay,
         };
-        let timings = HttpTimings {
-            // template:begin grpc:http-timings-drain-value
-            drain_budget,
-            // template:end grpc:http-timings-drain-value
-            // template:begin cache:http-timings-request-value
-            request_timeout,
-            // template:end cache:http-timings-request-value
-        };
-        (config, timings)
+        (config, drain_budget)
     }
 }
 
@@ -357,7 +341,7 @@ impl WorkerHttpConfig {
 impl WorkerHttpInput {
     pub(crate) fn admit(self, tail: Option<ShutdownTail>, v: &mut Violations) -> WorkerHttpConfig {
         validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        let (listener, _) = self.admit_listener(None, v);
+        let listener = self.admit_listener(None, v);
         WorkerHttpConfig {
             listener,
             grace_period: self.grace_period,
@@ -366,16 +350,6 @@ impl WorkerHttpInput {
     }
 }
 // template:end worker:worker-http-config
-
-#[derive(Clone, Copy)]
-pub(crate) struct HttpTimings {
-    // template:begin grpc:http-timings-drain-field
-    pub(crate) drain_budget: Option<Duration>,
-    // template:end grpc:http-timings-drain-field
-    // template:begin cache:http-timings-request-field
-    pub(crate) request_timeout: Option<Duration>,
-    // template:end cache:http-timings-request-field
-}
 
 #[cfg(test)]
 mod tests {

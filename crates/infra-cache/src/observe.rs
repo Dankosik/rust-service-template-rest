@@ -178,7 +178,7 @@ pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,
         Unit::Seconds,
-        "Cache operation duration in seconds including admission and command construction, excluding SETs rejected by local TTL validation"
+        "Cache operation duration in seconds including admission and command construction, excluding operations rejected by local key, value, or TTL validation"
     );
     metrics::describe_counter!(
         ADMISSION_REFUSED_METRIC,
