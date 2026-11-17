@@ -94,15 +94,13 @@ impl GrpcInput {
         let timeout = request_timeout_range("grpc.request_timeout", self.request_timeout);
         let timeout_in_range = timeout.is_ok();
         violations.check(timeout);
-        if timeout_in_range {
-            if let Some(drain_budget) = drain_budget {
-                violations.check(request_budget_fits_drain(
-                    "grpc.request_timeout",
-                    self.request_timeout,
-                    drain_budget,
-                    "calls",
-                ));
-            }
+        if timeout_in_range && let Some(drain_budget) = drain_budget {
+            violations.check(request_budget_fits_drain(
+                "grpc.request_timeout",
+                self.request_timeout,
+                drain_budget,
+                "calls",
+            ));
         }
         violations.check(admission_wait_range(
             "grpc.admission_wait",
