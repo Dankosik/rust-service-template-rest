@@ -2801,6 +2801,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "nats-test-support",
+ "nix",
  "nkeys",
  "opentelemetry",
  "opentelemetry_sdk",

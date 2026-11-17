@@ -19,7 +19,7 @@ use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
 use crate::messaging::{PUBLICATION_WINDOW_BYTES, Shared};
 use crate::registry::Registry;
-use crate::topology::{ConsumerAdmission, create_durable, get_stream_failure};
+use crate::topology::{ConsumerAdmission, bind_durable, same_durable_contract};
 use crate::wire;
 
 const ACK_WAIT: Duration = HANDLER_TIMEOUT
@@ -65,7 +65,7 @@ pub struct Consumer {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ConsumerError {
-    #[error("messaging durable consumer was deleted or replaced")]
+    #[error("messaging durable consumer was deleted, replaced, or reconfigured incompatibly")]
     ConsumerLost,
     #[error("messaging source message exceeds the maximum retained-message pull size")]
     RetainedMessageTooLarge,
@@ -96,12 +96,12 @@ impl Consumer {
         shared: Arc<Shared>,
         admission: ConsumerAdmission,
         registry: Registry,
+        deadline: Instant,
+        cancel: &CancellationToken,
     ) -> Result<Self, MessagingError> {
         let ConsumerAdmission {
             options,
             dead_letter,
-            deadline,
-            cancel,
         } = admission;
         if registry
             .handled_routes()
@@ -145,14 +145,16 @@ impl Consumer {
             replay_policy: ReplayPolicy::Instant,
             ..Default::default()
         };
-        let pull = bounded_operation(deadline, &cancel, async {
-            let stream = shared
-                .jetstream
-                .get_stream(&shared.source_stream)
-                .await
-                .map_err(|error| get_stream_failure(&error, "source"))?;
-            create_durable(&stream, config).await
-        })
+        let pull = bounded_operation(
+            deadline,
+            cancel,
+            bind_durable(
+                &shared.jetstream,
+                &shared.source_stream,
+                &options.durable_name,
+                config,
+            ),
+        )
         .await?;
         Ok(Self {
             handler: Arc::new(DeliveryHandler::new(
@@ -486,9 +488,8 @@ async fn check_durable_loss(pull: &PullConsumer) -> Result<bool, ConsumerInfoErr
         .await
         .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
     match result {
-        Ok(info) => {
-            Ok(info.created != pull.cached_info().created || info.config.deliver_subject.is_some())
-        }
+        Ok(info) => Ok(info.created != pull.cached_info().created
+            || !same_durable_contract(&pull.cached_info().config, &info.config)),
         Err(error)
             if matches!(
                 error.kind(),
@@ -538,32 +539,24 @@ impl BatchReceiveError {
 }
 
 fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError {
-    let Some(error) = error.downcast_ref::<std::io::Error>() else {
-        return BatchReceiveError::Other("other");
+    let Some(error) = error.downcast_ref::<pull::BatchStatusError>() else {
+        return BatchReceiveError::Other(if error.is::<std::io::Error>() {
+            "io_error"
+        } else {
+            "other"
+        });
     };
-    if error.kind() != std::io::ErrorKind::Other {
-        return BatchReceiveError::Other("io_error");
-    }
-    let description = error.to_string();
-    let Some(status) =
-        description.strip_prefix("error while processing messages from the stream: ")
-    else {
-        return BatchReceiveError::Other("io_error");
-    };
-    let label = match status {
-        "409, Some(\"Batch Completed\")" => "batch_completed",
-        "409, Some(\"Message Size Exceeds MaxBytes\")" => {
+    let label = match (error.status.as_u16(), error.description.as_deref()) {
+        (409, Some("Message Size Exceeds MaxBytes")) => {
             return BatchReceiveError::MaxBytesExceeded;
         }
-        _ => match status.split_once(", ").map(|(code, _)| code) {
-            Some("400") => "status_400",
-            Some("403") => "status_403",
-            Some("404") => "status_404",
-            Some("408") => "status_408",
-            Some("409") => "status_409",
-            Some("503") => "status_503",
-            _ => "status_other",
-        },
+        (400, _) => "status_400",
+        (403, _) => "status_403",
+        (404, _) => "status_404",
+        (408, _) => "status_408",
+        (409, _) => "status_409",
+        (503, _) => "status_503",
+        _ => "status_other",
     };
     BatchReceiveError::Other(label)
 }
@@ -681,36 +674,20 @@ mod tests {
 
     #[test]
     fn batch_receipt_diagnostics_classify_pinned_statuses_without_provider_text() {
-        for (description, expected) in [
-            (
-                "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
-                "batch_completed",
-            ),
-            (
-                "error while processing messages from the stream: 409, Some(\"Message Size Exceeds MaxBytes\")",
-                "max_bytes_exceeded",
-            ),
-            (
-                "error while processing messages from the stream: 409, Some(\"Batch Completed sentinel.provider.chosen\")",
-                "status_409",
-            ),
-            (
-                "error while processing messages from the stream: 503, Some(\"sentinel.provider.chosen\")",
-                "status_503",
-            ),
-            (
-                "error while processing messages from the stream: 500, Some(\"sentinel.provider.chosen\")",
-                "status_other",
-            ),
-            ("sentinel.provider.chosen", "io_error"),
+        for (code, description, expected) in [
+            (409, "Message Size Exceeds MaxBytes", "max_bytes_exceeded"),
+            (409, "Message Size Exceeds MaxBytes extra", "status_409"),
+            (503, "sentinel.provider.chosen", "status_503"),
+            (500, "sentinel.provider.chosen", "status_other"),
         ] {
-            let error: async_nats::Error = Box::new(std::io::Error::other(description));
+            let error: async_nats::Error = Box::new(pull::BatchStatusError {
+                status: async_nats::StatusCode::from_u16(code).unwrap(),
+                description: Some(description.to_owned()),
+            });
             assert_eq!(classify_batch_receive_error(&error).label(), expected);
         }
-        let error: async_nats::Error = Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
-        ));
+        let error: async_nats::Error =
+            Box::new(std::io::Error::other("Message Size Exceeds MaxBytes"));
         assert_eq!(classify_batch_receive_error(&error).label(), "io_error");
         let error: async_nats::Error = Box::new(std::fmt::Error);
         assert_eq!(classify_batch_receive_error(&error).label(), "other");

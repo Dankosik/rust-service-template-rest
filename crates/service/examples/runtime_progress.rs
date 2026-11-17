@@ -371,9 +371,12 @@ impl Echo {
             occurred_at: time::UtcDateTime::now(),
             payload: PrimitivePayload { value: &source },
         };
-        let prepared =
-            infra_messaging::PreparedEvent::prepare("runtime.progress", &event, PAYLOAD_LIMIT)
-                .map_err(|_| Status::internal("bounded preparation failed"))?;
+        let prepared = infra_messaging::PreparedEvent::prepare_for_subject(
+            "runtime.progress",
+            &event,
+            PAYLOAD_LIMIT,
+        )
+        .map_err(|_| Status::internal("bounded preparation failed"))?;
         std::hint::black_box(prepared);
         self.counts.prepared.fetch_add(1, Ordering::SeqCst);
         Ok("ok".to_owned())

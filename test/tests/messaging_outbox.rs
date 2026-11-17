@@ -64,6 +64,8 @@ struct Fixture {
     jetstream: jetstream::Context,
     stream: String,
     subject: String,
+    route: Route<Created>,
+    registry: Registry,
     durable: String,
     dlq_stream: String,
     dlq_subject: String,
@@ -114,7 +116,7 @@ impl Fixture {
                     name: Some(durable.clone()),
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
-                    ack_wait: Duration::from_secs(41),
+                    ack_wait: Duration::from_secs(46),
                     max_deliver: -1,
                     max_ack_pending: 1,
                     ..Default::default()
@@ -122,10 +124,17 @@ impl Fixture {
                 .await
                 .expect("test administrator provisions durable consumer");
         }
+        let route = Route::<Created>::new(subject.clone());
+        let mut registry = Registry::default();
+        registry
+            .declare(&route)
+            .expect("fixture publication route is valid");
         Self {
             jetstream,
             stream,
             subject,
+            route,
+            registry,
             durable,
             dlq_stream,
             dlq_subject,
@@ -238,11 +247,6 @@ fn consumer_options(fixture: &Fixture) -> MessagingOptions {
     options
 }
 
-fn routes(fixture: &Fixture) -> Registry {
-    Registry::try_new([Route::new::<Created>(fixture.subject.clone())])
-        .expect("fixture publication route is valid")
-}
-
 async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
     integration_tests::template_pool(
         &dsn_for(pool).await,
@@ -337,8 +341,9 @@ async fn outbox_count(pool: &PgPool) -> i64 {
 }
 
 fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::PreparedEvent {
-    routes(fixture)
-        .prepare(&event(id, value), 1024)
+    fixture
+        .registry
+        .prepare(&fixture.route, &event(id, value), 1024)
         .expect("fixture event prepares once")
 }
 
@@ -373,8 +378,9 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
 
     let fixture = Fixture::create().await;
     let jobs = template_pool(&pool, 3).await;
-    let registry = Registry::try_new([Route::new::<Payload>(fixture.subject.clone())])
-        .expect("typed publication route");
+    let route = Route::<Payload>::new(fixture.subject.clone());
+    let mut registry = Registry::default();
+    registry.declare(&route).expect("typed publication route");
     let leaf = serde_json::to_string("[{}]\\\"\\").expect("escaped string");
     let raw127 = format!("{}{leaf}{}", "[".repeat(127), "]".repeat(127));
     let raw128 = format!("[{raw127}]");
@@ -407,7 +413,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             payload: invalid,
         };
         let rejected = in_tx(&jobs, async |tx| -> Result<_, Step> {
-            match registry.prepare(&event, 1024) {
+            match registry.prepare(&route, &event, 1024) {
                 Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
                 Err(error) => Ok(Err(error)),
             }
@@ -418,7 +424,9 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
         assert_eq!(outbox_count(&jobs).await, before);
 
         event.payload = corrected;
-        let prepared = registry.prepare(&event, 1024).expect("corrected payload");
+        let prepared = registry
+            .prepare(&route, &event, 1024)
+            .expect("corrected payload");
         assert_eq!(prepared.payload().as_ref(), expected_bytes);
         assert_eq!(
             in_tx(&jobs, async |tx| -> Result<_, Step> {
@@ -727,10 +735,15 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgPool) {
+async fn local_payload_refusal_is_permanent_and_broker_refusal_exhausts_the_retry_budget(
+    pool: PgPool,
+) {
     let fixture = Fixture::create().await;
     let messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
+        MessagingOptions {
+            max_payload_bytes: 64,
+            ..messaging_options(&fixture)
+        },
         Instant::now() + WAIT,
         CancellationToken::new(),
     ))
@@ -738,21 +751,21 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
     let intent = prepared(&fixture, "event-exhausted", "unpublished");
-    assert_eq!(
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .expect("outbox intent commits"),
-        OutboxEnqueued::Created
-    );
+    let oversized = prepared(&fixture, "event-oversized", &"x".repeat(64));
+    in_tx(&jobs, async |tx| -> Result<_, Step> {
+        assert_eq!(intent.enqueue(tx).await?, OutboxEnqueued::Created);
+        assert_eq!(oversized.enqueue(tx).await?, OutboxEnqueued::Created);
+        Ok(())
+    })
+    .await
+    .expect("both outbox intents commit");
     let key = event_key("event-exhausted");
-    sqlx::query("UPDATE background_jobs SET attempts = 24 WHERE kind = $1 AND unique_key = $2")
+    sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = $1 AND unique_key = $2")
         .bind(OUTBOX_KIND)
         .bind(&key)
         .execute(&jobs)
         .await
-        .expect("the controlled final-attempt setup applies");
+        .expect("two attempts remain for the broker outage");
     fixture.remove_source().await;
 
     let publisher = template_pool(&pool, 3).await;
@@ -762,6 +775,32 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
             .expect("outbox publisher registry is valid"),
     )
     .await;
+    let oversized_key = event_key("event-oversized");
+    let permanent = poll_until(
+        "local payload refusal is terminal",
+        WAIT,
+        POLL,
+        async || {
+            let row = job(&jobs, &oversized_key).await;
+            (row.state == "failed").then_some(row)
+        },
+    )
+    .await;
+    assert_eq!(permanent.attempts, 1);
+    assert_eq!(permanent.failure_reason.as_deref(), Some("permanent"));
+
+    let pending = poll_until("missing stream is retryable", WAIT, POLL, async || {
+        let row = job(&jobs, &key).await;
+        (row.state == "pending" && row.attempts == 24).then_some(row)
+    })
+    .await;
+    sqlx::query(
+        "UPDATE background_jobs SET not_before = statement_timestamp() WHERE id::text = $1",
+    )
+    .bind(&pending.id)
+    .execute(&jobs)
+    .await
+    .expect("final retry is due");
     let failed = poll_until(
         "a refused final attempt leaves the job visibly failed",
         WAIT,
@@ -773,7 +812,7 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
     )
     .await;
     assert_eq!(failed.attempts, 25);
-    assert!(failed.failure_reason.is_some());
+    assert_eq!(failed.failure_reason.as_deref(), Some("exhausted"));
 
     finish(run, &[&publisher, &jobs]).await;
     fixture.restore_source().await;
@@ -782,7 +821,9 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: PgPool) {
+async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchanged(pool: PgPool) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     let fixture = Fixture::create().await;
     let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
@@ -792,28 +833,37 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     .await
     .expect("producer-only messaging admits the fixture stream");
     let jobs = template_pool(&pool, 3).await;
-    let logical_id = "event-malformed";
-    let key = event_key(logical_id);
-    let intent = prepared(&fixture, logical_id, "stored before corruption");
-    assert_eq!(
+    let nested = |depth| format!("{}1.00 {}", "[".repeat(depth), "]".repeat(depth));
+    let valid = nested(127);
+    let corrupt = [
+        ("bad-base64", "not-base64".to_owned()),
+        ("bad-utf8", STANDARD.encode([b'"', 0xff, b'"'])),
+        ("bad-json", STANDARD.encode(b"[1,]")),
+        ("too-deep", STANDARD.encode(nested(128))),
+    ];
+    let valid_intent = ("valid", STANDARD.encode(&valid));
+    for (id, encoded) in corrupt.iter().chain([&valid_intent]) {
+        let intent = prepared(&fixture, id, "stored before replacement");
+        let key = event_key(id);
         in_tx(&jobs, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
+            assert_eq!(intent.enqueue(tx).await?, OutboxEnqueued::Created);
+            Ok(())
         })
         .await
-        .expect("canonical outbox intent commits"),
-        OutboxEnqueued::Created
-    );
-    let corrupted = sqlx::query(
-        "UPDATE background_jobs \
-         SET payload_text = jsonb_set(payload, '{payload_base64}', to_jsonb('not-base64'::text), false)::text \
-         WHERE kind = $1 AND unique_key = $2",
-    )
-    .bind(OUTBOX_KIND)
-    .bind(&key)
-    .execute(&jobs)
-    .await
-    .expect("only the stored payload encoding is corrupted");
-    assert_eq!(corrupted.rows_affected(), 1);
+        .expect("canonical outbox intent commits");
+        let updated = sqlx::query(
+            "UPDATE background_jobs \
+             SET payload_text = jsonb_set(payload, '{payload_base64}', to_jsonb($3::text), false)::text \
+             WHERE kind = $1 AND unique_key = $2",
+        )
+        .bind(OUTBOX_KIND)
+        .bind(&key)
+        .bind(encoded)
+        .execute(&jobs)
+        .await
+        .expect("only the persisted body is replaced");
+        assert_eq!(updated.rows_affected(), 1);
+    }
 
     let publisher = template_pool(&pool, 3).await;
     let run = start(
@@ -822,18 +872,32 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let failed = poll_until(
-        "malformed intent becomes visible terminal history",
-        WAIT,
-        POLL,
-        async || {
+    for (id, _) in corrupt {
+        let key = event_key(id);
+        let failed = poll_until("corrupt intent is terminal", WAIT, POLL, async || {
             let row = job(&jobs, &key).await;
             (row.state == "failed").then_some(row)
-        },
-    )
+        })
+        .await;
+        assert_eq!(failed.attempts, 1, "{id}");
+        assert_eq!(failed.failure_reason.as_deref(), Some("permanent"), "{id}");
+    }
+    let key = event_key("valid");
+    poll_until("valid intent completes", WAIT, POLL, async || {
+        (job(&jobs, &key).await.state == "completed").then_some(())
+    })
     .await;
-    assert_eq!(failed.failure_reason.as_deref(), Some("permanent"));
-    assert_eq!(fixture.published().await, 0);
+    assert_eq!(fixture.published().await, 1);
+    let stored = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .unwrap()
+        .get_raw_message(1)
+        .await
+        .unwrap();
+    assert_eq!(stored.payload.as_ref(), valid.as_bytes());
+    assert_eq!(stored.headers.get("Nats-Msg-Id").unwrap().as_str(), "valid");
 
     finish(run, &[&publisher, &jobs]).await;
     close(messaging).await;
@@ -854,11 +918,12 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     create_effect_store(&effects).await;
     let invoked = Arc::new(AtomicUsize::new(0));
     let registry = effect_registry(&fixture, &effects, &invoked);
+    let cancel = CancellationToken::new();
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, Instant::now() + WAIT, &cancel)
         .await
         .expect("consumer admits")
-        .start(&CancellationToken::new());
+        .start(&cancel);
     let event = prepared(&fixture, "event-durable-effect", "same");
     messaging
         .producer()
@@ -935,9 +1000,9 @@ async fn create_effect_store(pool: &PgPool) {
 fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>) -> Registry {
     let effect_pool = pool.clone();
     let invoked = Arc::clone(invoked);
-    let mut registry = routes(fixture);
+    let mut registry = fixture.registry.clone();
     registry
-        .register::<Created, _, _>(move |event, _| {
+        .register(&fixture.route, move |event, _| {
             let pool = effect_pool.clone();
             let invoked = Arc::clone(&invoked);
             async move {
@@ -997,16 +1062,18 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     let effects = template_pool(&pool, 3).await;
     create_effect_store(&effects).await;
     let invoked = Arc::new(AtomicUsize::new(0));
+    let cancel = CancellationToken::new();
     let consumer = messaging
-        .consumer(effect_registry(&fixture, &effects, &invoked))
+        .consumer(
+            effect_registry(&fixture, &effects, &invoked),
+            Instant::now() + WAIT,
+            &cancel,
+        )
         .await
         .expect("real durable consumer admits");
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
-    let mut config = durable.cached_info().config.clone();
-    config.ack_wait = Duration::from_millis(100);
-    stream.create_consumer(config).await.unwrap();
-    let cancel = CancellationToken::new();
+    let ack_wait = durable.cached_info().config.ack_wait;
     let mut handle = consumer.start(&cancel);
     let event = prepared(&fixture, "event-lost-settlement", "committed");
     let ack = messaging
@@ -1029,7 +1096,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
         assert!(state.ack_floor.stream_sequence < ack.sequence);
         poll_until(
             "lost source ACK redelivers the committed effect",
-            WAIT,
+            ack_wait + WAIT,
             POLL,
             async || (invoked.load(Ordering::SeqCst) >= 2).then_some(()),
         )

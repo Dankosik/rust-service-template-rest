@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use async_nats::jetstream::{self, consumer, stream};
+use async_nats::jetstream::{self, stream};
 use domain_events::EventPayload;
 use infra_messaging::{ConsumerOptions, Messaging, MessagingOptions, Registry, Route};
 use tokio::time::Instant;
@@ -29,7 +29,6 @@ async fn provision(
     url: &str,
     stream_name: &str,
     subject: &str,
-    durable: &str,
     dlq_stream: &str,
     dlq_subject: &str,
 ) -> jetstream::Context {
@@ -38,7 +37,7 @@ async fn provision(
             .await
             .expect("NATS_URL must point to the JetStream broker selected for this suite"),
     );
-    let created = jetstream
+    jetstream
         .create_stream(stream::Config {
             name: stream_name.to_owned(),
             subjects: vec![subject.to_owned()],
@@ -56,14 +55,6 @@ async fn provision(
         })
         .await
         .expect("idle fixture DLQ stream is created");
-    created
-        .create_consumer(consumer::pull::Config {
-            durable_name: Some(durable.to_owned()),
-            filter_subject: subject.to_owned(),
-            ..Default::default()
-        })
-        .await
-        .expect("idle fixture durable is created");
 
     jetstream
 }
@@ -86,15 +77,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
         format!("TEST_IDLE_DLQ_{suffix}"),
         format!("test.idle_dlq.{suffix}"),
     );
-    let jetstream = provision(
-        &url,
-        &stream_name,
-        &subject,
-        &durable,
-        &dlq_stream,
-        &dlq_subject,
-    )
-    .await;
+    let jetstream = provision(&url, &stream_name, &subject, &dlq_stream, &dlq_subject).await;
 
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -120,13 +103,14 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     ))
     .await
     .expect("idle fixture stream is admitted");
-    let mut registry =
-        Registry::try_new([Route::new::<IdleEvent>(subject)]).expect("route is valid");
+    let route = Route::<IdleEvent>::new(subject);
+    let mut registry = Registry::default();
+    registry.declare(&route).expect("route is valid");
     registry
-        .register::<IdleEvent, _, _>(|_, _| async { Ok(()) })
+        .register(&route, |_, _| async { Ok(()) })
         .expect("handler is registered");
     let mut handle = messaging
-        .consumer(registry)
+        .consumer(registry, deadline(), &cancel)
         .await
         .expect("durable consumer is admitted")
         .start(&cancel);

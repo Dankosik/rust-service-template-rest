@@ -429,7 +429,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
         async || messaging.probe().check().await.ok(),
     )
     .await;
-    let prepared = registry(&fixture)
+    let prepared = fixture
         .prepare(&event("after-root-ca-rotation"), 1024)
         .expect("fixture event is prepared");
     messaging
@@ -675,17 +675,19 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     .await
     .unwrap();
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut registered = registry(&fixture);
+    let mut registered = fixture.registry.clone();
     registered
-        .register::<ExampleEvent, _, _>(move |event, _| {
+        .register(&fixture.route, move |event, _| {
             observed_tx.send(event.id).unwrap();
             async { Ok(()) }
         })
         .unwrap();
-    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
-    let before = registry(&fixture)
-        .prepare(&event("before-outage"), 1024)
-        .unwrap();
+    let mut handle = messaging
+        .consumer(registered, deadline(), &cancel)
+        .await
+        .unwrap()
+        .start(&cancel);
+    let before = fixture.prepare(&event("before-outage"), 1024).unwrap();
     messaging
         .producer()
         .publish(&before, &context(deadline(), &cancel))
@@ -707,7 +709,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     })
     .await
     .expect("the disconnected dependency becomes unready");
-    let contending = registry(&fixture)
+    let contending = fixture
         .prepare(&event("concurrent-silent-publication"), 1024)
         .unwrap();
     std::assert_matches!(
@@ -720,9 +722,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
             .await,
         Err(PublishError::Ambiguous)
     );
-    let after = registry(&fixture)
-        .prepare(&event("after-outage"), 1024)
-        .unwrap();
+    let after = fixture.prepare(&event("after-outage"), 1024).unwrap();
     fixture
         .jetstream
         .publish_with_headers(
@@ -744,7 +744,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     })
     .await
     .expect("the same consumer recovers and handles retained work after a bounded contending publication");
-    let recovered = registry(&fixture)
+    let recovered = fixture
         .prepare(&event("after-recovery-publication"), 1024)
         .unwrap();
     messaging

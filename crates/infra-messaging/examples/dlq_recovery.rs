@@ -563,7 +563,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                     duplicate: ack.duplicate,
                 });
             }
-            Err(PublishError::Rejected) => state.publication = rejected,
+            Err(PublishError::Rejected(_)) => state.publication = rejected,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
         save(&state_path, &state, Persist::Replace)?;

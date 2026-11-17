@@ -250,8 +250,10 @@ mod tests {
 
     #[test]
     fn payload_schema_reference_encodes_the_definition_name_as_a_uri_fragment() {
-        let registry =
-            Registry::try_new([Route::documented::<CustomSchemaName>("orders")]).unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<CustomSchemaName>::documented("orders"))
+            .unwrap();
         let document = registry.asyncapi("orders", "1").unwrap();
         let schema =
             &document["channels"]["orders"]["messages"]["order.custom.v1"]["payload"]["schema"];
@@ -268,11 +270,13 @@ mod tests {
 
     #[test]
     fn document_lists_each_subject_with_its_messages_headers_and_payload_schemas() {
-        let registry = Registry::try_new([
-            Route::documented::<OrderCreated>("orders.events"),
-            Route::documented::<OrderCancelled>("orders.events"),
-        ])
-        .unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<OrderCreated>::documented("orders.events"))
+            .unwrap();
+        registry
+            .declare(&Route::<OrderCancelled>::documented("orders.events"))
+            .unwrap();
         let document = registry.asyncapi("orders", "1.4.0").unwrap();
 
         assert_eq!(document["asyncapi"], "3.0.0");
@@ -370,7 +374,10 @@ mod tests {
 
     #[test]
     fn tuple_payload_retains_positional_schemas_and_forbids_extra_items() {
-        let registry = Registry::try_new([Route::documented::<TuplePayload>("tuples")]).unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<TuplePayload>::documented("tuples"))
+            .unwrap();
         let document = registry.asyncapi("tuples", "1").unwrap();
         let payload = &document["channels"]["tuples"]["messages"]["tuple.created.v1"]["payload"];
         assert_eq!(
@@ -402,7 +409,10 @@ mod tests {
 
     #[test]
     fn nested_and_recursive_refs_resolve_inside_the_standalone_payload() {
-        let registry = Registry::try_new([Route::documented::<Node>("trees")]).unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<Node>::documented("trees"))
+            .unwrap();
         let document = registry.asyncapi("trees", "1").unwrap();
         let schema =
             &document["channels"]["trees"]["messages"]["tree.created.v1"]["payload"]["schema"];
@@ -459,8 +469,10 @@ mod tests {
 
     #[test]
     fn literal_reference_data_property_names_and_external_refs_are_preserved() {
-        let registry =
-            Registry::try_new([Route::documented::<LiteralPayload>("literals")]).unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<LiteralPayload>::documented("literals"))
+            .unwrap();
         let document = registry.asyncapi("literals", "1").unwrap();
         let properties = &document["channels"]["literals"]["messages"]["literal.created.v1"]["payload"]
             ["schema"]["$defs"]["LiteralPayload"]["properties"];
@@ -485,16 +497,20 @@ mod tests {
 
     #[test]
     fn same_routes_render_the_same_text_in_any_declaration_order() {
-        let forward = Registry::try_new([
-            Route::documented::<OrderCreated>("orders.created"),
-            Route::documented::<OrderCancelled>("orders.cancelled"),
-        ])
-        .unwrap();
-        let backward = Registry::try_new([
-            Route::documented::<OrderCancelled>("orders.cancelled"),
-            Route::documented::<OrderCreated>("orders.created"),
-        ])
-        .unwrap();
+        let mut forward = Registry::default();
+        forward
+            .declare(&Route::<OrderCreated>::documented("orders.created"))
+            .unwrap();
+        forward
+            .declare(&Route::<OrderCancelled>::documented("orders.cancelled"))
+            .unwrap();
+        let mut backward = Registry::default();
+        backward
+            .declare(&Route::<OrderCancelled>::documented("orders.cancelled"))
+            .unwrap();
+        backward
+            .declare(&Route::<OrderCreated>::documented("orders.created"))
+            .unwrap();
         assert_eq!(
             serde_json::to_string(&forward.asyncapi("orders", "1").unwrap()).unwrap(),
             serde_json::to_string(&backward.asyncapi("orders", "1").unwrap()).unwrap()
@@ -503,11 +519,13 @@ mod tests {
 
     #[test]
     fn a_route_without_a_schema_has_no_document() {
-        let registry = Registry::try_new([
-            Route::documented::<OrderCreated>("orders.created"),
-            Route::new::<OrderCancelled>("orders.cancelled"),
-        ])
-        .unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<OrderCreated>::documented("orders.created"))
+            .unwrap();
+        registry
+            .declare(&Route::<OrderCancelled>::new("orders.cancelled"))
+            .unwrap();
         std::assert_matches!(
             registry.asyncapi("orders", "1"),
             Err(ContractError::Undocumented {
@@ -538,11 +556,13 @@ mod tests {
 
     #[test]
     fn two_different_types_under_one_schema_name_are_refused() {
-        let registry = Registry::try_new([
-            Route::documented::<OrderCreated>("orders.created"),
-            Route::documented::<other::OrderShipped>("orders.shipped"),
-        ])
-        .unwrap();
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<OrderCreated>::documented("orders.created"))
+            .unwrap();
+        registry
+            .declare(&Route::<other::OrderShipped>::documented("orders.shipped"))
+            .unwrap();
         std::assert_matches!(
             registry.asyncapi("orders", "1"),
             Err(ContractError::SchemaName(name)) if name == "Line"

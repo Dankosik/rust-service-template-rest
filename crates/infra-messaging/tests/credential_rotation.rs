@@ -210,7 +210,9 @@ async fn rotation_scenario(
         .unwrap(),
     );
     let messaging = client.as_ref().unwrap();
-    let registry = Registry::try_new([Route::new::<Payload>(subject)]).unwrap();
+    let route = Route::<Payload>::new(subject);
+    let mut registry = Registry::default();
+    registry.declare(&route).unwrap();
     let event = |id: &str| Event {
         id: id.to_owned(),
         occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
@@ -218,7 +220,9 @@ async fn rotation_scenario(
             value: "authenticated",
         },
     };
-    let first = registry.prepare(&event("before-expiry"), 1024).unwrap();
+    let first = registry
+        .prepare(&route, &event("before-expiry"), 1024)
+        .unwrap();
     messaging
         .producer()
         .publish(&first, &context(&cancel))
@@ -245,7 +249,9 @@ async fn rotation_scenario(
 
     let replacement = User::expiring_after(300);
     replacement.publish_file(&path).await;
-    let after = registry.prepare(&event("after-replacement"), 1024).unwrap();
+    let after = registry
+        .prepare(&route, &event("after-replacement"), 1024)
+        .unwrap();
     timeout(Duration::from_secs(15), async {
         let mut poll = tokio::time::interval(Duration::from_millis(50));
         loop {
