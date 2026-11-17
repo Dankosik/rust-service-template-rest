@@ -103,9 +103,10 @@ configured.
 <!-- template:begin http-idempotency:readme-http-idempotency-profile -->
 - `HTTP_IDEMPOTENCY=postgres` enables `Idempotency-Key` on opted-in operations.
   The client retry window is one minute from the first send unless the service
-  publishes a longer window. Allow time for the same request and key to reach
-  the service within that window. After it expires, check whether the original
-  operation took effect before sending it again.
+  publishes a longer window. The service must check the key before the window
+  ends. Allow for transit, request processing and database queueing. If there
+  may be too little time left, check whether the original operation took
+  effect before sending it again.
   [PostgreSQL idempotency store](crates/infra-idempotency-store)
 <!-- template:end http-idempotency:readme-http-idempotency-profile -->
 <!-- template:begin authn:readme-authn-profile -->
