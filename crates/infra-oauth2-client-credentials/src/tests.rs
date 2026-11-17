@@ -30,8 +30,8 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Credentials, Error, OnBehalfOf, Options,
-    RefreshDriver, Rejection,
+    AcquisitionError, Algorithm, AuthenticatedClient, Credentials, Error, IdentityMode, OnBehalfOf,
+    Options, RefreshDriver, Rejection,
     credentials::{Cached, acquisition_deadline},
     options::Admitted,
     token::EVICTION_MIN_AGE,
@@ -190,8 +190,9 @@ impl Fixture {
         Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
-    fn client(&self) -> AuthenticatedClient {
-        self.credentials(&[], None).http(self.resource_client())
+    fn client(&self, mode: IdentityMode) -> AuthenticatedClient {
+        self.credentials(&[], None)
+            .http(self.resource_client(), mode)
     }
 
     async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {

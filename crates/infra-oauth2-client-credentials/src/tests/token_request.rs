@@ -58,7 +58,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
             &["write", "read+all", "write"],
             Some("https://api.example/é?a=b&c=d"),
         )
-        .http(fixture.resource_client())
+        .http(fixture.resource_client(), IdentityMode::Service)
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -82,7 +82,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
 async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
-        .client()
+        .client(IdentityMode::Service)
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -98,7 +98,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
     let fixture = Fixture::new().await;
     for _ in 0..2 {
         fixture
-            .client()
+            .client(IdentityMode::Service)
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap();
@@ -132,7 +132,7 @@ async fn token_exchange_request_has_expected_form_fields() {
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
         .credentials(&["read"], Some("https://api.example/é"))
-        .http(fixture.resource_client())
+        .http(fixture.resource_client(), IdentityMode::OnBehalfOf)
         .execute(
             fixture.on_behalf_of_request("subject+/="),
             deadline(Duration::from_secs(10)),
@@ -170,7 +170,7 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
         }
         fixture.token_json(StatusCode::OK, &body);
         let result = fixture
-            .client()
+            .client(IdentityMode::OnBehalfOf)
             .execute(
                 fixture.on_behalf_of_request("subject"),
                 deadline(Duration::from_secs(10)),
@@ -194,7 +194,7 @@ async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
             &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
         );
         let result = fixture
-            .client()
+            .client(IdentityMode::Service)
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await;
         assert_matches!(
@@ -221,7 +221,7 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
         ),
     ] {
         fixture.token_json(StatusCode::OK, &body);
-        let client = fixture.client();
+        let client = fixture.client(IdentityMode::Service);
         let before = fixture.token_requests().len();
         for _ in 0..2 {
             fixture.send(&client).await.unwrap();
@@ -237,16 +237,24 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
 #[tokio::test]
 async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch() {
     let fixture = Fixture::new().await;
-    for (request, lifetime) in [
-        (fixture.request(), u64::MAX.into()),
-        (fixture.on_behalf_of_request("subject"), u64::MAX.into()),
-        (fixture.request(), serde_json::Value::Null),
+    for (mode, request, lifetime) in [
+        (IdentityMode::Service, fixture.request(), u64::MAX.into()),
+        (
+            IdentityMode::OnBehalfOf,
+            fixture.on_behalf_of_request("subject"),
+            u64::MAX.into(),
+        ),
+        (
+            IdentityMode::Service,
+            fixture.request(),
+            serde_json::Value::Null,
+        ),
     ] {
         let mut response = exchange_response("invalid-lifetime");
         response["expires_in"] = lifetime;
         fixture.token_json(StatusCode::OK, &response);
         let error = fixture
-            .client()
+            .client(mode)
             .execute(request, deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
@@ -269,7 +277,9 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
         },
     )
     .unwrap();
-    let client = fixture.credentials(&[], None).http(resource);
+    let client = fixture
+        .credentials(&[], None)
+        .http(resource, IdentityMode::OnBehalfOf);
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == infra_outbound_http::REQUEST_DURATION_METRIC
             && key
@@ -306,7 +316,7 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
     let mut response = exchange_response("short-lived");
     response["expires_in"] = 1.into();
     fixture.token_json(StatusCode::OK, &response);
-    let client = fixture.client();
+    let client = fixture.client(IdentityMode::OnBehalfOf);
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == "oauth2_token_acquisitions_total"
             && key
@@ -388,16 +398,13 @@ impl<F: Fn(&metrics::Key)> metrics::Recorder for ObserveMetricRegistration<F> {
 
 #[tokio::test]
 async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
-    for on_behalf_of in [false, true] {
+    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
         for extension in [false, true] {
             let fixture = Fixture::new().await;
-            let client = fixture.client();
-            let request = || {
-                if on_behalf_of {
-                    fixture.on_behalf_of_request("subject")
-                } else {
-                    fixture.request()
-                }
+            let client = fixture.client(mode);
+            let request = || match mode {
+                IdentityMode::Service => fixture.request(),
+                IdentityMode::OnBehalfOf => fixture.on_behalf_of_request("subject"),
             };
             let caller = OperationContext::with_timeout(Duration::from_secs(10));
             let mut first = request();
@@ -493,16 +500,14 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let mut captured = RecordedMetrics::default();
     let fixture = Fixture::new().await;
-    let client = || {
-        fixture
-            .prepare(Options {
-                provider_concurrency: 1,
-                ..fixture.options(&[], None)
-            })
-            .http(fixture.resource_client())
+    let credentials = || {
+        fixture.prepare(Options {
+            provider_concurrency: 1,
+            ..fixture.options(&[], None)
+        })
     };
     let far = || deadline(Duration::from_secs(10));
-    let reused = client();
+    let reused = credentials().http(fixture.resource_client(), IdentityMode::Service);
     for _ in 0..2 {
         reused.execute(fixture.request(), far()).await.unwrap();
     }
@@ -510,7 +515,8 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_client"}"#,
     ));
-    client()
+    credentials()
+        .http(fixture.resource_client(), IdentityMode::Service)
         .execute(fixture.request(), far())
         .await
         .unwrap_err();
@@ -518,12 +524,13 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_target"}"#,
     ));
-    client()
+    credentials()
+        .http(fixture.resource_client(), IdentityMode::OnBehalfOf)
         .execute(fixture.on_behalf_of_request("subject"), far())
         .await
         .unwrap_err();
     let gate = fixture.block_tokens();
-    let timed = client();
+    let timed = credentials().http(fixture.resource_client(), IdentityMode::Service);
     let mut request = fixture.request();
     request
         .extensions_mut()
@@ -535,14 +542,16 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    let dropped_client = client();
+    let shared = credentials();
+    let dropped_client = shared.http(fixture.resource_client(), IdentityMode::Service);
+    let exchange_client = shared.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
     let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
     tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
     captured.drain(&snapshotter);
     let before_capacity = captured.outbound_samples;
     assert!(before_capacity > 0);
     assert_matches!(
-        dropped_client
+        exchange_client
             .execute(fixture.on_behalf_of_request("at-capacity"), far())
             .await,
         Err(Error::Acquisition(AcquisitionError::AtCapacity))

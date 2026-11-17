@@ -81,7 +81,7 @@ impl Attempt {
         template: Option<UrlTemplate>,
         server: &Server,
         port: u16,
-        stops: &'a StopScopes<'a>,
+        stops: &'a StopScopes,
     ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
