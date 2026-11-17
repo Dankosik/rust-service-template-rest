@@ -63,6 +63,8 @@ struct Fixture {
     jetstream: jetstream::Context,
     stream: String,
     subject: String,
+    route: Route<ExampleEvent>,
+    registry: Registry,
     durable: String,
     dlq_stream: String,
     dlq_subject: String,
@@ -156,7 +158,7 @@ impl Fixture {
                     name: Some(durable.clone()),
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
-                    ack_wait: Duration::from_secs(41),
+                    ack_wait: Duration::from_secs(46),
                     max_deliver: -1,
                     max_ack_pending: 1,
                     ..Default::default()
@@ -167,14 +169,27 @@ impl Fixture {
                 );
         }
 
+        let route = Route::<ExampleEvent>::new(subject.clone());
+        let mut registry = Registry::default();
+        registry.declare(&route).expect("fixture route is valid");
         Self {
             jetstream,
             stream,
             subject,
+            route,
+            registry,
             durable,
             dlq_stream,
             dlq_subject,
         }
+    }
+
+    fn prepare(
+        &self,
+        event: &Event<ExampleEvent>,
+        limit: usize,
+    ) -> Result<infra_messaging::PreparedEvent, infra_messaging::EnvelopeError> {
+        self.registry.prepare(&self.route, event, limit)
     }
 
     async fn cleanup(self) {
@@ -263,11 +278,6 @@ fn consumer_options(fixture: &Fixture) -> ConsumerOptions {
         dlq_stream: Some(fixture.dlq_stream.clone()),
         concurrency: std::num::NonZeroUsize::MIN,
     }
-}
-
-fn registry(fixture: &Fixture) -> Registry {
-    Registry::try_new([Route::new::<ExampleEvent>(fixture.subject.clone())])
-        .expect("fixture route is valid")
 }
 
 async fn close(messaging: Messaging) {

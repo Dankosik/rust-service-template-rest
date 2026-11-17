@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tracing::Instrument as _;
 
 use crate::budget::BROKER_OPERATION_BUDGET;
-use crate::error::PublishError;
+use crate::error::{EnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
 use crate::prepared::PreparedEvent;
@@ -77,7 +77,7 @@ impl Producer {
         let result = self.send_prepared(event, &span, context).await;
         let outcome = match &result {
             Ok(_) => PublishOutcome::Acknowledged,
-            Err(PublishError::Rejected) => PublishOutcome::Rejected,
+            Err(PublishError::Rejected(_)) => PublishOutcome::Rejected,
             Err(PublishError::Ambiguous) => PublishOutcome::Ambiguous,
         };
         let label = outcome.label();
@@ -105,7 +105,7 @@ impl Producer {
         context: &OperationContext,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
-            return Err(PublishError::Rejected);
+            return Err(PublishRejection::Unavailable.into());
         }
         let message = source_message(
             event,
@@ -121,7 +121,6 @@ impl Producer {
         )
         .instrument(span.clone())
         .await
-        .map_err(PublishError::from)
     }
 }
 
@@ -130,33 +129,19 @@ fn source_message(
     span: &tracing::Span,
     expected_stream: &str,
     max_payload_bytes: usize,
-) -> Result<PublishMessage, PublishError> {
+) -> Result<PublishMessage, PublishRejection> {
     if event.payload().len() > max_payload_bytes {
-        return Err(PublishError::Rejected);
+        return Err(PublishRejection::InvalidEnvelope(
+            EnvelopeError::PayloadTooLarge,
+        ));
     }
-    let mut headers = encode_prepared(event).map_err(|_| PublishError::Rejected)?;
+    let mut headers = encode_prepared(event).map_err(PublishRejection::InvalidEnvelope)?;
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
-    validate_header_bytes(&headers).map_err(|_| PublishError::Rejected)?;
+    validate_header_bytes(&headers).map_err(PublishRejection::InvalidEnvelope)?;
     Ok(PublishMessage::build()
         .headers(headers)
         .payload(event.payload().clone()))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PublicationFailure {
-    Rejected,
-    SizeLimit,
-    Ambiguous,
-}
-
-impl From<PublicationFailure> for PublishError {
-    fn from(failure: PublicationFailure) -> Self {
-        match failure {
-            PublicationFailure::Rejected | PublicationFailure::SizeLimit => Self::Rejected,
-            PublicationFailure::Ambiguous => Self::Ambiguous,
-        }
-    }
 }
 
 pub(crate) async fn send_publication(
@@ -164,7 +149,7 @@ pub(crate) async fn send_publication(
     subject: impl ToSubject,
     message: PublishMessage,
     context: &OperationContext,
-) -> Result<PublishAck, PublicationFailure> {
+) -> Result<PublishAck, PublishError> {
     let local = Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET);
     let context = OperationContext::new(
         Some(
@@ -175,7 +160,7 @@ pub(crate) async fn send_publication(
         context.cancellation().clone(),
     );
     if context.stopped().is_some() {
-        return Err(PublicationFailure::Rejected);
+        return Err(PublishRejection::ContextStopped.into());
     }
     let classify = |error: async_nats::jetstream::context::PublishError| {
         classify_publish(&error, &shared.publish_metrics.admission_refused)
@@ -196,7 +181,7 @@ pub(crate) async fn send_publication(
     };
     tokio::select! {
         biased;
-        _ = context.wait_stopped() => Err(PublicationFailure::Ambiguous),
+        _ = context.wait_stopped() => Err(PublishError::Ambiguous),
         result = exchange => result,
     }
 }
@@ -204,15 +189,15 @@ pub(crate) async fn send_publication(
 fn classify_publish(
     error: &async_nats::jetstream::context::PublishError,
     admission_refused: &metrics::Counter,
-) -> PublicationFailure {
+) -> PublishError {
     match error.kind() {
         PublishErrorKind::StreamNotFound
         | PublishErrorKind::WrongLastMessageId
-        | PublishErrorKind::WrongLastSequence => PublicationFailure::Rejected,
-        PublishErrorKind::MaxPayloadExceeded => PublicationFailure::SizeLimit,
+        | PublishErrorKind::WrongLastSequence => PublishRejection::BrokerRefused.into(),
+        PublishErrorKind::MaxPayloadExceeded => PublishRejection::BrokerSizeLimit.into(),
         PublishErrorKind::MaxAckPending => {
             admission_refused.increment(1);
-            PublicationFailure::Rejected
+            PublishRejection::WindowFull.into()
         }
         PublishErrorKind::Other => {
             let code = error
@@ -223,7 +208,7 @@ fn classify_publish(
                 Some(
                     ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM
                     | ErrorCode::STREAM_HEADER_EXCEEDS_MAXIMUM,
-                ) => PublicationFailure::SizeLimit,
+                ) => PublishRejection::BrokerSizeLimit.into(),
                 Some(
                     ErrorCode::BAD_REQUEST
                     | ErrorCode::ACCOUNT_RESOURCES_EXCEEDED
@@ -238,11 +223,11 @@ fn classify_publish(
                     | ErrorCode::STREAM_SEALED
                     | ErrorCode::STREAM_WRONG_LAST_MESSAGE_ID
                     | ErrorCode::STREAM_WRONG_LAST_SEQUENCE,
-                ) => PublicationFailure::Rejected,
-                _ => PublicationFailure::Ambiguous,
+                ) => PublishRejection::BrokerRefused.into(),
+                _ => PublishError::Ambiguous,
             }
         }
-        PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe => PublicationFailure::Ambiguous,
+        PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe => PublishError::Ambiguous,
     }
 }
 
@@ -283,24 +268,33 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
             let refused = metrics::counter!("messaging_publish_admission_refused_total");
-            for (kind, rejected) in [
-                (PublishErrorKind::StreamNotFound, true),
-                (PublishErrorKind::WrongLastMessageId, true),
-                (PublishErrorKind::WrongLastSequence, true),
-                (PublishErrorKind::MaxPayloadExceeded, true),
-                (PublishErrorKind::MaxAckPending, true),
-                (PublishErrorKind::Other, false),
-                (PublishErrorKind::TimedOut, false),
-                (PublishErrorKind::BrokenPipe, false),
+            for (kind, expected) in [
+                (
+                    PublishErrorKind::StreamNotFound,
+                    PublishRejection::BrokerRefused.into(),
+                ),
+                (
+                    PublishErrorKind::WrongLastMessageId,
+                    PublishRejection::BrokerRefused.into(),
+                ),
+                (
+                    PublishErrorKind::WrongLastSequence,
+                    PublishRejection::BrokerRefused.into(),
+                ),
+                (
+                    PublishErrorKind::MaxPayloadExceeded,
+                    PublishRejection::BrokerSizeLimit.into(),
+                ),
+                (
+                    PublishErrorKind::MaxAckPending,
+                    PublishRejection::WindowFull.into(),
+                ),
+                (PublishErrorKind::Other, PublishError::Ambiguous),
+                (PublishErrorKind::TimedOut, PublishError::Ambiguous),
+                (PublishErrorKind::BrokenPipe, PublishError::Ambiguous),
             ] {
                 let error = async_nats::jetstream::context::PublishError::new(kind);
-                assert_eq!(
-                    matches!(
-                        PublishError::from(classify_publish(&error, &refused)),
-                        PublishError::Rejected
-                    ),
-                    rejected
-                );
+                assert_eq!(classify_publish(&error, &refused), expected);
             }
         });
         assert!(
@@ -319,7 +313,7 @@ mod tests {
                 .expect("fixed timestamp is valid"),
             payload: Created,
         };
-        let prepared = PreparedEvent::prepare("orders.created", &event, 4)
+        let prepared = PreparedEvent::prepare_for_subject("orders.created", &event, 4)
             .expect("null fits four payload bytes");
         let fixed = concat!(
             "NATS/1.0\r\n",
@@ -335,7 +329,9 @@ mod tests {
         assert!(source_message(&prepared, &tracing::Span::none(), &stream, 4).is_ok());
         std::assert_matches!(
             source_message(&prepared, &tracing::Span::none(), &(stream + "s"), 4),
-            Err(PublishError::Rejected)
+            Err(PublishRejection::InvalidEnvelope(
+                EnvelopeError::HeadersTooLarge
+            ))
         );
     }
 }

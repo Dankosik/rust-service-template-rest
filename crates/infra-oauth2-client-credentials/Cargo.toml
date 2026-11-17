@@ -53,6 +53,8 @@ zeroize = { workspace = true, features = ["alloc", "serde"] }
 grpc-contracts = { workspace = true }
 hyper = { workspace = true, features = ["server", "http2"] }
 hyper-util = { workspace = true, features = ["tokio", "service"] }
+tls-test-support = { workspace = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tonic-prost = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end outbound-auth-grpc:oauth-grpc-test-dependencies

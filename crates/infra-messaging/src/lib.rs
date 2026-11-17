@@ -20,7 +20,7 @@ pub mod wire;
 pub use budget::BROKER_OPERATION_BUDGET;
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
 pub use contract::ContractError;
-pub use error::{EnvelopeError, HandlerError, MessagingError, PublishError};
+pub use error::{EnvelopeError, HandlerError, MessagingError, PublishError, PublishRejection};
 pub use messaging::{
     CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
 };

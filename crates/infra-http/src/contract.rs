@@ -305,7 +305,7 @@ impl Application {
     pub fn serve(
         self,
         listener: infra_http_transport::BoundListener,
-        options: infra_http_transport::ServerOptions,
+        options: infra_http_transport::Http1Options,
     ) -> infra_http_transport::Server {
         let router = self.0;
         #[cfg(feature = "hotpath")]

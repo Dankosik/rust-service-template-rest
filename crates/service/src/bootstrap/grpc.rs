@@ -1,10 +1,8 @@
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use infra_grpc::{Authentication as GrpcAuthentication, ServerTlsMaterial};
-use infra_http_transport::ServerOptions;
-use rustls::ServerConfig;
-use std::net::SocketAddr;
-
+use infra_http_transport::{Http2Options, TlsOptions};
 use service_config::{GrpcConfig, GrpcListenerSecurity, ValidationError};
 
 use super::background::{Background, BackgroundRegistration};
@@ -22,8 +20,8 @@ pub type GrpcRegistration = fn(
 pub(super) struct Prepared {
     pub(super) addr: SocketAddr,
     pub(super) app: infra_grpc::Application,
-    pub(super) tls: Option<Arc<ServerConfig>>,
-    pub(super) options: ServerOptions,
+    pub(super) tls: Option<TlsOptions>,
+    pub(super) options: Http2Options,
 }
 
 pub(super) fn prepare(
@@ -87,7 +85,7 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
     }
 }
 
-fn tls(security: &GrpcListenerSecurity) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
+fn tls(security: &GrpcListenerSecurity) -> Result<Option<TlsOptions>, ValidationError> {
     let GrpcListenerSecurity::Tls(material) = security else {
         return Ok(None);
     };
@@ -97,7 +95,12 @@ fn tls(security: &GrpcListenerSecurity) -> Result<Option<Arc<ServerConfig>>, Val
         client_ca_pem: material.client_ca.as_deref(),
     };
     infra_grpc::server_tls_config(material)
-        .map(Some)
+        .map(|config| {
+            Some(TlsOptions {
+                config,
+                handshake_timeout: Duration::from_secs(5),
+            })
+        })
         .map_err(|error| {
             let key = match error {
                 infra_grpc::TlsMaterialError::InvalidCertificate => "grpc.certificate",

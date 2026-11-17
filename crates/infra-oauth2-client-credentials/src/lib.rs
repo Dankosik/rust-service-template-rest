@@ -19,3 +19,4 @@ pub use credentials::{Credentials, OnBehalfOf, RefreshDriver};
 pub use error::{AcquisitionError, ConfigurationError, Error, Rejection};
 pub use http_client::AuthenticatedClient;
 pub use options::{Algorithm, Options};
+pub use request_admission::IdentityMode;

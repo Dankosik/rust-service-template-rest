@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::Producer;
-use crate::error::PublishError;
-use crate::prepared::{PreparedEvent, PreparedEventParts};
+use crate::error::{PublishError, PublishRejection};
+use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
 use crate::wire::prefixed_digest_hex;
 
 const OUTBOX_KIND: &str = "publish_domain_event";
@@ -164,8 +164,19 @@ impl Handler<PublishDomainEvent> for Publisher {
             .await
             .map(|_| ())
             .map_err(|error| match error {
-                PublishError::Rejected => JobError::retryable("publication_rejected"),
                 PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
+                PublishError::Rejected(reason) => match reason {
+                    PublishRejection::InvalidEnvelope(_) => {
+                        JobError::permanent("outbox_envelope_invalid")
+                    }
+                    PublishRejection::BrokerRefused => JobError::retryable("broker_refused"),
+                    PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
+                    PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
+                    PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),
+                    PublishRejection::ContextStopped => {
+                        JobError::retryable("publish_context_stopped")
+                    }
+                },
             })
     }
 }
@@ -264,8 +275,11 @@ impl PublishDomainEvent {
             .payload
             .clone()
             .map_err(|InvalidBase64| "outbox_base64_invalid")?;
-        serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
-            .map_err(|_| "outbox_json_invalid")?;
+        let json = std::str::from_utf8(&payload).map_err(|_| "outbox_json_invalid")?;
+        if !payload_depth_allowed(&payload) {
+            return Err("outbox_payload_too_deep");
+        }
+        serde_json::from_str::<serde::de::IgnoredAny>(json).map_err(|_| "outbox_json_invalid")?;
         PreparedEvent::from_parts(PreparedEventParts {
             subject: self.subject.clone(),
             message_id: self.message_id.clone(),

@@ -1,3 +1,5 @@
+use std::any::TypeId;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -47,39 +49,51 @@ pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
     }
 }
 
-#[derive(Clone)]
-pub struct Route {
-    pub(crate) key: RouteKey<'static>,
-    pub(crate) subject: async_nats::Subject,
-    pub(crate) schema: Option<PayloadSchema>,
+pub struct Route<T> {
+    subject: async_nats::Subject,
+    schema: Option<PayloadSchema>,
+    payload: PhantomData<fn(T) -> T>,
 }
 
-impl std::fmt::Debug for Route {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Route")
-            .field("key", &self.key)
-            .field("subject", &self.subject)
-            .field("documented", &self.schema.is_some())
-            .finish()
+impl<T> Clone for Route<T> {
+    fn clone(&self) -> Self {
+        Self {
+            subject: self.subject.clone(),
+            schema: self.schema,
+            payload: PhantomData,
+        }
     }
 }
 
-impl Route {
+impl<T: EventPayload> std::fmt::Debug for Route<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Route")
+            .field("key", &route_key::<T>())
+            .field("subject", &self.subject)
+            .field("documented", &self.schema.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: EventPayload> Route<T> {
     #[must_use]
-    pub fn new<T: EventPayload>(subject: impl Into<String>) -> Self {
+    pub fn new(subject: impl Into<String>) -> Self {
         Self {
-            key: route_key::<T>(),
             subject: async_nats::Subject::from(subject.into()),
             schema: None,
+            payload: PhantomData,
         }
     }
 
     #[must_use]
-    pub fn documented<T: EventPayload + utoipa::ToSchema>(subject: impl Into<String>) -> Self {
+    pub fn documented(subject: impl Into<String>) -> Self
+    where
+        T: utoipa::ToSchema,
+    {
         Self {
             schema: Some(payload_schema::<T>),
-            ..Self::new::<T>(subject)
+            ..Self::new(subject)
         }
     }
 }
@@ -101,7 +115,7 @@ pub enum RegistryError {
         event_type: String,
         schema_version: u16,
     },
-    #[error("route missing for {event_type} v{schema_version}")]
+    #[error("typed route is not registered for {event_type} v{schema_version}")]
     MissingRoute {
         event_type: String,
         schema_version: u16,
@@ -115,26 +129,33 @@ pub enum RegistryError {
     Empty,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Registry {
-    routes: HashMap<RouteKey<'static>, RouteEntry>,
+    routes: HashMap<RouteKey<'static>, RegisteredRoute>,
 }
 
 #[derive(Clone)]
-struct RouteEntry {
-    route: Route,
+pub(crate) struct RegisteredRoute {
+    pub(crate) key: RouteKey<'static>,
+    pub(crate) subject: async_nats::Subject,
+    pub(crate) schema: Option<PayloadSchema>,
+    payload: TypeId,
     handler: Option<ErasedHandler>,
+}
+
+impl RegisteredRoute {
+    fn matches<T: 'static>(&self, route: &Route<T>) -> bool {
+        self.payload == TypeId::of::<T>()
+            && self.subject == route.subject
+            && self.schema.is_some() == route.schema.is_some()
+    }
 }
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let subjects = std::fmt::from_fn(|f| {
             f.debug_map()
-                .entries(
-                    self.routes
-                        .iter()
-                        .map(|(key, entry)| (key, &entry.route.subject)),
-                )
+                .entries(self.routes.iter().map(|(key, entry)| (key, &entry.subject)))
                 .finish()
         });
         formatter
@@ -145,7 +166,7 @@ impl std::fmt::Debug for Registry {
                 &self
                     .routes
                     .values()
-                    .filter(|entry| entry.route.schema.is_some())
+                    .filter(|entry| entry.schema.is_some())
                     .count(),
             )
             .field(
@@ -161,46 +182,53 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
-    pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
-        let mut mapped = HashMap::default();
-        for route in routes {
-            let key @ RouteKey {
-                event_type,
+    pub fn declare<T: EventPayload + 'static>(
+        &mut self,
+        route: &Route<T>,
+    ) -> Result<(), RegistryError> {
+        let key @ RouteKey {
+            event_type,
+            schema_version,
+        } = route_key::<T>();
+        if !valid_subject(&route.subject) {
+            return Err(RegistryError::InvalidSubject {
+                event_type: event_type.to_owned(),
                 schema_version,
-            } = route.key;
-            if !valid_subject(&route.subject) {
-                return Err(RegistryError::InvalidSubject {
-                    event_type: event_type.to_owned(),
-                    schema_version,
-                });
-            }
-            if crate::wire::validate_outbound_identity(event_type).is_err() {
-                return Err(RegistryError::InvalidEventType {
-                    event_type: event_type.to_owned(),
-                    schema_version,
-                });
-            }
-            let entry = RouteEntry {
-                route,
-                handler: None,
-            };
-            if mapped.insert(key, entry).is_some() {
-                return Err(RegistryError::DuplicateRoute {
-                    event_type: event_type.to_owned(),
-                    schema_version,
-                });
-            }
+            });
         }
-        Ok(Self { routes: mapped })
+        if crate::wire::validate_outbound_identity(event_type).is_err() {
+            return Err(RegistryError::InvalidEventType {
+                event_type: event_type.to_owned(),
+                schema_version,
+            });
+        }
+        let std::collections::hash_map::Entry::Vacant(entry) = self.routes.entry(key) else {
+            return Err(RegistryError::DuplicateRoute {
+                event_type: event_type.to_owned(),
+                schema_version,
+            });
+        };
+        entry.insert(RegisteredRoute {
+            key,
+            subject: route.subject.clone(),
+            schema: route.schema,
+            payload: TypeId::of::<T>(),
+            handler: None,
+        });
+        Ok(())
     }
 
-    pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
+    pub fn register<T, F, Fut>(&mut self, route: &Route<T>, handler: F) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
         F: Fn(Event<T>, OperationContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
-        let Some(entry) = self.routes.get_mut(&route_key::<T>()) else {
+        let Some(entry) = self
+            .routes
+            .get_mut(&route_key::<T>())
+            .filter(|entry| entry.matches(route))
+        else {
             return Err(RegistryError::MissingRoute {
                 event_type: T::EVENT_TYPE.to_owned(),
                 schema_version: T::SCHEMA_VERSION,
@@ -235,21 +263,22 @@ impl Registry {
         self.has_handlers().ok_or(RegistryError::Empty)
     }
 
-    pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&async_nats::Subject> {
+    pub(crate) fn subject_for<T: EventPayload + 'static>(
+        &self,
+        route: &Route<T>,
+    ) -> Option<&async_nats::Subject> {
         self.routes
             .get(&route_key::<T>())
-            .map(|entry| &entry.route.subject)
+            .filter(|entry| entry.matches(route))
+            .map(|entry| &entry.subject)
     }
 
-    pub(crate) fn routes(&self) -> impl Iterator<Item = &Route> {
-        self.routes.values().map(|entry| &entry.route)
+    pub(crate) fn routes(&self) -> impl Iterator<Item = &RegisteredRoute> {
+        self.routes.values()
     }
 
-    pub(crate) fn handled_routes(&self) -> impl Iterator<Item = &Route> {
-        self.routes
-            .values()
-            .filter(|entry| entry.handler.is_some())
-            .map(|entry| &entry.route)
+    pub(crate) fn handled_routes(&self) -> impl Iterator<Item = &RegisteredRoute> {
+        self.routes.values().filter(|entry| entry.handler.is_some())
     }
 
     pub(crate) async fn dispatch(
@@ -265,13 +294,13 @@ impl Registry {
             occurred_at,
             payload,
         } = envelope;
-        let routes: &HashMap<RouteKey<'_>, RouteEntry> = &self.routes;
+        let routes: &HashMap<RouteKey<'_>, RegisteredRoute> = &self.routes;
         let handler = routes
             .get(&RouteKey {
                 event_type: &event_type,
                 schema_version,
             })
-            .filter(|entry| entry.route.subject.as_str() == subject)
+            .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
         let run =
@@ -286,7 +315,7 @@ mod tests {
     use crate::error::EnvelopeError;
     use crate::prepared::PreparedEvent;
 
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
     struct Created {
         quantity: u32,
     }
@@ -301,6 +330,73 @@ mod tests {
     impl EventPayload for Shipped {
         const EVENT_TYPE: &'static str = "order.shipped";
         const SCHEMA_VERSION: u16 = 1;
+    }
+
+    #[test]
+    fn a_colliding_declaration_cannot_replace_publish_or_handle_the_admitted_route() {
+        #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+        struct Alias(String);
+
+        impl EventPayload for Alias {
+            const EVENT_TYPE: &'static str = Created::EVENT_TYPE;
+            const SCHEMA_VERSION: u16 = Created::SCHEMA_VERSION;
+        }
+
+        let route = Route::<Alias>::documented("orders.created");
+        let publication_route = route.clone();
+        let collision = Route::<Created>::documented("orders.created");
+        let mut registry = Registry::default();
+        registry.declare(&route).unwrap();
+        std::assert_matches!(
+            registry.declare(&collision),
+            Err(RegistryError::DuplicateRoute { .. })
+        );
+        let aliased_event = Event {
+            id: "event-1".to_owned(),
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
+            payload: Created { quantity: 2 },
+        };
+        std::assert_matches!(
+            registry.register(&collision, |_, _| async { Ok(()) }),
+            Err(RegistryError::MissingRoute { .. })
+        );
+        std::assert_matches!(
+            registry.prepare(&collision, &aliased_event, 1024),
+            Err(EnvelopeError::MissingRoute { .. })
+        );
+
+        let event = Event {
+            id: aliased_event.id,
+            occurred_at: aliased_event.occurred_at,
+            payload: Alias("accepted".to_owned()),
+        };
+        for undeclared in [
+            Route::<Alias>::documented("another.subject"),
+            Route::<Alias>::new("orders.created"),
+        ] {
+            std::assert_matches!(
+                registry.prepare(&undeclared, &event, 1024),
+                Err(EnvelopeError::MissingRoute { .. })
+            );
+            std::assert_matches!(
+                registry.register(&undeclared, |_, _| async { Ok(()) }),
+                Err(RegistryError::MissingRoute { .. })
+            );
+        }
+        let prepared = registry.prepare(&publication_route, &event, 1024).unwrap();
+        assert_eq!(prepared.subject(), "orders.created");
+        assert_eq!(prepared.payload().as_ref(), br#""accepted""#);
+        registry.register(&route, |_, _| async { Ok(()) }).unwrap();
+        std::assert_matches!(
+            registry.register(&route, |_, _| async { Ok(()) }),
+            Err(RegistryError::DuplicateHandler { .. })
+        );
+        let document = registry.asyncapi("orders", "1").unwrap();
+        assert_eq!(
+            document["channels"]["orders.created"]["messages"]["order.created.v2"]["payload"]["schema"]
+                ["$ref"],
+            "#/$defs/Alias"
+        );
     }
 
     #[test]
@@ -324,16 +420,16 @@ mod tests {
             occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
             payload: Measured(std::cell::Cell::new(0)),
         };
-        let missing = Registry::try_new([]).expect("empty publication registry");
+        let route = Route::<Measured>::new("orders.measured");
+        let mut registry = Registry::default();
         std::assert_matches!(
-            missing.prepare(&event, 1024),
+            registry.prepare(&route, &event, 1024),
             Err(EnvelopeError::MissingRoute { .. })
         );
         assert_eq!(event.payload.0.get(), 0);
-        let routed = Registry::try_new([Route::new::<Measured>("orders.measured")])
-            .expect("publication route");
+        registry.declare(&route).expect("publication route");
         std::assert_matches!(
-            routed.prepare(&event, 1024),
+            registry.prepare(&route, &event, 1024),
             Err(EnvelopeError::Serialization)
         );
         assert_eq!(event.payload.0.get(), 1);
@@ -349,9 +445,9 @@ mod tests {
             const SCHEMA_VERSION: u16 = 1;
         }
 
-        let route = Route::new::<Padded>("orders.shipped");
+        let route = Route::<Padded>::new("orders.shipped");
         std::assert_matches!(
-            Registry::try_new([route]),
+            Registry::default().declare(&route),
             Err(RegistryError::InvalidEventType { .. })
         );
         for (value, limit, expected) in [
@@ -365,20 +461,21 @@ mod tests {
                 payload: Padded(value),
             };
             assert_eq!(
-                PreparedEvent::prepare("orders.shipped", &event, limit),
+                PreparedEvent::prepare_for_subject("orders.shipped", &event, limit),
                 Err(expected)
             );
         }
     }
 
     fn registry() -> Registry {
-        let mut registry = Registry::try_new([
-            Route::new::<Created>("orders.created"),
-            Route::new::<Shipped>("orders.shipped"),
-        ])
-        .unwrap();
+        let created = Route::<Created>::new("orders.created");
+        let mut registry = Registry::default();
+        registry.declare(&created).unwrap();
         registry
-            .register::<Created, _, _>(|event, _| async move {
+            .declare(&Route::<Shipped>::new("orders.shipped"))
+            .unwrap();
+        registry
+            .register(&created, |event, _| async move {
                 if event.payload.quantity == 0 {
                     Err(HandlerError::Permanent)
                 } else {

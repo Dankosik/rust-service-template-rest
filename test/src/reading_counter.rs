@@ -125,7 +125,7 @@ impl PreparedRequest {
             .occurred_at
             .format(&Rfc3339)
             .map_err(|_| Error::InvalidOperation)?;
-        let event = PreparedEvent::prepare(subject, &event, MAX_OPERATION_BYTES)
+        let event = PreparedEvent::prepare_for_subject(subject, &event, MAX_OPERATION_BYTES)
             .map_err(|_| Error::InvalidOperation)?;
         Ok(Self {
             operation,
@@ -275,7 +275,7 @@ pub async fn replay(
         let occurred_at = UtcDateTime::parse(&original.event_time, &Rfc3339).map_err(|_| Error::InvalidOperation)?;
         let subject: String = row.try_get("event_subject")?;
         let event = Event { id: original.event_id, occurred_at, payload: operation.clone() };
-        let prepared = PreparedRequest { operation: operation.clone(), event: PreparedEvent::prepare(subject, &event, MAX_OPERATION_BYTES).map_err(|_| Error::InvalidOperation)?, event_time: original.event_time };
+        let prepared = PreparedRequest { operation: operation.clone(), event: PreparedEvent::prepare_for_subject(subject, &event, MAX_OPERATION_BYTES).map_err(|_| Error::InvalidOperation)?, event_time: original.event_time };
         enqueue_intents(tx, &prepared, outbound, endpoint).await
     }).await
 }
@@ -519,7 +519,12 @@ pub fn register(
                 }
             });
         registration.spawn("reading_pressure_request", move |cancel| async move {
-            if let Some(Ok(())) = cancel.run_until_cancelled(enqueue_pressure(&dsn)).await {
+            if matches!(
+                cancel
+                    .run_until_cancelled(Box::pin(enqueue_pressure(&dsn)))
+                    .await,
+                Some(Ok(()))
+            ) {
                 cancel.cancelled().await;
             }
         });

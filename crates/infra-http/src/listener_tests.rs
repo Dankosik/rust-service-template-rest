@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
-use infra_http_transport::{Drained, Server, ServerOptions};
+use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,12 +16,14 @@ fn loopback() -> SocketAddr {
     ([127, 0, 0, 1], 0).into()
 }
 
-fn options() -> ServerOptions {
-    ServerOptions {
+fn options() -> Http1Options {
+    Http1Options {
         header_read_timeout: Duration::from_millis(300),
-        max_header_bytes: 8 * 1024,
-        max_connections: NonZeroU32::new(4),
-        max_connection_age: None,
+        max_read_buffer_bytes: 8 * 1024,
+        connections: ConnectionLimits {
+            max_connections: NonZeroU32::new(4),
+            max_connection_age: None,
+        },
     }
 }
 
@@ -112,7 +114,7 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
 }
 
 // template:begin grpc:http-server-span-tls-test
-use infra_http_transport::BoundListener;
+use infra_http_transport::{BoundListener, TlsOptions};
 use rustls::pki_types::ServerName;
 use tls_test_support::localhost_tls;
 use tokio_rustls::TlsConnector;
@@ -121,7 +123,7 @@ use tokio_rustls::TlsConnector;
 async fn tls_http1_origin_form_reports_https_in_the_server_span() {
     let (_subscriber, _provider, exporter) = capture_request_spans();
     let (server_config, client_config) = localhost_tls(b"http/1.1");
-    let opts = ServerOptions {
+    let opts = Http1Options {
         header_read_timeout: Duration::from_secs(2),
         ..options()
     };
@@ -133,7 +135,10 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
     let server = BoundListener::bind(loopback()).unwrap().serve_tls(
         harden(route),
         opts,
-        Arc::new(server_config),
+        TlsOptions {
+            config: Arc::new(server_config),
+            handshake_timeout: Duration::from_secs(2),
+        },
     );
     tokio::time::timeout(Duration::from_secs(2), async {
         let stream = TcpStream::connect(server.local_addr()).await.unwrap();

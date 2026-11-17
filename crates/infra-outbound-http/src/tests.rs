@@ -418,9 +418,9 @@ async fn dispatch_can_be_refused_after_request_setup() {
     let mut observed_status = None;
 
     let result = client
-        .execute_with_dispatch_check(
-            request(),
-            &context,
+        .prepare(request(), &context)
+        .unwrap()
+        .send(
             || Instant::now() < credential_expiry,
             |status| observed_status = Some(status),
         )

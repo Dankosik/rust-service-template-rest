@@ -322,16 +322,17 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     assert_eq!(decoded.event_type().len(), 256);
     assert_eq!(decoded.schema_version(), u16::MAX);
 
-    let registry = Registry::try_new([Route::new::<BridgePayload>("events.created")])
-        .expect("bridge route admits");
+    let route = Route::<BridgePayload>::new("events.created");
+    let mut registry = Registry::default();
+    registry.declare(&route).expect("bridge route admits");
     let event = bridge_event("rust-payload-limit");
     assert!(
-        registry.prepare(&event, 1).is_err(),
+        registry.prepare(&route, &event, 1).is_err(),
         "production preparation enforces payload admission"
     );
     assert!(
         registry
-            .prepare(&bridge_event("x".repeat(257)), MAX_PAYLOAD_BYTES)
+            .prepare(&route, &bridge_event("x".repeat(257)), MAX_PAYLOAD_BYTES)
             .is_err(),
         "over-limit Go identity must reject before encoding"
     );
@@ -350,11 +351,12 @@ fn verify_production_limits(fixtures: &FixtureSet) {
 }
 
 fn rust_production_records() -> Vec<WireRecord> {
-    let registry = Registry::try_new([Route::new::<BridgePayload>("events.rust")])
-        .expect("Rust export route admits");
+    let route = Route::<BridgePayload>::new("events.rust");
+    let mut registry = Registry::default();
+    registry.declare(&route).expect("Rust export route admits");
     let event = bridge_event("rust-go-compat-1");
     let prepared = registry
-        .prepare(&event, MAX_PAYLOAD_BYTES)
+        .prepare(&route, &event, MAX_PAYLOAD_BYTES)
         .expect("production Rust preparation admits");
     let headers = encode_prepared(&prepared).expect("production Rust encoding admits");
     vec![WireRecord {

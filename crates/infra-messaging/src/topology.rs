@@ -1,13 +1,15 @@
 use std::num::NonZeroUsize;
 
-use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
+use async_nats::jetstream::consumer::{Config as ConsumerConfig, IntoConsumerConfig, PullConsumer};
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
 use async_nats::jetstream::stream::{
-    Config as StreamConfig, ConsumerErrorKind, PersistenceMode, StorageType, Stream,
+    Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, PersistenceMode,
+    StorageType, Stream,
 };
+use async_nats::jetstream::{Context, ErrorCode};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -25,8 +27,6 @@ const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
 pub(crate) struct ConsumerAdmission {
     pub(crate) options: ConsumerOptions,
     pub(crate) dead_letter: DeadLetterTopology,
-    pub(crate) deadline: Instant,
-    pub(crate) cancel: CancellationToken,
 }
 
 #[derive(Clone, Debug)]
@@ -181,8 +181,6 @@ pub(crate) async fn admit_topology(
                 .ok()
                 .and_then(NonZeroUsize::new),
         },
-        deadline,
-        cancel: cancel.clone(),
     }))
 }
 
@@ -223,7 +221,7 @@ async fn get_stream(
     .await
 }
 
-pub(crate) fn get_stream_failure(error: &GetStreamError, role: &'static str) -> MessagingError {
+fn get_stream_failure(error: &GetStreamError, role: &'static str) -> MessagingError {
     let broker = match error.kind() {
         GetStreamErrorKind::JetStream(broker) => Some(broker),
         _ => None,
@@ -252,17 +250,93 @@ async fn stream_name_for_subject(
     .await
 }
 
-pub(crate) async fn create_durable(
-    stream: &Stream,
+async fn find_durable(
+    jetstream: &Context,
+    stream: &str,
+    name: &str,
+) -> Result<Option<PullConsumer>, MessagingError> {
+    match jetstream.get_consumer_from_stream(name, stream).await {
+        Ok(pull) => Ok(Some(pull)),
+        Err(error) => match error.kind() {
+            ConsumerErrorKind::JetStream(broker)
+                if broker.error_code() == ErrorCode::CONSUMER_NOT_FOUND =>
+            {
+                Ok(None)
+            }
+            ConsumerErrorKind::JetStream(broker) => Err(topology_failure(
+                "get_consumer",
+                None,
+                &error,
+                Some(&broker),
+            )),
+            ConsumerErrorKind::TimedOut => Err(MessagingError::TimedOut {
+                budget: BROKER_OPERATION_BUDGET,
+            }),
+            _ => Err(topology_failure("get_consumer", None, &error, None)),
+        },
+    }
+}
+
+pub(crate) async fn bind_durable(
+    jetstream: &Context,
+    stream: &str,
+    name: &str,
     config: PullConfig,
 ) -> Result<PullConsumer, MessagingError> {
-    stream.create_consumer(config).await.map_err(|error| {
-        let broker = match error.kind() {
-            ConsumerErrorKind::JetStream(broker) => Some(broker),
-            _ => None,
-        };
-        topology_failure("create_consumer", None, &error, broker.as_ref())
-    })
+    let existing = find_durable(jetstream, stream, name).await?;
+    let pull = match existing {
+        Some(pull) => pull,
+        None => match jetstream
+            .create_consumer_strict_on_stream(config.clone(), stream)
+            .await
+        {
+            Ok(pull) => pull,
+            Err(error) => match error.kind() {
+                ConsumerCreateStrictErrorKind::AlreadyExists => {
+                    find_durable(jetstream, stream, name)
+                        .await?
+                        .ok_or(MessagingError::Topology)?
+                }
+                ConsumerCreateStrictErrorKind::JetStream(broker) => {
+                    return Err(topology_failure(
+                        "create_consumer",
+                        None,
+                        &error,
+                        Some(&broker),
+                    ));
+                }
+                ConsumerCreateStrictErrorKind::TimedOut => {
+                    return Err(MessagingError::TimedOut {
+                        budget: BROKER_OPERATION_BUDGET,
+                    });
+                }
+                _ => return Err(topology_failure("create_consumer", None, &error, None)),
+            },
+        },
+    };
+    if !same_durable_contract(&config.into_consumer_config(), &pull.cached_info().config) {
+        tracing::warn!(operation = "bind_consumer", error.type = "durable_configuration", reason = %MessagingError::Topology, "messaging_admission_failed");
+        return Err(MessagingError::Topology);
+    }
+    Ok(pull)
+}
+
+pub(crate) fn same_durable_contract(expected: &ConsumerConfig, actual: &ConsumerConfig) -> bool {
+    fn filters(config: &ConsumerConfig) -> impl Iterator<Item = &str> {
+        std::iter::once(config.filter_subject.as_str())
+            .filter(|filter| !filter.is_empty())
+            .chain(config.filter_subjects.iter().map(String::as_str))
+    }
+    expected.durable_name == actual.durable_name
+        && expected.deliver_subject == actual.deliver_subject
+        && filters(expected).eq(filters(actual))
+        && expected.deliver_policy == actual.deliver_policy
+        && expected.ack_policy == actual.ack_policy
+        && expected.ack_wait == actual.ack_wait
+        && expected.max_deliver == actual.max_deliver
+        && expected.replay_policy == actual.replay_policy
+        && expected.backoff == actual.backoff
+        && expected.headers_only == actual.headers_only
 }
 
 fn topology_failure(

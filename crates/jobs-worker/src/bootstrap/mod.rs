@@ -387,7 +387,7 @@ fn register_capabilities(
     register: Register<'_>,
     background: &Background,
 ) -> Result<RetainedCapabilities, WorkerError> {
-    let mut registration = Registration::new(config, background)?;
+    let mut registration = Registration::new(config, background);
     register(&mut registration).map_err(WorkerError::Registration)?;
     #[allow(
         unused_variables,

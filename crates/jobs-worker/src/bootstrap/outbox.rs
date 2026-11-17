@@ -74,7 +74,7 @@ mod tests {
             service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
         let background = Background::new();
-        let mut registration = crate::Registration::new(&config, &background).unwrap();
+        let mut registration = crate::Registration::new(&config, &background);
         let (handed, received) = tokio::sync::oneshot::channel();
         registration
             .with_postgres_messages(move |pool, _| {

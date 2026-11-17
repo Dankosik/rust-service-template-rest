@@ -81,8 +81,8 @@ impl Application {
     pub fn serve(
         self,
         listener: infra_http_transport::BoundListener,
-        options: infra_http_transport::ServerOptions,
-        tls: Option<Arc<rustls::ServerConfig>>,
+        options: infra_http_transport::Http2Options,
+        tls: Option<infra_http_transport::TlsOptions>,
     ) -> infra_http_transport::Server {
         listener.serve_h2(self.0, options, tls)
     }
@@ -164,12 +164,14 @@ pub fn router(
 }
 
 #[must_use]
-pub fn server_options(limits: Limits) -> infra_http_transport::ServerOptions {
-    infra_http_transport::ServerOptions {
-        header_read_timeout: Duration::from_secs(5),
-        max_header_bytes: 16 * 1024,
-        max_connections: limits.max_connections,
-        max_connection_age: limits.max_connection_age,
+pub fn server_options(limits: Limits) -> infra_http_transport::Http2Options {
+    infra_http_transport::Http2Options {
+        preface_timeout: Duration::from_secs(5),
+        max_header_list_size: 16 * 1024,
+        connections: infra_http_transport::ConnectionLimits {
+            max_connections: limits.max_connections,
+            max_connection_age: limits.max_connection_age,
+        },
     }
 }
 
