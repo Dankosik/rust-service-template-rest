@@ -193,21 +193,7 @@ async fn serve_resp(
         let Some(arguments) = resp_arguments(values) else {
             return;
         };
-        socket
-            .observed
-            .commands
-            .lock()
-            .expect("commands lock")
-            .push((socket.id, arguments.clone()));
-        socket.observed.changed.notify_waiters();
-        if socket.observed.silence_all.load(Ordering::SeqCst)
-            || socket.id <= socket.observed.silence_through.load(Ordering::SeqCst)
-        {
-            continue;
-        }
-        if arguments.first().is_some_and(|command| command == "AUTH")
-            && socket.observed.silence_auth.load(Ordering::SeqCst)
-        {
+        if !socket.record_and_should_reply(&arguments) {
             continue;
         }
         let auth_error = format!(
@@ -354,6 +340,21 @@ struct ObservedSocket {
 }
 
 impl ObservedSocket {
+    fn record_and_should_reply(&self, arguments: &[String]) -> bool {
+        use std::sync::atomic::Ordering;
+
+        self.observed
+            .commands
+            .lock()
+            .expect("commands lock")
+            .push((self.id, arguments.to_vec()));
+        self.observed.changed.notify_waiters();
+        !(self.observed.silence_all.load(Ordering::SeqCst)
+            || self.id <= self.observed.silence_through.load(Ordering::SeqCst)
+            || (arguments.first().is_some_and(|command| command == "AUTH")
+                && self.observed.silence_auth.load(Ordering::SeqCst)))
+    }
+
     fn new(id: usize, observed: std::sync::Arc<SocketObservations>) -> Self {
         observed.active.lock().expect("active lock").insert(id);
         observed.changed.notify_waiters();
