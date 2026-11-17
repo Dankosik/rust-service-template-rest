@@ -10,16 +10,18 @@ use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
 
-use crate::error::{Failure, LocalFailure};
+use crate::error::UploadFailure;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct PutBody {
     pub(crate) len: u64,
+    #[debug(skip)]
     pub(crate) stream: ByteStream,
+    #[debug(skip)]
     pub(crate) source: UploadSource,
 }
 
@@ -62,13 +64,13 @@ impl PutBody {
         self.len == 0
     }
 
-    pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, Failure> {
+    pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, UploadFailure> {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(self);
         }
         match self.stream.next().await {
-            Some(_) if self.source.mismatched() => Err(LocalFailure::UploadLengthMismatch.into()),
-            Some(_) => Err(LocalFailure::UploadBody.into()),
+            Some(_) if self.source.mismatched() => Err(UploadFailure::Length),
+            Some(_) => Err(UploadFailure::Body),
             None => Ok(Self::from(Bytes::new())),
         }
     }
@@ -207,6 +209,13 @@ mod tests {
     use http_body_util::StreamBody;
 
     use super::*;
+
+    #[test]
+    fn put_body_debug_hides_payload() {
+        let body = PutBody::from(Bytes::from_static(b"private-upload-data"));
+        let rendered = format!("{body:?}");
+        assert!(!rendered.contains("private-upload-data"), "{rendered}");
+    }
 
     fn send<const N: usize>(len: u64, chunks: [&'static [u8]; N]) -> (Result<u64, ()>, bool) {
         let frames =
