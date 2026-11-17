@@ -1,6 +1,6 @@
 use health::{Probe, ReadinessReader, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions, HttpContract};
-use infra_http_transport::{BoundListener, Server, ServerOptions};
+use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options, Server};
 use infra_telemetry::{Metrics, diagnostics_router};
 use service_config::{HttpListenerConfig, WorkerConfig};
 
@@ -64,12 +64,15 @@ fn watch_listener(name: &'static str, server: &Server, background: &Background) 
     });
 }
 
-fn server_options(http: &HttpListenerConfig) -> ServerOptions {
-    ServerOptions {
+fn server_options(http: &HttpListenerConfig) -> Http1Options {
+    Http1Options {
         header_read_timeout: http.header_read_timeout,
-        max_header_bytes: usize::try_from(http.max_header_bytes.as_u64()).unwrap_or(usize::MAX),
-        max_connections: http.max_connections,
-        max_connection_age: http.max_connection_age,
+        max_read_buffer_bytes: usize::try_from(http.max_header_bytes.as_u64())
+            .unwrap_or(usize::MAX),
+        connections: ConnectionLimits {
+            max_connections: http.max_connections,
+            max_connection_age: http.max_connection_age,
+        },
     }
 }
 

@@ -27,7 +27,7 @@ pub fn server_tls_config(
     let builder = ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("the aws-lc-rs provider supports TLS 1.3");
-    let mut config = match material.client_ca_pem {
+    let config = match material.client_ca_pem {
         Some(ca) => {
             let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots(ca)?))
                 .build()
@@ -38,7 +38,6 @@ pub fn server_tls_config(
     }
     .with_single_cert(certificates, key)
     .map_err(|_| TlsMaterialError::InvalidPrivateKey)?;
-    config.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Arc::new(config))
 }
 
