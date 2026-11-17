@@ -232,6 +232,26 @@ impl ConfigInput {
 #[derive(Clone, Debug)]
 pub struct Config(ServiceSections);
 
+impl Config {
+    #[must_use]
+    pub fn finite_listener_connection_caps(&self) -> u64 {
+        finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
+            // template:begin grpc:config-finite-listener-connection-caps
+            + self
+                .grpc
+                .as_ref()
+                .and_then(|grpc| grpc.max_connections)
+                .map_or(0, |cap| u64::from(cap.get()))
+        // template:end grpc:config-finite-listener-connection-caps
+    }
+}
+
+fn finite_http_connection_caps(http: &HttpListenerConfig, metrics: &MetricsConfig) -> u64 {
+    http.max_connections.map_or(0, |cap| {
+        u64::from(cap.get()) * (1 + u64::from(metrics.addr.is_some()))
+    })
+}
+
 impl std::ops::Deref for Config {
     type Target = ServiceSections;
 

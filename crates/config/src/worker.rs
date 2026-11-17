@@ -96,6 +96,13 @@ impl WorkerInput {
 #[derive(Clone, Debug)]
 pub struct WorkerConfig(WorkerSections);
 
+impl WorkerConfig {
+    #[must_use]
+    pub fn finite_listener_connection_caps(&self) -> u64 {
+        crate::finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
+    }
+}
+
 impl std::ops::Deref for WorkerConfig {
     type Target = WorkerSections;
 
@@ -127,4 +134,25 @@ pub struct WorkerSections {
     // template:begin inbound-webhooks:worker-config-inbound-webhooks-field
     pub inbound_webhook_endpoints: std::collections::BTreeSet<String>,
     // template:end inbound-webhooks:worker-config-inbound-webhooks-field
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::load_worker_env;
+
+    #[rstest::rstest]
+    #[case::health_only("4", "", 4)]
+    #[case::with_diagnostics("4", ":9090", 8)]
+    #[case::uncapped("0", ":9090", 0)]
+    fn worker_counts_finite_caps_of_enabled_listeners(
+        #[case] http_max_connections: &str,
+        #[case] diagnostics_addr: &str,
+        #[case] expected: u64,
+    ) {
+        let cfg = load_worker_env(&[
+            ("APP__HTTP__MAX_CONNECTIONS", http_max_connections),
+            ("APP__OBSERVABILITY__METRICS__ADDR", diagnostics_addr),
+        ]);
+        assert_eq!(cfg.finite_listener_connection_caps(), expected);
+    }
 }

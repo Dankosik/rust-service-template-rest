@@ -347,18 +347,15 @@ async fn serve(
 }
 
 fn raise_open_file_limit(config: &Config) {
+    let connection_caps = config.finite_listener_connection_caps();
     match rlimit::increase_nofile_limit(u64::MAX) {
         Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
-        Ok(open_file_limit) if let Some(cap) = config.http.listener().max_connections => {
-            let listeners = 1 + u64::from(config.observability.metrics.addr.is_some());
-            let connection_caps = u64::from(cap.get()) * listeners;
-            if open_file_limit < connection_caps {
-                tracing::warn!(
-                    open_file_limit,
-                    connection_caps,
-                    "open_file_limit_below_connection_caps"
-                );
-            }
+        Ok(open_file_limit) if open_file_limit < connection_caps => {
+            tracing::warn!(
+                open_file_limit,
+                connection_caps,
+                "open_file_limit_below_connection_caps"
+            );
         }
         Ok(_) => {}
     }
