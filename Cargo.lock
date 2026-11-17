@@ -2978,6 +2978,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "parking_lot",
  "shared-rules",
  "sqlx",
  "tempfile",

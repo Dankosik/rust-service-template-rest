@@ -1,10 +1,11 @@
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::slots::{Slot, Slots};
 
+use parking_lot::Mutex;
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Postgres};
@@ -156,14 +157,17 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         });
     let pool = pool_options.connect_lazy_with(connect_options);
     let address = std::ptr::from_ref(pool.options()).addr();
-    let mut known = TURNS.lock().unwrap_or_else(PoisonError::into_inner);
-    known.retain(|turns| turns.alive.strong_count() > 0 && turns.options != address);
-    if options.wait_order == WaitOrder::NewestOnceStanding {
-        known.push(Turns {
-            options: address,
-            alive: Arc::downgrade(&alive),
-            slots: Slots::new(options.max_connections.get() as usize),
-        });
+    let mut known = POOL_SLOTS.lock();
+    known.retain(|entry| entry.alive.strong_count() > 0 && entry.options_addr != address);
+    match options.wait_order {
+        WaitOrder::Arrival => {}
+        WaitOrder::NewestOnceStanding => {
+            known.push(PoolSlots {
+                options_addr: address,
+                alive: Arc::downgrade(&alive),
+                slots: Slots::new(options.max_connections.get() as usize),
+            });
+        }
     }
     drop(known);
     pool
@@ -171,34 +175,36 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
 
 /// The driver's own queue is first come, first served and cannot be told
 /// otherwise, so only as many callers as the pool has connections wait in
-/// it; the rest wait for a turn here, in the order the pool asked for.
-struct Turns {
-    options: usize,
+/// it; the rest wait for a slot here, in the order the pool asked for.
+struct PoolSlots {
+    options_addr: usize,
     alive: Weak<()>,
     slots: Arc<Slots>,
 }
 
-/// A pool has no place for caller state, so its turns are found by the
+/// A pool has no place for caller state, so its slots are found by the
 /// address of its options. `alive` is owned by a callback stored in those
 /// options: while it lives the address belongs to that pool, and a pool
 /// prepared at an address forgets whatever was recorded there before it.
-static TURNS: Mutex<Vec<Turns>> = Mutex::new(Vec::new());
+static POOL_SLOTS: Mutex<Vec<PoolSlots>> = Mutex::new(Vec::new());
 
-async fn turn(pool: &PgPool, deadline: tokio::time::Instant) -> Result<Option<Slot>, sqlx::Error> {
-    let options = std::ptr::from_ref(pool.options()).addr();
-    let turns = TURNS
+async fn take_slot(
+    pool: &PgPool,
+    deadline: tokio::time::Instant,
+) -> Result<Option<Slot>, sqlx::Error> {
+    let options_addr = std::ptr::from_ref(pool.options()).addr();
+    let slots = POOL_SLOTS
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
         .iter()
-        .find(|turns| turns.options == options && turns.alive.strong_count() > 0)
-        .map(|turns| Arc::clone(&turns.slots));
-    let Some(turns) = turns else {
+        .find(|entry| entry.options_addr == options_addr && entry.alive.strong_count() > 0)
+        .map(|entry| Arc::clone(&entry.slots));
+    let Some(slots) = slots else {
         return Ok(None);
     };
-    if let Some(turn) = turns.try_take() {
-        return Ok(Some(turn));
+    if let Some(slot) = slots.try_take() {
+        return Ok(Some(slot));
     }
-    tokio::time::timeout_at(deadline, turns.take())
+    tokio::time::timeout_at(deadline, slots.take())
         .await
         .map(Some)
         .map_err(|_elapsed| sqlx::Error::PoolTimedOut)
@@ -215,7 +221,7 @@ pub async fn acquire(
     let budget = pool.options().get_acquire_timeout();
     let deadline = tokio::time::Instant::now() + budget;
     acquisition(operation, budget, async {
-        let _turn = turn(pool, deadline).await?;
+        let _slot = take_slot(pool, deadline).await?;
         tokio::time::timeout_at(deadline, pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
@@ -236,7 +242,7 @@ pub async fn acquire_until(
         operation,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         async {
-            let _turn = turn(pool, deadline).await?;
+            let _slot = take_slot(pool, deadline).await?;
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout_at(deadline, pool.acquire()).await {
                     Err(_elapsed) => break,
@@ -532,37 +538,42 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn only_a_pool_that_asked_takes_turns_and_a_turn_is_bounded_by_the_deadline() {
+    async fn only_a_pool_that_asked_takes_slots_and_a_slot_is_bounded_by_the_deadline() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let in_arrival_order = unreachable_pool(WaitOrder::Arrival);
-        assert!(turn(&in_arrival_order, deadline).await.unwrap().is_none());
+        assert!(
+            take_slot(&in_arrival_order, deadline)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let newest_first = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let held = turn(&newest_first, deadline).await.unwrap();
+        let held = take_slot(&newest_first, deadline).await.unwrap();
         assert!(held.is_some());
-        let beyond_the_pool = turn(&newest_first, deadline).await;
+        let beyond_the_pool = take_slot(&newest_first, deadline).await;
         std::assert_matches!(beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
         assert!(tokio::time::Instant::now() >= deadline);
 
         drop(held);
         let later = tokio::time::Instant::now() + Duration::from_secs(1);
-        assert!(turn(&newest_first, later).await.unwrap().is_some());
+        assert!(take_slot(&newest_first, later).await.unwrap().is_some());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn turns_outlive_a_rotated_password_and_end_with_the_pool() {
+    async fn pool_slots_outlive_a_rotated_password_and_end_with_the_pool() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let options = std::ptr::from_ref(pool.options()).addr();
+        let options_addr = std::ptr::from_ref(pool.options()).addr();
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
-        assert!(turn(&pool, deadline).await.unwrap().is_some());
+        assert!(take_slot(&pool, deadline).await.unwrap().is_some());
 
         drop(pool);
-        let known = TURNS.lock().unwrap();
+        let known = POOL_SLOTS.lock();
         assert!(
             known
                 .iter()
-                .all(|turns| turns.options != options || turns.alive.strong_count() == 0)
+                .all(|entry| entry.options_addr != options_addr || entry.alive.strong_count() == 0)
         );
     }
 }
