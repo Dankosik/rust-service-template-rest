@@ -176,10 +176,6 @@ async fn business_call(
     let opening_deadline = Deadline::new(origin, opening_budget);
     let response_deadline = caller_timeout.map(|budget| Deadline::new(origin, budget));
 
-    let opening_token = CancellationToken::new();
-    let opening_context = OperationContext::new(Some(opening_deadline), opening_token.clone());
-    let _opening_guard = opening_token.drop_guard();
-
     let is_streaming = matches!(
         call.call_type(),
         Some(CallType::ServerStream | CallType::BidiStream)
@@ -188,6 +184,8 @@ async fn business_call(
         Some(drain) => drain.child_token(),
         None => CancellationToken::new(),
     };
+    let opening_context =
+        OperationContext::new(Some(opening_deadline), response_token.child_token());
     let response_context = ResponseContext(OperationContext::new(
         response_deadline,
         response_token.clone(),
@@ -353,11 +351,8 @@ async fn health_call(
     };
 
     let deadline = Deadline::new(tokio::time::Instant::now(), budget);
-    let opening_token = CancellationToken::new();
-    let opening_context = OperationContext::new(Some(deadline), opening_token.clone());
-    let _opening_guard = opening_token.drop_guard();
-
     let response_token = CancellationToken::new();
+    let opening_context = OperationContext::new(Some(deadline), response_token.child_token());
     let response_context = ResponseContext(OperationContext::new(
         Some(deadline),
         response_token.clone(),

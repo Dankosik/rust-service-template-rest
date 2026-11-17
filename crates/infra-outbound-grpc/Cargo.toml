@@ -24,6 +24,7 @@ hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 infra-serviceauth = { workspace = true }
 # template:end service-auth:outbound-grpc-service-auth-dependency
 metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
 operation-context = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
@@ -37,13 +38,16 @@ tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true, features = ["channel"] }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry = { workspace = true }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # template:begin service-auth:outbound-grpc-service-auth-test-dependency
 infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:outbound-grpc-service-auth-test-dependency
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }

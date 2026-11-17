@@ -273,6 +273,10 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         self.observe(&request, Seen::ServerStream);
         let response_context = request.extensions().get::<ResponseContext>().cloned();
+        let request_context = request
+            .extensions()
+            .get::<operation_context::OperationContext>()
+            .cloned();
         let message = request.into_inner().message;
         let first = futures_util::stream::iter([Ok(ServerStreamResponse {
             message: message.clone(),
@@ -288,8 +292,14 @@ impl EchoService for Echo {
                 Box::pin(first.chain(futures_util::stream::once(async move {
                     let _dropped = dropped;
                     hold.wait().await;
+                    let request_cancelled = request_context
+                        .is_some_and(|context| context.cancellation().is_cancelled());
                     Ok(ServerStreamResponse {
-                        message: "released".to_owned(),
+                        message: if request_cancelled {
+                            "request context cancelled while the stream was open".to_owned()
+                        } else {
+                            "released".to_owned()
+                        },
                     })
                 })))
             }

@@ -2904,6 +2904,8 @@ dependencies = [
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "operation-context",
  "parking_lot",
  "rcgen",
@@ -2918,7 +2920,9 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
 ]
 
 [[package]]

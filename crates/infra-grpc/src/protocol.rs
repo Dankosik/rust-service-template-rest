@@ -15,7 +15,7 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
 }
 
 #[must_use]
-pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
+pub(crate) fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(GRPC_TIMEOUT)
         .and_then(|value| shared_rules::grpc::parse_timeout(value.as_bytes()))

@@ -4,9 +4,12 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use foldhash::HashMap;
 use metrics::SharedString;
+use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
 use shared_rules::grpc::split_method_path;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
+use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
 
 pub(crate) const CLIENT_STARTED_METRIC: &str = "grpc_client_started_total";
 pub(crate) const CLIENT_HANDLED_METRIC: &str = "grpc_client_handled_total";
@@ -109,13 +112,11 @@ impl Call {
 
     fn record(&self, code: tonic::Code) {
         let (otel_status, metric_code) = code_names(code);
-        let is_error = otel_http::grpc::status_is_error(code as u16, false);
-        tracing::record_all!(
-            self.span,
-            rpc.status_code = otel_status,
-            error.type = is_error.then_some(otel_status),
-            otel.status_code = is_error.then_some("ERROR"),
-        );
+        self.span.set_attribute("rpc.status_code", otel_status);
+        if otel_http::grpc::status_is_error(code as u16, false) {
+            self.span.set_attribute("error.type", otel_status);
+            self.span.set_status(SpanStatus::error(""));
+        }
         self.metrics
             .handled(code, metric_code, self.started.elapsed());
     }
@@ -134,29 +135,32 @@ fn make_client_span<B>(
     metrics: &MethodMetrics,
     destination: &Destination,
 ) -> tracing::Span {
-    let rpc_method = metrics.rpc_method.as_deref().unwrap_or("_OTHER");
-    let rpc_method_original = if metrics.rpc_method.is_none() {
-        let raw = request.uri().path().trim_start_matches('/');
-        (!raw.is_empty() && raw.len() <= DIAGNOSTIC_BYTES).then_some(raw)
-    } else {
-        None
-    };
-    let raw_ua = otel_http::user_agent(request);
-    let user_agent = (!raw_ua.is_empty() && raw_ua.len() <= DIAGNOSTIC_BYTES).then_some(raw_ua);
-    tracing::info_span!(
+    let span = otel_trace_span!(
         "GRPC request",
         otel.name = metrics.span_name(),
-        otel.kind = "client",
-        rpc.system.name = "grpc",
-        rpc.method = rpc_method,
-        rpc.method_original = rpc_method_original,
-        server.address = destination.address.as_deref(),
-        server.port = destination.port.map(i64::from),
-        user_agent.original = user_agent,
-        rpc.status_code = tracing::field::Empty,
-        error.type = tracing::field::Empty,
-        otel.status_code = tracing::field::Empty,
-    )
+        otel.kind = ?SpanKind::Client,
+    );
+    span.set_attribute("rpc.system.name", "grpc");
+    if let Some(method) = &metrics.rpc_method {
+        span.set_attribute("rpc.method", Arc::clone(method));
+    } else {
+        span.set_attribute("rpc.method", "_OTHER");
+        let original = request.uri().path().trim_start_matches('/');
+        if !original.is_empty() && original.len() <= DIAGNOSTIC_BYTES {
+            span.set_attribute("rpc.method_original", original.to_owned());
+        }
+    }
+    if let Some(address) = &destination.address {
+        span.set_attribute("server.address", Arc::clone(address));
+        if let Some(port) = destination.port {
+            span.set_attribute("server.port", i64::from(port));
+        }
+    }
+    let user_agent = otel_http::user_agent(request);
+    if !user_agent.is_empty() && user_agent.len() <= DIAGNOSTIC_BYTES {
+        span.set_attribute("user_agent.original", user_agent.to_owned());
+    }
+    span
 }
 
 #[derive(derive_more::Debug)]
@@ -336,6 +340,54 @@ mod tests {
                 .insert(tonic::GrpcMethod::new(service, method));
         }
         request
+    }
+
+    #[test]
+    fn a_client_span_carries_the_stable_rpc_attributes() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let series = Arc::new(Series::new());
+        let known = test_request(
+            "/example.v1.EchoService/Unary",
+            Some(("example.v1.EchoService", "Unary")),
+        );
+        let destination = Destination::new(&"http://[::1]:50051".parse().unwrap());
+        Call::start(&series, &known, &destination).finish(tonic::Code::Unauthenticated);
+        drop(guard);
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let [span] = spans.as_slice() else {
+            panic!("one span: {spans:?}");
+        };
+        let text = |key: &str| {
+            span.attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == key)
+                .map(|attribute| attribute.value.as_str().into_owned())
+        };
+        assert_eq!(span.name, "example.v1.EchoService/Unary");
+        assert_eq!(text("rpc.system.name").as_deref(), Some("grpc"));
+        for deprecated in ["rpc.system", "rpc.service", "rpc.grpc.status_code"] {
+            assert_eq!(text(deprecated), None, "{deprecated}");
+        }
+        assert_eq!(
+            text("rpc.method").as_deref(),
+            Some("example.v1.EchoService/Unary")
+        );
+        assert_eq!(text("rpc.method_original"), None);
+        assert_eq!(text("rpc.status_code").as_deref(), Some("UNAUTHENTICATED"));
+        assert_eq!(text("error.type").as_deref(), Some("UNAUTHENTICATED"));
+        assert_eq!(text("server.address").as_deref(), Some("::1"));
+        assert_eq!(text("server.port").as_deref(), Some("50051"));
     }
 
     #[test]

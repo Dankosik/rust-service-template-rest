@@ -720,6 +720,97 @@ mod tests {
         assert!(already_initial.watcher.is_none());
     }
 
+    #[tokio::test]
+    async fn parent_cancellation_releases_an_unbounded_unpolled_response() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let source = PendingFrames::stalled();
+        let dropped = Arc::clone(&source.dropped);
+        let polls = Arc::clone(&source.polls);
+        let mut body = ClientResponseBody::start(
+            source,
+            ClientObservation::Transport(sample_call()),
+            ClientCustody {
+                lifetime: OperationContext::new(None, child.clone()),
+                watch_stop: true,
+                guards: ClientGuards {
+                    upload: None,
+                    cancel_on_drop: Some(child.drop_guard()),
+                },
+                on_status: None,
+            },
+            None,
+            ClientOutcome::local(tonic::Code::Unknown),
+        );
+        let watcher = body.watcher.take().unwrap();
+        parent.cancel();
+        tokio::time::timeout(TEST_BUDGET, watcher)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let trailers = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        assert_eq!(
+            tonic::Status::from_header_map(&trailers).unwrap().code(),
+            tonic::Code::Cancelled
+        );
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_drop_cancels_unpolled_upload_and_completes_watcher_abort() {
+        let cancellation = CancellationToken::new();
+        let source = PendingFrames::stalled();
+        let dropped = Arc::clone(&source.dropped);
+        let upload_source = PendingFrames::stalled();
+        let upload_dropped = Arc::clone(&upload_source.dropped);
+        let (mut outgoing, upload_guard) = upload(tonic::body::Body::new(upload_source));
+        let mut body = ClientResponseBody::start(
+            source,
+            ClientObservation::Transport(sample_call()),
+            ClientCustody {
+                lifetime: OperationContext::new(
+                    Some(Deadline::new(Instant::now(), TEST_BUDGET)),
+                    cancellation.clone(),
+                ),
+                watch_stop: true,
+                guards: ClientGuards {
+                    upload: upload_guard,
+                    cancel_on_drop: Some(cancellation.clone().drop_guard()),
+                },
+                on_status: None,
+            },
+            None,
+            ClientOutcome::local(tonic::Code::Unknown),
+        );
+        let done = body.watcher_done.take().unwrap();
+        drop(body);
+
+        assert!(
+            cancellation.is_cancelled(),
+            "response drop cancels propagated work"
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(upload_dropped.load(Ordering::SeqCst));
+        let abort_frame = outgoing.frame().await.expect("upload error frame");
+        assert_eq!(abort_frame.unwrap_err().code(), tonic::Code::Cancelled);
+        assert!(outgoing.frame().await.is_none());
+        assert!(
+            tokio::time::timeout(TEST_BUDGET, done)
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn deadline_expiry_releases_unpolled_stream_and_aborts_upload() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

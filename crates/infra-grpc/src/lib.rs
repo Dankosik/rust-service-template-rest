@@ -21,7 +21,6 @@ pub use authn::VerifiedPrincipal;
 // template:end authn:grpc-authn-exports
 pub use error::{Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;
-pub use protocol::grpc_timeout;
 pub use router::{Limits, ResponseContext, router, server_options};
 // template:begin service-auth:grpc-service-auth-exports
 pub use service_auth::{Caller, REFLECTION_PATHS};
