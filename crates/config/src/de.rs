@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -173,4 +174,25 @@ mod tests {
         assert!(rendered.contains("localhost:8080"), "{rendered}");
         assert!(rendered.contains(LISTEN_ADDR_FORM), "{rendered}");
     }
+}
+
+pub(crate) fn duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = String::deserialize(deserializer)?;
+    parse_duration(&text)
+        .ok_or_else(|| serde::de::Error::invalid_value(Unexpected::Str(&text), &"a duration"))
+}
+
+pub(crate) fn parse_duration(text: &str) -> Option<Duration> {
+    let span: jiff::Span = text.trim().parse().ok()?;
+    let signed = span
+        .to_duration(jiff::SpanRelativeTo::days_are_24_hours())
+        .ok()?;
+    Duration::try_from(signed).ok()
+}
+
+pub(crate) fn display_duration(duration: Duration) -> String {
+    jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&duration)
 }

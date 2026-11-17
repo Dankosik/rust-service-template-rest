@@ -17,8 +17,7 @@ bytesize = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 config = { workspace = true, features = ["toml"] }
 derive_more = { workspace = true, features = ["debug"] }
-humantime = { workspace = true }
-humantime-serde = { workspace = true }
+jiff = { workspace = true, features = ["std"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 thiserror = { workspace = true }

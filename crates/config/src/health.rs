@@ -11,13 +11,13 @@ pub struct HealthConfig {
     /// How often readiness is re-checked. Together with [`Self::probe_budget`]
     /// this sizes the staleness bound on the cached verdict, which
     /// `health::RefreshPolicy::stale_after` owns.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub refresh_interval: Duration,
     /// One deadline for a background check; every probe runs under it at
     /// the same time, and the verdict names the first probe that failed or
     /// ran out of it. Also feeds the staleness bound described on
     /// [`Self::refresh_interval`].
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub probe_budget: Duration,
     /// Failed checks in a row before a ready verdict is withdrawn. Some
     /// readers, such as a gRPC health `Watch` client, drop the backend on the

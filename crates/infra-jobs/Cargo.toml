@@ -20,7 +20,7 @@ derive_more = { workspace = true, features = ["debug", "display"] }
 enum-map = { workspace = true, features = ["derive"] }
 hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
-humantime = { workspace = true }
+jiff = { workspace = true, features = ["std"] }
 infra-postgres = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }

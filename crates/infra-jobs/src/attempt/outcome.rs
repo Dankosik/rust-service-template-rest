@@ -267,7 +267,8 @@ pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> 
             policy,
             &format!(
                 "attempt timed out after {}",
-                humantime::format_duration(policy.timeout)
+                jiff::fmt::friendly::SpanPrinter::new()
+                    .unsigned_duration_to_string(&policy.timeout)
             ),
             RetryCause::Timeout,
         ),

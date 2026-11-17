@@ -26,8 +26,8 @@ pub(super) fn request_budget_fits_drain(
             key,
             format!(
                 "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish, got {}",
-                humantime::format_duration(drain),
-                humantime::format_duration(timeout)
+                crate::de::display_duration(drain),
+                crate::de::display_duration(timeout)
             ),
         ));
     }

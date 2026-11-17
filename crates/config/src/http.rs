@@ -29,18 +29,18 @@ pub struct HttpConfig {
     /// root still requires leftover budget after the drain for diagnostics,
     /// background join, dependency close, and telemetry flush; that full
     /// rule is not encoded here.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub grace_period: Duration,
     /// Bound for the service's HTTP drain, including readiness propagation,
     /// and for the jobs worker's in-flight work drain, including configured
     /// messaging consumption. The process budgets Tokio shutdown separately
     /// within the SIGTERM-to-exit window (`grace_period`).
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a
     /// load balancer notices `/health/ready` failing before connections stop
     /// being accepted. Production-shaped on purpose; local overlays set `0s`.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub readiness_propagation_delay: Duration,
     /// Separate time limits of this duration apply to protocol detection and
     /// reading a complete HTTP/1 request head. On the first request, those
@@ -52,12 +52,12 @@ pub struct HttpConfig {
     /// Cloud load balancers hold backend connections for 600 s. HTTP/2
     /// request headers have a size limit (`max_header_bytes`) and no read
     /// timeout from this setting. HTTP/2 idle uses a separate PING cadence.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
     /// reads. Features that stream responses own the lifetime of their bodies
     /// and any resources held after the response head.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub request_timeout: Duration,
     /// HTTP/1 read-buffer ceiling for one request head; overflow answers
     /// hyper-native 431 before the router, not a Problem. HTTP/2 applies the
@@ -78,7 +78,7 @@ pub struct HttpConfig {
     /// spent out of the request budget: a wait near the whole budget admits
     /// requests with no time left to finish, so overload ends in 504s
     /// instead of 503s. Zero sheds at once.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound;
@@ -91,7 +91,7 @@ pub struct HttpConfig {
     /// client reconnects and is balanced again. Each connection's age is
     /// spread by up to 10% either way. Zero keeps a connection for as long
     /// as its peer does.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     pub max_connection_age: Duration,
     pub access_log_health_probes: bool,
 }
@@ -190,8 +190,8 @@ impl HttpConfig {
                     "http.drain_timeout",
                     format!(
                         "must be <= http.grace_period ({}), got {}",
-                        humantime::format_duration(self.grace_period),
-                        humantime::format_duration(self.drain_timeout)
+                        crate::de::display_duration(self.grace_period),
+                        crate::de::display_duration(self.drain_timeout)
                     ),
                 )));
             } else {
@@ -205,8 +205,8 @@ impl HttpConfig {
                     "http.readiness_propagation_delay",
                     format!(
                         "must be less than http.drain_timeout ({}), got {}",
-                        humantime::format_duration(self.drain_timeout),
-                        humantime::format_duration(self.readiness_propagation_delay)
+                        crate::de::display_duration(self.drain_timeout),
+                        crate::de::display_duration(self.readiness_propagation_delay)
                     ),
                 )));
             } else {

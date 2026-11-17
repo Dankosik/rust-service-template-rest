@@ -37,15 +37,15 @@ pub(crate) struct GrpcInput {
     private_key: Option<SecretString>,
     #[serde(default, deserialize_with = "blank_as_none")]
     client_ca: Option<String>,
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     request_timeout: Duration,
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     max_in_flight: u32,
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     admission_wait: Duration,
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     max_connections: u32,
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     max_connection_age: Duration,
 }
 

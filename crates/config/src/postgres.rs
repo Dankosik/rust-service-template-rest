@@ -51,7 +51,7 @@ pub(crate) struct PostgresInput {
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds
     /// an index concurrently on a large table. Only `migrate` checks the range.
-    #[serde(with = "humantime_serde")]
+    #[serde(deserialize_with = "crate::de::duration")]
     migration_deadline: Duration,
 }
 

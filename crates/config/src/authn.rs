@@ -154,7 +154,10 @@ pub(crate) enum AuthnInput {
         )]
         cache_capacity: usize,
         /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
-        #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+        #[serde(
+            default = "default_cache_ttl",
+            deserialize_with = "crate::de::duration"
+        )]
         cache_ttl: Duration,
     },
     // template:end oidc-introspection:authn-config-introspection-variant
