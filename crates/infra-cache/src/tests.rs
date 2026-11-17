@@ -25,6 +25,8 @@ fn options(
         allow_plaintext,
         allow_unauthenticated,
         command_timeout: Duration::from_millis(100),
+        max_key_bytes: 1024,
+        max_value_bytes: 64 * 1024,
     }
 }
 
@@ -181,6 +183,10 @@ async fn serve_resp(
         reason = "redis does not re-export the decoder type used by its parser"
     )]
     let mut decoder = Default::default();
+    let mut exec_reply: &[u8] = b"-ERR EXEC without MULTI\r\n";
+    stream
+        .set_nodelay(true)
+        .expect("disable Nagle in timing fixture");
     while let Ok(redis::Value::Array(values)) =
         redis::parse_redis_value_async(&mut decoder, &mut stream).await
     {
@@ -235,14 +241,19 @@ async fn serve_resp(
                 socket.observed.changed.notify_waiters();
                 reply
             }
-            Some("GET")
-                if arguments
+            Some("EXISTS") => b"+QUEUED\r\n",
+            Some("GETRANGE") => {
+                exec_reply = if arguments
                     .get(1)
-                    .is_some_and(|key| key.ends_with(":wrongtype")) =>
-            {
-                b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                    .is_some_and(|key| key.ends_with(":wrongtype"))
+                {
+                    b"*2\r\n:1\r\n-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                } else {
+                    b"*2\r\n:0\r\n$0\r\n\r\n"
+                };
+                b"+QUEUED\r\n"
             }
-            Some("GET") => b"$-1\r\n",
+            Some("EXEC") => exec_reply,
             Some("PING") if socket.observed.deny_ping.load(Ordering::SeqCst) => {
                 b"-NOPERM no permissions to run the 'ping' command\r\n"
             }
@@ -323,7 +334,7 @@ impl SocketObservations {
         match arguments.first().map(String::as_str) {
             Some("HELLO") => *self.hello_reply_delay.lock().expect("delay lock"),
             Some("AUTH") => *self.auth_reply_delay.lock().expect("delay lock"),
-            Some("GET") if arguments.get(1).is_some_and(|key| key.ends_with(":slow")) => {
+            Some("GETRANGE") if arguments.get(1).is_some_and(|key| key.ends_with(":slow")) => {
                 *self.slow_get_delay.lock().expect("delay lock")
             }
             Some("PING") => self

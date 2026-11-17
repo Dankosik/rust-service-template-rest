@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use operation_context::OperationContext;
+use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
 
-use crate::connection::CommandError;
+use crate::connection::{CommandError, ErrorType, query_mutation, query_read};
 use crate::observe::{OperationGuard, Outcome};
 use crate::{Cache, CacheNamespace, MutationError, Namespace, OperationError, SetError};
 
@@ -42,18 +43,27 @@ impl CacheNamespace {
         parent: &OperationContext,
         key: &str,
     ) -> Result<Option<Vec<u8>>, OperationError> {
-        let operation = Operation::Get;
-        let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
+        let key = self.admit_key(key)?;
+        let limit = self.cache.max_value_bytes;
         self.run(
             parent,
-            operation,
-            build_command,
-            |value: &Option<Vec<u8>>| {
-                if value.is_some() {
-                    Outcome::Hit
-                } else {
-                    Outcome::Miss
-                }
+            Operation::Get,
+            |connection| {
+                let mut pipeline = redis::Pipeline::with_capacity(2);
+                pipeline
+                    .atomic()
+                    .cmd("EXISTS")
+                    .arg(&key)
+                    .cmd("GETRANGE")
+                    .arg(key)
+                    .arg(0)
+                    .arg(limit);
+                query_read(pipeline, connection, limit)
+            },
+            |value| match value {
+                Some(bytes) if bytes.len() > limit => Err(ErrorType::ValueTooLarge),
+                Some(_) => Ok(Outcome::Hit),
+                None => Ok(Outcome::Miss),
             },
         )
         .await
@@ -72,40 +82,50 @@ impl CacheNamespace {
             .filter(|milliseconds| *milliseconds > 0)
             .ok_or(SetError::InvalidTtl)?;
         let operation = Operation::Set;
-        let build_command = || {
+        let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
+        if value.len() > self.cache.max_value_bytes {
+            return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
+        }
+        let build_query = |connection| {
             let options =
                 SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
-            let mut command = self.keyed_command(
+            let mut command = key.command(
                 operation,
-                key,
                 ExtraCommandCapacity {
                     extra_args: 3,
                     extra_bytes: value.len() + 2 + 20,
                 },
             );
             command.arg(value).arg(options);
-            command
+            query_mutation(command, connection, operation)
         };
-        self.run(parent, operation, build_command, |(): &()| Outcome::Ok)
+        self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
             .await
             .map_err(Into::into)
     }
 
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
         let operation = Operation::Delete;
-        let build_command = || self.keyed_command(operation, key, ExtraCommandCapacity::default());
-        self.run(parent, operation, build_command, |(): &()| Outcome::Ok)
+        let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
+        let build_query = |connection| {
+            let command = key.command(operation, ExtraCommandCapacity::default());
+            query_mutation(command, connection, operation)
+        };
+        self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
             .await
             .map_err(Into::into)
     }
 
-    async fn run<T: redis::FromRedisValue + Send + 'static>(
+    async fn run<T: Send + 'static, F>(
         &self,
         parent: &OperationContext,
         operation: Operation,
-        build_command: impl FnOnce() -> redis::Cmd,
-        outcome: fn(&T) -> Outcome,
-    ) -> Result<T, CommandError> {
+        build_query: impl FnOnce(MultiplexedConnection) -> F,
+        outcome: impl FnOnce(&T) -> Result<Outcome, ErrorType>,
+    ) -> Result<T, CommandError>
+    where
+        F: Future<Output = redis::RedisResult<T>> + Send + 'static,
+    {
         let guard = OperationGuard::start(
             self.name,
             &self.histograms,
@@ -115,11 +135,12 @@ impl CacheNamespace {
         match self
             .cache
             .link
-            .command(build_command, parent, operation)
+            .command(build_query, parent, operation)
             .await
+            .and_then(|value| Ok((outcome(&value)?, value)))
         {
-            Ok(value) => {
-                guard.succeed(outcome(&value));
+            Ok((outcome, value)) => {
+                guard.succeed(outcome);
                 Ok(value)
             }
             Err(error) => {
@@ -129,22 +150,15 @@ impl CacheNamespace {
         }
     }
 
-    fn keyed_command(
-        &self,
-        operation: Operation,
-        key: &str,
-        extra_capacity: ExtraCommandCapacity,
-    ) -> redis::Cmd {
-        let key = NamespacedKey {
+    fn admit_key<'a>(&self, key: &'a str) -> Result<NamespacedKey<'a>, OperationError> {
+        let full_key = NamespacedKey {
             namespace: self.name,
             key,
         };
-        let mut command = redis::Cmd::with_capacity(
-            2 + extra_capacity.extra_args,
-            operation.redis_name().len() + key.len() + extra_capacity.extra_bytes,
-        );
-        command.arg(operation.redis_name()).arg(key);
-        command
+        if full_key.len() > self.cache.max_key_bytes {
+            return Err(OperationError::KeyTooLarge);
+        }
+        Ok(full_key)
     }
 }
 
@@ -179,6 +193,15 @@ struct NamespacedKey<'a> {
 impl NamespacedKey<'_> {
     fn len(&self) -> usize {
         self.namespace.len() + 1 + self.key.len()
+    }
+
+    fn command(self, operation: Operation, extra_capacity: ExtraCommandCapacity) -> redis::Cmd {
+        let mut command = redis::Cmd::with_capacity(
+            2 + extra_capacity.extra_args,
+            operation.redis_name().len() + self.len() + extra_capacity.extra_bytes,
+        );
+        command.arg(operation.redis_name()).arg(self);
+        command
     }
 }
 

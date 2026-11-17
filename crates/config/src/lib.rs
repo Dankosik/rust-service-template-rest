@@ -164,11 +164,11 @@ impl ConfigInput {
         self.app.validate(v);
         #[allow(
             unused_variables,
-            reason = "only the gRPC and cache profiles compare against HTTP timings"
+            reason = "only the gRPC profile consumes the HTTP drain budget"
         )]
-        let (http, http_timings) = self.http.admit(shutdown_tail, v);
+        let (http, drain_budget) = self.http.admit(shutdown_tail, v);
         // template:begin grpc:config-admit
-        let grpc = self.grpc.admit(http_timings.drain_budget, v);
+        let grpc = self.grpc.admit(drain_budget, v);
         // template:end grpc:config-admit
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
@@ -178,9 +178,7 @@ impl ConfigInput {
         self.runtime.validate(v);
         self.observability.validate(v);
         // template:begin cache:config-admit
-        let cache = self
-            .cache
-            .admit(&self.app.env, http_timings.request_timeout, v);
+        let cache = self.cache.admit(&self.app.env, v);
         // template:end cache:config-admit
         // template:begin object-storage:config-admit
         let object_storage = self.object_storage.admit(&self.app.env, v);

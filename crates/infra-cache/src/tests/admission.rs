@@ -377,12 +377,14 @@ async fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_inva
 }
 
 #[tokio::test]
-async fn an_unparsable_dsn_does_not_echo_the_password() {
-    let err = Cache::start(options("not a url hunter2", true, true, None))
-        .await
-        .unwrap_err();
-    assert_eq!(err, CacheError::InvalidDsn);
-    assert_no_leak(&err, &["hunter2"]);
+async fn invalid_dsns_fail_before_setup_without_echoing_the_password() {
+    for dsn in ["not a url hunter2", "rediss://:hunter2@localhost/-1"] {
+        let err = Cache::start(options(dsn, true, true, None))
+            .await
+            .unwrap_err();
+        assert_eq!(err, CacheError::InvalidDsn);
+        assert_no_leak(&err, &["hunter2"]);
+    }
 }
 
 #[test]
@@ -456,4 +458,35 @@ async fn an_unreadable_or_empty_password_file_fails_admission() {
     .await
     .unwrap_err();
     assert_eq!(err, CacheError::PasswordFileEmpty);
+}
+
+#[tokio::test]
+async fn credential_files_over_their_limit_fail_admission() {
+    use std::io::ErrorKind::InvalidData;
+
+    let password = temp_file(vec![b'a'; 16 * 1024]);
+    Cache::start(with_password_file(
+        "redis://localhost",
+        password.path().to_owned(),
+    ))
+    .await
+    .unwrap();
+    let oversized = temp_file(vec![b'a'; 16 * 1024 + 1]);
+    assert_eq!(
+        Cache::start(with_password_file(
+            "redis://localhost",
+            oversized.path().to_owned()
+        ))
+        .await
+        .unwrap_err(),
+        CacheError::PasswordFile { kind: InvalidData }
+    );
+
+    let roots = temp_file(vec![b'a'; 1024 * 1024 + 1]);
+    let mut with_roots = super::options(TLS_DSN, false, false, None);
+    with_roots.root_ca_path = Some(roots.path().to_owned());
+    assert_eq!(
+        Cache::start(with_roots).await.unwrap_err(),
+        CacheError::CaFile { kind: InvalidData }
+    );
 }

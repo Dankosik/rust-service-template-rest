@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use bytesize::ByteSize;
 use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{Rejected, ValidationError, Violations, duration_range, missing};
+use crate::validate::{Rejected, Violations, duration_range, int_range, missing};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -46,6 +47,10 @@ pub(crate) struct CacheInput {
     /// Bound for one cache command, including a reconnect wait.
     #[serde(deserialize_with = "crate::de::duration")]
     command_timeout: Duration,
+    /// Maximum wire key including namespace and separator.
+    max_key_bytes: ByteSize,
+    /// Largest value the service will write or return from a lookup.
+    max_value_bytes: ByteSize,
 }
 
 impl Default for CacheInput {
@@ -58,6 +63,8 @@ impl Default for CacheInput {
             allow_plaintext,
             allow_unauthenticated,
             command_timeout,
+            max_key_bytes,
+            max_value_bytes,
         } = CacheConfig::default();
         Self {
             dsn,
@@ -68,6 +75,8 @@ impl Default for CacheInput {
             allow_plaintext,
             allow_unauthenticated,
             command_timeout,
+            max_key_bytes,
+            max_value_bytes,
         }
     }
 }
@@ -81,6 +90,8 @@ pub struct CacheConfig {
     pub allow_plaintext: bool,
     pub allow_unauthenticated: bool,
     pub command_timeout: Duration,
+    pub max_key_bytes: ByteSize,
+    pub max_value_bytes: ByteSize,
 }
 
 impl Default for CacheConfig {
@@ -93,17 +104,14 @@ impl Default for CacheConfig {
             allow_plaintext: false,
             allow_unauthenticated: false,
             command_timeout: Duration::from_secs(2),
+            max_key_bytes: ByteSize::kib(1),
+            max_value_bytes: ByteSize::kib(64),
         }
     }
 }
 
 impl CacheInput {
-    pub(crate) fn admit(
-        self,
-        app_env: &str,
-        request_timeout: Option<Duration>,
-        v: &mut Violations,
-    ) -> Result<CacheConfig, Rejected> {
+    pub(crate) fn admit(self, app_env: &str, v: &mut Violations) -> Result<CacheConfig, Rejected> {
         v.check(local_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
@@ -135,19 +143,16 @@ impl CacheInput {
             self.command_timeout,
             Duration::from_millis(1)..=Duration::from_secs(10),
         ));
-        let command_timeout = match (command_timeout, request_timeout) {
-            (Ok(()), Some(limit)) if self.dsn.is_some() && self.command_timeout * 2 > limit => {
-                Err(v.reject(ValidationError::new(
-                    "cache.command_timeout",
-                    format!(
-                        "must be at most half of http.request_timeout ({}), got {}",
-                        crate::de::display_duration(limit / 2),
-                        crate::de::display_duration(self.command_timeout)
-                    ),
-                )))
-            }
-            (other, _) => other,
-        };
+        for (key, size) in [
+            ("cache.max_key_bytes", self.max_key_bytes),
+            ("cache.max_value_bytes", self.max_value_bytes),
+        ] {
+            v.check(int_range(
+                key,
+                size.as_u64(),
+                1..=shared_rules::cache::MAX_ENTRY_BYTES as u64,
+            ));
+        }
         let client_certificate = client_certificate?;
         command_timeout?;
         Ok(CacheConfig {
@@ -158,6 +163,8 @@ impl CacheInput {
             allow_plaintext: self.allow_plaintext,
             allow_unauthenticated: self.allow_unauthenticated,
             command_timeout: self.command_timeout,
+            max_key_bytes: self.max_key_bytes,
+            max_value_bytes: self.max_value_bytes,
         })
     }
 }

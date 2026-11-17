@@ -8,18 +8,12 @@ use crate::test_support::{
 };
 use crate::validate::{ValidationErrors, admit_with};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-
-fn admit(
-    input: CacheInput,
-    app_env: &str,
-    request_timeout: Duration,
-) -> Result<CacheConfig, ValidationErrors> {
-    admit_with(|v| input.admit(app_env, Some(request_timeout), v))
+fn admit(input: CacheInput, app_env: &str) -> Result<CacheConfig, ValidationErrors> {
+    admit_with(|v| input.admit(app_env, v))
 }
 
 fn rejected_keys(input: CacheInput, app_env: &str) -> Vec<String> {
-    admit(input, app_env, REQUEST_TIMEOUT)
+    admit(input, app_env)
         .unwrap_err()
         .iter()
         .map(|error| error.key.clone())
@@ -28,7 +22,7 @@ fn rejected_keys(input: CacheInput, app_env: &str) -> Vec<String> {
 
 #[test]
 fn defaults_are_inert() {
-    let config = admit(CacheInput::default(), "production", REQUEST_TIMEOUT).unwrap();
+    let config = admit(CacheInput::default(), "production").unwrap();
     assert!(config.dsn.is_none());
     assert_eq!(config.password_file, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
@@ -70,7 +64,7 @@ fn allow_flags_are_refused_outside_local_development() {
             allow_unauthenticated: true,
             ..CacheInput::default()
         };
-        let admitted = admit(local, app_env, REQUEST_TIMEOUT).unwrap();
+        let admitted = admit(local, app_env).unwrap();
         assert!(admitted.allow_plaintext && admitted.allow_unauthenticated);
     }
 }
@@ -98,7 +92,7 @@ fn a_client_certificate_and_its_key_are_set_together() {
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
         ..CacheInput::default()
     };
-    let certificate = admit(both, "production", REQUEST_TIMEOUT)
+    let certificate = admit(both, "production")
         .unwrap()
         .client_certificate
         .unwrap();
@@ -140,22 +134,20 @@ fn command_timeout_is_bounded() {
         command_timeout: Duration::from_secs(10),
         ..CacheInput::default()
     };
-    admit(edges, "production", REQUEST_TIMEOUT).unwrap();
+    admit(edges, "production").unwrap();
 }
 
 #[test]
-fn an_active_cache_must_leave_half_the_request_budget() {
-    let active = || CacheInput {
-        dsn: Some(SecretString::from(
-            "rediss://:secret@cache.example:6379".to_owned(),
-        )),
-        command_timeout: Duration::from_millis(100),
+fn byte_limits_reject_zero_and_values_above_the_server_ceiling() {
+    let input = CacheInput {
+        max_key_bytes: ByteSize::b(0),
+        max_value_bytes: ByteSize::mib(513),
         ..CacheInput::default()
     };
-    let errors = admit(active(), "production", Duration::from_millis(150)).unwrap_err();
-    assert!(errors.names("cache.command_timeout"));
-
-    admit(active(), "production", Duration::from_millis(200)).unwrap();
+    assert_eq!(
+        rejected_keys(input, "production"),
+        ["cache.max_key_bytes", "cache.max_value_bytes"]
+    );
 }
 
 #[test]
@@ -165,6 +157,9 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
     let cfg = load_env(&[
         ("APP__CACHE__DSN", "redis://:hunter2@127.0.0.1:6379"),
         ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
+        ("APP__HTTP__REQUEST_TIMEOUT", "250ms"),
+        ("APP__CACHE__MAX_KEY_BYTES", "3 KiB"),
+        ("APP__CACHE__MAX_VALUE_BYTES", "17 KiB"),
         ("APP__APP__ENV", "local"),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
@@ -174,6 +169,8 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
         "redis://:hunter2@127.0.0.1:6379"
     );
     assert_eq!(cfg.cache.command_timeout, Duration::from_millis(200));
+    assert_eq!(cfg.cache.max_key_bytes, ByteSize::kib(3));
+    assert_eq!(cfg.cache.max_value_bytes, ByteSize::kib(17));
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }
 

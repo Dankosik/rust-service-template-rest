@@ -20,7 +20,7 @@ struct FullPipeline {
 
 impl FullPipeline {
     async fn new() -> Self {
-        let (stream, server) = tokio::io::duplex(32 * 1024);
+        let (stream, server) = tokio::io::duplex(64 * 1024);
         let info = redis::RedisConnectionInfo::default().set_skip_set_lib_name();
         let config = redis::AsyncConnectionConfig::new()
             .set_response_timeout(None)
@@ -50,6 +50,8 @@ impl FullPipeline {
         let supervisor = finished.abort_handle();
         finished.await.expect("fixture has no running supervisor");
         let cache = Cache {
+            max_key_bytes: 128,
+            max_value_bytes: 32,
             link: Arc::new(Link {
                 server: ServerEndpoint {
                     host: "duplex".into(),
@@ -83,12 +85,19 @@ impl FullPipeline {
     }
 
     async fn answer_gets_and_ping(&mut self) {
-        let mut expected = redis::cmd("GET");
-        expected.arg("test:peer");
-        let mut expected = expected.get_packed_command();
-        let mut abandoned = redis::cmd("GET");
-        abandoned.arg("test:abandoned");
-        expected.extend(abandoned.get_packed_command().repeat(ABANDONED_COMMANDS));
+        let read = |key: &str| {
+            redis::pipe()
+                .atomic()
+                .cmd("EXISTS")
+                .arg(key)
+                .cmd("GETRANGE")
+                .arg(key)
+                .arg(0)
+                .arg(32)
+                .get_packed_pipeline()
+        };
+        let mut expected = read("test:peer");
+        expected.extend(read("test:abandoned").repeat(ABANDONED_COMMANDS));
         expected.extend(redis::Cmd::ping().get_packed_command());
         let mut actual = vec![0; expected.len()];
         timeout(BUDGET, self.server.read_exact(&mut actual))
@@ -96,8 +105,10 @@ impl FullPipeline {
             .expect("driver writes the queued GETs and maintenance PING")
             .expect("read requests");
         assert_eq!(actual, expected);
-        let mut replies = b"$4\r\nlive\r\n".to_vec();
-        replies.extend(b"$-1\r\n".repeat(ABANDONED_COMMANDS));
+        let mut replies = b"+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n:1\r\n$4\r\nlive\r\n".to_vec();
+        replies.extend(
+            b"+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n:0\r\n$0\r\n\r\n".repeat(ABANDONED_COMMANDS),
+        );
         replies.extend(b"+PONG\r\n");
         timeout(BUDGET, self.server.write_all(&replies))
             .await

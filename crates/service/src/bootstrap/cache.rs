@@ -27,6 +27,9 @@ pub(super) async fn open(
         allow_plaintext: config.cache.allow_plaintext,
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,
+        max_key_bytes: usize::try_from(config.cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_value_bytes: usize::try_from(config.cache.max_value_bytes.as_u64())
+            .unwrap_or(usize::MAX),
     };
     *retained = Some(Cache::start(options).await?);
     Ok(())
@@ -42,11 +45,7 @@ mod tests {
     fn a_feature_handler_can_forward_its_request_context_to_the_cache() {
         let _: axum::routing::MethodRouter<CacheNamespace> = axum::routing::get(
             async |State(cache): State<CacheNamespace>, request: RequestContext| {
-                cache
-                    .get(request.operation(), "key")
-                    .await
-                    .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?
-                    .ok_or(axum::http::StatusCode::NOT_FOUND)
+                let _lookup = cache.get(request.operation(), "key").await;
             },
         );
     }

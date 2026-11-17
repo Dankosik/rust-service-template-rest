@@ -11,6 +11,7 @@ use infra_object_storage::{
     ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
     ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
+use operation_context::OperationContext;
 use secrecy::SecretString;
 
 const BUCKET: &str = "template-bucket";
@@ -64,6 +65,7 @@ fn unique_key(name: &str) -> ObjectKey {
 
 #[tokio::test]
 async fn round_trip_create_only_and_delete() {
+    let parent = OperationContext::unbounded();
     let emulator = Emulator::from_env();
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("round-trip.json");
@@ -73,32 +75,38 @@ async fn round_trip_create_only_and_delete() {
         .create_only();
 
     storage
-        .put(&key, body.clone().into(), options.clone())
+        .put(&parent, &key, body.clone().into(), options.clone())
         .await
         .unwrap();
     assert_eq!(
-        storage.put(&key, body.clone().into(), options).await,
+        storage
+            .put(&parent, &key, body.clone().into(), options)
+            .await,
         Err(ObjectStorageError::AlreadyExists)
     );
 
-    let metadata = storage.head(&key).await.unwrap();
+    let metadata = storage.head(&parent, &key).await.unwrap();
     assert_eq!(metadata.size, body.len() as u64);
     assert_eq!(metadata.content_type.as_deref(), Some("application/json"));
 
-    let download = storage.get(&key).await.unwrap();
+    let download = storage.get(&parent, &key).await.unwrap();
     assert_eq!(download.into_bytes().await.unwrap(), body);
 
-    storage.delete(&key).await.unwrap();
-    assert_eq!(storage.head(&key).await, Err(ObjectStorageError::NotFound));
+    storage.delete(&parent, &key).await.unwrap();
     assert_eq!(
-        storage.get(&key).await.err(),
+        storage.head(&parent, &key).await,
+        Err(ObjectStorageError::NotFound)
+    );
+    assert_eq!(
+        storage.get(&parent, &key).await.err(),
         Some(ObjectStorageError::NotFound)
     );
-    storage.delete(&key).await.unwrap();
+    storage.delete(&parent, &key).await.unwrap();
 }
 
 #[tokio::test]
 async fn streamed_upload_round_trips() {
+    let parent = OperationContext::unbounded();
     let emulator = Emulator::from_env();
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("streamed.bin");
@@ -106,28 +114,31 @@ async fn streamed_upload_round_trips() {
     let body = http_body_util::Full::new(payload.clone());
     storage
         .put(
+            &parent,
             &key,
             PutBody::stream(payload.len() as u64, body),
             PutOptions::default(),
         )
         .await
         .unwrap();
-    let mut download = storage.get(&key).await.unwrap();
+    let mut download = storage.get(&parent, &key).await.unwrap();
     let mut received = Vec::new();
     while let Some(chunk) = download.next_chunk().await.unwrap() {
         received.extend_from_slice(&chunk);
     }
     assert_eq!(received, payload);
-    storage.delete(&key).await.unwrap();
+    storage.delete(&parent, &key).await.unwrap();
 }
 
 #[tokio::test]
 async fn presigned_get_works_until_it_expires() {
+    let parent = OperationContext::unbounded();
     let emulator = Emulator::from_env();
     let storage = emulator.storage(&emulator.secret_access_key);
     let key = unique_key("presigned.txt");
     storage
         .put(
+            &parent,
             &key,
             Bytes::from_static(b"presigned").into(),
             PutOptions::default(),
@@ -137,7 +148,7 @@ async fn presigned_get_works_until_it_expires() {
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
 
     let url = storage
-        .presign_get(&key, Duration::from_mins(1))
+        .presign_get(&parent, &key, Duration::from_mins(1))
         .await
         .unwrap();
     let response = http.get(url.expose()).send().await.unwrap();
@@ -148,32 +159,41 @@ async fn presigned_get_works_until_it_expires() {
     );
 
     let short = storage
-        .presign_get(&key, Duration::from_secs(1))
+        .presign_get(&parent, &key, Duration::from_secs(1))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let expired = http.get(short.expose()).send().await.unwrap();
     assert_eq!(expired.status(), 403);
-    storage.delete(&key).await.unwrap();
+    storage.delete(&parent, &key).await.unwrap();
 }
 
 #[tokio::test]
 async fn wrong_credentials_are_rejected_while_valid_credentials_succeed() {
+    let parent = OperationContext::unbounded();
     let emulator = Emulator::from_env();
     let key = unique_key("denied.txt");
     assert_eq!(
         emulator
             .storage(&emulator.secret_access_key)
-            .head(&key)
+            .head(&parent, &key)
             .await,
         Err(ObjectStorageError::NotFound)
     );
 
     let storage = emulator.storage("not-the-secret");
-    assert_eq!(storage.head(&key).await, Err(ObjectStorageError::Rejected));
+    assert_eq!(
+        storage.head(&parent, &key).await,
+        Err(ObjectStorageError::Rejected)
+    );
     assert_eq!(
         storage
-            .put(&key, Bytes::from_static(b"x").into(), PutOptions::default())
+            .put(
+                &parent,
+                &key,
+                Bytes::from_static(b"x").into(),
+                PutOptions::default()
+            )
             .await,
         Err(ObjectStorageError::Rejected)
     );
