@@ -69,13 +69,50 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            env: "unspecified".to_owned(),
+            env: default_env(),
             version: String::new(),
             commit: String::new(),
             instance_id: None,
         }
     }
 }
+
+fn default_env() -> String {
+    "unspecified".to_owned()
+}
+
+// template:begin postgres:migration-app-input
+pub(crate) fn deserialize_migration_app<'de, D>(deserializer: D) -> Result<AppConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MigrationAppInput {
+        #[serde(default = "default_env", deserialize_with = "crate::de::string")]
+        env: String,
+        #[serde(default, deserialize_with = "crate::de::string")]
+        version: String,
+        #[serde(default, deserialize_with = "crate::de::string")]
+        commit: String,
+        #[serde(default, rename = "instance_id")]
+        _instance_id: serde::de::IgnoredAny,
+    }
+
+    let MigrationAppInput {
+        env,
+        version,
+        commit,
+        ..
+    } = MigrationAppInput::deserialize(deserializer)?;
+    Ok(AppConfig {
+        env,
+        version,
+        commit,
+        instance_id: None,
+    })
+}
+// template:end postgres:migration-app-input
 
 impl AppConfig {
     pub(crate) fn apply_build_info(&mut self, build: BuildInfo) {

@@ -13,6 +13,20 @@ use crate::listener_limits::{
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct ReadinessPropagationDelay(
+    #[serde(deserialize_with = "crate::de::duration")] Duration,
+);
+
+impl Default for ReadinessPropagationDelay {
+    fn default() -> Self {
+        Self(Duration::from_secs(15))
+    }
+}
+
+pub(crate) type HttpInput = HttpFields<ReadinessPropagationDelay>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShutdownTail {
     pub duration: Duration,
@@ -29,87 +43,75 @@ impl ShutdownTail {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct HttpConfig {
+pub(crate) struct HttpFields<Propagation> {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
-    /// all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
-    /// look them up.
+    /// all-interfaces (`0.0.0.0`). Hostnames are refused.
     #[serde(deserialize_with = "crate::de::listen_addr")]
-    pub addr: SocketAddr,
-    /// Total time the platform allows between SIGTERM and SIGKILL. Every
-    /// teardown stage draws from it: `drain_timeout` plus the composition
-    /// root's [`ShutdownTail`] must fit inside `grace_period`.
+    addr: SocketAddr,
+    /// Total time the platform allows between SIGTERM and SIGKILL.
+    /// `drain_timeout` plus the process's [`ShutdownTail`] must fit inside it.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub grace_period: Duration,
-    /// Bound for the service's HTTP drain, including
-    /// `readiness_propagation_delay`. The process budgets post-drain teardown
-    /// and Tokio shutdown within `grace_period`.
+    grace_period: Duration,
+    /// Bound for the HTTP drain. In the service this includes
+    /// `readiness_propagation_delay`. The worker budgets its drain separately.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub drain_timeout: Duration,
-    /// How long the listener keeps serving after readiness flips off, so a
-    /// load balancer notices `/health/ready` failing before connections stop
-    /// being accepted. Production-shaped on purpose; local overlays set `0s`.
+    drain_timeout: Duration,
+    /// Time the service keeps serving after readiness flips off so a load
+    /// balancer observes `/health/ready` failing before the listener stops
+    /// accepting connections. The worker ignores this field.
+    readiness_propagation_delay: Propagation,
+    /// Time limit for reading a complete HTTP/1.1 request head. It also bounds
+    /// keep-alive idle time. Set it above the upstream load balancer's idle
+    /// timeout to avoid 502s when it reuses a connection the listener closed.
+    /// The default clears the common 60s timeout. Google Cloud load balancers
+    /// hold backend connections for 600s.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub readiness_propagation_delay: Duration,
-    /// Time limit for reading a complete request head. The listener speaks
-    /// HTTP/1.1 only. The same timer bounds keep-alive idle time, so keep it
-    /// above the idle timeout of whatever reuses connections to this
-    /// listener: a balancer that reuses a connection the service has just
-    /// closed answers 502. The default clears the common 60 s (AWS ALB,
-    /// nginx upstreams, Railway); Google Cloud load balancers hold backend
-    /// connections for 600 s.
-    #[serde(deserialize_with = "crate::de::duration")]
-    pub header_read_timeout: Duration,
+    header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
     /// reads. Features that stream responses own the lifetime of their bodies
     /// and any resources held after the response head.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub request_timeout: Duration,
-    /// Read-buffer ceiling for one request head; overflow answers
-    /// hyper-native 431 before the router, not a Problem.
-    pub max_header_bytes: ByteSize,
+    request_timeout: Duration,
+    /// Read-buffer ceiling for one request head. Overflow answers with a
+    /// Hyper 431 before the router.
+    max_header_bytes: ByteSize,
     /// A declared request body length above this ceiling answers 413.
     /// Streaming bodies are checked as handlers or extractors read them.
-    pub max_body_bytes: ByteSize,
-    /// Requests in handlers at once, each counted until its response head:
-    /// a body still streaming holds no slot. A request over the limit waits
-    /// up to `admission_wait` for a slot and is then shed with 503; while it
-    /// waits, `http_server_active_requests` already counts it. Zero disables
-    /// the limit; [`Self::in_flight_cap`] gives the adapter form.
+    max_body_bytes: ByteSize,
+    /// Requests in handlers at once, each counted until its response head.
+    /// Requests above the limit wait up to `admission_wait` before receiving
+    /// 503. `http_server_active_requests` includes waiting requests.
+    /// Zero disables the limit.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
-    pub max_in_flight: u32,
-    /// Longest wait for a handler slot, never longer than `request_timeout`;
-    /// [`Self::admission_wait_cap`] gives the adapter form. The wait is
-    /// spent out of the request budget: a wait near the whole budget admits
-    /// requests with no time left to finish, so overload ends in 504s
-    /// instead of 503s. Zero sheds at once.
+    max_in_flight: u32,
+    /// Longest wait for a handler slot. It consumes part of the request budget
+    /// and cannot outlast `request_timeout`. Zero sheds at once.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub admission_wait: Duration,
+    admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
-    /// socket with no HTTP response. Zero accepts without a bound;
-    /// [`Self::connection_cap`] gives the adapter form.
+    /// socket with no HTTP response. Zero accepts without a bound.
     /// A connection carries one request at a time, so `max_in_flight` takes
     /// effect only below this cap.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
-    pub max_connections: u32,
-    /// Age after which a connection is told to finish and close, so its
-    /// client reconnects and is balanced again. Each connection's age is
-    /// spread by up to 10% either way. Zero keeps a connection for as long
-    /// as its peer does.
+    max_connections: u32,
+    /// Age after which a connection is told to finish and close, so its client
+    /// reconnects and is balanced again. Each connection's age is spread by
+    /// up to 10% either way. Zero leaves connection age unbounded.
     #[serde(deserialize_with = "crate::de::duration")]
-    pub max_connection_age: Duration,
+    max_connection_age: Duration,
     #[serde(deserialize_with = "crate::de::boolean")]
-    pub access_log_health_probes: bool,
+    access_log_health_probes: bool,
 }
 
-impl Default for HttpConfig {
+impl<Propagation: Default> Default for HttpFields<Propagation> {
     fn default() -> Self {
         Self {
             addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             grace_period: Duration::from_secs(45),
             drain_timeout: Duration::from_secs(25),
-            readiness_propagation_delay: Duration::from_secs(15),
+            readiness_propagation_delay: Propagation::default(),
             header_read_timeout: Duration::from_secs(75),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_header_bytes: ByteSize::kib(16),
@@ -120,6 +122,41 @@ impl Default for HttpConfig {
             max_connection_age: Duration::ZERO,
             access_log_health_probes: false,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpListenerConfig {
+    pub addr: SocketAddr,
+    pub header_read_timeout: Duration,
+    pub request_timeout: Duration,
+    pub max_header_bytes: ByteSize,
+    pub max_body_bytes: ByteSize,
+    pub max_in_flight: Option<NonZeroU32>,
+    pub admission_wait: Duration,
+    pub max_connections: Option<NonZeroU32>,
+    pub max_connection_age: Option<Duration>,
+    pub access_log_health_probes: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpConfig {
+    listener: HttpListenerConfig,
+    pub grace_period: Duration,
+    pub drain_timeout: Duration,
+    pub readiness_propagation_delay: Duration,
+}
+
+impl HttpConfig {
+    #[must_use]
+    pub const fn listener(&self) -> &HttpListenerConfig {
+        &self.listener
+    }
+
+    #[must_use]
+    pub const fn effective_drain_budget(&self) -> Duration {
+        self.drain_timeout
+            .saturating_sub(self.readiness_propagation_delay)
     }
 }
 
@@ -182,19 +219,12 @@ fn validate_grace_and_drain(
     }
 }
 
-struct ListenerLimits {
-    header_read_timeout: Duration,
-    request_timeout: Duration,
-    max_header_bytes: ByteSize,
-    max_body_bytes: ByteSize,
-    max_in_flight: u32,
-    admission_wait: Duration,
-    max_connections: u32,
-    max_connection_age: Duration,
-}
-
-impl ListenerLimits {
-    fn validate(&self, drain_budget: Option<Duration>, v: &mut Violations) -> Option<Duration> {
+impl<Propagation> HttpFields<Propagation> {
+    fn admit_listener(
+        &self,
+        drain_budget: Option<Duration>,
+        v: &mut Violations,
+    ) -> (HttpListenerConfig, Option<Duration>) {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
@@ -237,243 +267,102 @@ impl ListenerLimits {
             "http.max_connection_age",
             self.max_connection_age,
         ));
-        request_timeout_in_range.then_some(self.request_timeout)
+        let listener = HttpListenerConfig {
+            addr: self.addr,
+            header_read_timeout: self.header_read_timeout,
+            request_timeout: self.request_timeout,
+            max_header_bytes: self.max_header_bytes,
+            max_body_bytes: self.max_body_bytes,
+            max_in_flight: NonZeroU32::new(self.max_in_flight),
+            admission_wait: admission_wait_cap(self.admission_wait, self.request_timeout),
+            max_connections: NonZeroU32::new(self.max_connections),
+            max_connection_age: (!self.max_connection_age.is_zero())
+                .then_some(self.max_connection_age),
+            access_log_health_probes: self.access_log_health_probes,
+        };
+        (
+            listener,
+            request_timeout_in_range.then_some(self.request_timeout),
+        )
     }
 }
 
-impl HttpConfig {
-    pub fn check_grace_budget(&self, tail: ShutdownTail) -> Result<(), ValidationError> {
-        check_grace_budget_pair(self.grace_period, self.drain_timeout, tail)
-    }
-
-    #[must_use]
-    pub fn connection_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_connections)
-    }
-
-    #[must_use]
-    pub fn effective_drain_budget(&self) -> Duration {
-        self.drain_timeout
-            .saturating_sub(self.readiness_propagation_delay)
-    }
-
-    #[must_use]
-    pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_in_flight)
-    }
-
-    #[must_use]
-    pub fn admission_wait_cap(&self) -> Duration {
-        admission_wait_cap(self.admission_wait, self.request_timeout)
-    }
-
-    #[must_use]
-    pub fn connection_age_cap(&self) -> Option<Duration> {
-        (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
-    }
-
-    pub(crate) fn validate(&self, tail: Option<ShutdownTail>, v: &mut Violations) -> HttpTimings {
+impl HttpInput {
+    pub(crate) fn admit(
+        self,
+        tail: Option<ShutdownTail>,
+        v: &mut Violations,
+    ) -> (HttpConfig, HttpTimings) {
         let drain = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
+        let readiness_propagation_delay = self.readiness_propagation_delay.0;
         let mut propagation_fits_drain = false;
         if drain.in_range && drain.fits_grace {
-            if self.readiness_propagation_delay >= self.drain_timeout {
+            if readiness_propagation_delay >= self.drain_timeout {
                 v.check(Err(ValidationError::new(
                     "http.readiness_propagation_delay",
                     format!(
                         "must be less than http.drain_timeout ({}), got {}",
                         crate::de::display_duration(self.drain_timeout),
-                        crate::de::display_duration(self.readiness_propagation_delay)
+                        crate::de::display_duration(readiness_propagation_delay)
                     ),
                 )));
             } else {
                 propagation_fits_drain = true;
             }
         }
-        let drain_budget = propagation_fits_drain.then(|| self.effective_drain_budget());
+        let drain_budget = propagation_fits_drain.then(|| {
+            self.drain_timeout
+                .saturating_sub(readiness_propagation_delay)
+        });
         #[allow(
             unused_variables,
             reason = "only the cache profile consumes the validated HTTP request timeout"
         )]
-        let request_timeout = ListenerLimits {
-            header_read_timeout: self.header_read_timeout,
-            request_timeout: self.request_timeout,
-            max_header_bytes: self.max_header_bytes,
-            max_body_bytes: self.max_body_bytes,
-            max_in_flight: self.max_in_flight,
-            admission_wait: self.admission_wait,
-            max_connections: self.max_connections,
-            max_connection_age: self.max_connection_age,
-        }
-        .validate(drain_budget, v);
-        HttpTimings {
+        let (listener, request_timeout) = self.admit_listener(drain_budget, v);
+        let config = HttpConfig {
+            listener,
+            grace_period: self.grace_period,
+            drain_timeout: self.drain_timeout,
+            readiness_propagation_delay,
+        };
+        let timings = HttpTimings {
             // template:begin grpc:http-timings-drain-value
             drain_budget,
             // template:end grpc:http-timings-drain-value
             // template:begin cache:http-timings-request-value
             request_timeout,
             // template:end cache:http-timings-request-value
-        }
+        };
+        (config, timings)
     }
 }
 
 // template:begin worker:worker-http-config
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct WorkerHttpInput {
-    #[serde(deserialize_with = "crate::de::listen_addr")]
-    addr: SocketAddr,
-    #[serde(deserialize_with = "crate::de::boolean")]
-    access_log_health_probes: bool,
-    max_header_bytes: ByteSize,
-    max_body_bytes: ByteSize,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
-    max_in_flight: u32,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
-    max_connections: u32,
-    #[serde(deserialize_with = "crate::de::duration")]
-    header_read_timeout: Duration,
-    #[serde(deserialize_with = "crate::de::duration")]
-    request_timeout: Duration,
-    #[serde(deserialize_with = "crate::de::duration")]
-    admission_wait: Duration,
-    #[serde(deserialize_with = "crate::de::duration")]
-    max_connection_age: Duration,
-    #[serde(deserialize_with = "crate::de::duration")]
-    grace_period: Duration,
-    #[serde(deserialize_with = "crate::de::duration")]
-    drain_timeout: Duration,
-    readiness_propagation_delay: serde::de::IgnoredAny,
-}
+pub(crate) type WorkerHttpInput = HttpFields<serde::de::IgnoredAny>;
 
-impl Default for WorkerHttpInput {
-    fn default() -> Self {
-        let defaults = WorkerHttpConfig::default();
-        Self {
-            addr: defaults.addr,
-            access_log_health_probes: defaults.access_log_health_probes,
-            max_header_bytes: defaults.max_header_bytes,
-            max_body_bytes: defaults.max_body_bytes,
-            max_in_flight: defaults.max_in_flight,
-            max_connections: defaults.max_connections,
-            header_read_timeout: defaults.header_read_timeout,
-            request_timeout: defaults.request_timeout,
-            admission_wait: defaults.admission_wait,
-            max_connection_age: defaults.max_connection_age,
-            grace_period: defaults.grace_period,
-            drain_timeout: defaults.drain_timeout,
-            readiness_propagation_delay: serde::de::IgnoredAny,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(from = "WorkerHttpInput")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerHttpConfig {
-    pub addr: SocketAddr,
+    listener: HttpListenerConfig,
     pub grace_period: Duration,
     pub drain_timeout: Duration,
-    pub header_read_timeout: Duration,
-    pub request_timeout: Duration,
-    pub max_header_bytes: ByteSize,
-    pub max_body_bytes: ByteSize,
-    pub max_in_flight: u32,
-    pub admission_wait: Duration,
-    pub max_connections: u32,
-    pub max_connection_age: Duration,
-    pub access_log_health_probes: bool,
-}
-
-impl From<WorkerHttpInput> for WorkerHttpConfig {
-    fn from(input: WorkerHttpInput) -> Self {
-        Self {
-            addr: input.addr,
-            grace_period: input.grace_period,
-            drain_timeout: input.drain_timeout,
-            header_read_timeout: input.header_read_timeout,
-            request_timeout: input.request_timeout,
-            max_header_bytes: input.max_header_bytes,
-            max_body_bytes: input.max_body_bytes,
-            max_in_flight: input.max_in_flight,
-            admission_wait: input.admission_wait,
-            max_connections: input.max_connections,
-            max_connection_age: input.max_connection_age,
-            access_log_health_probes: input.access_log_health_probes,
-        }
-    }
-}
-
-impl Default for WorkerHttpConfig {
-    fn default() -> Self {
-        let HttpConfig {
-            addr,
-            grace_period,
-            drain_timeout,
-            readiness_propagation_delay: _,
-            header_read_timeout,
-            request_timeout,
-            max_header_bytes,
-            max_body_bytes,
-            max_in_flight,
-            admission_wait,
-            max_connections,
-            max_connection_age,
-            access_log_health_probes,
-        } = HttpConfig::default();
-        Self {
-            addr,
-            grace_period,
-            drain_timeout,
-            header_read_timeout,
-            request_timeout,
-            max_header_bytes,
-            max_body_bytes,
-            max_in_flight,
-            admission_wait,
-            max_connections,
-            max_connection_age,
-            access_log_health_probes,
-        }
-    }
 }
 
 impl WorkerHttpConfig {
-    pub(crate) fn validate(&self, tail: Option<ShutdownTail>, v: &mut Violations) {
+    #[must_use]
+    pub const fn listener(&self) -> &HttpListenerConfig {
+        &self.listener
+    }
+}
+
+impl WorkerHttpInput {
+    pub(crate) fn admit(self, tail: Option<ShutdownTail>, v: &mut Violations) -> WorkerHttpConfig {
         validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        ListenerLimits {
-            header_read_timeout: self.header_read_timeout,
-            request_timeout: self.request_timeout,
-            max_header_bytes: self.max_header_bytes,
-            max_body_bytes: self.max_body_bytes,
-            max_in_flight: self.max_in_flight,
-            admission_wait: self.admission_wait,
-            max_connections: self.max_connections,
-            max_connection_age: self.max_connection_age,
+        let (listener, _) = self.admit_listener(None, v);
+        WorkerHttpConfig {
+            listener,
+            grace_period: self.grace_period,
+            drain_timeout: self.drain_timeout,
         }
-        .validate(None, v);
-    }
-
-    #[must_use]
-    pub fn admission_wait_cap(&self) -> Duration {
-        admission_wait_cap(self.admission_wait, self.request_timeout)
-    }
-
-    #[must_use]
-    pub fn connection_age_cap(&self) -> Option<Duration> {
-        (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
-    }
-
-    pub fn check_grace_budget(&self, tail: ShutdownTail) -> Result<(), ValidationError> {
-        check_grace_budget_pair(self.grace_period, self.drain_timeout, tail)
-    }
-
-    #[must_use]
-    pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_in_flight)
-    }
-
-    #[must_use]
-    pub fn connection_cap(&self) -> Option<NonZeroU32> {
-        NonZeroU32::new(self.max_connections)
     }
 }
 // template:end worker:worker-http-config
@@ -491,53 +380,51 @@ pub(crate) struct HttpTimings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validate::validate_with;
+    use crate::ValidationErrors;
+    use crate::validate::admit_with;
+
+    fn admit(input: HttpInput) -> Result<HttpConfig, ValidationErrors> {
+        admit_with(|v| Ok(input.admit(None, v).0))
+    }
 
     #[test]
     fn a_connection_age_is_off_at_zero_or_at_least_a_second() {
-        assert_eq!(HttpConfig::default().connection_age_cap(), None);
-        let aged = HttpConfig {
+        let defaults = admit(HttpInput::default()).unwrap();
+        assert_eq!(defaults.listener().max_connection_age, None);
+        let aged = admit(HttpInput {
             max_connection_age: Duration::from_mins(30),
-            ..HttpConfig::default()
-        };
-        validate_with(|v| {
-            aged.validate(None, v);
+            ..HttpInput::default()
         })
         .unwrap();
-        assert_eq!(aged.connection_age_cap(), Some(Duration::from_mins(30)));
-        let too_short = HttpConfig {
+        assert_eq!(
+            aged.listener().max_connection_age,
+            Some(Duration::from_mins(30))
+        );
+        let too_short = HttpInput {
             max_connection_age: Duration::from_millis(500),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
         assert!(
-            validate_with(|v| {
-                too_short.validate(None, v);
-            })
-            .unwrap_err()
-            .names("http.max_connection_age")
+            admit(too_short)
+                .unwrap_err()
+                .names("http.max_connection_age")
         );
     }
 
     #[test]
     fn defaults_validate() {
-        validate_with(|v| {
-            HttpConfig::default().validate(None, v);
-        })
-        .unwrap();
+        admit(HttpInput::default()).unwrap();
     }
 
     #[test]
     fn grace_budget_validates_inside_admission_when_tail_is_supplied() {
         let tail = ShutdownTail::new(Duration::from_secs(18), "teardown tail");
-        let tight = HttpConfig {
+        let tight = HttpInput {
             grace_period: Duration::from_secs(42),
             drain_timeout: Duration::from_secs(25),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
-        let errors = validate_with(|v| {
-            tight.validate(Some(tail), v);
-        })
-        .unwrap_err();
+        let errors = admit_with(|v| Ok(tight.admit(Some(tail), v).0)).unwrap_err();
         assert!(errors.names("http.grace_period"), "{errors}");
         assert!(
             errors
@@ -549,152 +436,122 @@ mod tests {
 
     #[test]
     fn request_timeout_must_fit_inside_drain() {
-        let cfg = HttpConfig {
+        let input = HttpInput {
             request_timeout: Duration::from_secs(11),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
-        let errors = validate_with(|v| {
-            cfg.validate(None, v);
-        })
-        .unwrap_err();
+        let errors = admit(input).unwrap_err();
         assert!(errors.names("http.request_timeout"));
     }
 
     #[test]
     fn the_admission_wait_defaults_to_a_second_and_never_outlasts_the_request_budget() {
-        let defaults = HttpConfig::default();
-        assert_eq!(defaults.admission_wait_cap(), Duration::from_secs(1));
-        let short_budget = HttpConfig {
+        let defaults = admit(HttpInput::default()).unwrap();
+        assert_eq!(defaults.listener().admission_wait, Duration::from_secs(1));
+        let short_budget = admit(HttpInput {
             request_timeout: Duration::from_millis(500),
-            ..HttpConfig::default()
-        };
-        validate_with(|v| {
-            short_budget.validate(None, v);
+            ..HttpInput::default()
         })
         .unwrap();
         assert_eq!(
-            short_budget.admission_wait_cap(),
+            short_budget.listener().admission_wait,
             Duration::from_millis(500)
         );
-        let immediate = HttpConfig {
+        let immediate = admit(HttpInput {
             admission_wait: Duration::ZERO,
-            ..HttpConfig::default()
-        };
-        validate_with(|v| {
-            immediate.validate(None, v);
+            ..HttpInput::default()
         })
         .unwrap();
-        assert_eq!(immediate.admission_wait_cap(), Duration::ZERO);
-        let unbounded = HttpConfig {
+        assert_eq!(immediate.listener().admission_wait, Duration::ZERO);
+        let unbounded = HttpInput {
             admission_wait: Duration::from_mins(11),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
-        assert!(
-            validate_with(|v| {
-                unbounded.validate(None, v);
-            })
-            .unwrap_err()
-            .names("http.admission_wait")
-        );
+        assert!(admit(unbounded).unwrap_err().names("http.admission_wait"));
     }
 
     #[test]
     fn propagation_delay_must_leave_drain_budget() {
-        let cfg = HttpConfig {
-            readiness_propagation_delay: Duration::from_secs(25),
-            ..HttpConfig::default()
+        let input = HttpInput {
+            readiness_propagation_delay: ReadinessPropagationDelay(Duration::from_secs(25)),
+            ..HttpInput::default()
         };
         assert!(
-            validate_with(|v| {
-                cfg.validate(None, v);
-            })
-            .unwrap_err()
-            .names("http.readiness_propagation_delay")
+            admit(input)
+                .unwrap_err()
+                .names("http.readiness_propagation_delay")
         );
     }
 
     #[test]
     fn connection_cap_defaults_to_4096_and_zero_disables_it() {
-        let unbounded = HttpConfig {
+        let unbounded = admit(HttpInput {
             max_connections: 0,
-            ..HttpConfig::default()
-        };
-        validate_with(|v| {
-            unbounded.validate(None, v);
+            ..HttpInput::default()
         })
         .unwrap();
-        assert_eq!(unbounded.connection_cap(), None);
+        assert_eq!(unbounded.listener().max_connections, None);
         assert_eq!(
-            HttpConfig::default().connection_cap().map(NonZeroU32::get),
+            admit(HttpInput::default())
+                .unwrap()
+                .listener()
+                .max_connections
+                .map(NonZeroU32::get),
             Some(4096)
         );
     }
 
     #[test]
     fn header_bytes_below_hyper_minimum_rejected() {
-        let cfg = HttpConfig {
+        let input = HttpInput {
             max_header_bytes: ByteSize::kib(4),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
-        assert!(
-            validate_with(|v| {
-                cfg.validate(None, v);
-            })
-            .unwrap_err()
-            .names("http.max_header_bytes")
-        );
+        assert!(admit(input).unwrap_err().names("http.max_header_bytes"));
     }
 
     #[test]
     fn an_idle_connection_outlives_common_balancer_idle_timeouts() {
-        assert!(HttpConfig::default().header_read_timeout > Duration::from_mins(1));
-        let behind_google_cloud = HttpConfig {
+        let defaults = admit(HttpInput::default()).unwrap();
+        assert!(defaults.listener().header_read_timeout > Duration::from_mins(1));
+        let behind_google_cloud = HttpInput {
             header_read_timeout: Duration::from_secs(620),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
-        validate_with(|v| {
-            behind_google_cloud.validate(None, v);
-        })
-        .unwrap();
-        let unbounded = HttpConfig {
+        admit(behind_google_cloud).unwrap();
+        let unbounded = HttpInput {
             header_read_timeout: Duration::from_mins(16),
-            ..HttpConfig::default()
+            ..HttpInput::default()
         };
         assert!(
-            validate_with(|v| {
-                unbounded.validate(None, v);
-            })
-            .unwrap_err()
-            .names("http.header_read_timeout")
+            admit(unbounded)
+                .unwrap_err()
+                .names("http.header_read_timeout")
         );
     }
 
     // template:begin worker:worker-http-config-tests
     #[test]
     fn worker_http_drain_timeout_is_decoupled_from_readiness_propagation_and_request_timeout() {
-        for drain_timeout in [Duration::from_secs(10), Duration::from_secs(1)] {
-            let worker = WorkerHttpConfig {
-                drain_timeout,
-                ..WorkerHttpConfig::default()
-            };
-            assert_eq!(worker.request_timeout, Duration::from_secs(8));
-            validate_with(|v| worker.validate(None, v)).unwrap();
-        }
         let loaded = crate::test_support::load_worker_env(&[
             ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
-            ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
+            ("APP__HTTP__READINESS_PROPAGATION_DELAY", "not a duration"),
         ]);
         assert_eq!(loaded.http.drain_timeout, Duration::from_secs(1));
-        assert_eq!(loaded.http.request_timeout, Duration::from_secs(8));
+        assert_eq!(
+            loaded.http.listener().request_timeout,
+            Duration::from_secs(8)
+        );
     }
 
     #[test]
     fn worker_http_ignores_shared_propagation_delay_in_toml_and_rejects_unknown_keys() {
-        let decoded: WorkerHttpConfig =
-            toml::from_str("drain_timeout = \"10s\"\nreadiness_propagation_delay = \"0s\"\n")
-                .unwrap();
-        assert_eq!(decoded.drain_timeout, Duration::from_secs(10));
-        assert!(toml::from_str::<WorkerHttpConfig>("bogus = 1\n").is_err());
+        let ignored = "drain_timeout = \"10s\"\nreadiness_propagation_delay = { bad = 1 }\n";
+        let input: WorkerHttpInput = toml::from_str(ignored).unwrap();
+        let worker = admit_with(|v| Ok(input.admit(None, v))).unwrap();
+        assert_eq!(worker.drain_timeout, Duration::from_secs(10));
+        assert!(toml::from_str::<HttpInput>(ignored).is_err());
+        assert!(toml::from_str::<WorkerHttpInput>("bogus = 1\n").is_err());
     }
     // template:end worker:worker-http-config-tests
 }

@@ -349,9 +349,9 @@ async fn serve(
 fn raise_open_file_limit(config: &Config) {
     match rlimit::increase_nofile_limit(u64::MAX) {
         Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
-        Ok(open_file_limit) => {
+        Ok(open_file_limit) if let Some(cap) = config.http.listener().max_connections => {
             let listeners = 1 + u64::from(config.observability.metrics.addr.is_some());
-            let connection_caps = u64::from(config.http.max_connections) * listeners;
+            let connection_caps = u64::from(cap.get()) * listeners;
             if open_file_limit < connection_caps {
                 tracing::warn!(
                     open_file_limit,
@@ -360,6 +360,7 @@ fn raise_open_file_limit(config: &Config) {
                 );
             }
         }
+        Ok(_) => {}
     }
 }
 
@@ -511,23 +512,23 @@ async fn start(
         &mut composer,
         // template:end http-idempotency:bootstrap-http-idempotency-contract-composer
     )?;
+    let http = config.http.listener();
     let app = contract.build(
         state,
         auth,
         &HardenOptions {
-            max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64())
-                .unwrap_or(usize::MAX),
-            request_timeout: config.http.request_timeout,
-            max_in_flight: config.http.in_flight_cap(),
-            admission_wait: config.http.admission_wait_cap(),
-            log_health_probes: config.http.access_log_health_probes,
+            max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
+            request_timeout: http.request_timeout,
+            max_in_flight: http.max_in_flight,
+            admission_wait: http.admission_wait,
+            log_health_probes: http.access_log_health_probes,
             draining: Some(control.reader()),
         },
     )?;
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    let app_listener = BoundListener::bind(config.http.addr)?;
+    let app_listener = BoundListener::bind(http.addr)?;
     let diagnostics_listener = match config.observability.metrics.addr {
         Some(addr) => Some(BoundListener::bind(addr)?),
         None => None,
@@ -544,11 +545,10 @@ async fn start(
         .map_err(BootstrapError::Admission)?;
 
     let server_options = ServerOptions {
-        header_read_timeout: config.http.header_read_timeout,
-        max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
-        max_connections: config.http.connection_cap(),
-        max_connection_age: config.http.connection_age_cap(),
+        header_read_timeout: http.header_read_timeout,
+        max_header_bytes: usize::try_from(http.max_header_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_connections: http.max_connections,
+        max_connection_age: http.max_connection_age,
     };
     #[cfg(feature = "hotpath")]
     hotpath::tokio_runtime!();

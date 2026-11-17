@@ -150,10 +150,18 @@ where
 // template:end worker:load-worker
 
 // template:begin postgres:load-migration
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationLoadError {
+    #[error(transparent)]
+    Config(#[from] Error),
+    #[error("postgres.enabled must be true to run migrations")]
+    PostgresDisabled { log: crate::LogConfig },
+}
+
 pub fn load_migration(
     options: &LoadOptions,
     build: BuildInfo,
-) -> Result<crate::MigrationConfig, Error> {
+) -> Result<crate::MigrationConfig, MigrationLoadError> {
     load_migration_from(options, build, std::env::vars_os())
 }
 
@@ -161,7 +169,7 @@ pub(crate) fn load_migration_from<I, K, V>(
     options: &LoadOptions,
     build: BuildInfo,
     environment: I,
-) -> Result<crate::MigrationConfig, Error>
+) -> Result<crate::MigrationConfig, MigrationLoadError>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<OsString>,
@@ -169,26 +177,36 @@ where
 {
     let mut input: crate::postgres::MigrationInput = merge(options, environment)?;
     input.app.apply_build_info(build);
-    Ok(input.admit()?)
+    input.admit()
 }
 // template:end postgres:load-migration
 
 // template:begin jobs:load-jobs-operator
-pub fn load_jobs_operator(options: &LoadOptions) -> Result<crate::JobsOperatorConfig, Error> {
+#[derive(Debug, thiserror::Error)]
+pub enum JobsOperatorLoadError {
+    #[error(transparent)]
+    Config(#[from] Error),
+    #[error("postgres.enabled must be true to run jobs operator commands")]
+    PostgresDisabled,
+}
+
+pub fn load_jobs_operator(
+    options: &LoadOptions,
+) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError> {
     load_jobs_operator_from(options, std::env::vars_os())
 }
 
 pub(crate) fn load_jobs_operator_from<I, K, V>(
     options: &LoadOptions,
     environment: I,
-) -> Result<crate::JobsOperatorConfig, Error>
+) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<OsString>,
     V: Into<OsString>,
 {
     let input: crate::jobs::JobsOperatorInput = merge(options, environment)?;
-    Ok(input.admit()?)
+    input.admit()
 }
 // template:end jobs:load-jobs-operator
 

@@ -433,12 +433,17 @@ mod tests {
 
     #[test]
     fn grace_covers_the_whole_tail_including_equality() {
-        let mut http = HttpConfig::default();
-        http.check_grace_budget(TAIL).unwrap();
-        http.grace_period = Duration::from_millis(43_500);
-        http.check_grace_budget(TAIL).unwrap();
-        http.grace_period -= Duration::from_nanos(1);
-        assert!(http.check_grace_budget(TAIL).is_err());
+        super::super::test_config(&[]);
+        super::super::test_config(&[("APP__HTTP__GRACE_PERIOD", "43.5s")]);
+        let refused = service_config::fixtures::service(
+            &[("APP__HTTP__GRACE_PERIOD", "43.499999999s")],
+            super::super::BUILD_INFO,
+            TAIL,
+        );
+        std::assert_matches!(
+            refused,
+            Err(service_config::Error::Validate(errors)) if errors.names("http.grace_period")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -471,10 +476,11 @@ mod tests {
             std::future::pending::<()>().await;
         });
         running.await.unwrap();
-        let http_config = HttpConfig::default();
+        let config = super::super::test_config(&[]);
+        let http_config = &config.http;
         let mut signals = Signals::install().unwrap();
         let outcome = run(Plan {
-            http_config: &http_config,
+            http_config,
             signals: &mut signals,
             deadline: Instant::now() + http_config.grace_period,
             serving: Serving::default(),
@@ -496,11 +502,12 @@ mod tests {
             cancel.cancelled().await;
             panic!("cleanup defect")
         });
-        let http_config = HttpConfig::default();
+        let config = super::super::test_config(&[]);
+        let http_config = &config.http;
         let mut signals = Signals::install().unwrap();
         assert_eq!(
             run(Plan {
-                http_config: &http_config,
+                http_config,
                 signals: &mut signals,
                 deadline: Instant::now() + http_config.grace_period,
                 serving: Serving::default(),

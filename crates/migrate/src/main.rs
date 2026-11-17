@@ -8,7 +8,7 @@ use infra_telemetry::{
 };
 use migrate::{MIGRATOR, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, LoadOptions, MigrationConfig};
+use service_config::{BuildInfo, LoadOptions, MigrationConfig, MigrationLoadError};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -22,8 +22,6 @@ const FALLBACK_LOGGING: LoggingOptions<'static> = LoggingOptions {
 
 #[derive(Debug, thiserror::Error)]
 enum Failure {
-    #[error("postgres.enabled must be true to run migrations")]
-    PostgresDisabled,
     #[error(transparent)]
     Dsn(#[from] DsnError),
     #[error("build tokio runtime: {0}")]
@@ -41,7 +39,7 @@ enum Failure {
 impl Failure {
     fn stage(&self) -> &'static str {
         match self {
-            Self::PostgresDisabled | Self::Dsn(_) | Self::Setup(_) => "config",
+            Self::Dsn(_) | Self::Setup(_) => "config",
             Self::Runtime(_) => "runtime",
             Self::Signals(_) => "signals",
             Self::Run(error) => error.stage(),
@@ -61,14 +59,16 @@ fn main() -> ExitCode {
     let started = Instant::now();
     let target = MIGRATOR.iter().map(|migration| migration.version).max();
     let options = LoadOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
-    let config = match service_config::load_migration(&options, BUILD_INFO) {
-        Ok(config) => config,
+    let config = service_config::load_migration(&options, BUILD_INFO);
+    let log = match &config {
+        Ok(config) => config.log(),
+        Err(MigrationLoadError::PostgresDisabled { log }) => log,
         Err(err) => return finish_config_failure(err.to_string(), target, started),
     };
-    let level = format!("{},migrate_record=info", config.log().level);
+    let level = format!("{},migrate_record=info", log.level);
     let logger = match install_subscriber(&LoggingOptions {
         level: &level,
-        format: match config.log().format {
+        format: match log.format {
             service_config::LogFormat::Json => LoggingFormat::Json,
             service_config::LogFormat::Text => LoggingFormat::Text,
         },
@@ -83,6 +83,18 @@ fn main() -> ExitCode {
                 None,
                 fallback,
                 Err(Failure::Setup(format!("install logger: {err}"))),
+                target,
+                started,
+            );
+        }
+    };
+    let config = match config {
+        Ok(config) => config,
+        Err(err) => {
+            return finish_run(
+                None,
+                logger,
+                Err(Failure::Setup(err.to_string())),
                 target,
                 started,
             );
@@ -178,9 +190,7 @@ fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instan
 }
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
-    let Some(postgres) = config.postgres() else {
-        return Err(Failure::PostgresDisabled);
-    };
+    let postgres = config.postgres();
     let dsn = Dsn::admit_with(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),

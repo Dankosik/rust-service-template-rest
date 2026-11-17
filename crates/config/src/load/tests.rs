@@ -25,7 +25,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
     assert_eq!(cfg.app.env, "unspecified");
-    assert_eq!(cfg.http.addr, "0.0.0.0:8080".parse().unwrap());
+    assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app.version, "1.2.3");
     assert_eq!(cfg.app.commit, "abc123");
     assert_eq!(cfg.log.format, LogFormat::Json);
@@ -333,7 +333,7 @@ fn only_numeric_zero_disables_the_http_in_flight_cap() {
     assert!(err.to_string().contains("http.max_in_flight"), "{err}");
 
     let cfg = load_from(&options, BUILD, env(&[("APP__HTTP__MAX_IN_FLIGHT", "0")])).unwrap();
-    assert_eq!(cfg.http.in_flight_cap(), None);
+    assert_eq!(cfg.http.listener().max_in_flight, None);
 }
 
 #[test]
@@ -343,11 +343,17 @@ fn http_can_limit_connections_below_concurrent_requests() {
         ("APP__HTTP__MAX_IN_FLIGHT", "32"),
     ]);
     assert_eq!(
-        cfg.http.connection_cap().map(std::num::NonZeroU32::get),
+        cfg.http
+            .listener()
+            .max_connections
+            .map(std::num::NonZeroU32::get),
         Some(4)
     );
     assert_eq!(
-        cfg.http.in_flight_cap().map(std::num::NonZeroU32::get),
+        cfg.http
+            .listener()
+            .max_in_flight
+            .map(std::num::NonZeroU32::get),
         Some(32)
     );
 }
@@ -372,9 +378,13 @@ fn precedence_is_defaults_then_files_in_order_then_env() {
         env(&[("APP__HTTP__ADDR", "127.0.0.1:3"), ("UNRELATED", "x")]),
     )
     .unwrap();
-    assert_eq!(cfg.http.addr, "127.0.0.1:3".parse().unwrap(), "env wins");
     assert_eq!(
-        cfg.http.request_timeout,
+        cfg.http.listener().addr,
+        "127.0.0.1:3".parse().unwrap(),
+        "env wins"
+    );
+    assert_eq!(
+        cfg.http.listener().request_timeout,
         Duration::from_secs(2),
         "base file survives"
     );
@@ -441,11 +451,12 @@ fn env_parses_durations_sizes_numbers_and_enums() {
         ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
         ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
     ]);
-    assert_eq!(cfg.http.request_timeout, Duration::from_millis(500));
-    assert_eq!(cfg.http.max_body_bytes, bytesize::ByteSize::mib(2));
-    assert_eq!(cfg.http.max_in_flight, 12);
-    assert_eq!(cfg.http.connection_age_cap(), Some(Duration::from_hours(1)));
-    assert!(cfg.http.access_log_health_probes);
+    let http = cfg.http.listener();
+    assert_eq!(http.request_timeout, Duration::from_millis(500));
+    assert_eq!(http.max_body_bytes, bytesize::ByteSize::mib(2));
+    assert_eq!(http.max_in_flight.map(std::num::NonZeroU32::get), Some(12));
+    assert_eq!(http.max_connection_age, Some(Duration::from_hours(1)));
+    assert!(http.access_log_health_probes);
     assert_eq!(cfg.log.format, LogFormat::Text);
     assert_eq!(
         cfg.observability.otel.traces_sampler,
@@ -711,7 +722,11 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
         " authorization=Bearer s3cr3t ",
         "only trailing line breaks are removed"
     );
-    assert_eq!(cfg.http.addr, "127.0.0.1:9".parse().unwrap(), "env wins");
+    assert_eq!(
+        cfg.http.listener().addr,
+        "127.0.0.1:9".parse().unwrap(),
+        "env wins"
+    );
     assert_eq!(cfg.log.level, "debug");
     assert!(!format!("{cfg:?}").contains("s3cr3t"));
 }

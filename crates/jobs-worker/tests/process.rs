@@ -312,6 +312,23 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
 }
 
 #[test]
+fn operator_invalid_postgres_configuration_wins_over_disabled() {
+    let output = output_with_env(
+        &["inspect", JOB_ID],
+        &[
+            ("APP__POSTGRES__ENABLED", "false"),
+            ("APP__POSTGRES__SESSION_BUDGETS", "invalid"),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["cause"], "configuration");
+    assert_eq!(receipt["outcome"], "unavailable");
+    assert!(stderr.contains("postgres.session_budgets"), "{stderr}");
+}
+
+#[test]
 fn operator_dsn_refusal_keeps_credentials_and_arbitrary_parameters_private() {
     let output = output_with_env(
         &["inspect", JOB_ID],

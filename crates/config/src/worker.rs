@@ -18,7 +18,7 @@ pub(crate) struct WorkerInput {
     runtime: RuntimeConfig,
     health: HealthConfig,
     observability: ObservabilityConfig,
-    http: WorkerHttpConfig,
+    http: crate::http::WorkerHttpInput,
     // template:begin jobs:worker-skip-service-postgres
     #[serde(skip)]
     // template:end jobs:worker-skip-service-postgres
@@ -69,7 +69,7 @@ impl WorkerInput {
         let mut violations = Violations::default();
         let v = &mut violations;
         self.app.validate(v);
-        self.http.validate(shutdown_tail, v);
+        let http = self.http.admit(shutdown_tail, v);
         // template:begin inbound-webhooks:worker-inbound-webhooks-validate
         let inbound_webhook_endpoints = self.inbound_webhooks.admit(self.postgres.enabled, v);
         // template:end inbound-webhooks:worker-inbound-webhooks-validate
@@ -100,7 +100,7 @@ impl WorkerInput {
                 runtime: self.runtime,
                 health: self.health,
                 observability: self.observability,
-                http: self.http,
+                http,
                 // template:begin jobs:worker-postgres-admitted-field
                 postgres: postgres?,
                 // template:end jobs:worker-postgres-admitted-field

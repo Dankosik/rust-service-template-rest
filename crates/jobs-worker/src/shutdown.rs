@@ -562,10 +562,16 @@ mod tests {
 
     use super::*;
 
+    fn worker_config(
+        environment: &[(&str, &str)],
+    ) -> Result<service_config::WorkerConfig, service_config::Error> {
+        service_config::fixtures::worker(environment, crate::BUILD_INFO, TAIL)
+    }
+
     #[test]
     fn default_budgets_leave_one_and_a_half_seconds() {
-        let http = WorkerHttpConfig::default();
-        http.check_grace_budget(TAIL).unwrap();
+        let config = worker_config(&[]).unwrap();
+        let http = &config.http;
         assert_eq!(
             http.grace_period
                 .checked_sub(http.drain_timeout)
@@ -576,17 +582,12 @@ mod tests {
 
     #[test]
     fn grace_budget_boundary_is_drain_plus_tail() {
-        let pass = WorkerHttpConfig {
-            drain_timeout: Duration::from_secs(25),
-            grace_period: Duration::from_millis(43_500),
-            ..WorkerHttpConfig::default()
-        };
-        pass.check_grace_budget(TAIL).unwrap();
-        let fail = WorkerHttpConfig {
-            grace_period: Duration::from_millis(43_500) - Duration::from_nanos(1),
-            ..pass
-        };
-        assert!(fail.check_grace_budget(TAIL).is_err());
+        worker_config(&[("APP__HTTP__GRACE_PERIOD", "43.5s")]).unwrap();
+        let refused = worker_config(&[("APP__HTTP__GRACE_PERIOD", "43.499999999s")]);
+        std::assert_matches!(
+            refused,
+            Err(service_config::Error::Validate(errors)) if errors.names("http.grace_period")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -646,12 +647,13 @@ mod tests {
             cancel.cancelled().await;
             panic!("cleanup defect");
         });
-        let http = WorkerHttpConfig::default();
+        let config = worker_config(&[]).unwrap();
+        let http = &config.http;
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
             run(Plan {
-                http: &http,
+                http,
                 resources: Resources::default(),
                 background: background.clone(),
                 signals: &mut signals,
@@ -673,13 +675,14 @@ mod tests {
             let _held = ended;
             std::future::pending::<()>().await;
         });
-        let http = WorkerHttpConfig::default();
+        let config = worker_config(&[]).unwrap();
+        let http = &config.http;
         let mut signals = Signals::install().unwrap();
         let started = Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(9),
             run(Plan {
-                http: &http,
+                http,
                 resources: Resources::default(),
                 background: background.clone(),
                 signals: &mut signals,
