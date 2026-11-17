@@ -1,6 +1,6 @@
 use futures_util::FutureExt;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
-use service_config::Config;
+use service_config::WorkerConfig;
 
 use super::{Ended, WorkerError, pending_end};
 use crate::background::Background;
@@ -20,7 +20,7 @@ pub(super) fn kind_names(registry: Option<&Kinds>) -> String {
 }
 
 pub(super) async fn build_engines(
-    config: &Config,
+    config: &WorkerConfig,
     jobs: Option<Kinds>,
     resources: &Resources,
 ) -> Result<Vec<Engine>, WorkerError> {

@@ -2,14 +2,14 @@ use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, install_subscriber,
     install_tracer_provider, runtime_metrics,
 };
-use service_config::{Config, LogFormat, TracesSampler};
+use service_config::{LogFormat, TracesSampler, WorkerConfig};
 
 use super::{METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
 use crate::resources::Resources;
 
 pub(super) fn install_observability(
-    config: &Config,
+    config: &WorkerConfig,
     identity: &str,
     resources: &mut Resources,
 ) -> Result<(Metrics, ExporterState), WorkerError> {
@@ -52,7 +52,7 @@ pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
     });
 }
 
-fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
+fn tracing_options(config: &WorkerConfig, identity: &str) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,
@@ -77,7 +77,7 @@ fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
 }
 
 pub(super) fn log_startup_record(
-    config: &Config,
+    config: &WorkerConfig,
     identity: &str,
     // template:begin jobs:worker-bootstrap-log-jobs-parameter
     registry: Option<&infra_jobs::Kinds>,

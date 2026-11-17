@@ -6,7 +6,7 @@ use infra_messaging::{
     Consumer, ConsumerError, ConsumerOptions, Credentials, Messaging, MessagingError,
     MessagingOptions, Registry as MessagingRegistry,
 };
-use service_config::{Config, MessagingCredentials};
+use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +27,7 @@ pub(super) struct RetainedMessages {
 
 impl RetainedMessages {
     pub(super) fn retain(
-        config: &Config,
+        config: &WorkerConfig,
         registration: Registration<'_>,
     ) -> Result<Option<Self>, WorkerError> {
         let consumes_messages = registration.messages.has_handlers();
@@ -48,7 +48,7 @@ impl RetainedMessages {
 }
 
 pub(super) async fn connect_messaging(
-    config: &Config,
+    config: &WorkerConfig,
     messages: Option<MessagingRegistry>,
     cancel: &CancellationToken,
     resources: &mut Resources,
@@ -90,7 +90,7 @@ pub(super) async fn connect_messaging(
 }
 
 fn messaging_options(
-    config: &Config,
+    config: &WorkerConfig,
     needs_subscription: bool,
 ) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;

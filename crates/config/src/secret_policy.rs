@@ -1,36 +1,57 @@
+const SECRET_KEY_PATTERNS: &[&str] = &[
+    "observability.otel.exporter.otlp_headers",
+    // template:begin grpc:secret-policy-grpc
+    "grpc.private_key",
+    // template:end grpc:secret-policy-grpc
+    // template:begin oidc-introspection:secret-policy-introspection
+    "authn.introspection_client_secret",
+    // template:end oidc-introspection:secret-policy-introspection
+    // template:begin service-auth:secret-policy-service-auth
+    "service_auth.private_key",
+    // template:end service-auth:secret-policy-service-auth
+    // template:begin postgres:secret-policy-postgres
+    "postgres.dsn",
+    // template:end postgres:secret-policy-postgres
+    // template:begin cache:secret-policy-cache
+    "cache.dsn",
+    // template:end cache:secret-policy-cache
+    // template:begin messaging:secret-policy-messaging
+    "messaging.credentials",
+    // template:end messaging:secret-policy-messaging
+    // template:begin object-storage:secret-policy-object-storage
+    "object_storage.secret_access_key",
+    // template:end object-storage:secret-policy-object-storage
+    // template:begin inbound-webhooks:secret-policy-inbound-webhooks
+    "inbound_webhooks.secrets.*",
+    // template:end inbound-webhooks:secret-policy-inbound-webhooks
+    // template:begin webhooks:secret-policy-webhooks
+    "webhooks.endpoints.*.secret",
+    "webhooks.endpoints.*.previous_secret",
+    // template:end webhooks:secret-policy-webhooks
+];
+
 #[must_use]
-pub(crate) fn is_secret_like_key(key: &str) -> bool {
-    let lowered = key.trim().to_ascii_lowercase();
-    // template:begin oidc-jwt:secret-policy-token-profile-exception
-    if lowered == "authn.token_profile" {
-        return false;
-    }
-    // template:end oidc-jwt:secret-policy-token-profile-exception
-    // template:begin object-storage:secret-policy-credentials-exception
-    if lowered == "object_storage.credentials" {
-        return false;
-    }
-    // template:end object-storage:secret-policy-credentials-exception
-    let segments: Vec<&str> = lowered
-        .split(['.', '_', '-'])
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    segments.iter().enumerate().any(|(i, segment)| {
-        let previous = i.checked_sub(1).and_then(|j| segments.get(j)).copied();
-        let rest = &segments[i + 1..];
-        let next = rest.first().copied();
-        match *segment {
-            "secret" | "secrets" | "authorization" | "dsn" => true,
-            "password" | "credentials" => rest != ["file"],
-            "token" => next != Some("url"),
-            "key" => matches!(previous, Some("api" | "private")),
-            "headers" => previous == Some("otlp"),
-            _ => false,
-        }
-    })
+pub(crate) fn is_secret_key(key: &str) -> bool {
+    let trimmed = key.trim();
+    SECRET_KEY_PATTERNS
+        .iter()
+        .any(|pattern| matches_pattern(pattern, trimmed))
 }
 
-pub(crate) fn first_secret_like_key(table: &toml::Table) -> Option<String> {
+fn matches_pattern(pattern: &str, key: &str) -> bool {
+    let mut pattern_segments = pattern.split('.');
+    let mut key_segments = key.split('.');
+    loop {
+        match (pattern_segments.next(), key_segments.next()) {
+            (Some("*"), Some(segment)) if !segment.is_empty() => {}
+            (Some(expected), Some(segment)) if segment.eq_ignore_ascii_case(expected) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+pub(crate) fn first_secret_key(table: &toml::Table) -> Option<String> {
     let mut path = Vec::new();
     find_secret(table, &mut path)
 }
@@ -42,7 +63,7 @@ fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<St
             toml::Value::Table(nested) => find_secret(nested, path),
             leaf => {
                 let dotted = path.join(".");
-                (is_secret_like_key(&dotted) && has_non_empty_leaf_value(leaf)).then_some(dotted)
+                (is_secret_key(&dotted) && has_non_empty_leaf_value(leaf)).then_some(dotted)
             }
         };
         path.pop();
@@ -66,57 +87,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_secret_like_keys() {
+    fn classifies_secret_keys() {
         for key in [
-            // template:begin postgres:secret-key-vector
-            "postgres.dsn",
-            // template:end postgres:secret-key-vector
+            "observability.otel.exporter.otlp_headers",
+            "  OBSERVABILITY.OTEL.EXPORTER.OTLP_HEADERS  ",
+            // template:begin grpc:secret-key-grpc-vector
+            "grpc.private_key",
+            // template:end grpc:secret-key-grpc-vector
             // template:begin oidc-introspection:secret-key-introspection-vector
             "authn.introspection_client_secret",
             // template:end oidc-introspection:secret-key-introspection-vector
-            "cache.token_profile",
-            "observability.otel.exporter.otlp_headers",
-            "webhooks.endpoints.partner.secret",
-            "webhooks.endpoints.partner.previous_secret",
-            "inbound_webhooks.secrets.partner_v2",
-            "outbound.api_key",
-            "signing.private-key",
-            "auth.token",
-            "smtp.password",
-            "smtp.password_file_contents",
-            "http.authorization",
-            "messaging.credentials",
-            "messaging.credentials_file_contents",
-            "object_storage.secret_access_key",
             // template:begin service-auth:secret-key-service-auth-vector
             "service_auth.private_key",
             // template:end service-auth:secret-key-service-auth-vector
+            // template:begin postgres:secret-key-vector
+            "postgres.dsn",
+            // template:end postgres:secret-key-vector
+            // template:begin cache:secret-key-cache-vector
+            "cache.dsn",
+            // template:end cache:secret-key-cache-vector
+            // template:begin messaging:secret-key-messaging-vector
+            "messaging.credentials",
+            // template:end messaging:secret-key-messaging-vector
+            // template:begin object-storage:secret-key-object-storage-vector
+            "object_storage.secret_access_key",
+            // template:end object-storage:secret-key-object-storage-vector
+            // template:begin inbound-webhooks:secret-key-inbound-webhooks-vector
+            "inbound_webhooks.secrets.partner_v2",
+            // template:end inbound-webhooks:secret-key-inbound-webhooks-vector
+            // template:begin webhooks:secret-key-webhooks-vector
+            "webhooks.endpoints.partner.secret",
+            "webhooks.endpoints.partner.previous_secret",
+            // template:end webhooks:secret-key-webhooks-vector
         ] {
-            assert!(is_secret_like_key(key), "{key} should be secret-like");
+            assert!(is_secret_key(key), "{key} should be secret");
         }
         for key in [
-            // template:begin oidc-jwt:secret-policy-token-profile-vector
+            "cors.allow_credentials",
+            "auth.token_ttl",
+            "rate_limit.token_bucket",
             "authn.token_profile",
-            // template:end oidc-jwt:secret-policy-token-profile-vector
-            "authn.token_url",
-            "database.password_file",
+            "object_storage.credentials",
+            "postgres.password_file",
             "messaging.credentials_file",
+            "service_auth.key_id",
+            "service_auth.jwt_type",
+            "service_auth.trust",
             "http.addr",
             "observability.otel.exporter.otlp_endpoint",
             "cache.key_prefix",
             "cache.client_key_path",
             "object_storage.access_key_id",
-            // template:begin object-storage:secret-policy-credentials-vector
-            "object_storage.credentials",
-            // template:end object-storage:secret-policy-credentials-vector
-            "keyboard.layout",
-            // template:begin service-auth:secret-policy-service-auth-public-vector
-            "service_auth.key_id",
-            "service_auth.jwt_type",
-            "service_auth.trust",
-            // template:end service-auth:secret-policy-service-auth-public-vector
+            "inbound_webhooks.secrets.",
+            "inbound_webhooks.secrets.partner.extra",
+            "webhooks.endpoints.partner.url",
+            "webhooks.endpoints..secret",
         ] {
-            assert!(!is_secret_like_key(key), "{key} should not be secret-like");
+            assert!(!is_secret_key(key), "{key} should not be secret");
         }
     }
 
@@ -135,10 +162,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(
-            first_secret_like_key(&table).as_deref(),
-            Some("postgres.dsn")
-        );
+        assert_eq!(first_secret_key(&table).as_deref(), Some("postgres.dsn"));
     }
     // template:end postgres:secret-policy-postgres-fixture
 }

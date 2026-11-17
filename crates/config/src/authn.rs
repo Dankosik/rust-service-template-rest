@@ -5,23 +5,18 @@ use std::{num::NonZeroU32, time::Duration};
 // template:begin oidc-introspection:authn-secrecy-import
 use secrecy::SecretString;
 // template:end oidc-introspection:authn-secrecy-import
+use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 
-// template:begin oidc-introspection:authn-occupied-secret-import
-use crate::de::{blank_secret_as_none, deserialize_scalar};
-// template:end oidc-introspection:authn-occupied-secret-import
-use crate::de::value_free;
-use crate::validate::{Rejected, Violations, required_when};
-
-pub(crate) const AUDIENCE_INPUT_FORM: &str =
-    "`authn.audience` must be a string or a list of strings";
+use crate::de::{StrictString, optional_string};
+use crate::validate::{Rejected, ValidationError, Violations, required, required_when};
 
 /// Exact audiences accepted by an authentication profile.
 ///
-/// Configuration accepts either one string or a nonempty list. Values retain
-/// their spelling; duplicate list entries collapse to their first occurrence.
-/// `APP__AUTHN__AUDIENCE` takes one exact value. `APP__AUTHN__AUDIENCES`
-/// takes a TOML array of strings and overrides the same key.
+/// `authn.audience` takes one string or a nonempty list. `APP__AUTHN__AUDIENCES`
+/// takes a TOML array of strings written as one value. Setting both keys is
+/// rejected. Values retain their spelling; duplicate list entries collapse to
+/// their first occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Audiences(Vec<String>);
 
@@ -40,18 +35,26 @@ impl<'de> Deserialize<'de> for Audiences {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
-            One(String),
-            Many(Vec<String>),
+            One(StrictString),
+            Many(Vec<StrictString>),
         }
 
-        let input = Input::deserialize(deserializer)
-            .map_err(|_| value_free::<D::Error>(AUDIENCE_INPUT_FORM))?;
+        let input = Input::deserialize(deserializer).map_err(|_| {
+            serde::de::Error::invalid_value(
+                Unexpected::Other("a non-string audience"),
+                &"a string or a list of strings",
+            )
+        })?;
         let values = match input {
-            Input::One(value) => vec![value],
-            Input::Many(values) => values,
+            Input::One(value) => vec![value.0],
+            Input::Many(values) => values.into_iter().map(|value| value.0).collect(),
         };
-        Self::try_from(values)
-            .map_err(|message| value_free(format_args!("`authn.audience` {message}")))
+        Self::try_from(values).map_err(|_| {
+            serde::de::Error::invalid_value(
+                Unexpected::Other("an empty or blank audience"),
+                &"a nonempty string or list of nonblank exact values",
+            )
+        })
     }
 }
 
@@ -74,6 +77,25 @@ impl TryFrom<Vec<String>> for Audiences {
         }
         Ok(Self(deduplicated))
     }
+}
+
+fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Option<Audiences>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(raw) = optional_string(deserializer)? else {
+        return Ok(None);
+    };
+    let invalid = || {
+        serde::de::Error::invalid_value(
+            Unexpected::Other("a malformed audience list"),
+            &"a TOML array of nonblank strings",
+        )
+    };
+    let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
+    let items = Vec::<StrictString>::deserialize(value).map_err(|_| invalid())?;
+    let values: Vec<String> = items.into_iter().map(|item| item.0).collect();
+    Audiences::try_from(values).map(Some).map_err(|_| invalid())
 }
 
 // template:begin oidc-jwt:authn-token-profile
@@ -102,76 +124,71 @@ pub enum JwtAlgorithm {
 }
 // template:end oidc-jwt:authn-algorithm
 
-#[derive(Clone, Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum AuthnInput {
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum AuthnMode {
     /// No provider is configured. This is the omitted-section default.
-    None {},
+    #[default]
+    None,
+    // template:begin oidc-jwt:authn-mode-jwt
+    OidcJwt,
+    // template:end oidc-jwt:authn-mode-jwt
+    // template:begin oidc-introspection:authn-mode-introspection
+    OidcIntrospection,
+    // template:end oidc-introspection:authn-mode-introspection
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct AuthnInput {
+    #[serde(deserialize_with = "crate::de::string_enum")]
+    mode: AuthnMode,
+    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    issuer: Option<String>,
+    audience: Option<Audiences>,
+    #[serde(default, deserialize_with = "deserialize_audience_list")]
+    audiences: Option<Audiences>,
     // template:begin oidc-jwt:authn-config-jwt-variant
-    OidcJwt {
-        issuer: String,
-        audience: Audiences,
-        /// JWT access-token contract. Missing uses `resource-server`.
-        #[serde(default)]
-        token_profile: TokenProfile,
-        /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
-        /// Missing uses `[RS256]`.
-        #[serde(
-            default = "default_algorithms",
-            deserialize_with = "deserialize_algorithms"
-        )]
-        algorithms: Vec<JwtAlgorithm>,
-        /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
-        /// metadata.
-        #[serde(default)]
-        jwks_uri: Option<String>,
-    },
+    /// JWT access-token contract. Missing uses `resource-server`.
+    #[serde(default, deserialize_with = "crate::de::optional_string_enum")]
+    token_profile: Option<TokenProfile>,
+    /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
+    /// Missing uses `[RS256]`.
+    #[serde(default, deserialize_with = "deserialize_optional_algorithms")]
+    algorithms: Option<Vec<JwtAlgorithm>>,
+    /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
+    /// metadata.
+    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    jwks_uri: Option<String>,
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
-    OidcIntrospection {
-        issuer: String,
-        audience: Audiences,
-        introspection_endpoint: String,
-        introspection_client_id: String,
-        /// Environment-only client secret. Missing or blank is rejected.
-        /// Whitespace determines absence only; a present credential retains
-        /// its exact bytes for the provider, including surrounding whitespace.
-        #[serde(default, deserialize_with = "blank_secret_as_none")]
-        introspection_client_secret: Option<SecretString>,
-        /// Immediate provider-exchange capacity. Missing uses 32.
-        #[serde(
-            default = "default_provider_concurrency",
-            deserialize_with = "deserialize_provider_concurrency"
-        )]
-        provider_concurrency: NonZeroU32,
-        /// Reuse verified positive results until their fixed expiry. Default off.
-        #[serde(default, deserialize_with = "deserialize_cache_enabled")]
-        cache_enabled: bool,
-        /// Maximum retained results, from 1 through 1024. Missing uses 256.
-        #[serde(
-            default = "default_cache_capacity",
-            deserialize_with = "deserialize_cache_capacity"
-        )]
-        cache_capacity: usize,
-        /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
-        #[serde(
-            default = "default_cache_ttl",
-            deserialize_with = "crate::de::duration"
-        )]
-        cache_ttl: Duration,
-    },
+    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    introspection_endpoint: Option<String>,
+    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    introspection_client_id: Option<String>,
+    /// Environment-only client secret. Missing or blank is rejected.
+    /// Whitespace determines absence only; a present credential retains
+    /// its exact bytes for the provider, including surrounding whitespace.
+    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
+    introspection_client_secret: Option<SecretString>,
+    /// Immediate provider-exchange capacity. Missing uses 32.
+    #[serde(default, deserialize_with = "crate::de::optional_unsigned_count")]
+    provider_concurrency: Option<NonZeroU32>,
+    /// Reuse verified positive results until their fixed expiry. Default off.
+    #[serde(default, deserialize_with = "crate::de::optional_boolean")]
+    cache_enabled: Option<bool>,
+    /// Maximum retained results, from 1 through 1024. Missing uses 256.
+    #[serde(default, deserialize_with = "crate::de::optional_unsigned_count")]
+    cache_capacity: Option<usize>,
+    /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
+    #[serde(default, deserialize_with = "crate::de::optional_duration")]
+    cache_ttl: Option<Duration>,
     // template:end oidc-introspection:authn-config-introspection-variant
 }
 
 impl std::fmt::Debug for AuthnInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AuthnInput { .. }")
-    }
-}
-
-impl Default for AuthnInput {
-    fn default() -> Self {
-        Self::None {}
     }
 }
 
@@ -216,32 +233,49 @@ fn default_algorithms() -> Vec<JwtAlgorithm> {
     vec![JwtAlgorithm::Rs256]
 }
 
-fn deserialize_algorithms<'de, D>(deserializer: D) -> Result<Vec<JwtAlgorithm>, D::Error>
+fn deserialize_optional_algorithms<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<JwtAlgorithm>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     #[derive(Deserialize)]
+    #[serde(transparent)]
+    struct StrictAlgorithm(#[serde(deserialize_with = "crate::de::string_enum")] JwtAlgorithm);
+
+    #[derive(Deserialize)]
     #[serde(untagged)]
     enum Input {
-        List(Vec<JwtAlgorithm>),
-        Text(String),
+        List(Vec<StrictAlgorithm>),
+        Text(StrictString),
     }
 
-    let input = Input::deserialize(deserializer).map_err(|_| {
-        value_free::<D::Error>(
-            "`authn.algorithms` must be a list of supported JWT algorithms or a comma-separated string",
+    let Some(input) = Option::<Input>::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::invalid_value(
+            Unexpected::Other("an unsupported algorithm list"),
+            &"a list of supported JWT algorithms or a comma-separated string",
         )
-    })?;
+    })?
+    else {
+        return Ok(None);
+    };
     match input {
-        Input::List(values) => Ok(values),
+        Input::List(values) => Ok(Some(values.into_iter().map(|item| item.0).collect())),
         Input::Text(value) => value
+            .0
             .split(',')
-            .map(|value| {
-                JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::new(value.trim()))
+            .map(|item| {
+                JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(
+                    item.trim(),
+                ))
             })
-            .collect::<Result<_, _>>()
-            .map_err(|_: D::Error| {
-                value_free("`authn.algorithms` must contain only supported JWT algorithms")
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+            .map_err(|_| {
+                serde::de::Error::invalid_value(
+                    Unexpected::Other("an unsupported JWT algorithm"),
+                    &"a list of supported JWT algorithms or a comma-separated string",
+                )
             }),
     }
 }
@@ -252,45 +286,8 @@ fn default_provider_concurrency() -> NonZeroU32 {
     const { NonZeroU32::new(32).expect("32 is nonzero") }
 }
 
-const fn default_cache_capacity() -> usize {
-    256
-}
-
-const fn default_cache_ttl() -> Duration {
-    Duration::from_secs(30)
-}
-
-fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<NonZeroU32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_scalar(
-        deserializer,
-        "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
-    )
-}
-
-fn deserialize_cache_enabled<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_scalar(deserializer, "`authn.cache_enabled` must be true or false")
-}
-
-fn deserialize_cache_capacity<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use shared_rules::oidc_introspection::CACHE_CAPACITY;
-
-    let message = format!(
-        "`authn.cache_capacity` must be an integer from {} to {}",
-        CACHE_CAPACITY.start(),
-        CACHE_CAPACITY.end(),
-    );
-    deserialize_scalar(deserializer, &message)
-}
-
+const DEFAULT_CACHE_CAPACITY: usize = 256;
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 // template:end oidc-introspection:authn-default-provider-concurrency
 
 impl AuthnConfig {
@@ -309,100 +306,160 @@ impl AuthnConfig {
 }
 
 impl AuthnInput {
-    pub(crate) fn admit(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
-        match self {
+    fn take_audience(
+        &mut self,
+        condition: &str,
+        v: &mut Violations,
+    ) -> Result<Audiences, Rejected> {
+        match (self.audience.take(), self.audiences.take()) {
+            (Some(_), Some(_)) => Err(v.reject(ValidationError::new(
+                "authn.audiences",
+                "cannot be set together with authn.audience",
+            ))),
+            (Some(audience), None) | (None, Some(audience)) => Ok(audience),
+            (None, None) => v.take(required("authn.audience", None, condition)),
+        }
+    }
+
+    #[allow(
+        clippy::unused_self,
+        unused_variables,
+        reason = "no JWT fields exist when the oidc-jwt profile is unselected"
+    )]
+    fn reject_jwt_fields(&self, v: &mut Violations) {
+        // template:begin oidc-jwt:authn-reject-jwt-fields
+        for (key, present) in [
+            ("authn.token_profile", self.token_profile.is_some()),
+            ("authn.algorithms", self.algorithms.is_some()),
+            ("authn.jwks_uri", self.jwks_uri.is_some()),
+        ] {
+            if present {
+                v.check(Err(ValidationError::new(
+                    key,
+                    "is only valid when authn.mode = oidc-jwt",
+                )));
+            }
+        }
+        // template:end oidc-jwt:authn-reject-jwt-fields
+    }
+
+    #[allow(
+        clippy::unused_self,
+        unused_variables,
+        reason = "no introspection fields exist when the oidc-introspection profile is unselected"
+    )]
+    fn reject_introspection_fields(&self, v: &mut Violations) {
+        // template:begin oidc-introspection:authn-reject-introspection-fields
+        for (key, present) in [
+            (
+                "authn.introspection_endpoint",
+                self.introspection_endpoint.is_some(),
+            ),
+            (
+                "authn.introspection_client_id",
+                self.introspection_client_id.is_some(),
+            ),
+            (
+                "authn.introspection_client_secret",
+                self.introspection_client_secret.is_some(),
+            ),
+            (
+                "authn.provider_concurrency",
+                self.provider_concurrency.is_some(),
+            ),
+            ("authn.cache_enabled", self.cache_enabled.is_some()),
+            ("authn.cache_capacity", self.cache_capacity.is_some()),
+            ("authn.cache_ttl", self.cache_ttl.is_some()),
+        ] {
+            if present {
+                v.check(Err(ValidationError::new(
+                    key,
+                    "is only valid when authn.mode = oidc-introspection",
+                )));
+            }
+        }
+        // template:end oidc-introspection:authn-reject-introspection-fields
+    }
+
+    pub(crate) fn admit(mut self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
+        match self.mode {
             // template:begin oidc-jwt:authn-config-jwt-validation
-            Self::OidcJwt {
-                issuer,
-                audience,
-                token_profile,
-                algorithms,
-                jwks_uri,
-            } => {
-                let named = v.take(required_when(
-                    "authn.issuer",
-                    &issuer,
-                    "authn.mode = oidc-jwt",
-                ));
-                let located = if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
-                    Err(v.reject(crate::validate::ValidationError::new(
+            AuthnMode::OidcJwt => {
+                self.reject_introspection_fields(v);
+                let condition = "authn.mode = oidc-jwt";
+                let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
+                let audience = self.take_audience(condition, v);
+                let token_profile = self.token_profile.unwrap_or_default();
+                let algorithms = self.algorithms.unwrap_or_else(default_algorithms);
+                if self
+                    .jwks_uri
+                    .as_deref()
+                    .is_some_and(|uri| uri.trim().is_empty())
+                {
+                    v.check(Err(ValidationError::new(
                         "authn.jwks_uri",
                         "must not be blank when set",
-                    )))
-                } else {
-                    Ok(())
-                };
-                let signed = if algorithms.is_empty() {
-                    Err(v.reject(crate::validate::ValidationError::new(
+                    )));
+                }
+                if algorithms.is_empty() {
+                    v.check(Err(ValidationError::new(
                         "authn.algorithms",
                         "must contain at least one supported algorithm",
-                    )))
-                } else {
-                    Ok(())
-                };
-                named?;
-                located?;
-                signed?;
+                    )));
+                }
                 Ok(AuthnConfig::OidcJwt {
-                    issuer,
-                    audience,
+                    issuer: issuer?,
+                    audience: audience?,
                     token_profile,
                     algorithms,
-                    jwks_uri,
+                    jwks_uri: self.jwks_uri,
                 })
             }
             // template:end oidc-jwt:authn-config-jwt-validation
             // template:begin oidc-introspection:authn-config-introspection-validation
-            Self::OidcIntrospection {
-                issuer,
-                audience,
-                introspection_endpoint,
-                introspection_client_id,
-                introspection_client_secret,
-                provider_concurrency,
-                cache_enabled,
-                cache_capacity,
-                cache_ttl,
-            } => {
+            AuthnMode::OidcIntrospection => {
                 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 
+                self.reject_jwt_fields(v);
                 let condition = "authn.mode = oidc-introspection";
-                let named = v.take(required_when("authn.issuer", &issuer, condition));
-                let located = v.take(required_when(
+                let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
+                let audience = self.take_audience(condition, v);
+                let introspection_endpoint = v.take(required_when(
                     "authn.introspection_endpoint",
-                    &introspection_endpoint,
+                    self.introspection_endpoint,
                     condition,
                 ));
-                let identified = v.take(required_when(
+                let introspection_client_id = v.take(required_when(
                     "authn.introspection_client_id",
-                    &introspection_client_id,
+                    self.introspection_client_id,
                     condition,
                 ));
-                let secret = v.take(crate::validate::required(
+                let secret = v.take(required(
                     "authn.introspection_client_secret",
-                    introspection_client_secret,
+                    self.introspection_client_secret,
                     condition,
                 ));
-                let capacity = v.take(crate::validate::int_range(
+                let provider_concurrency = self
+                    .provider_concurrency
+                    .unwrap_or_else(default_provider_concurrency);
+                let cache_enabled = self.cache_enabled.unwrap_or(false);
+                let cache_capacity = self.cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY);
+                let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
+                v.check(crate::validate::int_range(
                     "authn.cache_capacity",
                     cache_capacity,
                     CACHE_CAPACITY,
                 ));
-                let retention = v.take(crate::validate::duration_range(
+                v.check(crate::validate::duration_range(
                     "authn.cache_ttl",
                     cache_ttl,
                     CACHE_TTL,
                 ));
-                named?;
-                located?;
-                identified?;
-                capacity?;
-                retention?;
                 Ok(AuthnConfig::OidcIntrospection {
-                    issuer,
-                    audience,
-                    introspection_endpoint,
-                    introspection_client_id,
+                    issuer: issuer?,
+                    audience: audience?,
+                    introspection_endpoint: introspection_endpoint?,
+                    introspection_client_id: introspection_client_id?,
                     introspection_client_secret: secret?,
                     provider_concurrency,
                     cache_enabled,
@@ -411,7 +468,23 @@ impl AuthnInput {
                 })
             }
             // template:end oidc-introspection:authn-config-introspection-validation
-            Self::None {} => Ok(AuthnConfig::None),
+            AuthnMode::None => {
+                for (key, present) in [
+                    ("authn.issuer", self.issuer.is_some()),
+                    ("authn.audience", self.audience.is_some()),
+                    ("authn.audiences", self.audiences.is_some()),
+                ] {
+                    if present {
+                        v.check(Err(ValidationError::new(
+                            key,
+                            "is only valid when authn.mode is not none",
+                        )));
+                    }
+                }
+                self.reject_jwt_fields(v);
+                self.reject_introspection_fields(v);
+                Ok(AuthnConfig::None)
+            }
         }
     }
 }

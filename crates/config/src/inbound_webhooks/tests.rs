@@ -1,15 +1,18 @@
+use std::assert_matches;
+
+use secrecy::SecretString;
+
 use super::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
+use crate::load::{Error, is_env_addressable, load_from, load_worker_from};
 use crate::test_support::{BUILD, env, load_env, write};
 use crate::validate::{ValidationErrors, validate_with};
-use std::assert_matches;
 
 fn validated(
     config: &InboundWebhooksConfig,
     postgres_enabled: bool,
 ) -> Result<(), ValidationErrors> {
-    validate_with(|v| config.validate(postgres_enabled, v))
+    validate_with(|v| config.validate_service(postgres_enabled, v))
 }
 
 fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhooksConfig {
@@ -21,6 +24,20 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
             previous_key: previous_key.map(str::to_owned),
         },
     );
+    if is_env_addressable(active_key) {
+        config.secrets.insert(
+            active_key.to_owned(),
+            SecretString::from("fixture-secret".to_owned()),
+        );
+    }
+    if let Some(previous) = previous_key
+        && is_env_addressable(previous)
+    {
+        config.secrets.insert(
+            previous.to_owned(),
+            SecretString::from("fixture-previous-secret".to_owned()),
+        );
+    }
     config
 }
 
@@ -62,6 +79,65 @@ fn rejects_reused_active_and_previous_references() {
     let errors = validated(&with_endpoint("partner_v2", Some("partner_v2")), true).unwrap_err();
     assert!(errors.names("inbound_webhooks.endpoints.partner.previous_key"));
     assert!(errors.to_string().contains("must differ"), "{errors}");
+}
+
+#[test]
+fn service_requires_non_blank_secrets_for_referenced_inbound_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write(
+        &dir,
+        "config.toml",
+        "[inbound_webhooks.endpoints.partner]\nactive_key = \"partner_v2\"\nprevious_key = \"partner_v1\"\n",
+    );
+    let options = LoadOptions {
+        config: Some(config),
+        ..LoadOptions::default()
+    };
+    let err = load_from(
+        &options,
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            ("APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V1", "   "),
+        ]),
+    )
+    .unwrap_err();
+    let rendered = err.to_string();
+    assert_matches!(&err, Error::Validate(errors) if errors.names("inbound_webhooks.secrets.partner_v2") && errors.names("inbound_webhooks.secrets.partner_v1"), "{rendered}");
+    assert!(
+        rendered.contains("; set APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("; set APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V1"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn worker_admits_configured_inbound_endpoints_without_service_signing_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write(
+        &dir,
+        "config.toml",
+        "[inbound_webhooks.endpoints.partner]\nactive_key = \"partner_v2\"\nprevious_key = \"partner_v1\"\n",
+    );
+    let cfg = load_worker_from(
+        &LoadOptions {
+            config: Some(config),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]),
+    )
+    .unwrap();
+    let partner = cfg.inbound_webhooks.endpoints.get("partner").unwrap();
+    assert_eq!(partner.active_key, "partner_v2");
+    assert_eq!(partner.previous_key.as_deref(), Some("partner_v1"));
 }
 
 #[test]
@@ -117,6 +193,10 @@ fn an_empty_inbound_previous_key_variable_unsets_the_file_value() {
             (
                 "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_KEY",
                 "",
+            ),
+            (
+                "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2",
+                "fixture-secret",
             ),
             ("APP__POSTGRES__ENABLED", "true"),
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),

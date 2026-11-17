@@ -44,12 +44,15 @@ pub(crate) fn local_development_only(
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AppConfig {
+    #[serde(deserialize_with = "crate::de::string")]
     pub env: String,
     /// Service version published as `service.version`. Empty means "use the
     /// build's own version".
+    #[serde(deserialize_with = "crate::de::string")]
     pub version: String,
     /// Source revision published as `vcs.ref.head.revision`. Empty means
     /// "use the revision stamped into the binary".
+    #[serde(deserialize_with = "crate::de::string")]
     pub commit: String,
     /// Replica identity published as `service.instance.id`.
     ///

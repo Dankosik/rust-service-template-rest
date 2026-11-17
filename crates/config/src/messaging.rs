@@ -7,7 +7,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::app::local_development_only;
-use crate::de::{blank_as_none, blank_secret_as_none, value_free};
+use crate::de::{StrictString, blank_as_none, blank_secret_as_none};
 use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
@@ -42,16 +42,20 @@ pub(crate) struct MessagingInput {
     #[serde(default, deserialize_with = "blank_as_none")]
     root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
+    #[serde(deserialize_with = "crate::de::boolean")]
     allow_plaintext: bool,
     /// Perform TLS before INFO; every configured URL must use `tls://`.
+    #[serde(deserialize_with = "crate::de::boolean")]
     tls_first: bool,
     /// The operator declares the private network the broker trust boundary,
     /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
     /// in every environment. Credentials stay required outside local and
     /// development.
+    #[serde(deserialize_with = "crate::de::boolean")]
     trusted_network: bool,
     /// Permit a connection without credentials only for a local or
     /// development process.
+    #[serde(deserialize_with = "crate::de::boolean")]
     allow_unauthenticated: bool,
     #[serde(default, deserialize_with = "blank_as_none")]
     source_stream: Option<String>,
@@ -362,15 +366,19 @@ where
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Input {
-        Text(String),
-        List(Vec<String>),
+        Text(StrictString),
+        List(Vec<StrictString>),
     }
 
-    let input = Input::deserialize(deserializer)
-        .map_err(|_| value_free("must be a list of strings or a comma-separated string"))?;
+    let input = Input::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::invalid_value(
+            serde::de::Unexpected::Other("a non-string value"),
+            &"a list of strings or a comma-separated string",
+        )
+    })?;
     Ok(match input {
-        Input::Text(value) => value.split(',').map(ToOwned::to_owned).collect(),
-        Input::List(urls) => urls,
+        Input::Text(value) => value.0.split(',').map(ToOwned::to_owned).collect(),
+        Input::List(urls) => urls.into_iter().map(|url| url.0).collect(),
     })
 }
 

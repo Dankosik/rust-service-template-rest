@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use health::Probe;
 use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
 use secrecy::ExposeSecret;
-use service_config::{Config, PostgresConfig, PostgresSessionBudgets};
+use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, RetainedCapabilities, WorkerError};
 use crate::background::Background;
@@ -12,7 +12,7 @@ use crate::resources::{PoolResource, Resources};
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
 pub(super) async fn admit_pool(
-    config: &Config,
+    config: &WorkerConfig,
     capabilities: &RetainedCapabilities,
     background: &Background,
     resources: &mut Resources,
@@ -52,7 +52,7 @@ pub(super) async fn admit_pool(
 }
 
 async fn open_pool(
-    config: &Config,
+    config: &WorkerConfig,
     postgres: &PostgresConfig,
     background: &Background,
     resources: &mut Resources,

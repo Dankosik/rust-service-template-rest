@@ -38,8 +38,10 @@ pub(crate) struct CacheInput {
     #[serde(default, deserialize_with = "blank_as_none")]
     client_key_path: Option<PathBuf>,
     /// Permit a plaintext DSN. Local and development only.
+    #[serde(deserialize_with = "crate::de::boolean")]
     allow_plaintext: bool,
     /// Permit a DSN with no password. Local and development only.
+    #[serde(deserialize_with = "crate::de::boolean")]
     allow_unauthenticated: bool,
     /// Bound for one cache command, including a reconnect wait.
     #[serde(deserialize_with = "crate::de::duration")]
