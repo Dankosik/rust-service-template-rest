@@ -13,7 +13,7 @@ use tower::{Service as _, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
-use crate::Error;
+use crate::ClientError;
 use crate::call::{Held, Observation, ResponseCustody, ResponseStatusObserver, Side};
 use operation_context::{Deadline, OperationContext};
 use shared_rules::error_chain::DisplayErrorChain;
@@ -72,7 +72,7 @@ impl Client {
         destination: &str,
         security: ClientSecurity,
         timeout: Duration,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ClientError> {
         Self::with_timeout_policy(destination, security, ClientTimeout::FullRpc(timeout))
     }
 
@@ -80,9 +80,9 @@ impl Client {
         destination: &str,
         security: ClientSecurity,
         timeout: ClientTimeout,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ClientError> {
         let destination =
-            http::Uri::try_from(destination).map_err(|_| Error::InvalidDestination)?;
+            http::Uri::try_from(destination).map_err(|_| ClientError::InvalidDestination)?;
         let mut endpoint = Endpoint::from(destination)
             .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(Duration::from_mins(1))
@@ -94,12 +94,12 @@ impl Client {
             ClientSecurity::Tls(_) => "https",
         };
         if endpoint.uri().scheme_str() != Some(expected_scheme) {
-            return Err(Error::DestinationSecurityMismatch);
+            return Err(ClientError::DestinationSecurityMismatch);
         }
         if let ClientSecurity::Tls(material) = security {
             endpoint = endpoint
                 .tls_config(client_tls(&material)?)
-                .map_err(|_| Error::InvalidClientTls)?;
+                .map_err(|_| ClientError::InvalidClientTls)?;
         }
         let mut connector = HttpConnector::new();
         connector.enforce_http(false);
@@ -309,7 +309,7 @@ fn apply_forwarded_timeout(
     Ok(())
 }
 
-fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
+fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, ClientError> {
     let mut config = match &material.ca_certificate_pem {
         Some(ca) => {
             crate::tls::roots(ca)?;
@@ -392,7 +392,7 @@ mod tests {
         });
         assert_eq!(
             Client::try_new("https://example.test", security, Duration::from_secs(1)).unwrap_err(),
-            Error::Tls(crate::TlsMaterialError::InvalidCaCertificate)
+            ClientError::Tls(crate::TlsMaterialError::InvalidCaCertificate)
         );
     }
 
@@ -405,7 +405,7 @@ mod tests {
             ] {
                 assert_eq!(
                     Client::try_new(destination, security, Duration::from_secs(1)).unwrap_err(),
-                    Error::InvalidDestination,
+                    ClientError::InvalidDestination,
                     "{destination}"
                 );
             }
