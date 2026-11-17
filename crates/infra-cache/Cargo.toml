@@ -34,13 +34,15 @@ redis = { workspace = true, features = [
     "tokio-comp",
     "tokio-rustls-comp",
 ] }
-rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"] }
+rustls-platform-verifier = { workspace = true }
 secrecy = { workspace = true }
 shared-rules = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-tokio-util = { workspace = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 
@@ -56,5 +58,3 @@ rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tls-test-support = { workspace = true }
 tokio ={ workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
-tokio-util = { workspace = true, features = ["rt"] }

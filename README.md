@@ -141,7 +141,8 @@ configured.
   ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
-- `CACHE=redis`: a Redis or Valkey cache that falls back to the source of truth
+- `CACHE=redis`: a Valkey cache (Redis 6+ speaks the same protocol but is not
+  tested) that falls back to the source of truth
   ([`infra-cache`](crates/infra-cache)).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->

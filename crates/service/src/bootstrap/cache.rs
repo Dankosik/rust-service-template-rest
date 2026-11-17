@@ -37,12 +37,16 @@ pub(super) async fn open(
     .await?;
     let cache = retained.insert(cache);
     let server = cache.server();
-    let unavailable =
-        match tokio::time::timeout(infra_cache::STARTUP_TIMEOUT, cache.probe().check()).await {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(_) => Some("startup check timed out".to_owned()),
-        };
+    let unavailable = match tokio::time::timeout(
+        infra_cache::STARTUP_TIMEOUT + config.cache.command_timeout,
+        cache.probe().check(),
+    )
+    .await
+    {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(_) => Some("startup check timed out".to_owned()),
+    };
     match unavailable {
         None => tracing::info!(
             server.address = %server.host,

@@ -15,10 +15,12 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit, mpsc
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use zeroize::Zeroizing;
 
 use crate::ServerEndpoint;
 use crate::credentials::{PasswordFile, ReadFailure};
+use crate::dial::{Dial, Dialed};
 use crate::observe::{
     ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
     RETIREMENTS_METRIC,
@@ -127,6 +129,7 @@ enum State {
 
 struct Generation {
     connection: MultiplexedConnection,
+    _driver: AbortOnDropHandle<()>,
     caller_capacity: Arc<Semaphore>,
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
     retired: CancellationToken,
@@ -380,7 +383,8 @@ impl Shared {
 impl Link {
     pub(crate) fn start(
         server: ServerEndpoint,
-        client: redis::Client,
+        dial: Dial,
+        settings: redis::RedisConnectionInfo,
         password_file: Option<PasswordFile>,
         command_timeout: Duration,
     ) -> Self {
@@ -399,8 +403,14 @@ impl Link {
             shared: shared.clone(),
             server: server.clone(),
         };
-        let supervisor =
-            tokio::spawn(supervise(exit, client, password_file, command_timeout)).abort_handle();
+        let supervisor = tokio::spawn(supervise(
+            exit,
+            dial,
+            settings,
+            password_file,
+            command_timeout,
+        ))
+        .abort_handle();
         Self {
             server,
             command_timeout,
@@ -601,14 +611,16 @@ fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
 
 async fn supervise(
     exit: SupervisorExit,
-    client: redis::Client,
+    dial: Dial,
+    settings: redis::RedisConnectionInfo,
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
     run_supervisor(
         &exit.shared,
         &exit.server,
-        &client,
+        &dial,
+        &settings,
         password_file.as_ref(),
         command_timeout,
     )
@@ -618,7 +630,8 @@ async fn supervise(
 async fn run_supervisor(
     shared: &Shared,
     server: &ServerEndpoint,
-    client: &redis::Client,
+    dial: &Dial,
+    settings: &redis::RedisConnectionInfo,
     password_file: Option<&PasswordFile>,
     command_timeout: Duration,
 ) {
@@ -630,7 +643,7 @@ async fn run_supervisor(
             return;
         }
         let (abandoned, replies) = mpsc::unbounded_channel();
-        match setup_attempt(server, client, password_file, abandoned).await {
+        match setup_attempt(server, dial, settings, password_file, abandoned).await {
             Ok((generation, rotation)) => {
                 if !shared.publish(generation.clone()) {
                     return;
@@ -703,25 +716,27 @@ async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedR
 
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
-    client: &redis::Client,
+    dial: &Dial,
+    settings: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
 ) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
     let retired = CancellationToken::new();
     let setup = async {
-        let (client, rotation) = credentialed_client(server, client, password_file).await?;
-        let connection = connect(&client, retired.clone()).await?;
-        Ok((connection, rotation))
+        let (settings, rotation) = credentialed_settings(server, settings, password_file).await?;
+        let dialed = connect(dial, &settings, retired.clone()).await?;
+        Ok((dialed, rotation))
     };
     let result = match timeout(SETUP_TIMEOUT, setup).await {
         Err(_elapsed) => Err(ErrorType::Timeout),
         Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
         Ok(connected) => connected,
     };
-    result.map(|(connection, rotation)| {
+    result.map(|(Dialed { connection, driver }, rotation)| {
         (
             Arc::new(Generation {
                 connection,
+                _driver: driver,
                 caller_capacity: Arc::new(Semaphore::new(CALLER_PIPELINE_CAPACITY)),
                 abandoned,
                 retired,
@@ -731,11 +746,11 @@ async fn setup_attempt<'a>(
     })
 }
 
-async fn credentialed_client<'a>(
+async fn credentialed_settings<'a>(
     server: &ServerEndpoint,
-    admitted: &redis::Client,
+    admitted: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
-) -> Result<(redis::Client, Option<Rotation<'a>>), ErrorType> {
+) -> Result<(redis::RedisConnectionInfo, Option<Rotation<'a>>), ErrorType> {
     let Some(file) = password_file else {
         return Ok((admitted.clone(), None));
     };
@@ -743,15 +758,11 @@ async fn credentialed_client<'a>(
         warn_password_file_unreadable(server, error);
         ErrorType::Other
     })?;
-    let info = admitted.get_connection_info().clone();
-    let settings = info
-        .redis_settings()
+    let settings = admitted
         .clone()
         .set_username(file.username())
         .set_password(password.as_str());
-    let client =
-        redis::Client::open(info.set_redis_settings(settings)).map_err(|_| ErrorType::Other)?;
-    Ok((client, Some(Rotation::new(file, password))))
+    Ok((settings, Some(Rotation::new(file, password))))
 }
 
 fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
@@ -764,9 +775,10 @@ fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
 }
 
 async fn connect(
-    client: &redis::Client,
+    dial: &Dial,
+    settings: &redis::RedisConnectionInfo,
     retired: CancellationToken,
-) -> Result<MultiplexedConnection, ErrorType> {
+) -> Result<Dialed, ErrorType> {
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
         .set_connection_timeout(None)
@@ -777,8 +789,7 @@ async fn connect(
             }
             Ok::<(), redis::aio::SendError>(())
         });
-    client
-        .get_multiplexed_async_connection_with_config(&config)
+    dial.connect(settings, config)
         .await
         .map_err(|error| error_type(&error))
 }
@@ -826,6 +837,7 @@ struct Rotation<'a> {
     file: &'a PasswordFile,
     authenticated_password: Zeroizing<String>,
     unreadable_logged: bool,
+    refused_logged: bool,
 }
 
 enum RefreshOutcome {
@@ -869,6 +881,7 @@ impl<'a> Rotation<'a> {
             file,
             authenticated_password,
             unreadable_logged: false,
+            refused_logged: false,
         }
     }
 
@@ -930,6 +943,8 @@ impl<'a> Rotation<'a> {
             .increment(1);
         let read_failed = matches!(outcome, RefreshOutcome::ReadFailed(_));
         let unreadable_logged = std::mem::replace(&mut self.unreadable_logged, read_failed);
+        let refused = matches!(outcome, RefreshOutcome::AuthRefused);
+        let refused_logged = std::mem::replace(&mut self.refused_logged, refused);
         match outcome {
             RefreshOutcome::ReadFailed(error) => {
                 if !unreadable_logged {
@@ -942,6 +957,7 @@ impl<'a> Rotation<'a> {
                 server.port = server.port,
                 "cache_password_reloaded"
             ),
+            RefreshOutcome::AuthRefused if refused_logged => {}
             RefreshOutcome::AuthRefused | RefreshOutcome::Failed(_) => {
                 tracing::warn!(
                     server.address = %server.host,

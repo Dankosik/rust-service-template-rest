@@ -1,22 +1,18 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
 
 use redis::IntoConnectionInfo;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
-use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::credentials::PasswordFile;
+use crate::dial::{Dial, Tls};
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
-
-const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const KEEPALIVE_RETRIES: u32 = 3;
-#[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-const USER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
-    pub(crate) client: redis::Client,
+    pub(crate) dial: Dial,
+    pub(crate) settings: redis::RedisConnectionInfo,
     pub(crate) password_file: Option<PasswordFile>,
 }
 
@@ -42,44 +38,40 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     )?;
     let password_file =
         admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
-    let tls_certificates =
-        read_tls_certificates(root_ca_path.as_deref(), client_certificate.as_ref())?;
+    let tls = if server.tls {
+        let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
+        let identity = client_certificate
+            .as_ref()
+            .map(read_client_certificate)
+            .transpose()?;
+        Some(Tls {
+            connector: tls_connector(roots, identity)?,
+            server_name: ServerName::try_from(server.host.clone())
+                .map_err(|_| CacheError::InvalidDsn)?,
+        })
+    } else {
+        None
+    };
     let settings = info
         .redis_settings()
         .clone()
         .set_protocol(redis::ProtocolVersion::RESP3);
-    let info = info
-        .set_redis_settings(settings)
-        .set_tcp_settings(tcp_settings());
-    if server.tls {
-        install_tls_provider();
-    }
-    let client = match tls_certificates {
-        Some(certificates) => redis::Client::build_with_tls(info, certificates),
-        None => redis::Client::open(info),
-    }
-    .map_err(|_| CacheError::ClientBuild)?;
     Ok(Admitted {
+        dial: Dial {
+            host: server.host.clone(),
+            port: server.port,
+            tls,
+        },
         server,
-        client,
+        settings,
         password_file,
     })
 }
 
 pub(crate) fn check_runtime() -> Result<(), CacheError> {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return Err(CacheError::NoRuntime);
-    }
-    std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
-        .map_err(|_| CacheError::NoTimeDriver)?;
-
-    let io_error = |error: std::io::Error| CacheError::IoDriverCheck { kind: error.kind() };
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(io_error)?;
-    socket.set_nonblocking(true).map_err(io_error)?;
-    std::panic::catch_unwind(|| tokio::net::TcpStream::from_std(socket.into()))
-        .map_err(|_| CacheError::NoIoDriver)?
+    tokio::runtime::Handle::try_current()
         .map(drop)
-        .map_err(io_error)
+        .map_err(|_| CacheError::NoRuntime)
 }
 
 fn admit_address(
@@ -136,44 +128,29 @@ fn admit_password(
     }
 }
 
-fn read_tls_certificates(
-    root_ca_path: Option<&Path>,
-    client_certificate: Option<&ClientCertificate>,
-) -> Result<Option<redis::TlsCertificates>, CacheError> {
-    let root_cert = root_ca_path.map(read_root_ca).transpose()?;
-    let client_tls = client_certificate
-        .map(read_client_certificate)
-        .transpose()?;
-    if root_cert.is_none() && client_tls.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(redis::TlsCertificates {
-        client_tls,
-        root_cert,
-    }))
-}
-
 #[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
 )]
-fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
+fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, CacheError> {
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
     let mut roots = rustls::RootCertStore::empty();
     for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
         roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
     }
-    Ok(bytes)
+    Ok(roots)
+}
+
+struct ClientIdentity {
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
 )]
-fn read_client_certificate(
-    certificate: &ClientCertificate,
-) -> Result<redis::ClientTlsConfig, CacheError> {
-    use rustls::pki_types::PrivateKeyDer;
+fn read_client_certificate(certificate: &ClientCertificate) -> Result<ClientIdentity, CacheError> {
     use rustls::pki_types::pem::PemObject;
 
     let client_cert = std::fs::read(&certificate.cert_path)
@@ -183,44 +160,44 @@ fn read_client_certificate(
     let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
     let key =
         PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| CacheError::InvalidClientKey)?;
-    rustls::sign::CertifiedKey::from_der(
-        chain,
-        key,
-        &rustls::crypto::aws_lc_rs::default_provider(),
-    )
-    .map_err(|error| match error {
-        rustls::Error::InvalidCertificate(_) => CacheError::InvalidClientCertificate,
-        _ => CacheError::InvalidClientKey,
-    })?;
-    Ok(redis::ClientTlsConfig {
-        client_cert,
-        client_key,
-    })
+    Ok(ClientIdentity { chain, key })
 }
 
-fn pem_certificates(bytes: &[u8]) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    use rustls::pki_types::CertificateDer;
+fn tls_connector(
+    roots: Option<rustls::RootCertStore>,
+    identity: Option<ClientIdentity>,
+) -> Result<tokio_rustls::TlsConnector, CacheError> {
+    use rustls_platform_verifier::BuilderVerifierExt as _;
+
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| CacheError::ClientBuild)?;
+    let builder = match roots {
+        Some(roots) => builder.with_root_certificates(roots),
+        None => builder
+            .with_platform_verifier()
+            .map_err(|_| CacheError::ClientBuild)?,
+    };
+    let config =
+        match identity {
+            Some(ClientIdentity { chain, key }) => builder
+                .with_client_auth_cert(chain, key)
+                .map_err(|error| match error {
+                    rustls::Error::InvalidCertificate(_) => CacheError::InvalidClientCertificate,
+                    _ => CacheError::InvalidClientKey,
+                })?,
+            None => builder.with_no_client_auth(),
+        };
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
+}
+
+fn pem_certificates(bytes: &[u8]) -> Option<Vec<CertificateDer<'static>>> {
     use rustls::pki_types::pem::PemObject;
 
     CertificateDer::pem_slice_iter(bytes)
         .collect::<Result<Vec<_>, _>>()
         .ok()
         .filter(|certificates| !certificates.is_empty())
-}
-
-fn tcp_settings() -> redis::io::tcp::TcpSettings {
-    let keepalive = socket2::TcpKeepalive::new()
-        .with_time(KEEPALIVE_TIME)
-        .with_interval(KEEPALIVE_INTERVAL)
-        .with_retries(KEEPALIVE_RETRIES);
-    let settings = redis::io::tcp::TcpSettings::default()
-        .set_nodelay(true)
-        .set_keepalive(keepalive);
-    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-    let settings = settings.set_user_timeout(USER_TIMEOUT);
-    settings
-}
-
-fn install_tls_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
