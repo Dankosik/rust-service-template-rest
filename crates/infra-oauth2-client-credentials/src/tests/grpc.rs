@@ -21,13 +21,18 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
-use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
 use operation_context::OperationContext;
+use tls_test_support::TlsMaterial;
 use tokio::{
     net::TcpListener,
     sync::{Notify, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::Instant,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{ServerConfig, crypto::aws_lc_rs, pki_types::PrivatePkcs8KeyDer},
 };
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::{Service as _, service_fn};
@@ -35,7 +40,7 @@ use tower::{Service as _, service_fn};
 use secrecy::SecretString;
 
 use super::{Credentials, Fixture, acquisition_deadline, token_context};
-use crate::{AcquisitionError, OnBehalfOf, Rejection};
+use crate::{AcquisitionError, IdentityMode, OnBehalfOf, Rejection};
 
 #[derive(Clone)]
 struct Peer {
@@ -106,6 +111,7 @@ impl tonic::server::UnaryService<UnaryRequest> for Peer {
 
 struct Resource {
     address: SocketAddr,
+    root_pem: String,
     peer: Peer,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<()>,
@@ -115,11 +121,29 @@ impl Resource {
     async fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let material = TlsMaterial::new("127.0.0.1");
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![material.cert.into()],
+                    PrivatePkcs8KeyDer::from(material.key).into(),
+                )
+                .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec()];
         let peer = Peer::new();
         let (shutdown, receiver) = oneshot::channel();
-        let task = tokio::spawn(serve(listener, peer.clone(), receiver));
+        let task = tokio::spawn(serve(
+            listener,
+            TlsAcceptor::from(Arc::new(config)),
+            peer.clone(),
+            receiver,
+        ));
         Self {
             address,
+            root_pem: material.root_pem,
             peer,
             shutdown,
             task,
@@ -130,13 +154,20 @@ impl Resource {
         &self,
         credentials: &Credentials,
     ) -> EchoServiceClient<crate::grpc::AuthenticatedClient> {
-        let channel = Client::try_new(
-            &format!("http://{}", self.address),
-            ClientSecurity::Plaintext,
-            Duration::from_secs(10),
+        let channel = self.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
+        EchoServiceClient::new(credentials.grpc(channel, IdentityMode::Service).unwrap())
+    }
+
+    fn channel(&self, timeout: ClientTimeout) -> Client {
+        Client::with_timeout_policy(
+            &format!("https://{}", self.address),
+            ClientSecurity::Tls(ClientTlsMaterial {
+                ca_certificate_pem: Some(self.root_pem.clone()),
+                identity: None,
+            }),
+            timeout,
         )
-        .unwrap();
-        EchoServiceClient::new(credentials.grpc(channel))
+        .unwrap()
     }
 
     fn calls(&self) -> usize {
@@ -168,7 +199,12 @@ impl Resource {
     }
 }
 
-async fn serve(listener: TcpListener, peer: Peer, mut shutdown: oneshot::Receiver<()>) {
+async fn serve(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    peer: Peer,
+    mut shutdown: oneshot::Receiver<()>,
+) {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -178,7 +214,7 @@ async fn serve(listener: TcpListener, peer: Peer, mut shutdown: oneshot::Receive
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.unwrap();
-                connections.spawn(serve_connection(stream, peer.clone()));
+                connections.spawn(serve_connection(stream, acceptor.clone(), peer.clone()));
             }
         }
     }
@@ -190,7 +226,10 @@ async fn serve(listener: TcpListener, peer: Peer, mut shutdown: oneshot::Receive
     }
 }
 
-async fn serve_connection(stream: tokio::net::TcpStream, peer: Peer) {
+async fn serve_connection(stream: tokio::net::TcpStream, acceptor: TlsAcceptor, peer: Peer) {
+    let Ok(stream) = acceptor.accept(stream).await else {
+        return;
+    };
     let service = service_fn(move |request| {
         let peer = peer.clone();
         async move { Ok::<_, Infallible>(route(request, peer).await) }
@@ -300,6 +339,46 @@ fn rpc<T>(message: T, after: Duration) -> Request<T> {
 }
 
 #[tokio::test]
+async fn plaintext_cannot_be_bound_to_oauth_credentials() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.credentials(&[], None);
+    let channel = Client::try_new(
+        &format!("http://{}", resource.address),
+        ClientSecurity::Plaintext,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    for mode in [IdentityMode::Service, IdentityMode::OnBehalfOf] {
+        assert_eq!(
+            credentials.grpc(channel.clone(), mode).unwrap_err().key,
+            "grpc_resource"
+        );
+    }
+    assert!(tokens.token_requests().is_empty());
+    assert_eq!(resource.calls(), 0);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
+    let tokens = Fixture::new().await;
+    let mut resource = Resource::new().await;
+    resource.root_pem = tls_test_support::new_issuer().pem();
+    let error = resource
+        .client(&tokens.credentials(&[], None))
+        .unary(rpc(UnaryRequest::default(), Duration::from_secs(10)))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 0);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
 async fn caller_authorization_is_internal_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
@@ -398,13 +477,8 @@ async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     let gate = tokens.block_tokens();
-    let channel = Client::try_new(
-        &format!("http://{}", resource.address),
-        ClientSecurity::Plaintext,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    let mut client = credentials.grpc(channel);
+    let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
+    let mut client = credentials.grpc(channel, IdentityMode::Service).unwrap();
     let parent = OperationContext::unbounded();
     let mut request = http::Request::post("/cancelled")
         .header("content-type", "application/grpc")
@@ -437,7 +511,7 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
         provider_concurrency: 1,
         ..tokens.options(&[], None)
     });
-    let http = credentials.http(tokens.resource_client());
+    let http = credentials.http(tokens.resource_client(), IdentityMode::OnBehalfOf);
     let gate = tokens.block_tokens();
     let mut exchange = Box::pin(http.execute(
         tokens.on_behalf_of_request("active"),
@@ -659,7 +733,7 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
 
 async fn warm_and_age(credentials: &Credentials) {
     credentials
-        .service_token(acquisition_deadline(&token_context(), None))
+        .service_token(acquisition_deadline(&token_context()))
         .await
         .unwrap();
     super::advance(crate::token::EVICTION_MIN_AGE).await;
@@ -716,13 +790,8 @@ async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     warm_and_age(&credentials).await;
-    let channel = Client::try_new(
-        &format!("http://{}", resource.address),
-        ClientSecurity::Plaintext,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    let mut client = credentials.grpc(channel);
+    let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
+    let mut client = credentials.grpc(channel, IdentityMode::Service).unwrap();
     let mut response = client
         .call(
             http::Request::post("/budget-stream")
@@ -793,7 +862,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .service_token(acquisition_deadline(&token_context(), None))
+        .service_token(acquisition_deadline(&token_context()))
         .await
         .unwrap();
     resource.release();
@@ -879,9 +948,8 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 }
 
 #[tokio::test]
-async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_token() {
+async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
     let tokens = Fixture::new().await;
-    tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     let mut request = rpc(
@@ -893,9 +961,14 @@ async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_toke
     request
         .extensions_mut()
         .insert(OnBehalfOf::new(SecretString::from("subject-token")));
-    resource.client(&credentials).unary(request).await.unwrap();
-    assert_eq!(resource.authorizations(), ["Bearer exchanged-token"]);
-    assert_eq!(tokens.token_requests().len(), 1);
+    let error = resource
+        .client(&credentials)
+        .unary(request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Internal);
+    assert!(tokens.token_requests().is_empty());
+    assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
 }
@@ -916,13 +989,9 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
 
-    let channel = Client::try_new(
-        &format!("http://{}", resource.address),
-        ClientSecurity::Plaintext,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    let mut client = EchoServiceClient::new(credentials.grpc(channel).require_on_behalf_of());
+    let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
+    let mut client =
+        EchoServiceClient::new(credentials.grpc(channel, IdentityMode::OnBehalfOf).unwrap());
     let error = client
         .unary(rpc(message(), Duration::from_secs(10)))
         .await
@@ -959,7 +1028,7 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
             let credentials = tokens.credentials(&[], None);
             if cached {
                 credentials
-                    .service_token(acquisition_deadline(&token_context(), None))
+                    .service_token(acquisition_deadline(&token_context()))
                     .await
                     .unwrap();
             }
@@ -970,13 +1039,9 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
             } else {
                 ClientTimeout::FullRpc(local)
             };
-            let channel = Client::with_timeout_policy(
-                &format!("http://{}", resource.address),
-                ClientSecurity::Plaintext,
-                policy,
-            )
-            .unwrap();
-            let mut client = credentials.grpc(channel);
+            let mut client = credentials
+                .grpc(resource.channel(policy), IdentityMode::Service)
+                .unwrap();
             let mut request = http::Request::post("/budget-stream")
                 .header("content-type", "application/grpc")
                 .body(Body::empty())
@@ -1054,13 +1119,10 @@ async fn resource_opening_ceiling_starts_before_credentials_without_caller_metad
         let tokens = Fixture::new().await;
         let resource = Resource::new().await;
         let gate = tokens.block_tokens();
-        let channel = Client::with_timeout_policy(
-            &format!("http://{}", resource.address),
-            ClientSecurity::Plaintext,
-            policy,
-        )
-        .unwrap();
-        let mut client = tokens.credentials(&[], None).grpc(channel);
+        let mut client = tokens
+            .credentials(&[], None)
+            .grpc(resource.channel(policy), IdentityMode::Service)
+            .unwrap();
         let mut call = client.call(
             http::Request::post("/budget-stream")
                 .body(Body::empty())

@@ -62,7 +62,11 @@ impl EchoService for Echo {
         &self,
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
-        let context = request.extensions().get::<ResponseContext>().cloned();
+        let context = request
+            .extensions()
+            .get::<ResponseContext>()
+            .cloned()
+            .ok_or_else(|| Failure::new(Code::InternalServerError))?;
         let responses = request
             .into_inner()
             .map(|item| {
@@ -72,12 +76,7 @@ impl EchoService for Echo {
                 })
             })
             .take_until(async move {
-                match context {
-                    Some(ctx) => {
-                        ctx.operation().wait_stopped().await;
-                    }
-                    None => std::future::pending().await,
-                }
+                context.operation().wait_stopped().await;
             });
         Ok(Response::new(Box::pin(responses)))
     }

@@ -21,7 +21,7 @@ impl ExchangeState {
         let minimum_weight = EXCHANGE_CACHE_BYTES / capacity;
         Self {
             cache: moka::future::Cache::builder()
-                .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
+                .max_capacity(u64::from(minimum_weight * capacity))
                 .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
                     u32::try_from(token.header.as_bytes().len())
                         .unwrap_or(u32::MAX)
@@ -217,5 +217,26 @@ impl Credentials {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn short_tokens_cannot_use_the_weight_remainder_for_an_extra_subject()
+    -> Result<(), AcquisitionError> {
+        const CAPACITY: u32 = 4_160;
+        let cache = ExchangeState::new(CAPACITY).cache;
+        let token = Arc::new(Token::bearer("short", Instant::now(), Some(3600))?);
+        for subject in 0..=CAPACITY {
+            let mut key = [0; 32];
+            key[..4].copy_from_slice(&subject.to_be_bytes());
+            cache.insert(SubjectKey(key), token.clone()).await;
+        }
+        cache.run_pending_tasks().await;
+        assert!(cache.entry_count() <= u64::from(CAPACITY));
+        Ok(())
     }
 }

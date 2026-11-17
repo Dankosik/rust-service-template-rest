@@ -5,27 +5,47 @@ use infra_postgres::{
     Tx, TxError, failure_cause, in_tx_with, in_tx_with_acquire_deadline, is_transient, observed,
     sqlstate,
 };
+use sha2::{Digest as _, Sha256};
 
-use crate::{READ_COMMITTED, Store};
+use crate::record::HeaderPair;
+use crate::{READ_COMMITTED, Record, Store};
 
 pub type Digest = [u8; 32];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScopeKey(Digest);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeKey {
+    digest: Digest,
+    caller: CallerIdentity,
+}
 
 impl ScopeKey {
     #[must_use]
-    pub const fn from_digest(digest: Digest) -> Self {
-        Self(digest)
+    pub fn new(caller: CallerIdentity, key: &[u8]) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"http-idempotency/scope/v2\0");
+        hash.update((caller.issuer.len() as u64).to_be_bytes());
+        hash.update(caller.issuer.as_bytes());
+        hash.update([match caller.kind {
+            CallerKind::Subject => 1,
+            CallerKind::Client => 2,
+        }]);
+        for field in [caller.value.as_bytes(), key] {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field);
+        }
+        Self {
+            digest: hash.finalize().into(),
+            caller,
+        }
     }
 
     #[must_use]
     pub const fn digest(&self) -> &Digest {
-        &self.0
+        &self.digest
     }
 
     fn lock_key(&self) -> i64 {
-        let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.0;
+        let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.digest;
         i64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
     }
 }
@@ -54,23 +74,9 @@ pub struct CallerIdentity {
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "http_idempotency_header_pair")]
-pub struct HeaderPair {
-    pub name: String,
-    pub value: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub status: i16,
-    pub headers: Vec<HeaderPair>,
-    pub body: Bytes,
-}
-
 #[derive(Debug)]
-pub enum Attempted<C, R> {
-    Committed(C),
+pub enum Attempted<R> {
+    Committed(Record),
     RolledBack(R),
     Replay(Record),
     Mismatch,
@@ -88,60 +94,56 @@ pub enum AttemptError {
 }
 
 impl Store {
-    pub async fn attempt<W, C, R>(
+    pub async fn attempt<W, R>(
         &self,
         scope: &ScopeKey,
-        caller: &CallerIdentity,
         fingerprint: &Digest,
         work: W,
-    ) -> Result<Attempted<C, R>, AttemptError>
+    ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
     {
-        self.attempt_in_tx(scope, caller, fingerprint, None, work)
-            .await
+        self.attempt_in_tx(scope, fingerprint, None, work).await
     }
 
-    pub async fn attempt_with_acquire_deadline<W, C, R>(
+    pub async fn attempt_with_acquire_deadline<W, R>(
         &self,
         scope: &ScopeKey,
-        caller: &CallerIdentity,
         fingerprint: &Digest,
         deadline: tokio::time::Instant,
         work: W,
-    ) -> Result<Attempted<C, R>, AttemptError>
+    ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
     {
-        self.attempt_in_tx(scope, caller, fingerprint, Some(deadline), work)
+        self.attempt_in_tx(scope, fingerprint, Some(deadline), work)
             .await
     }
 
-    async fn attempt_in_tx<W, C, R>(
+    async fn attempt_in_tx<W, R>(
         &self,
         scope: &ScopeKey,
-        caller: &CallerIdentity,
         fingerprint: &Digest,
         deadline: Option<tokio::time::Instant>,
         work: W,
-    ) -> Result<Attempted<C, R>, AttemptError>
+    ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
     {
-        if caller.issuer.contains('\0') || caller.value.contains('\0') {
+        if scope.caller.issuer.contains('\0') || scope.caller.value.contains('\0') {
             return Err(refused(
                 "caller_identity",
                 AttemptError::Internal,
                 "unstorable_caller",
             ));
         }
-        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<R>> {
+        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<Record, Stop<R>> {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
                 return Err(Stop::Decided(decision));
             }
-            let (record, value) = work(tx).await.map_err(Stop::RolledBack)?;
-            write(tx, scope, caller, fingerprint, &record, self.retention).await?;
-            Ok(value)
+            let record = work(tx).await.map_err(Stop::RolledBack)?;
+            write(tx, scope, fingerprint, &record, self.retention).await?;
+            Ok(record)
         };
         let outcome = match deadline {
             Some(deadline) => {
@@ -187,13 +189,20 @@ async fn arbitrate(
              FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r \
              ON r.scope_key = $2 AND r.expires_at > statement_timestamp()",
             scope.lock_key(),
-            scope.0.as_slice(),
+            scope.digest.as_slice(),
             fingerprint.as_slice(),
         )
         .fetch_one(&mut *tx),
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
+    if !row.writable {
+        return Err(refused(
+            "writer_check",
+            AttemptError::Unavailable,
+            "not_writable",
+        ));
+    }
     let live = match (row.fingerprint, row.status, row.headers) {
         (Some(stored_fingerprint), Some(status), Some(headers)) => Some(decide_live(
             stored_fingerprint,
@@ -204,13 +213,6 @@ async fn arbitrate(
         )?),
         _ => None,
     };
-    if !row.writable {
-        return Err(refused(
-            "writer_check",
-            AttemptError::Unavailable,
-            "not_writable",
-        ));
-    }
     match live {
         Some(decision) => Ok(Some(decision)),
         None if !row.acquired => Ok(Some(Decision::InProgress)),
@@ -223,7 +225,7 @@ async fn arbitrate(
                      CASE WHEN fingerprint = $2 THEN body END AS body \
                      FROM http_idempotency_records \
                      WHERE scope_key = $1 AND expires_at > statement_timestamp()",
-                    scope.0.as_slice(),
+                    scope.digest.as_slice(),
                     fingerprint.as_slice(),
                 )
                 .fetch_optional(tx),
@@ -255,11 +257,9 @@ fn decide_live(
         return Ok(Decision::Mismatch);
     }
     let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
-    Ok(Decision::Replay(Record {
-        status,
-        headers,
-        body: Bytes::from(body),
-    }))
+    Record::decode(status, headers, Bytes::from(body))
+        .map(Decision::Replay)
+        .map_err(|err| refused("decode_record", AttemptError::Integrity, err.class()))
 }
 
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
@@ -274,11 +274,11 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
 async fn write(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
-    caller: &CallerIdentity,
     fingerprint: &Digest,
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
+    let headers = record.encode_headers();
     let written = observed(
         "write idempotency record",
         sqlx::query!(
@@ -295,14 +295,14 @@ async fn write(
              issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
              caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $9 \
              WHERE r.expires_at <= statement_timestamp()",
-            scope.0.as_slice(),
+            scope.digest.as_slice(),
             fingerprint.as_slice(),
-            record.status,
-            &record.headers as _,
-            record.body.as_ref(),
-            caller.issuer,
-            caller.kind.as_str(),
-            caller.value,
+            record.status(),
+            &headers as _,
+            record.body(),
+            scope.caller.issuer,
+            scope.caller.kind.as_str(),
+            scope.caller.value,
             retention as _,
         )
         .execute(tx),
@@ -389,13 +389,15 @@ mod tests {
 
     #[test]
     fn the_lock_key_is_the_digest_prefix_as_big_endian() {
-        let mut digest = [0xff; 32];
-        digest[..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        let caller = CallerIdentity {
+            issuer: "https://issuer.example".into(),
+            kind: CallerKind::Subject,
+            value: "fixture-subject".into(),
+        };
         assert_eq!(
-            ScopeKey::from_digest(digest).lock_key(),
-            0x0102_0304_0506_0708
+            ScopeKey::new(caller, b"k-123").lock_key(),
+            i64::from_be_bytes([0x98, 0xdf, 0x40, 0x43, 0xb9, 0xe7, 0x95, 0x01])
         );
-        assert_eq!(ScopeKey::from_digest([0xff; 32]).lock_key(), -1);
     }
 
     #[test]
@@ -441,10 +443,9 @@ mod tests {
             let mut ran = false;
             let attempted = store
                 .attempt(
-                    &ScopeKey::from_digest([0; 32]),
-                    &caller,
+                    &ScopeKey::new(caller, b"k"),
                     &[0; 32],
-                    async |_: &mut Tx<'_>| -> Result<(Record, ()), ()> {
+                    async |_: &mut Tx<'_>| -> Result<Record, ()> {
                         ran = true;
                         Err(())
                     },

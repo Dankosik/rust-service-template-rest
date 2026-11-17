@@ -3,8 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use http::{HeaderMap, header::AUTHORIZATION};
-use infra_outbound_http::Client;
+use infra_outbound_http::{Client, PreparedRequest};
 use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::SecretString;
@@ -195,21 +194,17 @@ impl Credentials {
     }
 
     fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        if let Some(error) = deadline.expired_error() {
+        if let Some(error) = deadline.stopped_error() {
             return Err(error);
         }
         self.check_lifecycle(deadline)
     }
 
-    pub(crate) async fn authorize(
+    pub(crate) async fn acquire_for_request(
         &self,
-        headers: &mut HeaderMap,
         on_behalf_of: Option<OnBehalfOf>,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        context.check().map_err(acquisition_stopped)?;
-        let deadline = acquisition_deadline(context, request_context);
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
@@ -219,13 +214,14 @@ impl Credentials {
         };
         let acquired = tokio::select! {
             biased;
-            stopped = context.wait_stopped() => return Err(acquisition_stopped(stopped)),
+            stopped = deadline.context.wait_stopped() => return Err(acquisition_stopped(stopped)),
             result = acquisition => result,
         };
-        context.check().map_err(acquisition_stopped)?;
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
+        }
         let acquired = acquired?;
         acquired.check_expiry(Instant::now())?;
-        headers.insert(AUTHORIZATION, acquired.header.clone());
         Ok(acquired)
     }
 
@@ -395,8 +391,7 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     expiry: AcquisitionError,
-    context: &'a OperationContext,
-    request_context: Option<&'a OperationContext>,
+    context: AcquisitionContext<'a>,
 }
 
 impl AcquisitionDeadline<'_> {
@@ -410,20 +405,54 @@ impl AcquisitionDeadline<'_> {
     }
 
     fn stopped_error(self) -> Option<AcquisitionError> {
-        self.expired_error().or_else(|| {
-            self.request_context
-                .and_then(OperationContext::stopped)
-                .or_else(|| self.context.stopped())
-                .map(acquisition_stopped)
-        })
+        self.expired_error()
+            .or_else(|| self.context.stopped().map(acquisition_stopped))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AcquisitionContext<'a> {
+    Operation(&'a OperationContext),
+    Http(&'a PreparedRequest<'a>),
+}
+
+impl<'a> From<&'a OperationContext> for AcquisitionContext<'a> {
+    fn from(context: &'a OperationContext) -> Self {
+        Self::Operation(context)
+    }
+}
+
+impl<'a> From<&'a PreparedRequest<'_>> for AcquisitionContext<'a> {
+    fn from(request: &'a PreparedRequest<'_>) -> Self {
+        Self::Http(request)
+    }
+}
+
+impl AcquisitionContext<'_> {
+    fn stopped(self) -> Option<Stopped> {
+        match self {
+            Self::Operation(context) => context.stopped(),
+            Self::Http(request) => request.stopped(),
+        }
+    }
+
+    async fn wait_stopped(self) -> Stopped {
+        match self {
+            Self::Operation(context) => context.wait_stopped().await,
+            Self::Http(request) => request.wait_stopped().await,
+        }
     }
 }
 
 pub(crate) fn acquisition_deadline<'a>(
-    context: &'a OperationContext,
-    request_context: Option<&'a OperationContext>,
+    context: impl Into<AcquisitionContext<'a>>,
 ) -> AcquisitionDeadline<'a> {
-    let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
+    let context = context.into();
+    let deadline = match context {
+        AcquisitionContext::Operation(context) => context.deadline(),
+        AcquisitionContext::Http(request) => request.deadline(),
+    };
+    let (cutoff, expiry) = match deadline.and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, AcquisitionError::Timeout),
         None => (
             Instant::now() + FETCH_TIMEOUT,
@@ -434,7 +463,6 @@ pub(crate) fn acquisition_deadline<'a>(
         cutoff,
         expiry,
         context,
-        request_context,
     }
 }
 
@@ -445,7 +473,7 @@ fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     }
 }
 
-pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
+fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
     match stopped {
         Stopped::Deadline => AcquisitionError::Timeout,
         Stopped::Cancelled => AcquisitionError::Cancelled,

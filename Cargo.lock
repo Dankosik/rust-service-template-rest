@@ -2628,6 +2628,7 @@ dependencies = [
  "operation-context",
  "parking_lot",
  "prost",
+ "prost-reflect",
  "prost-types",
  "rcgen",
  "regex",
@@ -2739,8 +2740,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "derive_more",
+ "http",
  "infra-postgres",
  "metrics",
+ "sha2 0.11.1",
  "sqlx",
  "thiserror",
  "tokio",
@@ -2853,7 +2856,9 @@ dependencies = [
  "serde_json",
  "shared-rules",
  "thiserror",
+ "tls-test-support",
  "tokio",
+ "tokio-rustls",
  "tonic",
  "tonic-prost",
  "tower",
@@ -4269,6 +4274,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "prost-reflect"
+version = "0.16.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
+dependencies = [
+ "prost",
+ "prost-types",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{
-    AcquisitionError, Credentials,
+    AcquisitionError, ConfigurationError, Credentials, IdentityMode,
     credentials::acquisition_deadline,
     request_admission::{AdmissionRefusal, admit_request_subject},
 };
@@ -21,25 +21,26 @@ use crate::{
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
-    subject_required: bool,
-}
-
-impl AuthenticatedClient {
-    #[must_use]
-    pub fn require_on_behalf_of(mut self) -> Self {
-        self.subject_required = true;
-        self
-    }
+    mode: IdentityMode,
 }
 
 impl Credentials {
-    #[must_use]
-    pub fn grpc(&self, resource: Client) -> AuthenticatedClient {
-        AuthenticatedClient {
+    pub fn grpc(
+        &self,
+        resource: Client,
+        mode: IdentityMode,
+    ) -> Result<AuthenticatedClient, ConfigurationError> {
+        if !resource.uses_tls() {
+            return Err(ConfigurationError {
+                key: "grpc_resource",
+                reason: "must use TLS to carry OAuth2 bearer tokens",
+            });
+        }
+        Ok(AuthenticatedClient {
             credentials: self.clone(),
             resource,
-            subject_required: false,
-        }
+            mode,
+        })
     }
 }
 
@@ -53,12 +54,12 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let admission = admit_request_subject(&mut request, self.subject_required);
+        let admission = admit_request_subject(&mut request, self.mode);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();
         let precheck = self
             .credentials
-            .check_lifecycle(acquisition_deadline(&context, None))
+            .check_lifecycle(acquisition_deadline(&context))
             .map_err(acquisition_status)
             .and_then(|()| admission.map_err(admission_status));
         let on_behalf_of = match precheck {
@@ -68,12 +69,15 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let credentials = self.credentials.clone();
         Box::pin(async move {
             let token = match credentials
-                .authorize(prepared.headers_mut(), on_behalf_of, &context, None)
+                .acquire_for_request(on_behalf_of, acquisition_deadline(&context))
                 .await
             {
                 Ok(acquired) => acquired,
                 Err(error) => return Err(prepared.refuse(acquisition_status(error))),
             };
+            prepared
+                .headers_mut()
+                .insert(http::header::AUTHORIZATION, token.header.clone());
             let used = Arc::downgrade(&token);
             prepared
                 .send_with_dispatch_check(
@@ -102,6 +106,9 @@ fn admission_status(refusal: AdmissionRefusal) -> Status {
             Status::internal("authorization conflicts with client credentials")
         }
         AdmissionRefusal::SubjectRequired => Status::internal("on-behalf-of subject is required"),
+        AdmissionRefusal::UnexpectedSubject => {
+            Status::internal("service identity does not accept an on-behalf-of subject")
+        }
     }
 }
 

@@ -104,6 +104,8 @@ pub enum Error {
     AuthorizationConflict,
     #[error("request carries no subject to act on behalf of")]
     SubjectRequired,
+    #[error("service identity does not accept an on-behalf-of subject")]
+    UnexpectedSubject,
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]

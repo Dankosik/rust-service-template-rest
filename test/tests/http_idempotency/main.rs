@@ -21,12 +21,18 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use axum::http::header::{
+    CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
+    LOCATION,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use backon::{ConstantBuilder, Retryable};
+use bytes::Bytes;
 use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
     AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
-    CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
+    CallerKind, CleanupError, Digest, Record, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
 use integration_tests::{close_pools, dsn_for, poll_until};
@@ -36,13 +42,7 @@ use tokio_util::sync::CancellationToken;
 
 use commit_proxy::{CommitProxy, ReadyBoundary};
 
-type Committing<R> = Result<(Record, Record), R>;
-
-type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
-
-fn returned(record: Record) -> (Record, Record) {
-    (record.clone(), record)
-}
+type Outcome<R> = Result<Attempted<R>, AttemptError>;
 
 const APP: &str = "integration-tests-idempotency";
 const RETENTION: Duration = Duration::from_hours(1);
@@ -50,9 +50,10 @@ const WAIT: Duration = Duration::from_secs(10);
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
 const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 
-const SCOPE: Digest = [0x11; 32];
-const OTHER_CALLER: Digest = [0x12; 32];
-const OTHER_SCOPE: Digest = [0x13; 32];
+const KEY: &[u8] = b"k-123";
+const OTHER_KEY: &[u8] = b"other-key";
+const SUBJECT: &str = "fixture-subject";
+const OTHER_SUBJECT: &str = "other-subject";
 const INPUT: Digest = [0xa1; 32];
 const OTHER_INPUT: Digest = [0xa2; 32];
 
@@ -114,20 +115,20 @@ async fn count(pool: &PgPool, sql: &'static str) -> i64 {
         .expect("a count")
 }
 
-async fn records(pool: &PgPool, scope: Digest) -> i64 {
+async fn records(pool: &PgPool, scope: &ScopeKey) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM http_idempotency_records WHERE scope_key = $1")
-        .bind(scope)
+        .bind(scope.digest())
         .fetch_one(pool)
         .await
         .expect("a record count")
 }
 
-async fn expire(pool: &PgPool, scope: Digest) {
+async fn expire(pool: &PgPool, scope: &ScopeKey) {
     let moved = sqlx::query(
         "UPDATE http_idempotency_records SET expires_at = now() - interval '1 second' \
          WHERE scope_key = $1",
     )
-    .bind(scope)
+    .bind(scope.digest())
     .execute(pool)
     .await
     .expect("the expiry moves");
@@ -144,44 +145,28 @@ async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
 }
 
 fn success(body: &str) -> Record {
-    Record {
-        status: 201,
-        headers: vec![
-            HeaderPair {
-                name: "content-type".to_owned(),
-                value: b"application/json".to_vec(),
-            },
-            HeaderPair {
-                name: "content-encoding".to_owned(),
-                value: b"br".to_vec(),
-            },
-            HeaderPair {
-                name: "content-language".to_owned(),
-                value: b"en".to_vec(),
-            },
-            HeaderPair {
-                name: "content-language".to_owned(),
-                value: b"fr".to_vec(),
-            },
-            HeaderPair {
-                name: "content-disposition".to_owned(),
-                value: b"attachment; filename=widget.json".to_vec(),
-            },
-            HeaderPair {
-                name: "location".to_owned(),
-                value: b"/widgets/1".to_vec(),
-            },
-            HeaderPair {
-                name: "etag".to_owned(),
-                value: vec![b'\"', 0x80, b'\"'],
-            },
-            HeaderPair {
-                name: "last-modified".to_owned(),
-                value: b"Sun, 06 Nov 1994 08:49:37 GMT".to_vec(),
-            },
-        ],
-        body: body.as_bytes().to_vec().into(),
+    let mut headers = HeaderMap::new();
+    for (name, value) in [
+        (CONTENT_TYPE, "application/json"),
+        (CONTENT_ENCODING, "br"),
+        (CONTENT_LANGUAGE, "en"),
+        (CONTENT_LANGUAGE, "fr"),
+        (CONTENT_DISPOSITION, "attachment; filename=widget.json"),
+        (LOCATION, "/widgets/1"),
+        (LAST_MODIFIED, "Sun, 06 Nov 1994 08:49:37 GMT"),
+    ] {
+        headers.append(name, HeaderValue::from_static(value));
     }
+    headers.append(
+        ETAG,
+        HeaderValue::from_bytes(b"\"\x80\"").expect("valid opaque bytes"),
+    );
+    Record::capture(
+        StatusCode::CREATED,
+        &headers,
+        Bytes::copy_from_slice(body.as_bytes()),
+    )
+    .expect("a storable response")
 }
 
 fn caller(value: &str) -> CallerIdentity {
@@ -273,26 +258,25 @@ enum Refusal {
 
 async fn execute(
     store: &Store,
-    scope: Digest,
+    scope: &ScopeKey,
     fingerprint: Digest,
     record: &Record,
     work: &Work,
 ) -> Outcome<Refusal> {
-    let caller = caller("fixture-subject");
     store
-        .attempt(
-            &ScopeKey::from_digest(scope),
-            &caller,
-            &fingerprint,
-            async |tx: &mut Tx<'_>| {
-                work.run(tx).await;
-                Ok(returned(record.clone()))
-            },
-        )
+        .attempt(scope, &fingerprint, async |tx: &mut Tx<'_>| {
+            work.run(tx).await;
+            Ok(record.clone())
+        })
         .await
 }
 
-async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -> Outcome<Refusal> {
+async fn once_free(
+    store: &Store,
+    scope: &ScopeKey,
+    record: &Record,
+    work: &Work,
+) -> Outcome<Refusal> {
     bounded(
         "the key is released",
         (|| async {
@@ -338,13 +322,14 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     let (pool_2, replica_2) = replica(&dsn).await;
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
 
     work.hold.arm();
-    let (held, ()) = tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
+    let (held, ()) = tokio::join!(execute(&replica_1, &scope, INPUT, &record, &work), async {
         work.hold.entered().await;
         for replica in [&replica_1, &replica_2] {
             for fingerprint in [INPUT, OTHER_INPUT] {
-                let duplicate = execute(replica, SCOPE, fingerprint, &record, &work).await;
+                let duplicate = execute(replica, &scope, fingerprint, &record, &work).await;
                 std::assert_matches!(duplicate, Ok(Attempted::InProgress), "{duplicate:?}");
             }
         }
@@ -354,13 +339,13 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     assert_eq!(committed(held), record);
 
     for replica in [&replica_1, &replica_2] {
-        let retry = execute(replica, SCOPE, INPUT, &record, &work).await;
+        let retry = execute(replica, &scope, INPUT, &record, &work).await;
         assert_eq!(live(retry), Some(record.clone()));
     }
     let concurrent = [
         &replica_1, &replica_2, &replica_1, &replica_2, &replica_1, &replica_2,
     ]
-    .map(|replica| execute(replica, SCOPE, INPUT, &record, &work));
+    .map(|replica| execute(replica, &scope, INPUT, &record, &work));
     for retry in join_all(concurrent).await {
         assert_eq!(live(retry), Some(record.clone()));
     }
@@ -376,30 +361,25 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
-    let caller = caller("fixture-subject");
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refused: Outcome<Refusal> = store
-        .attempt(
-            &ScopeKey::from_digest(SCOPE),
-            &caller,
-            &INPUT,
-            async |tx: &mut Tx<'_>| {
-                work.run(tx).await;
-                sqlx::query(INSERT_LIVE)
-                    .bind(SCOPE)
-                    .bind(OTHER_INPUT)
-                    .execute(&pool)
-                    .await
-                    .expect("another writer commits a live record");
-                Ok(returned(record.clone()))
-            },
-        )
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            work.run(tx).await;
+            sqlx::query(INSERT_LIVE)
+                .bind(scope.digest())
+                .bind(OTHER_INPUT)
+                .execute(&pool)
+                .await
+                .expect("another writer commits a live record");
+            Ok(record.clone())
+        })
         .await;
     std::assert_matches!(refused, Err(AttemptError::Internal), "{refused:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    let decided = execute(&store, SCOPE, INPUT, &record, &work).await;
+    let decided = execute(&store, &scope, INPUT, &record, &work).await;
     assert_eq!(live(decided), None);
-    assert_eq!(records(&pool, SCOPE).await, 1);
+    assert_eq!(records(&pool, &scope).await, 1);
     assert_eq!(work.runs(), 1);
     close_pools(&[&store_pool]).await;
 }
@@ -413,31 +393,27 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
-    let caller = caller("fixture-subject");
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let other_caller = ScopeKey::new(caller(OTHER_SUBJECT), KEY);
+    let other_key = ScopeKey::new(caller(SUBJECT), OTHER_KEY);
     for (scope, refusal) in [
-        (SCOPE, Refusal::NotSuccess),
-        (OTHER_CALLER, Refusal::Unstorable),
+        (&scope, Refusal::NotSuccess),
+        (&other_caller, Refusal::Unstorable),
     ] {
-        let outcome = replica_1
-            .attempt(
-                &ScopeKey::from_digest(scope),
-                &caller,
-                &INPUT,
-                async |tx: &mut Tx<'_>| -> Committing<Refusal> {
-                    work.run(tx).await;
-                    Err(refusal)
-                },
-            )
+        let outcome: Outcome<Refusal> = replica_1
+            .attempt(scope, &INPUT, async |tx: &mut Tx<'_>| {
+                work.run(tx).await;
+                Err(refusal)
+            })
             .await;
         std::assert_matches!(outcome, Ok(Attempted::RolledBack(returned)) if returned == refusal,
             "{outcome:?}"
         );
     }
     let panicked = AssertUnwindSafe(replica_1.attempt(
-        &ScopeKey::from_digest(OTHER_SCOPE),
-        &caller,
+        &other_key,
         &INPUT,
-        async |tx: &mut Tx<'_>| -> Committing<Refusal> {
+        async |tx: &mut Tx<'_>| -> Result<Record, Refusal> {
             work.run(tx).await;
             panic!("the work panics after writing its effect");
         },
@@ -448,7 +424,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     assert_eq!(work.runs(), 3);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    for scope in [SCOPE, OTHER_CALLER, OTHER_SCOPE] {
+    for scope in [&scope, &other_caller, &other_key] {
         assert_eq!(records(&pool, scope).await, 0);
         let retry = once_free(&replica_2, scope, &record, &work).await;
         assert_eq!(committed(retry), record);
@@ -467,25 +443,43 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     let record = success(r#"{"id":1,"name":"first"}"#);
     let other = success(r#"{"id":2,"name":"other"}"#);
     let work = Work::default();
-    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
-    let replayed = execute(&replica_2, SCOPE, INPUT, &other, &work).await;
+    let replayed = execute(&replica_2, &scope, INPUT, &other, &work).await;
     assert_eq!(live(replayed), Some(record.clone()));
-    let mismatched = execute(&replica_2, SCOPE, OTHER_INPUT, &other, &work).await;
+    let mismatched = execute(&replica_2, &scope, OTHER_INPUT, &other, &work).await;
     assert_eq!(live(mismatched), None);
     assert_eq!(work.runs(), 1);
 
-    for scope in [OTHER_CALLER, OTHER_SCOPE] {
-        let independent = execute(&replica_2, scope, INPUT, &other, &work).await;
+    for independent_scope in [
+        ScopeKey::new(caller(OTHER_SUBJECT), KEY),
+        ScopeKey::new(caller(SUBJECT), OTHER_KEY),
+        ScopeKey::new(
+            CallerIdentity {
+                issuer: "https://other-issuer.example".into(),
+                ..caller(SUBJECT)
+            },
+            KEY,
+        ),
+        ScopeKey::new(
+            CallerIdentity {
+                kind: CallerKind::Client,
+                ..caller(SUBJECT)
+            },
+            KEY,
+        ),
+    ] {
+        let independent = execute(&replica_2, &independent_scope, INPUT, &other, &work).await;
         assert_eq!(committed(independent), other);
     }
-    assert_eq!(work.runs(), 3);
-    assert_eq!(count(&pool, EFFECTS).await, 3);
+    assert_eq!(work.runs(), 5);
+    assert_eq!(count(&pool, EFFECTS).await, 5);
     let metadata: (String, String, String) = sqlx::query_as(
         "SELECT issuer, caller_kind, caller_value FROM http_idempotency_records WHERE scope_key = $1",
     )
-    .bind(SCOPE)
+    .bind(scope.digest())
     .fetch_one(&pool)
     .await
     .expect("the stored caller metadata");
@@ -501,13 +495,65 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
+    let fingerprint: Digest = [
+        0x2e, 0x4f, 0xb5, 0x7a, 0x46, 0x09, 0x5c, 0x45, 0xe8, 0x86, 0xd2, 0x90, 0x70, 0x7b, 0xf6,
+        0x45, 0x41, 0x23, 0x66, 0x96, 0x6b, 0xf1, 0x00, 0x09, 0x31, 0x40, 0x01, 0xfd, 0x08, 0x7e,
+        0xb3, 0x0b,
+    ];
+    sqlx::query(
+        "INSERT INTO http_idempotency_records \
+         (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
+         VALUES (decode('98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94', 'hex'), \
+         $1, 201, ARRAY[ \
+           ROW('content-type', convert_to('application/json', 'UTF8'))::http_idempotency_header_pair, \
+           ROW('content-language', convert_to('en', 'UTF8'))::http_idempotency_header_pair, \
+           ROW('content-language', convert_to('fr', 'UTF8'))::http_idempotency_header_pair, \
+           ROW('etag', decode('228022', 'hex'))::http_idempotency_header_pair \
+         ], $2, 'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')",
+    )
+    .bind(fingerprint)
+    .bind(br#"{"id":1}"#.as_slice())
+    .execute(&pool)
+    .await
+    .expect("seed a record in the existing format");
+
+    let (store_pool, store) = replica(&dsn_for(&pool).await).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let replay: Outcome<()> = store
+        .attempt(&scope, &fingerprint, async |_: &mut Tx<'_>| {
+            panic!("an existing row must replay without running work")
+        })
+        .await;
+    let Ok(Attempted::Replay(record)) = replay else {
+        panic!("expected a replay of the existing record, got {replay:?}");
+    };
+    let (status, headers, body) = record.into_parts();
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body.as_ref(), br#"{"id":1}"#);
+    assert_eq!(headers.len(), 4);
+    assert_eq!(headers[CONTENT_TYPE], "application/json");
+    assert_eq!(
+        headers
+            .get_all(CONTENT_LANGUAGE)
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        [b"en".as_slice(), b"fr".as_slice()]
+    );
+    assert_eq!(headers[ETAG].as_bytes(), b"\"\x80\"");
+    close_pools(&[&store_pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     let record = success("stored body");
     let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
     assert_eq!(
-        committed(execute(&store, SCOPE, INPUT, &record, &work).await),
+        committed(execute(&store, &scope, INPUT, &record, &work).await),
         record
     );
 
@@ -538,7 +584,7 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
         ),
     ] {
         let changed = sqlx::query(corruption)
-            .bind(SCOPE)
+            .bind(scope.digest())
             .execute(&pool)
             .await
             .expect("one stored column is corrupted");
@@ -546,7 +592,7 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
         for fingerprint in [INPUT, OTHER_INPUT] {
             let result = bounded(
                 "the corrupt record is refused",
-                execute(&store, SCOPE, fingerprint, &record, &work),
+                execute(&store, &scope, fingerprint, &record, &work),
             )
             .await;
             if fingerprint == INPUT || mismatch_sees_it {
@@ -569,22 +615,17 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     for part in 0..2_048 {
         write!(&mut caller_value, "caller-{part:08x};").expect("String writes do not fail");
     }
-    let caller = caller(&caller_value);
+    let scope = ScopeKey::new(caller(&caller_value), KEY);
     let record = success(r#"{"id":1,"name":"long-caller"}"#);
 
     let first: Outcome<()> = store
-        .attempt(
-            &ScopeKey::from_digest(SCOPE),
-            &caller,
-            &INPUT,
-            async |tx: &mut Tx<'_>| {
-                sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(&mut *tx)
-                    .await
-                    .expect("the committed effect");
-                Ok(returned(record.clone()))
-            },
-        )
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                .execute(&mut *tx)
+                .await
+                .expect("the committed effect");
+            Ok(record.clone())
+        })
         .await;
     match first {
         Ok(Attempted::Committed(actual)) => assert_eq!(actual, record),
@@ -592,18 +633,13 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     }
 
     let replayed: Outcome<()> = store
-        .attempt(
-            &ScopeKey::from_digest(SCOPE),
-            &caller,
-            &INPUT,
-            async |tx: &mut Tx<'_>| {
-                sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(&mut *tx)
-                    .await
-                    .expect("a replay must not run this effect");
-                Ok(returned(record.clone()))
-            },
-        )
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                .execute(&mut *tx)
+                .await
+                .expect("a replay must not run this effect");
+            Ok(record.clone())
+        })
         .await;
     match replayed {
         Ok(Attempted::Replay(actual)) => assert_eq!(actual, record),
@@ -613,7 +649,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     let stored: String = sqlx::query_scalar(
         "SELECT caller_value FROM http_idempotency_records WHERE scope_key = $1",
     )
-    .bind(SCOPE)
+    .bind(scope.digest())
     .fetch_one(&pool)
     .await
     .expect("the stored caller identity");
@@ -630,15 +666,16 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     let record = success(r#"{"id":1}"#);
     let replacement = success(r#"{"id":2}"#);
     let work = Work::default();
-    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
-    expire(&pool, SCOPE).await;
+    expire(&pool, &scope).await;
 
-    let afresh = execute(&replica_2, SCOPE, OTHER_INPUT, &replacement, &work).await;
+    let afresh = execute(&replica_2, &scope, OTHER_INPUT, &replacement, &work).await;
     assert_eq!(committed(afresh), replacement);
-    let decided = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
+    let decided = execute(&replica_1, &scope, INPUT, &record, &work).await;
     assert_eq!(live(decided), None);
-    assert_eq!(records(&pool, SCOPE).await, 1);
+    assert_eq!(records(&pool, &scope).await, 1);
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
     close_pools(&[&pool_1, &pool_2]).await;
@@ -651,14 +688,15 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
     let retention = Duration::from_secs(2);
     let store = Store::new(store_pool.clone(), retention).expect("retention fits PostgreSQL");
 
-    for (scope, delete_while_locked) in [(SCOPE, false), (OTHER_SCOPE, true)] {
+    for (key, delete_while_locked) in [(KEY, false), (OTHER_KEY, true)] {
+        let scope = ScopeKey::new(caller(SUBJECT), key);
         sqlx::query(INSERT_LIVE)
-            .bind(scope)
+            .bind(scope.digest())
             .bind(INPUT)
             .execute(&pool)
             .await
             .expect("seed the old record");
-        expire(&pool, scope).await;
+        expire(&pool, &scope).await;
 
         #[expect(
             clippy::disallowed_methods,
@@ -668,7 +706,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
         let holder_pid: i32 = sqlx::query_scalar(
             "SELECT pg_backend_pid() FROM http_idempotency_records WHERE scope_key = $1 FOR UPDATE",
         )
-        .bind(scope)
+        .bind(scope.digest())
         .fetch_one(&mut *holder)
         .await
         .expect("lock the expired record");
@@ -676,7 +714,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
         let work = Work::default();
         let response = success(r#"{"id":2}"#);
         let (written, before_release) = bounded("the blocked record write to commit", async {
-            tokio::join!(execute(&store, scope, INPUT, &response, &work), async {
+            tokio::join!(execute(&store, &scope, INPUT, &response, &work), async {
                 poll_until(
                     "the writer waits on the row lock",
                     WAIT,
@@ -699,7 +737,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
                 tokio::time::sleep(retention + RETRY_PAUSE).await;
                 if delete_while_locked {
                     sqlx::query("DELETE FROM http_idempotency_records WHERE scope_key = $1")
-                        .bind(scope)
+                        .bind(scope.digest())
                         .execute(&mut *holder)
                         .await
                         .expect("delete the expired record as cleanup would");
@@ -718,7 +756,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
         let retry_response = success(r#"{"id":3}"#);
         let retry = bounded(
             "same-key replay after the write",
-            execute(&store, scope, INPUT, &retry_response, &work),
+            execute(&store, &scope, INPUT, &retry_response, &work),
         )
         .await;
         assert_eq!(live(retry), Some(response));
@@ -727,7 +765,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
             "SELECT expires_at >= $2::text::timestamptz + $3::interval \
              FROM http_idempotency_records WHERE scope_key = $1",
         )
-        .bind(scope)
+        .bind(scope.digest())
         .bind(before_release)
         .bind(retention)
         .fetch_one(&pool)
@@ -750,24 +788,28 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
     let original = success(r#"{"id":1}"#);
     let replacement = success(r#"{"id":2}"#);
     let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
 
-    let seeded = execute(&writer, SCOPE, INPUT, &original, &work).await;
+    let seeded = execute(&writer, &scope, INPUT, &original, &work).await;
     assert_eq!(committed(seeded), original);
     proxy.arm_ready_hold(ReadyBoundary::ExecuteSync);
     let (replay, afresh) = bounded("replay across expiry", async {
-        tokio::join!(execute(&replaying, SCOPE, INPUT, &original, &work), async {
-            proxy.ready_held().await;
-            expire(&pool, SCOPE).await;
-            let outcome = execute(&writer, SCOPE, OTHER_INPUT, &replacement, &work).await;
-            proxy.release_ready();
-            outcome
-        })
+        tokio::join!(
+            execute(&replaying, &scope, INPUT, &original, &work),
+            async {
+                proxy.ready_held().await;
+                expire(&pool, &scope).await;
+                let outcome = execute(&writer, &scope, OTHER_INPUT, &replacement, &work).await;
+                proxy.release_ready();
+                outcome
+            }
+        )
     })
     .await;
 
     assert_eq!(live(replay), Some(original));
     assert_eq!(committed(afresh), replacement);
-    let retry = execute(&writer, SCOPE, OTHER_INPUT, &replacement, &work).await;
+    let retry = execute(&writer, &scope, OTHER_INPUT, &replacement, &work).await;
     assert_eq!(live(retry), Some(replacement));
     assert_eq!(count(&pool, EFFECTS).await, 2);
     close_pools(&[&replay_pool, &writer_pool]).await;
@@ -781,14 +823,15 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789))
         .expect("retention fits PostgreSQL");
     let record = success(r#"{"id":1}"#);
-    let written = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let written = execute(&store, &scope, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(written), record);
     let on_time: bool = sqlx::query_scalar(
         "SELECT expires_at BETWEEN now() + interval '3599 seconds' \
          AND now() + interval '3601 seconds' \
          FROM http_idempotency_records WHERE scope_key = $1",
     )
-    .bind(SCOPE)
+    .bind(scope.digest())
     .fetch_one(&pool)
     .await
     .expect("the record's expiry");
@@ -806,9 +849,10 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let (pool_2, replica_2) = replica(&dsn).await;
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
-    let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
-    expire(&pool, SCOPE).await;
+    expire(&pool, &scope).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
     seed(&pool, SEED_LIVE, LIVE).await;
     #[expect(
@@ -823,10 +867,10 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
 
     work.hold.arm();
     let (executed, removed) =
-        tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
+        tokio::join!(execute(&replica_1, &scope, INPUT, &record, &work), async {
             work.hold.entered().await;
             let removed = bounded("a cleanup run", Box::pin(replica_2.remove_expired())).await;
-            let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
+            let duplicate = execute(&replica_2, &scope, INPUT, &record, &work).await;
             std::assert_matches!(duplicate, Ok(Attempted::InProgress), "{duplicate:?}");
             work.hold.release();
             removed
@@ -1100,12 +1144,19 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let (writer_pool, writer) = replica(&dsn).await;
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
-    let first = execute(&writer, SCOPE, INPUT, &record, &work).await;
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let other_caller = ScopeKey::new(caller(OTHER_SUBJECT), KEY);
+    let first = execute(&writer, &scope, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
+    sqlx::query("UPDATE http_idempotency_records SET headers = ARRAY[ROW('set-cookie', ''::bytea)::http_idempotency_header_pair] WHERE scope_key = $1")
+        .bind(scope.digest())
+        .execute(&pool)
+        .await
+        .expect("seed a disallowed replay header");
     make_read_only(&pool).await;
     let (reader_pool, reader) = replica(&dsn).await;
-    for scope in [SCOPE, OTHER_CALLER] {
+    for scope in [&scope, &other_caller] {
         let refused = execute(&reader, scope, INPUT, &record, &work).await;
         std::assert_matches!(refused, Err(AttemptError::Unavailable), "{refused:?}");
     }
@@ -1120,31 +1171,26 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
     let record = success(r#"{"id":1}"#);
-    let caller = caller("fixture-subject");
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
 
     let aborted: Outcome<()> = store
-        .attempt(
-            &ScopeKey::from_digest(SCOPE),
-            &caller,
-            &INPUT,
-            async |tx: &mut Tx<'_>| {
-                sqlx::query("INSERT INTO effects DEFAULT VALUES")
-                    .execute(&mut *tx)
-                    .await
-                    .expect("the effect starts inside the transaction");
-                assert!(
-                    sqlx::query("SELECT 1 / 0").execute(&mut *tx).await.is_err(),
-                    "the first statement aborts the transaction"
-                );
-                Ok(returned(record.clone()))
-            },
-        )
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                .execute(&mut *tx)
+                .await
+                .expect("the effect starts inside the transaction");
+            assert!(
+                sqlx::query("SELECT 1 / 0").execute(&mut *tx).await.is_err(),
+                "the first statement aborts the transaction"
+            );
+            Ok(record.clone())
+        })
         .await;
     std::assert_matches!(aborted, Err(AttemptError::Internal), "{aborted:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
-    assert_eq!(records(&pool, SCOPE).await, 0);
+    assert_eq!(records(&pool, &scope).await, 0);
 
-    let retry = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
+    let retry = execute(&store, &scope, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(retry), record);
     assert_eq!(count(&pool, EFFECTS).await, 1);
     close_pools(&[&store_pool]).await;
@@ -1158,9 +1204,10 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     let (pool_2, replica_2) = replica(&dsn).await;
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
 
     work.hold.arm();
-    let mut attempt = Box::pin(execute(&replica_1, SCOPE, INPUT, &record, &work));
+    let mut attempt = Box::pin(execute(&replica_1, &scope, INPUT, &record, &work));
     tokio::select! {
         outcome = &mut attempt => panic!("the held attempt finished: {outcome:?}"),
         () = work.hold.entered() => {}
@@ -1168,11 +1215,11 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     drop(attempt);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    let retry = once_free(&replica_2, SCOPE, &record, &work).await;
+    let retry = once_free(&replica_2, &scope, &record, &work).await;
     assert_eq!(committed(retry), record);
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    assert_eq!(records(&pool, SCOPE).await, 1);
+    assert_eq!(records(&pool, &scope).await, 1);
     close_pools(&[&pool_1, &pool_2]).await;
 }
 

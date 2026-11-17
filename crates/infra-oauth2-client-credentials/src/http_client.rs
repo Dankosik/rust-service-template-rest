@@ -5,8 +5,8 @@ use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 
 use crate::{
-    AcquisitionError, Credentials, Error,
-    credentials::{acquisition_deadline, acquisition_stopped},
+    AcquisitionError, Credentials, Error, IdentityMode,
+    credentials::acquisition_deadline,
     request_admission::{AdmissionRefusal, admit_request_subject},
 };
 
@@ -15,27 +15,21 @@ use crate::{
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
-    subject_required: bool,
+    mode: IdentityMode,
 }
 
 impl Credentials {
     #[must_use]
-    pub fn http(&self, resource: Client) -> AuthenticatedClient {
+    pub fn http(&self, resource: Client, mode: IdentityMode) -> AuthenticatedClient {
         AuthenticatedClient {
             credentials: self.clone(),
             resource,
-            subject_required: false,
+            mode,
         }
     }
 }
 
 impl AuthenticatedClient {
-    #[must_use]
-    pub fn require_on_behalf_of(mut self) -> Self {
-        self.subject_required = true;
-        self
-    }
-
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -53,58 +47,33 @@ impl AuthenticatedClient {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let context = self.resource.begin_operation(context);
-        let request_context = request.extensions().get::<OperationContext>().cloned();
-        let acquisition_context = request_context
-            .as_ref()
-            .and_then(OperationContext::deadline)
-            .map(|request_deadline| {
-                let deadline = context
-                    .deadline()
-                    .map_or(request_deadline, |local| local.earlier(request_deadline));
-                OperationContext::new(Some(deadline), context.cancellation().clone())
-            });
-        let acquisition_context = acquisition_context.as_ref().unwrap_or(&context);
-        let check_stop = || {
-            let request_stop = request_context
-                .as_ref()
-                .map_or(Ok(()), OperationContext::check);
-            acquisition_context
-                .check()
-                .and(request_stop)
-                .map_err(acquisition_stopped)
-        };
-        let request_stopped = async {
-            match &request_context {
-                Some(request_context) => request_context.wait_stopped().await,
-                None => std::future::pending().await,
-            }
-        };
-        self.credentials.check_lifecycle(acquisition_deadline(
-            acquisition_context,
-            request_context.as_ref(),
-        ))?;
-        let on_behalf_of =
-            admit_request_subject(&mut request, self.subject_required).map_err(|refusal| {
-                match refusal {
-                    AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
-                    AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
-                }
-            })?;
-        check_stop()?;
-        let acquired = tokio::select! {
-            biased;
-            stopped = request_stopped => Err(acquisition_stopped(stopped)),
-            result = self.credentials.authorize(
-                request.headers_mut(), on_behalf_of, acquisition_context, request_context.as_ref(),
-            ) => result,
-        };
-        check_stop()?;
-        let acquired = acquired?;
-        self.resource
-            .execute_with_dispatch_check(
-                request,
-                &context,
+        let subject = admit_request_subject(&mut request, self.mode);
+        let mut prepared =
+            self.resource
+                .prepare(request, context)
+                .map_err(|error| match error {
+                    infra_outbound_http::Error::Timeout => {
+                        Error::Acquisition(AcquisitionError::Timeout)
+                    }
+                    infra_outbound_http::Error::Cancelled => {
+                        Error::Acquisition(AcquisitionError::Cancelled)
+                    }
+                    other => Error::Resource(other),
+                })?;
+        let deadline = acquisition_deadline(&prepared);
+        self.credentials.check_lifecycle(deadline)?;
+        let subject = subject.map_err(|refusal| match refusal {
+            AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
+            AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
+            AdmissionRefusal::UnexpectedSubject => Error::UnexpectedSubject,
+        })?;
+        let acquired = self
+            .credentials
+            .acquire_for_request(subject, deadline)
+            .await?;
+        prepared.set_authorization(acquired.header.clone());
+        prepared
+            .send(
                 || acquired.check_expiry(Instant::now()).is_ok(),
                 |status| {
                     if status == StatusCode::UNAUTHORIZED {
