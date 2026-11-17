@@ -442,6 +442,20 @@ impl Fixture {
         Self::open(false, None).await
     }
 
+    async fn with_descriptor_set(contract: &prost_types::FileDescriptorSet) -> Self {
+        use prost::Message as _;
+
+        Self::open_with_at(
+            true,
+            None,
+            limits(),
+            connection_limits(),
+            loopback(),
+            Box::leak(contract.encode_to_vec().into_boxed_slice()),
+        )
+        .await
+    }
+
     async fn tls(pki: &Pki, mtls: bool) -> Self {
         Self::open(true, Some((pki, mtls))).await
     }
@@ -2786,16 +2800,7 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
         .clone();
     unregistered.name = Some("Unregistered".to_owned());
     file.service.push(unregistered);
-    let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
-    let fixture = Fixture::open_with_at(
-        true,
-        None,
-        limits(),
-        connection_limits(),
-        loopback(),
-        descriptor_set,
-    )
-    .await;
+    let fixture = Fixture::with_descriptor_set(&contract).await;
     let expected_names = [
         ECHO_SERVICE,
         "grpc.health.v1.Health",
@@ -2899,16 +2904,7 @@ async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
     let original_count = echo.method.len();
     echo.method.retain(|method| method.name() != "ServerStream");
     assert_eq!(echo.method.len() + 1, original_count);
-    let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
-    let fixture = Fixture::open_with_at(
-        true,
-        None,
-        limits(),
-        connection_limits(),
-        loopback(),
-        descriptor_set,
-    )
-    .await;
+    let fixture = Fixture::with_descriptor_set(&contract).await;
     let mut client = fixture.echo_client();
 
     let omitted = timeout(
