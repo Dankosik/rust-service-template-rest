@@ -94,6 +94,13 @@ within minutes of a fault and reset promptly after recovery.
 
 ## Runbooks
 
+<!-- template:begin authn:docs-alerting-http-authentication -->
+For an HTTP or gRPC `authentication_unavailable` failure, break down
+`authn_token_verifications_total{outcome="failure"}` by `mode` and `reason`.
+If verification failed on a provider call, check
+`authn_provider_request_duration_seconds_count` by `operation` and `outcome`.
+<!-- template:end authn:docs-alerting-http-authentication -->
+
 ### HTTPErrorBudgetBurn
 
 Clients receive 5xx answers faster than the objective allows. In the
