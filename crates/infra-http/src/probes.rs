@@ -105,7 +105,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-    use axum::http::{Method, Request};
+    use axum::http::Request;
     use axum::response::Response;
     use health::{Readiness, RefreshPolicy};
     use tower::ServiceExt;

@@ -416,7 +416,6 @@ mod tests {
     use utoipa::OpenApi;
 
     use super::*;
-    use crate::HardenOptions;
     use crate::test_support::body_json;
 
     #[derive(OpenApi)]

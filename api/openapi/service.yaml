@@ -109,6 +109,8 @@ paths:
           $ref: '#/components/responses/WebhookRejected'
         '404':
           $ref: '#/components/responses/NotFound'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
         '413':
           $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
@@ -290,6 +292,12 @@ components:
             $ref: '#/components/schemas/Problem'
     RequestEntityTooLarge:
       description: request body exceeds configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RequestTimeout:
+      description: request body was not received within the request budget
       content:
         application/problem+json:
           schema:
