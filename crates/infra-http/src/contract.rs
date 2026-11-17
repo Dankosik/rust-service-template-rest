@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{NestedPath, Request, State};
 use axum::handler::Handler;
 use axum::http::{HeaderValue, Method, header::ALLOW};
 use axum::middleware::{self, Next};
@@ -38,6 +38,8 @@ macro_rules! http_route {
 pub enum FinalizeError {
     #[error("application metadata must contain no registered paths")]
     ApplicationPaths,
+    #[error("QUERY and additional operations require OpenAPI 3.2 application metadata")]
+    OpenApi32Required,
     #[error("only the application root may supply global security, schemes, or metadata")]
     ApplicationMetadata,
     #[error("an annotated registration requires one concrete path with native HTTP operations")]
@@ -89,12 +91,15 @@ pub enum Authentication {
 pub struct HttpContract<S> {
     routes: OpenApiRouter<S>,
     application: bool,
-    extensions: BTreeMap<String, HashMap<Method, MethodRouter<S>>>,
+    extensions: HashMap<Method, Router<S>>,
     probes: Vec<Box<str>>,
     // template:begin http-idempotency:http-mounted-operations-field
     idempotency: MountedOperations,
     // template:end http-idempotency:http-mounted-operations-field
 }
+
+#[derive(Clone)]
+struct RegisteredRequest(axum::http::Extensions);
 
 // template:begin http-idempotency:http-mounted-operations
 #[derive(Clone, Default)]
@@ -124,7 +129,7 @@ impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
         Self {
             routes: OpenApiRouter::default(),
             application: false,
-            extensions: BTreeMap::new(),
+            extensions: HashMap::default(),
             probes: Vec::new(),
             // template:begin http-idempotency:http-mounted-operations-init
             idempotency: MountedOperations::default(),
@@ -222,6 +227,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             || metadata.external_docs.is_some()
             || metadata.extensions.is_some()
             || metadata.json_schema_dialect.is_some()
+            || !metadata.schema.is_empty()
             || metadata.self_uri.is_some()
         {
             return Err(FinalizeError::ApplicationMetadata);
@@ -244,12 +250,15 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         H: Handler<T, S>,
         T: 'static,
     {
-        if MethodFilter::try_from(method.clone()).is_ok() {
+        if method != Method::CONNECT && MethodFilter::try_from(method.clone()).is_ok() {
             return Err(FinalizeError::NativeMethod {
                 method: method.to_string(),
             });
         }
         let path = if path.is_empty() { "/" } else { path };
+        if !path.starts_with('/') {
+            return Err(FinalizeError::InvalidRegistration);
+        }
         let mut item = PathItem::default();
         if method.as_str() == "QUERY" {
             item.query = Some(operation);
@@ -257,23 +266,38 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             item.additional_operations
                 .insert(method.to_string(), operation);
         }
-        let mut feature = Self::default();
-        feature
-            .routes
-            .get_openapi_mut()
-            .paths
-            .paths
-            .insert(path.to_owned(), item);
+        let mut paths = Paths::new();
+        paths.paths.insert(path.to_owned(), item);
+        if method == Method::CONNECT {
+            let route = (
+                Vec::new(),
+                paths,
+                axum::routing::on(MethodFilter::CONNECT, handler),
+            );
+            return self.merge(Self::feature_route(OpenApi::default(), route)?);
+        }
+        let mut feature =
+            Self::feature_route(OpenApi::default(), (Vec::new(), paths, MethodRouter::new()))?;
+        let dispatch = move |State(state): State<S>, mut request: Request| {
+            let handler = handler.clone();
+            async move {
+                let Some(RegisteredRequest(mut extensions)) = request.extensions_mut().remove()
+                else {
+                    return sanitized_internal_error();
+                };
+                if let Some(nested) = request.extensions_mut().remove::<NestedPath>() {
+                    extensions.insert(nested);
+                }
+                *request.extensions_mut() = extensions;
+                handler.call(request, state).await
+            }
+        };
         #[expect(
             clippy::disallowed_methods,
             reason = "the dispatcher selects this handler by its exact registered extension method"
         )]
-        let handler = axum::routing::any(handler);
-        feature
-            .extensions
-            .entry(path.to_owned())
-            .or_default()
-            .insert(method, handler);
+        let router = Router::new().route(path, axum::routing::any(dispatch));
+        feature.extensions.insert(method, router);
         self.merge(feature)
     }
 
@@ -283,15 +307,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             extensions: self
                 .extensions
                 .into_iter()
-                .map(|(path, handlers)| {
-                    (
-                        path,
-                        handlers
-                            .into_iter()
-                            .map(|(method, handler)| (method, handler.with_state(state.clone())))
-                            .collect(),
-                    )
-                })
+                .map(|(method, router)| (method, router.with_state(state.clone())))
                 .collect(),
             probes: self.probes,
             application: self.application,
@@ -340,8 +356,9 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             self = self.with_components(incoming)?;
         }
         self.routes = self.routes.merge(other.routes);
-        for (path, handlers) in other.extensions {
-            self.extensions.entry(path).or_default().extend(handlers);
+        for (method, router) in other.extensions {
+            let existing = self.extensions.entry(method).or_default();
+            *existing = std::mem::take(existing).merge(router);
         }
         self.probes.extend(other.probes);
         // template:begin http-idempotency:http-merge-mounted-operations
@@ -358,11 +375,9 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         let components = other.routes.get_openapi_mut().components.take();
         other.routes = OpenApiRouter::default().nest(prefix, other.routes);
         other.routes.get_openapi_mut().components = components;
-        other.extensions = other
-            .extensions
-            .into_iter()
-            .map(|(path, handlers)| (nested_path(prefix, &path).into_string(), handlers))
-            .collect();
+        for router in other.extensions.values_mut() {
+            *router = Router::new().nest(prefix, std::mem::take(router));
+        }
         for path in &mut other.probes {
             *path = nested_path(prefix, path);
         }
@@ -417,6 +432,18 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     fn finalize(&mut self, probes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
         let document = self.routes.get_openapi_mut();
         normalize_root(&mut document.paths)?;
+        if document
+            .paths
+            .paths
+            .values()
+            .any(|item| item.query.is_some() || !item.additional_operations.is_empty())
+        {
+            use utoipa::openapi::OpenApiVersion;
+            if self.application && document.openapi != OpenApiVersion::Version32 {
+                return Err(FinalizeError::OpenApi32Required);
+            }
+            document.openapi = OpenApiVersion::Version32;
+        }
         let policy = Policy::compile(
             document,
             // template:begin http-idempotency:http-policy-compile-mounts
@@ -471,18 +498,26 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     ) -> Result<Application, FinalizeError> {
         let probes = self.probe_routes();
         let policy = self.finalize(&probes)?;
-        for (path, handlers) in self.extensions {
+        let (mut routes, document) = self.routes.split_for_parts();
+        if !self.extensions.is_empty() {
             let handlers = Arc::new(
-                handlers
+                self.extensions
                     .into_iter()
-                    .map(|(method, handler)| (method, handler.with_state::<()>(state.clone())))
+                    .map(|(method, router)| (method, router.with_state::<()>(state.clone())))
                     .collect::<HashMap<_, _>>(),
             );
-            let dispatch = move |request: Request| {
-                let handler = handlers.get(request.method()).cloned();
+            let dispatch = move |mut request: Request| {
+                let router = handlers.get(request.method()).cloned();
                 async move {
-                    if let Some(handler) = handler {
-                        let Ok(response) = handler.oneshot(request).await;
+                    if let Some(router) = router {
+                        let extensions = std::mem::take(request.extensions_mut());
+                        if let Some(nested) = extensions.get::<NestedPath>() {
+                            request.extensions_mut().insert(nested.clone());
+                        }
+                        request
+                            .extensions_mut()
+                            .insert(RegisteredRequest(extensions));
+                        let Ok(response) = router.oneshot(request).await;
                         response
                     } else {
                         sanitized_internal_error()
@@ -494,13 +529,22 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                 reason = "extension methods share a fallback selected by their exact registered method"
             )]
             {
-                self.routes = self.routes.route(&path, axum::routing::any(dispatch));
+                for (path, item) in document.paths.paths {
+                    if item.query.is_some()
+                        || item
+                            .additional_operations
+                            .keys()
+                            .any(|method| method != "CONNECT")
+                    {
+                        routes = routes.route(&path, axum::routing::any(dispatch.clone()));
+                    }
+                }
             }
         }
         let routes = match authentication {
-            Authentication::Public => finalize_public(self.routes, policy)?,
+            Authentication::Public => finalize_public(routes, policy)?,
             // template:begin authn:http-assembly-finalize
-            Authentication::Bearer(auth) => crate::authn::finalize(self.routes, policy, *auth),
+            Authentication::Bearer(auth) => crate::authn::finalize(routes, policy, *auth),
             // template:end authn:http-assembly-finalize
         };
         // template:begin http-idempotency:http-build-bind-store
@@ -551,10 +595,7 @@ impl tower::Service<Request> for Application {
     }
 }
 
-fn finalize_public<S>(
-    contract: OpenApiRouter<S>,
-    policy: Policy,
-) -> Result<Router<S>, FinalizeError>
+fn finalize_public<S>(contract: Router<S>, policy: Policy) -> Result<Router<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -570,13 +611,12 @@ where
 }
 
 pub(crate) fn layer_routes<S>(
-    contract: OpenApiRouter<S>,
+    router: Router<S>,
     layer: impl FnOnce(Router<S>) -> Router<S>,
 ) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    let (router, _) = contract.split_for_parts();
     if router.has_routes() {
         layer(router)
     } else {
@@ -1023,11 +1063,35 @@ mod tests {
             )
             .unwrap()
             .merge(crate::http_route!(documented_get).unwrap())
+            .unwrap()
+            .extension(
+                "/_test/method",
+                Method::CONNECT,
+                serde_json::from_value(
+                    serde_json::json!({"responses":{"200":{"description":"connected"}}}),
+                )
+                .unwrap(),
+                || async { StatusCode::OK },
+            )
             .unwrap();
         let contract = HttpContract::default().nest("/api", contract).unwrap();
         let published = contract.clone().into_openapi().unwrap();
         let published = serde_json::to_value(published).unwrap();
+        assert_eq!(published["openapi"], "3.2.0");
+        assert_eq!(
+            HttpContract::application(utoipa::openapi::OpenApi::default())
+                .unwrap()
+                .merge(contract.clone())
+                .unwrap()
+                .into_openapi()
+                .err(),
+            Some(FinalizeError::OpenApi32Required)
+        );
         let item = &published["paths"]["/api/_test/method"];
+        assert_eq!(
+            item["additionalOperations"]["CONNECT"]["responses"]["200"]["description"],
+            "connected"
+        );
         let query_unavailable = &item["query"]["responses"]["503"];
         assert!(
             query_unavailable["description"]
@@ -1056,6 +1120,7 @@ mod tests {
             ("COPY", "copy handler"),
             ("GET", "get"),
             ("HEAD", ""),
+            ("CONNECT", ""),
         ] {
             let response = app
                 .clone()
@@ -1096,9 +1161,73 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             allow,
-            ["COPY", "GET", "HEAD", "QUERY"].into_iter().collect()
+            ["CONNECT", "COPY", "GET", "HEAD", "QUERY"]
+                .into_iter()
+                .collect()
         );
         assert_eq!(body_json(response).await["code"], "method_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn extension_methods_retain_their_own_nested_request_context() {
+        async fn context(
+            uri: axum::http::Uri,
+            original: axum::extract::OriginalUri,
+            nested: NestedPath,
+            matched: axum::extract::MatchedPath,
+            crate::extract::Path((tenant, id)): crate::extract::Path<(String, String)>,
+            axum::Extension(marker): axum::Extension<u32>,
+        ) -> String {
+            format!(
+                "{uri} {} {} {} {tenant} {id} {marker}",
+                original.0,
+                nested.as_str(),
+                matched.as_str()
+            )
+        }
+        let operation: Operation = serde_json::from_value(
+            serde_json::json!({"responses":{"200":{"description":"context"}}}),
+        )
+        .unwrap();
+        let query = HttpContract::default()
+            .extension(
+                "/books/{id}",
+                Method::from_bytes(b"QUERY").unwrap(),
+                operation.clone(),
+                context,
+            )
+            .unwrap();
+        let copy = HttpContract::default()
+            .extension(
+                "/v1/books/{id}",
+                Method::from_bytes(b"COPY").unwrap(),
+                operation,
+                context,
+            )
+            .unwrap();
+        let service = app(HttpContract::default()
+            .nest("/tenants/{tenant}", copy.nest("/v1", query).unwrap())
+            .unwrap());
+        for (method, local, prefix) in [
+            ("QUERY", "/books/two?x=1", "/tenants/{tenant}/v1"),
+            ("COPY", "/v1/books/two?x=1", "/tenants/{tenant}"),
+        ] {
+            let response = service
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/tenants/one/v1/books/two?x=1")
+                        .extension(17u32)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), format!("{local} /tenants/one/v1/books/two?x=1 {prefix} /tenants/{{tenant}}/v1/books/{{id}} one two 17").as_bytes());
+        }
     }
 
     // template:begin http-idempotency:http-unregistered-contract-test

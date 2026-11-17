@@ -9,7 +9,6 @@ use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
 use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
-use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, Policy, layer_routes};
 pub use crate::problem::responses::GatewayTimeout;
@@ -82,11 +81,7 @@ where
     }
 }
 
-pub(crate) fn finalize<S>(
-    contract: OpenApiRouter<S>,
-    policy: Policy,
-    verifier: Verifier,
-) -> Router<S>
+pub(crate) fn finalize<S>(contract: Router<S>, policy: Policy, verifier: Verifier) -> Router<S>
 where
     S: Send + Sync + Clone + 'static,
 {
