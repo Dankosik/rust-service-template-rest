@@ -6,6 +6,7 @@ use infra_bearerauthn::test_support::JwtFixture;
 use super::{ACCEPTED, ProviderFixture, UNSCOPED, verifier_fixture};
 // template:end oidc-introspection:grpc-transport-test-introspection-import
 
+#[derive(Clone, Copy)]
 pub(super) enum BearerMode {
     // template:begin oidc-introspection:grpc-transport-test-introspection-mode
     Introspection,
