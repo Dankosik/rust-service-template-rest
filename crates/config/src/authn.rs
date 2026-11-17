@@ -278,10 +278,14 @@ fn deserialize_cache_capacity<'de, D>(deserializer: D) -> Result<usize, D::Error
 where
     D: Deserializer<'de>,
 {
-    deserialize_scalar(
-        deserializer,
-        "`authn.cache_capacity` must be an integer from 1 to 1024",
-    )
+    use shared_rules::oidc_introspection::CACHE_CAPACITY;
+
+    let message = format!(
+        "`authn.cache_capacity` must be an integer from {} to {}",
+        CACHE_CAPACITY.start(),
+        CACHE_CAPACITY.end(),
+    );
+    deserialize_scalar(deserializer, &message)
 }
 
 // template:end oidc-introspection:authn-default-provider-concurrency

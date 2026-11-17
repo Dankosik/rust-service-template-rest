@@ -1,11 +1,7 @@
 use std::assert_matches;
-use std::time::Duration;
-
-use secrecy::SecretString;
 
 use super::*;
 use crate::LoadOptions;
-use crate::PostgresSessionBudgets;
 use crate::load::{Error, load_jobs_operator_from};
 use crate::test_support::{env, load_env, write};
 use crate::validate::validate_with;
@@ -20,14 +16,8 @@ fn workers(max_workers: u32) -> JobsConfig {
     }
 }
 
-fn postgres(max_connections: u32) -> PostgresConfig {
-    PostgresConfig {
-        dsn: SecretString::from("postgres://localhost/app".to_owned()),
-        password_file: None,
-        session_budgets: PostgresSessionBudgets::Startup,
-        max_connections: NonZeroU32::new(max_connections).unwrap(),
-        migration_deadline: Duration::from_mins(5),
-    }
+fn connections(max_connections: u32) -> NonZeroU32 {
+    NonZeroU32::new(max_connections).unwrap()
 }
 
 #[test]
@@ -71,7 +61,9 @@ fn unknown_keys_in_the_section_fail() {
 
 #[test]
 fn one_worker_needs_three_connections() {
-    let err = workers(1).validate_pool_capacity(&postgres(2)).unwrap_err();
+    let err = workers(1)
+        .validate_pool_capacity(connections(2))
+        .unwrap_err();
     assert_eq!(err.key, "postgres.max_connections");
     assert_eq!(
         err.message,
@@ -85,29 +77,29 @@ fn one_worker_needs_three_connections() {
 
 #[test]
 fn one_worker_accepts_three_connections() {
-    workers(1).validate_pool_capacity(&postgres(3)).unwrap();
+    workers(1).validate_pool_capacity(connections(3)).unwrap();
 }
 
 #[test]
 fn eight_workers_need_ten_connections() {
     let jobs = workers(8);
-    let err = jobs.validate_pool_capacity(&postgres(9)).unwrap_err();
+    let err = jobs.validate_pool_capacity(connections(9)).unwrap_err();
     assert_eq!(err.key, "postgres.max_connections");
     assert!(err.message.contains("(10)"), "{err}");
-    jobs.validate_pool_capacity(&postgres(10)).unwrap();
+    jobs.validate_pool_capacity(connections(10)).unwrap();
 }
 
 #[test]
 fn defaults_satisfy_the_pool_bound() {
     JobsConfig::default()
-        .validate_pool_capacity(&postgres(4))
+        .validate_pool_capacity(connections(4))
         .unwrap();
 }
 
 #[test]
 fn five_hundred_workers_refuse_five_hundred_connections() {
     let err = workers(500)
-        .validate_pool_capacity(&postgres(500))
+        .validate_pool_capacity(connections(500))
         .unwrap_err();
     assert_eq!(err.key, "postgres.max_connections");
 }
@@ -135,11 +127,11 @@ fn publisher_capacity_is_reserved_from_ordinary_slots(
 ) {
     let jobs = workers(max_workers);
     let error = jobs
-        .validate_pool_capacity_with_outbox(&postgres(required - 1), ordinary_jobs)
+        .validate_pool_capacity_with_outbox(connections(required - 1), ordinary_jobs)
         .unwrap_err();
     assert_eq!(error.key, "postgres.max_connections");
     assert_eq!(error.message, message);
-    jobs.validate_pool_capacity_with_outbox(&postgres(required), ordinary_jobs)
+    jobs.validate_pool_capacity_with_outbox(connections(required), ordinary_jobs)
         .unwrap();
 }
 // template:end outbox:jobs-outbox-capacity-tests
