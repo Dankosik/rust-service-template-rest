@@ -181,8 +181,10 @@ impl CreateWidgets for SqlWidgets {
 async fn create_widget(
     request: CommandInput,
     principal: VerifiedPrincipal,
+    delegation: Option<DelegationCredential>,
     state: WidgetState,
 ) -> Result<CreateWidget, Box<Problem>> {
+    assert!(delegation.is_none());
     let mut input: NewWidget = request.json()?;
     if !may_create(&principal) {
         return Err(Box::new(forbidden()));
@@ -212,6 +214,7 @@ struct CreateDocument;
     request_body = NewWidget,
     security(("bearerAuth" = [])),
     extensions(
+        ("x-bearer-delegation" = json!(true)),
         ("x-security-decision" = json!({
             "exposure": "protected",
             "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
@@ -225,8 +228,10 @@ struct CreateDocument;
 async fn replace_widget(
     mut request: CommandInput,
     principal: VerifiedPrincipal,
+    delegation: Option<DelegationCredential>,
     state: WidgetState,
 ) -> Result<CreateWidget, Box<Problem>> {
+    assert!(delegation.is_some());
     let _id: i64 = request.path().await?;
     let input = request.json()?;
     if !may_create(&principal) {

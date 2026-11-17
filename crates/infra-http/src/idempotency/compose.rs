@@ -16,19 +16,23 @@ use super::execute::{Attempt, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Ou
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::IdempotencyComponents;
 use super::{CommandInput, KEY_HEADER};
-use crate::HttpContract;
 use crate::authn::VerifiedPrincipal;
 use crate::context::{RequestContext, RequestDeadline, collect_body};
 use crate::problem::{
     Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
     sanitized_internal_error,
 };
+use crate::{DelegationCredential, HttpContract};
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 
 pub fn route<S, C, F>(
     mut document: utoipa::openapi::OpenApi,
-    prepare: impl Fn(CommandInput, VerifiedPrincipal, S) -> F + Clone + Send + Sync + 'static,
+    prepare: impl Fn(CommandInput, VerifiedPrincipal, Option<DelegationCredential>, S) -> F
+    + Clone
+    + Send
+    + Sync
+    + 'static,
 ) -> Result<HttpContract<S>, CompositionError>
 where
     S: Clone + Send + Sync + 'static,
@@ -45,17 +49,18 @@ where
     let method = operation.method;
     let operation_id: Arc<str> = Arc::from(operation.id.as_str());
     let fingerprint_headers: Arc<[HeaderName]> = operation.fingerprint_headers.into();
-    let handler = move |State(state): State<S>, request: Request| {
+    let handler = move |State(state): State<S>, mut request: Request| {
         let operation_id = operation_id.clone();
         let fingerprint_headers = fingerprint_headers.clone();
         let prepare = prepare.clone();
         async move {
+            let delegation = request.extensions_mut().remove::<DelegationCredential>();
             let (input, principal, attempt) =
                 match capture_attempt(operation_id, &fingerprint_headers, request).await {
                     ControlFlow::Continue(captured) => captured,
                     ControlFlow::Break(response) => return response,
                 };
-            match prepare(input, principal, state).await {
+            match prepare(input, principal, delegation, state).await {
                 Ok(command) => attempt.run(command).await,
                 Err(problem) => {
                     Outcome::NotStored.record();

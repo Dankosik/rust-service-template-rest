@@ -199,6 +199,7 @@ mod idempotency_tests {
     async fn idempotent(
         _input: idempotency::CommandInput,
         _principal: infra_http::VerifiedPrincipal,
+        _delegation: Option<infra_http::DelegationCredential>,
         _state: AppState,
     ) -> Result<Create, Box<infra_http::Problem>> {
         Ok(Create)

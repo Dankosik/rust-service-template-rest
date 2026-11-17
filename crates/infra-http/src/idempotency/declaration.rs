@@ -385,7 +385,7 @@ mod tests {
             let feature = OpenApiRouter::new().routes(carrier).into_openapi();
             let contract: crate::HttpContract<()> = root
                 .merge(
-                    crate::idempotency::route(feature, |_, _, ()| async { Ok(TestCommand) })
+                    crate::idempotency::route(feature, |_, _, _, ()| async { Ok(TestCommand) })
                         .unwrap(),
                 )
                 .unwrap();
@@ -456,7 +456,7 @@ mod tests {
             document[field] = value;
             let result = crate::idempotency::route(
                 serde_json::from_value(document).unwrap(),
-                |_, _, ()| async { Ok(TestCommand) },
+                |_, _, _, ()| async { Ok(TestCommand) },
             );
             assert_eq!(result.unwrap_err().rule(), &Rule::Contract(expected));
         }
