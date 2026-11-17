@@ -1799,7 +1799,10 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     assert_eq!(view.error_summary, reclaimed.error_summary);
     assert!(!view.claim_cleared);
 
-    proxy.arm_autocommit(Fault::ForwardThenDrop, "SET state = 'completed'");
+    proxy.arm_autocommit(
+        Fault::ForwardThenDrop,
+        "UPDATE background_jobs AS job SET state = 'completed'",
+    );
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;
     assert_eq!(done.attempts, 2);

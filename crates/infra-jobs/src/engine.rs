@@ -161,11 +161,12 @@ impl Engine {
                 failure.clone(),
             );
         }
-        for run in [
+        let background_tasks = [
             Run::Retention,
             Run::Listener(Arc::clone(&engine)),
             Run::Sampling(kinds),
-        ] {
+        ];
+        for run in background_tasks {
             spawn_guarded(
                 tracker,
                 Arc::clone(&engine.shared),

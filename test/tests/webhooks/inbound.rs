@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use axum_test::TestServer;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use infra_jobs::{Engine, JobError, KindsBuilder, Policy};
+use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
@@ -504,7 +504,7 @@ struct RunningProcessor {
 impl RunningProcessor {
     fn start(pool: &PgPool, consumers: Consumers) -> Self {
         let mut kinds = KindsBuilder::new();
-        kinds.register(Policy::default(), Processor::new(consumers));
+        Processor::new(consumers).register(&mut kinds);
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("webhook processor registry"),
