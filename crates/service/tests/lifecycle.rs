@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::{agent, baseline_env, get, poll_until, spawn_stdout_lines, terminate};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 
 #[expect(
     clippy::disallowed_types,
@@ -217,61 +215,6 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         took >= Duration::from_millis(300) && took < Duration::from_secs(5),
         "drain timing off: {took:?}"
     );
-}
-
-#[cfg(unix)]
-#[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the external fixture confirms SIGSTOP then deliberately holds the owned process past its completion bound"
-)]
-fn resumed_service_exits_one_after_progress_loss_without_diagnostics_or_probe_reads() {
-    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-
-    let service = Service::spawn(&[
-        ("APP__OBSERVABILITY__METRICS__ADDR", ""),
-        ("APP__HEALTH__REFRESH_INTERVAL", "500ms"),
-        ("APP__HEALTH__PROBE_BUDGET", "500ms"),
-    ]);
-    service.await_record("service_ready");
-    let pid = Pid::from_raw(service.child.id().cast_signed());
-    kill(pid, Signal::SIGSTOP).expect("suspend admitted service");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
-            WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
-            WaitStatus::StillAlive => {
-                assert!(Instant::now() < deadline, "service did not stop");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            other => panic!("unexpected child state: {other:?}"),
-        }
-    }
-    std::thread::sleep(Duration::from_secs(3));
-    kill(pid, Signal::SIGCONT).expect("resume admitted service");
-    let (code, stdout, stderr) = service.wait_output();
-    let records = records(&stdout);
-    let losses: Vec<_> = records
-        .iter()
-        .filter(|record| record["message"] == "readiness_progress_lost")
-        .collect();
-    assert_eq!(losses.len(), 1, "{stdout}");
-    let lost = losses[0];
-    assert_eq!(lost["task"], "readiness_progress");
-    assert!(lost["age_seconds"].as_f64().unwrap() > lost["bound_seconds"].as_f64().unwrap());
-    let failure = records
-        .iter()
-        .find(|record| record["message"] == "service failed")
-        .expect("primary failure is logged");
-    assert!(
-        failure["error"]
-            .as_str()
-            .unwrap()
-            .contains("readiness_progress")
-    );
-    assert_eq!(code, Some(1), "{stdout}\n{stderr}");
-    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
-    assert!(!stdout.contains("readiness_recovered"), "{stdout}");
 }
 
 #[test]

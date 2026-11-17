@@ -55,10 +55,6 @@ impl Background {
         *self.first_failure.borrow()
     }
 
-    pub(crate) fn record_failure(&self, name: &'static str) {
-        record_first(&self.first_failure, name);
-    }
-
     pub(crate) fn abort(&self) {
         for task in self.aborts.lock().iter() {
             task.abort();

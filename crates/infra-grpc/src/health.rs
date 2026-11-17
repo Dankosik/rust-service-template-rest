@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ::health::{NotReady, ReadinessReader};
+use ::health::ReadinessReader;
 use tonic::{Request, Response, Status};
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::Health;
@@ -38,7 +38,12 @@ impl Health for Adapter {
         if !self.known(service) {
             return Err(Status::not_found("service not registered"));
         }
-        Ok(Response::new(response(serving(&self.readiness.verdict()))))
+        let status = if self.readiness.is_ready() {
+            ServingStatus::Serving
+        } else {
+            ServingStatus::NotServing
+        };
+        Ok(Response::new(response(status)))
     }
 
     type WatchStream = tonic::codegen::BoxStream<HealthCheckResponse>;
@@ -58,16 +63,18 @@ fn watch(
     known: bool,
 ) -> impl futures_util::Stream<Item = Result<HealthCheckResponse, Status>> + Send {
     async_stream::stream! {
+        if !known {
+            yield Ok(response(ServingStatus::ServiceUnknown));
+            reader.wait_for_drain().await;
+            return;
+        }
         let mut sent = None;
         loop {
-            let (status, draining) = {
-                let verdict = reader.verdict();
-                let status = if known {
-                    serving(&verdict)
-                } else {
-                    ServingStatus::ServiceUnknown
-                };
-                (status, matches!(verdict, Err(NotReady::Draining)))
+            let draining = reader.is_draining();
+            let status = if !draining && reader.is_ready() {
+                ServingStatus::Serving
+            } else {
+                ServingStatus::NotServing
             };
             if sent != Some(status) {
                 sent = Some(status);
@@ -77,14 +84,6 @@ fn watch(
                 break;
             }
         }
-    }
-}
-
-fn serving(verdict: &Result<(), NotReady>) -> ServingStatus {
-    if verdict.is_ok() {
-        ServingStatus::Serving
-    } else {
-        ServingStatus::NotServing
     }
 }
 

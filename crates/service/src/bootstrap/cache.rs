@@ -1,4 +1,3 @@
-use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate};
 use service_config::Config;
 
@@ -39,7 +38,7 @@ pub(super) async fn open(
     let server = cache.server();
     let unavailable = match tokio::time::timeout(
         infra_cache::STARTUP_TIMEOUT + config.cache.command_timeout,
-        cache.probe().check(),
+        cache.ping(),
     )
     .await
     {

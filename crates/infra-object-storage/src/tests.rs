@@ -1145,16 +1145,6 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
 }
 
 #[tokio::test]
-async fn probe_reports_only_the_error_type() {
-    use health::Probe;
-    let stub = Stub::start(|_, _| xml_error(StatusCode::FORBIDDEN, "AccessDenied")).await;
-    let probe = stub.storage(|_| {}).probe();
-    assert_eq!(probe.name(), "object_storage");
-    let error = probe.check().await.unwrap_err().to_string();
-    assert_eq!(error, "object storage bucket check failed: 403");
-}
-
-#[tokio::test]
 async fn metrics_carry_only_operation_and_outcome() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();

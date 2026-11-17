@@ -30,7 +30,6 @@ use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
-const READINESS_PROGRESS: &str = "readiness_progress";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
@@ -139,7 +138,10 @@ pub(crate) async fn serve(
     )
     .await
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
-    let ended = settle_end(&resources, &background, ended);
+    let ended = match ended {
+        Ended::Failure(_) => ended,
+        Ended::Signal => pending_failure(&resources, &background).map_or(ended, Ended::Failure),
+    };
     let deadline = *deadline.insert(shutdown::stop_deadline(
         signals.first_stop(),
         config.http.grace_period,
@@ -270,21 +272,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         return Some(error);
     }
     // template:end messaging:worker-bootstrap-pending-consumer
-    resources
-        .readiness
-        .as_ref()
-        .filter(|readiness| readiness.progress_lost())
-        .map(|_| WorkerError::BackgroundStopped(READINESS_PROGRESS))
-}
-
-fn settle_end(resources: &Resources, background: &Background, ended: Ended) -> Ended {
-    if let Some(readiness) = &resources.readiness {
-        readiness.stop_progress();
-    }
-    match ended {
-        Ended::Failure(_) => ended,
-        Ended::Signal => pending_failure(resources, background).map_or(ended, Ended::Failure),
-    }
+    None
 }
 
 async fn prepare(
@@ -335,11 +323,11 @@ async fn prepare(
     let probes = listeners::readiness_probes(resources);
     let readiness = resources
         .readiness
-        .insert(Readiness::new(probes, listeners::refresh_policy(config)))
+        .insert(Readiness::new(probes, listeners::refresh_policy(config)?))
         .clone();
     listeners::bind_listeners(config, &metrics, &readiness, background, resources)?;
     readiness.admit().await.map_err(WorkerError::Admission)?;
-    listeners::start_progress(&readiness, background)?;
+    listeners::start_refresher(&readiness, background);
     Ok(Prepared {
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
         engines,
@@ -449,99 +437,6 @@ mod tests {
 
     use super::{Config, WorkerError};
     use crate::shutdown::validate_grace_budget;
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_failure_prevents_admission_and_retains_tracker_custody() {
-        let policy = health::RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
-        };
-        let readiness = health::Readiness::new(Vec::new(), policy);
-        readiness.refresh().await;
-        let background = super::Background::new();
-        super::listeners::start_progress(&readiness, &background).unwrap();
-        let resources = super::Resources {
-            readiness: Some(readiness),
-            ..super::Resources::default()
-        };
-        tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), background.wait_for_failure())
-                .await
-                .unwrap(),
-            "readiness_progress"
-        );
-        std::assert_matches!(
-            super::pending_failure(&resources, &background),
-            Some(super::WorkerError::BackgroundStopped("readiness_progress"))
-        );
-        assert_eq!(
-            background.tracker.len(),
-            2,
-            "the report retains both task lifetimes"
-        );
-        let ended = super::settle_end(&resources, &background, super::Ended::Signal);
-        std::assert_matches!(
-            ended,
-            super::Ended::Failure(super::WorkerError::BackgroundStopped("readiness_progress"))
-        );
-        background.cancel.cancel();
-        background.tracker.close();
-        tokio::time::timeout(Duration::from_secs(1), background.tracker.wait())
-            .await
-            .unwrap();
-        assert!(background.tracker.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stop_arbitrates_before_observer_reporting_and_preserves_primary_failure() {
-        for (late, prior_failure) in [(false, false), (true, false), (true, true)] {
-            let readiness = health::Readiness::new(
-                Vec::new(),
-                health::RefreshPolicy {
-                    interval: Duration::from_secs(1),
-                    probe_budget: Duration::from_secs(1),
-                    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
-                },
-            );
-            readiness.refresh().await;
-            readiness.arm_progress().unwrap();
-            let resources = super::Resources {
-                readiness: Some(readiness.clone()),
-                ..super::Resources::default()
-            };
-            let background = super::Background::new();
-            if late {
-                tokio::time::advance(Duration::from_secs(5)).await;
-            }
-            let ended = super::settle_end(
-                &resources,
-                &background,
-                if prior_failure {
-                    super::Ended::Failure(super::WorkerError::Panicked)
-                } else {
-                    super::Ended::Signal
-                },
-            );
-            match (late, prior_failure, ended) {
-                (_, true, super::Ended::Failure(super::WorkerError::Panicked))
-                | (
-                    true,
-                    false,
-                    super::Ended::Failure(super::WorkerError::BackgroundStopped(
-                        "readiness_progress",
-                    )),
-                )
-                | (false, false, super::Ended::Signal) => {}
-                _ => panic!("incorrect primary failure"),
-            }
-            tokio::time::advance(Duration::from_secs(5)).await;
-            readiness.refresh().await;
-            assert_eq!(readiness.progress_lost(), late);
-            assert!(background.tracker.is_empty());
-        }
-    }
 
     #[cfg(unix)]
     #[test]

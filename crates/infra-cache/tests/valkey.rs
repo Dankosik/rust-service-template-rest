@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable, namespace};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
@@ -327,9 +326,9 @@ async fn a_short_ttl_expires() {
 }
 
 #[tokio::test]
-async fn probe_succeeds_against_valkey() {
+async fn ping_succeeds_against_valkey() {
     let cache = connect_url(&cache_url(), Duration::from_secs(1));
-    cache.probe().check().await.expect("cache ping");
+    cache.ping().await.expect("cache ping");
 }
 
 #[tokio::test]

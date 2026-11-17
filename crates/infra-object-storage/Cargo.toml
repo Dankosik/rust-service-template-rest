@@ -29,7 +29,6 @@ derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 operation-context = { workspace = true }
-async-trait = { workspace = true }
 aws-config = { workspace = true, features = ["rt-tokio"] }
 aws-credential-types = { workspace = true }
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
@@ -38,7 +37,6 @@ aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 aws-smithy-runtime = { workspace = true, features = ["client"] }
 bytes = { workspace = true, features = ["std"] }
 compact_str = { workspace = true }
-health = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 metrics = { workspace = true }

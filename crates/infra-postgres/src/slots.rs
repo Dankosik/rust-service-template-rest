@@ -13,8 +13,6 @@ use tokio::time::Instant;
 /// Scale" (ACM Queue, 2015).
 const STANDING_AFTER: Duration = Duration::from_millis(100);
 
-/// A fixed number of slots with a wait queue. Callers bound the wait
-/// themselves; an abandoned wait never strands a slot.
 #[derive(Debug)]
 pub(crate) struct Slots {
     state: Mutex<State>,
@@ -24,8 +22,15 @@ pub(crate) struct Slots {
 struct State {
     free: usize,
     next_waiter: u64,
+    probes: BTreeMap<u64, oneshot::Sender<()>>,
     waiters: BTreeMap<u64, oneshot::Sender<()>>,
     waiters_since: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Queue {
+    Probes,
+    Waiters,
 }
 
 #[derive(Debug)]
@@ -38,6 +43,7 @@ impl Slots {
             state: Mutex::new(State {
                 free: capacity,
                 next_waiter: 0,
+                probes: BTreeMap::new(),
                 waiters: BTreeMap::new(),
                 waiters_since: None,
             }),
@@ -51,6 +57,14 @@ impl Slots {
     }
 
     pub(crate) async fn take(self: &Arc<Self>) -> Slot {
+        self.wait(Queue::Waiters).await
+    }
+
+    pub(crate) async fn take_probe(self: &Arc<Self>) -> Slot {
+        self.wait(Queue::Probes).await
+    }
+
+    async fn wait(self: &Arc<Self>, queue: Queue) -> Slot {
         let (id, granted) = {
             let mut state = self.state.lock();
             if let Some(free) = state.free.checked_sub(1) {
@@ -60,19 +74,26 @@ impl Slots {
             let id = state.next_waiter;
             state.next_waiter += 1;
             let (grant, granted) = oneshot::channel();
-            if state.waiters.is_empty() {
-                state.waiters_since = Some(Instant::now());
+            match queue {
+                Queue::Probes => {
+                    state.probes.insert(id, grant);
+                }
+                Queue::Waiters => {
+                    if state.waiters.is_empty() {
+                        state.waiters_since = Some(Instant::now());
+                    }
+                    state.waiters.insert(id, grant);
+                }
             }
-            state.waiters.insert(id, grant);
             (id, granted)
         };
         let mut wait = Wait {
             slots: self,
+            queue,
             id,
             granted,
             pending: true,
         };
-        // The sender stays in the queue until it grants or this wait removes it.
         let _ = (&mut wait.granted).await;
         wait.pending = false;
         Slot(Arc::clone(self))
@@ -80,6 +101,11 @@ impl Slots {
 
     fn release(&self) {
         let mut state = self.state.lock();
+        while let Some((_, grant)) = state.probes.pop_first() {
+            if grant.send(()).is_ok() {
+                return;
+            }
+        }
         let now = Instant::now();
         loop {
             let newest_first = state
@@ -106,6 +132,7 @@ impl Slots {
 
 struct Wait<'a> {
     slots: &'a Slots,
+    queue: Queue,
     id: u64,
     granted: oneshot::Receiver<()>,
     pending: bool,
@@ -118,14 +145,18 @@ impl Drop for Wait<'_> {
         }
         let queued = {
             let mut state = self.slots.state.lock();
-            let queued = state.waiters.remove(&self.id).is_some();
-            if state.waiters.is_empty() {
-                state.waiters_since = None;
+            match self.queue {
+                Queue::Probes => state.probes.remove(&self.id).is_some(),
+                Queue::Waiters => {
+                    let queued = state.waiters.remove(&self.id).is_some();
+                    if state.waiters.is_empty() {
+                        state.waiters_since = None;
+                    }
+                    queued
+                }
             }
-            queued
         };
         if !queued {
-            // Granted between the last poll and this drop: pass the slot on.
             self.slots.release();
         }
     }
@@ -239,5 +270,55 @@ mod tests {
         }
 
         assert!(poll(next.as_mut()).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_waiters_precede_standing_newest_first_waiters_and_never_strand_slots() {
+        let slots = Slots::new(1);
+        let held = slots.try_take();
+        let mut oldest = pin!(slots.take());
+        assert!(poll(oldest.as_mut()).is_pending());
+        tokio::time::advance(STANDING_AFTER + Duration::from_millis(1)).await;
+        let mut probe = pin!(slots.take_probe());
+        assert!(poll(probe.as_mut()).is_pending());
+        let mut newer = pin!(slots.take());
+        let mut newest = pin!(slots.take());
+        assert!(poll(newer.as_mut()).is_pending());
+        assert!(poll(newest.as_mut()).is_pending());
+
+        drop(held);
+
+        assert!(poll(oldest.as_mut()).is_pending());
+        assert!(poll(newer.as_mut()).is_pending());
+        assert!(poll(newest.as_mut()).is_pending());
+        let Poll::Ready(probe_slot) = poll(probe.as_mut()) else {
+            panic!("the probe waiter was not served first");
+        };
+
+        {
+            let mut abandoned_probe = pin!(slots.take_probe());
+            assert!(poll(abandoned_probe.as_mut()).is_pending());
+        }
+        {
+            let mut granted_then_dropped_probe = pin!(slots.take_probe());
+            assert!(poll(granted_then_dropped_probe.as_mut()).is_pending());
+            drop(probe_slot);
+        }
+
+        assert!(poll(oldest.as_mut()).is_pending());
+        assert!(poll(newer.as_mut()).is_pending());
+        let Poll::Ready(newest_slot) = poll(newest.as_mut()) else {
+            panic!("cancelled probe wait stranded the slot or reset standing order");
+        };
+        drop(newest_slot);
+        let Poll::Ready(newer_slot) = poll(newer.as_mut()) else {
+            panic!("the next newest waiter was not served");
+        };
+        drop(newer_slot);
+        let Poll::Ready(oldest_slot) = poll(oldest.as_mut()) else {
+            panic!("the oldest waiter was not served");
+        };
+        drop(oldest_slot);
+        assert!(slots.try_take().is_some());
     }
 }

@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{ArmError, Probe, Readiness, RefreshPolicy};
+use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{BoundListener, HardenOptions, ServerOptions};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
@@ -321,7 +321,7 @@ async fn serve(
     .catch_unwind()
     .await
     .unwrap_or(Some(BootstrapError::Panicked));
-    let failure = stop_progress(&background, &serving, failure);
+    let failure = failure.or_else(|| pending_failure(&background, &serving));
     let deadline = *deadline.get_or_insert_with(|| {
         signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
     });
@@ -389,54 +389,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
             }));
         }
     }
-    serving
-        .readiness
-        .as_ref()
-        .filter(|readiness| readiness.progress_lost())
-        .map(|_| progress_error())
-}
-
-fn progress_error() -> BootstrapError {
-    BootstrapError::Background {
-        name: "readiness_progress",
-        panicked: false,
-    }
-}
-
-fn stop_progress(
-    background: &Background,
-    serving: &Serving,
-    failure: Option<BootstrapError>,
-) -> Option<BootstrapError> {
-    if let Some(readiness) = &serving.readiness {
-        readiness.stop_progress();
-    }
-    failure.or_else(|| pending_failure(background, serving))
-}
-
-fn start_progress(
-    readiness: &Readiness,
-    background: &mut Background,
-) -> Result<(), BootstrapError> {
-    readiness.arm_progress().map_err(|error| match error {
-        ArmError::ProgressLost => progress_error(),
-        ArmError::Refused(reason) => BootstrapError::Admission(reason),
-    })?;
-    background.spawn("readiness", {
-        let readiness = readiness.clone();
-        let cancel = background.child_token();
-        async move { readiness.refresh_until(cancel).await }
-    });
-    BackgroundRegistration { background }.spawn("readiness_progress", {
-        let readiness = readiness.clone();
-        move |cancel, reporter| async move {
-            readiness
-                .observe_progress(cancel, || reporter.report())
-                .await;
-            Ok::<(), std::convert::Infallible>(())
-        }
-    });
-    Ok(())
+    None
 }
 
 fn background_error(failure: BackgroundFailure) -> BootstrapError {
@@ -499,11 +452,12 @@ async fn start(
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = serving.readiness.insert(Readiness::new(
         probes,
-        RefreshPolicy {
-            interval: config.health.refresh_interval,
-            probe_budget: config.health.probe_budget,
-            failure_threshold: config.health.failure_threshold,
-        },
+        RefreshPolicy::try_new(
+            config.health.refresh_interval,
+            config.health.probe_budget,
+            config.health.failure_threshold,
+        )
+        .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     ));
 
     let state = crate::AppState {
@@ -561,7 +515,11 @@ async fn start(
     };
     // template:end grpc:bootstrap-grpc-bind-before-ready
     readiness.admit().await.map_err(BootstrapError::Admission)?;
-    start_progress(readiness, background)?;
+    background.spawn("readiness", {
+        let readiness = readiness.clone();
+        let cancel = background.child_token();
+        async move { readiness.refresh_until(cancel).await }
+    });
 
     let server_options = ServerOptions {
         header_read_timeout: config.http.header_read_timeout,
@@ -629,52 +587,6 @@ mod tests {
         METRICS
             .get_or_init(|| telemetry::install_metrics().unwrap())
             .clone()
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn final_stop_retains_unreported_progress_loss_and_the_original_failure() {
-        for (late, prior_failure) in [(false, false), (true, false), (true, true)] {
-            let readiness = Readiness::new(
-                Vec::new(),
-                RefreshPolicy {
-                    interval: Duration::from_secs(1),
-                    probe_budget: Duration::from_secs(1),
-                    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
-                },
-            );
-            readiness.refresh().await;
-            readiness.arm_progress().unwrap();
-            let serving = Serving {
-                readiness: Some(readiness.clone()),
-                ..Serving::default()
-            };
-            let background = Background::new(CancellationToken::new());
-            if late {
-                tokio::time::advance(Duration::from_secs(5)).await;
-            }
-            let failure = stop_progress(
-                &background,
-                &serving,
-                prior_failure.then_some(BootstrapError::Panicked),
-            );
-            match (late, prior_failure, failure) {
-                (_, true, Some(BootstrapError::Panicked))
-                | (
-                    true,
-                    false,
-                    Some(BootstrapError::Background {
-                        name: "readiness_progress",
-                        panicked: false,
-                    }),
-                )
-                | (false, false, None) => {}
-                other => panic!("incorrect primary failure: {other:?}"),
-            }
-            tokio::time::advance(Duration::from_secs(5)).await;
-            readiness.refresh().await;
-            assert_eq!(readiness.progress_lost(), late);
-            assert!(background.is_empty());
-        }
     }
 
     #[tokio::test]

@@ -593,11 +593,12 @@ async fn a_request_is_shed_after_the_admission_wait_while_its_budget_is_still_op
 fn draining_reader() -> (health::Readiness, health::ReadinessReader) {
     let readiness = health::Readiness::new(
         Vec::new(),
-        health::RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: NonZeroU32::MIN,
-        },
+        health::RefreshPolicy::try_new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     );
     let reader = readiness.reader();
     (readiness, reader)
@@ -729,11 +730,12 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
 async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     let readiness = health::Readiness::new(
         Vec::new(),
-        health::RefreshPolicy {
-            interval: Duration::from_secs(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        health::RefreshPolicy::try_new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap(),
     );
     readiness.refresh().await;
     let started = Arc::new(tokio::sync::Notify::new());

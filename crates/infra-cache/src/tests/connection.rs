@@ -251,8 +251,6 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_hello_is_reported_as_auth() {
-    use health::Probe;
-
     let gate = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_millis(200),
@@ -265,7 +263,7 @@ async fn a_refused_hello_is_reported_as_auth() {
     })
     .expect("start connect");
 
-    let refused = tokio::time::timeout(Duration::from_secs(20), cache.probe().check())
+    let refused = tokio::time::timeout(Duration::from_secs(20), cache.ping())
         .await
         .expect("the reconnect chain ends")
         .expect_err("the server refuses the password");
@@ -278,8 +276,6 @@ async fn a_refused_hello_is_reported_as_auth() {
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
-    use health::Probe;
-
     let server = FakeServer::start().await;
     let password = ephemeral_password();
     server.require_password(&password);
@@ -291,7 +287,7 @@ async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
     .expect("start cache");
     std::fs::remove_file(file.path()).expect("remove password file");
 
-    let refused = tokio::time::timeout(Duration::from_secs(5), cache.probe().check())
+    let refused = tokio::time::timeout(Duration::from_secs(5), cache.ping())
         .await
         .expect("the setup attempt ends")
         .expect_err("setup cannot read the password");
@@ -351,8 +347,6 @@ async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
 
 #[tokio::test]
 async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
-    use health::Probe;
-
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::MAX,
@@ -360,9 +354,8 @@ async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
     })
     .expect("start cache");
     let namespace = cache.namespace(namespace!("large_budget"));
-    let probe = cache.probe();
     let limit = Duration::from_secs(5);
-    tokio::time::timeout(limit, probe.check())
+    tokio::time::timeout(limit, cache.ping())
         .await
         .expect("probe must complete")
         .expect("probe must succeed");
@@ -380,8 +373,6 @@ async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
 
 #[tokio::test]
 async fn ping_permission_denial_keeps_the_connection_usable() {
-    use health::Probe;
-
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
     let namespace = cache.namespace(namespace!("ping_permission"));
@@ -390,7 +381,7 @@ async fn ping_permission_denial_keeps_the_connection_usable() {
     let pings = server.command_count("PING", None);
     server.observed.deny_ping.store(true, Ordering::SeqCst);
 
-    assert!(cache.probe().check().await.is_err());
+    assert!(cache.ping().await.is_err());
     assert_eq!(namespace.get("after_probe").await, Ok(None));
     server
         .wait_for(
@@ -405,8 +396,6 @@ async fn ping_permission_denial_keeps_the_connection_usable() {
 
 #[tokio::test]
 async fn a_slow_command_survives_an_overlapping_readiness_probe() {
-    use health::Probe;
-
     let server = FakeServer::start().await;
     *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_secs(7);
     let cache = Cache::start(CacheOptions {
@@ -416,7 +405,6 @@ async fn a_slow_command_survives_an_overlapping_readiness_probe() {
     .expect("start cache");
     let namespace = cache.namespace(namespace!("probe_budget"));
     assert_eq!(namespace.get("ready").await, Ok(None));
-    let probe = cache.probe();
 
     let (command, readiness) = tokio::join!(namespace.get("slow"), async {
         server
@@ -426,7 +414,7 @@ async fn a_slow_command_survives_an_overlapping_readiness_probe() {
                 || server.command_count("GET", Some("probe_budget:slow")) == 1,
             )
             .await;
-        probe.check().await
+        cache.ping().await
     });
     assert_eq!(command, Ok(None));
     assert!(readiness.is_ok(), "{readiness:?}");
@@ -575,7 +563,6 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 
 #[tokio::test]
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
-    use health::Probe;
     use std::task::Poll;
 
     let server = FakeServer::start().await;
@@ -603,10 +590,9 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         Poll::Ready(Err(crate::Unavailable))
     );
     assert_work_metrics(&metrics, 256, 1, 0);
-    let probe = cache.probe();
-    let mut waiting_probe = probe.check();
+    let mut waiting_probe = Box::pin(cache.ping());
     assert!(futures_util::poll!(waiting_probe.as_mut()).is_pending());
-    let mut excess_probe = probe.check();
+    let mut excess_probe = Box::pin(cache.ping());
     std::assert_matches!(
         futures_util::poll!(excess_probe.as_mut()),
         Poll::Ready(Err(_))
@@ -621,8 +607,8 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     assert_work_metrics(&metrics, 1, 2, 0);
     assert_eq!(replacement.await, Ok(None));
     assert_work_metrics(&metrics, 0, 2, 0);
-    probe
-        .check()
+    cache
+        .ping()
         .await
         .expect("setup and probe capacity survive acquisition cancellation");
     assert_work_metrics(&metrics, 0, 2, 0);
@@ -633,7 +619,6 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
 
 #[tokio::test]
 async fn reliability_full_application_window_leaves_probe_and_maintenance_admission() {
-    use health::Probe;
     use std::task::Poll;
 
     let server = FakeServer::start().await;
@@ -665,9 +650,8 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    let probe = cache.probe();
     let pings = server.command_count("PING", None);
-    let mut pending_probe = probe.check();
+    let mut pending_probe = Box::pin(cache.ping());
     tokio::select! {
         result = &mut pending_probe => panic!("silent probe completed: {result:?}"),
         () = server.wait_for(
@@ -676,7 +660,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
             || server.command_count("PING", None) > pings,
         ) => {}
     }
-    let mut excess_probe = probe.check();
+    let mut excess_probe = Box::pin(cache.ping());
     std::assert_matches!(
         futures_util::poll!(excess_probe.as_mut()),
         Poll::Ready(Err(error)) if error.to_string() == "cache ping failed: other"
@@ -712,7 +696,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         })
         .await;
     assert_eq!(namespace.get("recovered").await, Ok(None));
-    probe.check().await.expect("probe capacity is reusable");
+    cache.ping().await.expect("probe capacity is reusable");
 }
 
 #[tokio::test]
@@ -783,7 +767,6 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
 
 #[tokio::test]
 async fn reliability_a_probe_reply_timeout_retires_the_connection() {
-    use health::Probe;
     use std::task::Poll;
 
     let server = FakeServer::start().await;
@@ -796,11 +779,10 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
         .expect("start cache")
     });
     let namespace = cache.namespace(namespace!("probe_timeout"));
-    let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
     let before = server.command_count("PING", None);
-    let mut pending_probe = probe.check();
+    let mut pending_probe = Box::pin(cache.ping());
     tokio::select! {
         biased;
         result = &mut pending_probe => panic!("silent probe completed before dispatch: {result:?}"),
@@ -865,7 +847,7 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
         )
         .await;
     assert_eq!(server.active(), 1);
-    probe.check().await.expect("healthy probe after timeout");
+    cache.ping().await.expect("healthy probe after timeout");
 }
 
 #[tokio::test]
@@ -976,7 +958,6 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
 
 #[tokio::test]
 async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
-    use health::Probe;
     use tokio::task::coop::{consume_budget, has_budget_remaining};
 
     let server = FakeServer::start().await;
@@ -986,7 +967,6 @@ async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
     })
     .expect("start cache");
     let namespace = cache.namespace(namespace!("yield_before_send"));
-    let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
 
@@ -1000,7 +980,8 @@ async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
             assert!(futures_util::poll!(stopped.as_mut()).is_pending());
         }
         {
-            let mut stopped = probe.check();
+            let stopped = cache.ping();
+            tokio::pin!(stopped);
             assert!(futures_util::poll!(stopped.as_mut()).is_pending());
         }
         assert_eq!(namespace.get("live").await, Ok(None));
@@ -1102,8 +1083,6 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
 
 #[tokio::test]
 async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
-    use health::Probe;
-
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(2),
@@ -1111,7 +1090,6 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
     })
     .expect("start cache");
     let namespace = cache.namespace(namespace!("drop_ready_reply"));
-    let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
 
     for check_probe in [false, true] {
@@ -1119,7 +1097,7 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
         {
             let exchange = async {
                 if check_probe {
-                    probe.check().await.expect("PING would succeed");
+                    cache.ping().await.expect("PING would succeed");
                 } else {
                     assert_eq!(namespace.get("discarded").await, Ok(None));
                 }
@@ -1143,15 +1121,13 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
 
 #[test]
 fn probe_reports_the_exit_of_a_supervisor_that_never_ran() {
-    use health::Probe;
-
     let cache = admitted("redis://127.0.0.1:6379", true, true);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("probe runtime");
     runtime.block_on(async {
-        let error = tokio::time::timeout(Duration::from_secs(1), cache.probe().check())
+        let error = tokio::time::timeout(Duration::from_secs(1), cache.ping())
             .await
             .expect("probe must observe the supervisor exit")
             .expect_err("the supervisor cannot dial");
@@ -1259,21 +1235,19 @@ async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
 }
 
 #[tokio::test]
-async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_cancelled() {
-    use health::Probe;
-
+async fn reliability_namespace_and_clone_retain_owner_until_live_maintenance_is_cancelled() {
     let server = FakeServer::start().await;
     let metrics = TestMetrics::new();
     let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
+    let retained = cache.clone();
     let namespace = cache.namespace(namespace!("lifetime"));
-    let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     drop(cache);
     assert_eq!(namespace.get("namespace-owner").await, Ok(None));
     drop(namespace);
-    probe.check().await.expect("healthy probe");
+    retained.ping().await.expect("healthy ping");
     server.stall_existing();
     let pings = server.command_count("PING", None);
     server
@@ -1284,12 +1258,12 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
         )
         .await;
     assert_work_metrics(&metrics, 0, 0, 0);
-    drop(probe);
+    drop(retained);
     assert_work_metrics(&metrics, 0, 0, 1);
     server
         .wait_for(
             Duration::from_millis(500),
-            "last probe retained cache-owned maintenance",
+            "last owner retained cache-owned maintenance",
             || server.active() == 0,
         )
         .await;

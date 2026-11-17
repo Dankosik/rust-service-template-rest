@@ -382,11 +382,12 @@ impl Fixture {
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(
             Vec::new(),
-            RefreshPolicy {
-                interval: Duration::from_mins(1),
-                probe_budget: Duration::from_secs(1),
-                failure_threshold: std::num::NonZeroU32::MIN,
-            },
+            RefreshPolicy::try_new(
+                Duration::from_mins(1),
+                Duration::from_secs(1),
+                NonZeroU32::MIN,
+            )
+            .unwrap(),
         );
         if seed {
             seed_ready(&readiness).await;
@@ -948,11 +949,12 @@ fn opening_app_waiting(
 ) -> axum::Router {
     let readiness = Readiness::new(
         Vec::new(),
-        RefreshPolicy {
-            interval: Duration::from_mins(1),
-            probe_budget: Duration::from_secs(1),
-            failure_threshold: std::num::NonZeroU32::MIN,
-        },
+        RefreshPolicy::try_new(
+            Duration::from_mins(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
     );
     let mut services = described();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();

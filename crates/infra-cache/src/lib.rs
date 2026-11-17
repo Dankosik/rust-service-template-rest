@@ -83,6 +83,12 @@ pub enum CacheError {
 pub struct Unavailable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("cache ping failed: {reason}")]
+pub struct PingError {
+    reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SetError {
     #[error("cache ttl must be between 1 and {} whole milliseconds", i64::MAX)]
     InvalidTtl,
@@ -124,34 +130,15 @@ impl Cache {
         })
     }
 
-    #[must_use]
-    pub fn probe(&self) -> CacheProbe {
-        CacheProbe {
-            cache: self.clone(),
-        }
+    pub async fn ping(&self) -> Result<(), PingError> {
+        self.link.probe().await.map_err(|error| PingError {
+            reason: error.label(),
+        })
     }
 
     #[must_use]
     pub fn server(&self) -> &ServerEndpoint {
         &self.link.server
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CacheProbe {
-    cache: Cache,
-}
-
-#[async_trait::async_trait]
-impl health::Probe for CacheProbe {
-    fn name(&self) -> &'static str {
-        "cache"
-    }
-
-    async fn check(&self) -> Result<(), health::ProbeError> {
-        self.cache.link.probe().await.map_err(|error| {
-            health::ProbeError::format(format_args!("cache ping failed: {}", error.label()))
-        })
     }
 }
 

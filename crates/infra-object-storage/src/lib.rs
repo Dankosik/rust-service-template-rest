@@ -458,13 +458,6 @@ impl ObjectStorage {
         }
     }
 
-    #[must_use]
-    pub fn probe(&self) -> BucketProbe {
-        BucketProbe {
-            storage: self.clone(),
-        }
-    }
-
     fn start_observation(&self, operation: Operation) -> OperationGuard {
         OperationGuard::start(
             Arc::clone(&self.inner.histograms),
@@ -540,45 +533,4 @@ fn https_client() -> SharedHttpClient {
             tls::rustls_provider::CryptoMode::AwsLc,
         ))
         .build_https()
-}
-
-#[derive(Clone, Debug)]
-pub struct BucketProbe {
-    storage: ObjectStorage,
-}
-
-#[async_trait::async_trait]
-impl health::Probe for BucketProbe {
-    fn name(&self) -> &'static str {
-        "object_storage"
-    }
-
-    async fn check(&self) -> Result<(), health::ProbeError> {
-        let inner = &self.storage.inner;
-        let mut guard = self.storage.start_observation(Operation::Probe);
-        let result = inner
-            .client
-            .head_bucket()
-            .bucket(&inner.bucket)
-            .set_expected_bucket_owner(inner.expected_bucket_owner.clone())
-            .customize()
-            .interceptor(ResponseLimit::SuccessBody)
-            .send()
-            .await;
-        guard.answered_by(&result);
-        match result {
-            Ok(_) => {
-                guard.succeed();
-                Ok(())
-            }
-            Err(sdk_error) => {
-                let failure = error::from_sdk(Call::Read, &sdk_error);
-                guard.fail(&failure);
-                Err(health::ProbeError::format(format_args!(
-                    "object storage bucket check failed: {}",
-                    failure.error_type
-                )))
-            }
-        }
-    }
 }
