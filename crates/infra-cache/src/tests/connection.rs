@@ -751,9 +751,9 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    let caller = OperationContext::unbounded();
     use crate::connection::{CommandError, CommandFailure, ErrorType};
 
+    let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
     *server
         .observed
@@ -1941,8 +1941,8 @@ impl std::io::Write for CapturedLogs {
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
-    let caller = OperationContext::unbounded();
     static BRIDGE: std::sync::Once = std::sync::Once::new();
+    let caller = OperationContext::unbounded();
     BRIDGE.call_once(|| {
         tracing_log::LogTracer::init().expect("install actual dependency log bridge");
     });
