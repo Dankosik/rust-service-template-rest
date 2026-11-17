@@ -68,29 +68,17 @@ async fn start(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use tokio_util::sync::CancellationToken;
-
-    use service_config::{PostgresConfig, PostgresSessionBudgets};
 
     use super::*;
 
-    fn enabled_postgres() -> PostgresConfig {
-        PostgresConfig {
-            dsn: secrecy::SecretString::from("postgres://localhost/app".to_owned()),
-            password_file: None,
-            session_budgets: PostgresSessionBudgets::Startup,
-            max_connections: std::num::NonZeroU32::MIN,
-            migration_deadline: Duration::from_mins(5),
-        }
-    }
+    use crate::bootstrap::test_config;
 
     #[tokio::test]
     async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
         let composer = Composer::inert();
         let mut background = Background::new(CancellationToken::new());
-        activate(composer, &Config::default(), &mut background)
+        activate(composer, &test_config(&[]), &mut background)
             .await
             .expect("an inactive boundary requires no value");
         assert!(background.is_empty());
@@ -98,7 +86,7 @@ mod tests {
 
     #[test]
     fn an_unconfigured_boundary_refuses_disabled_postgres_naming_the_key() {
-        let refused = unconfigured(&Config::default());
+        let refused = unconfigured(&test_config(&[]));
         std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "postgres.enabled",
             "{refused:?}"
         );
@@ -106,10 +94,10 @@ mod tests {
 
     #[test]
     fn an_unconfigured_boundary_refuses_an_unset_retention_naming_the_key() {
-        let config = Config {
-            postgres: Some(enabled_postgres()),
-            ..Config::default()
-        };
+        let config = test_config(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]);
         let refused = unconfigured(&config);
         std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention",
             "{refused:?}"
@@ -118,11 +106,11 @@ mod tests {
 
     #[test]
     fn an_unconfigured_boundary_with_every_key_set_reports_the_store_unavailable() {
-        let mut config = Config {
-            postgres: Some(enabled_postgres()),
-            ..Config::default()
-        };
-        config.http_idempotency.retention = Some(Duration::from_hours(1));
+        let config = test_config(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+            ("APP__HTTP_IDEMPOTENCY__RETENTION", "1h"),
+        ]);
         let refused = unconfigured(&config);
         std::assert_matches!(
             &refused,

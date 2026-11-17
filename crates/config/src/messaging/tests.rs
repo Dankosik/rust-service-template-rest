@@ -55,7 +55,7 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
         &config.credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/nats.creds")
     );
-    config.validate_producer().unwrap();
+    config.producer_source_stream().unwrap();
 
     let both = MessagingInput {
         credentials: Some(fixture_credentials()),
@@ -73,20 +73,20 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
 fn producer_requires_admitted_connection_credentials_and_source() {
     let mut config = admit(tls_input(), "production").unwrap();
     assert_eq!(
-        config.validate_producer().unwrap_err().key,
+        config.producer_source_stream().unwrap_err().key,
         "messaging.credentials"
     );
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
     assert_eq!(
-        config.validate_producer().unwrap_err().key,
+        config.producer_source_stream().unwrap_err().key,
         "messaging.source_stream"
     );
     config.source_stream = Some("events".to_owned());
-    config.validate_producer().unwrap();
+    assert_eq!(config.producer_source_stream().unwrap(), "events");
     assert!(!format!("{config:?}").contains("fixture-credentials"));
     assert_eq!(
         MessagingConfig::default()
-            .validate_producer()
+            .producer_source_stream()
             .unwrap_err()
             .key,
         "messaging.urls"
@@ -95,16 +95,32 @@ fn producer_requires_admitted_connection_credentials_and_source() {
 
 #[test]
 fn consumer_requires_its_distinct_operator_owned_names() {
-    let config = MessagingConfig {
+    let mut config = MessagingConfig {
         urls: vec!["tls://nats.example:4222".to_owned()],
         credentials: Some(MessagingCredentials::Inline(fixture_credentials())),
         source_stream: Some("events".to_owned()),
         ..MessagingConfig::default()
     };
     assert_eq!(
-        config.validate_consumer().unwrap_err().key,
+        config.consumer_keys().unwrap_err().key,
         "messaging.consumer_durable"
     );
+    config.consumer_durable = Some("worker".to_owned());
+    assert_eq!(
+        config.consumer_keys().unwrap_err().key,
+        "messaging.consumer_filter_subject"
+    );
+    config.consumer_filter_subject = Some("events.created".to_owned());
+    assert_eq!(
+        config.consumer_keys().unwrap_err().key,
+        "messaging.dlq_subject"
+    );
+    config.dlq_subject = Some("dead.created".to_owned());
+    let admitted = config.consumer_keys().unwrap();
+    assert_eq!(admitted.source_stream, "events");
+    assert_eq!(admitted.durable, "worker");
+    assert_eq!(admitted.filter_subject, "events.created");
+    assert_eq!(admitted.dlq_subject, "dead.created");
 }
 
 #[test]
@@ -161,7 +177,7 @@ fn plaintext_and_unauthenticated_are_only_available_in_local_development() {
     };
     admit(input(), "local")
         .unwrap()
-        .validate_producer()
+        .producer_source_stream()
         .unwrap();
     let errors = admit(input(), "production").unwrap_err();
     assert!(errors.names("messaging.allow_plaintext"));
@@ -178,11 +194,11 @@ fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
     };
     let mut config = admit(input, "production").unwrap();
     assert_eq!(
-        config.validate_producer().unwrap_err().key,
+        config.producer_source_stream().unwrap_err().key,
         "messaging.credentials"
     );
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
-    config.validate_producer().unwrap();
+    config.producer_source_stream().unwrap();
     assert!(config.plaintext_admitted());
 
     let unauthenticated = MessagingInput {
@@ -309,7 +325,7 @@ fn messaging_trusted_network_admits_plaintext_in_production() {
     ]);
     assert!(cfg.messaging.trusted_network);
     assert!(cfg.messaging.plaintext_admitted());
-    cfg.messaging.validate_producer().unwrap();
+    cfg.messaging.producer_source_stream().unwrap();
 }
 
 #[test]

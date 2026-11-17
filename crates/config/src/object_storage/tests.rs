@@ -357,7 +357,7 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__CREDENTIALS", "workload_identity"),
     ]);
     assert_matches!(
-        amazon.object_storage.unwrap().credentials,
+        amazon.object_storage.as_ref().unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 
@@ -373,7 +373,7 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
     ]);
     assert_eq!(
-        generic.object_storage.unwrap().provider,
+        generic.object_storage.as_ref().unwrap().provider,
         crate::ObjectStorageProvider::S3Compatible {
             endpoint: "https://ceph.internal.example:8443".to_owned(),
             region: None,
@@ -408,7 +408,7 @@ fn object_storage_credentials_selector_in_a_file_is_public() {
     )
     .unwrap();
     assert_matches!(
-        cfg.object_storage.unwrap().credentials,
+        cfg.object_storage.as_ref().unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 }

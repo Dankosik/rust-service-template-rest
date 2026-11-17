@@ -24,6 +24,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 #[test]
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
+    assert_eq!(cfg.app.env, "unspecified");
     assert_eq!(cfg.http.addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app.version, "1.2.3");
     assert_eq!(cfg.app.commit, "abc123");
@@ -740,13 +741,21 @@ fn rejected_secret_file_values_are_not_echoed() {
     let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
     let rendered = err.to_string();
     assert!(
-        rendered.contains(
-            "expected an integer for key `http.max_in_flight` in the environment or the secrets directory"
-        ),
+        rendered
+            .contains("expected an integer for key `http.max_in_flight` in the secrets directory"),
         "{rendered}"
     );
     assert!(!rendered.contains("hunter2"), "{rendered}");
     assert!(!format!("{err:?}").contains("hunter2"), "{err:?}");
+
+    let err = load_from(
+        &with_secrets(&dir),
+        BUILD,
+        env(&[("APP__HTTP__MAX_IN_FLIGHT", "invalid-override")]),
+    )
+    .unwrap_err();
+    assert!(err.to_string().ends_with("in the environment"), "{err}");
+    assert!(!err.to_string().contains("invalid-override"), "{err}");
 }
 
 #[test]
@@ -974,6 +983,18 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
     assert_eq!(cfg.app.env, "2026-11-13");
 
     let cfg = load_from(&base_only, BUILD, env(&[("APP__APP__ENV", "production")])).unwrap();
+    assert_eq!(cfg.app.env, "production");
+
+    let scalar_section = LoadOptions {
+        config: Some(write(&dir, "scalar.toml", "app = 2026-11-13\n")),
+        ..LoadOptions::default()
+    };
+    let cfg = load_from(
+        &scalar_section,
+        BUILD,
+        env(&[("APP__APP__ENV", "production")]),
+    )
+    .unwrap();
     assert_eq!(cfg.app.env, "production");
 }
 

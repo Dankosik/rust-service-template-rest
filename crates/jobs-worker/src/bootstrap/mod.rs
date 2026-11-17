@@ -158,7 +158,7 @@ pub(crate) async fn serve(
             // template:end messaging:worker-bootstrap-log-consumer-failure
             tracing::error!(failure.kind = failure_kind, error = %error, "jobs worker failed");
         } else {
-            let _ = service_config::process_failure(error);
+            crate::report_failure(error);
         }
     }
     let outcome = shutdown::run(shutdown::Plan {
@@ -320,25 +320,31 @@ async fn prepare(
         &exporter_state,
     );
     telemetry::spawn_metrics_tasks(&metrics, background);
-    // template:begin jobs:worker-bootstrap-admit-pool-call
-    postgres::admit_pool(config, &capabilities, background, resources).await?;
-    // template:end jobs:worker-bootstrap-admit-pool-call
-    // template:begin outbox:worker-bootstrap-activate-postgres-messages
-    if let Some(messages) = &mut capabilities.messages {
-        messages.activate_postgres_messages(resources)?;
+    // template:begin jobs:worker-bootstrap-pool-config
+    let postgres = postgres::pool_config(config, capabilities.jobs.is_some())?;
+    // template:end jobs:worker-bootstrap-pool-config
+    // template:begin outbox:worker-bootstrap-outbox-pool-inputs
+    if capabilities.messages.is_none() {
+        capabilities.messages = Some(messaging::MessagingPlan::producer(config)?);
     }
-    // template:end outbox:worker-bootstrap-activate-postgres-messages
+    // template:end outbox:worker-bootstrap-outbox-pool-inputs
+    // template:begin jobs:worker-bootstrap-admit-pool-call
+    if let Some(postgres) = postgres {
+        postgres::admit_pool(config, postgres, background, resources).await?;
+    }
+    // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin messaging:worker-bootstrap-messaging-connect
-    let consumer = messaging::connect_messaging(
-        config,
-        capabilities
-            .messages
-            .take()
-            .map(|messages| messages.registry),
-        &background.cancel,
-        resources,
-    )
-    .await?;
+    let consumer = match capabilities.messages.take() {
+        Some(messages) => {
+            Box::pin(messaging::connect_messaging(
+                messages,
+                &background.cancel,
+                resources,
+            ))
+            .await?
+        }
+        None => None,
+    };
     // template:end messaging:worker-bootstrap-messaging-connect
     // template:begin jobs:worker-bootstrap-build-engines
     let engines = jobs::build_engines(config, capabilities.jobs.take(), resources).await?;
@@ -372,7 +378,7 @@ struct RetainedCapabilities {
     jobs: Option<infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-registrations-jobs
     // template:begin messaging:worker-bootstrap-registrations-messaging
-    messages: Option<messaging::RetainedMessages>,
+    messages: Option<messaging::MessagingPlan>,
     // template:end messaging:worker-bootstrap-registrations-messaging
 }
 
@@ -414,7 +420,7 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-retain-messaging
-    let messages = messaging::RetainedMessages::retain(config, registration)?;
+    let messages = messaging::MessagingPlan::retain(config, registration)?;
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-retain-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
@@ -464,7 +470,7 @@ fn worker_identity(service_name: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{WorkerConfig, WorkerError};
+    use super::WorkerError;
 
     #[cfg(unix)]
     async fn prepare_worker_and_check_http(
@@ -473,9 +479,15 @@ mod tests {
     ) -> super::PreparedReadiness {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-        let mut config = WorkerConfig::default();
-        config.http.addr = "127.0.0.1:0".parse().unwrap();
-        config.observability.metrics.addr = None;
+        let config = service_config::fixtures::worker(
+            &[
+                ("APP__HTTP__ADDR", "127.0.0.1:0"),
+                ("APP__OBSERVABILITY__METRICS__ADDR", ""),
+            ],
+            crate::BUILD_INFO,
+            crate::shutdown::TAIL,
+        )
+        .unwrap();
         let metrics = infra_telemetry::Metrics::install(&[]).unwrap();
         let prepared = super::prepare_readiness(&config, &metrics, background, resources)
             .await
@@ -615,7 +627,9 @@ mod tests {
     async fn registration_unwind_cancels_and_joins_already_registered_work() {
         use futures_util::FutureExt;
 
-        let config = WorkerConfig::default();
+        let config =
+            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+                .unwrap();
         let mut signals = super::Signals::install().unwrap();
         let mut deadline = None;
         let (finished, observed_finish) = tokio::sync::oneshot::channel();
@@ -652,16 +666,14 @@ mod tests {
             "no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
         );
 
-        let mut config = WorkerConfig::default();
-        config.http.grace_period = Duration::from_secs(30);
+        let refused = service_config::fixtures::worker(
+            &[("APP__HTTP__GRACE_PERIOD", "30s")],
+            crate::BUILD_INFO,
+            crate::shutdown::TAIL,
+        )
+        .unwrap_err();
         assert_eq!(
-            WorkerError::from(
-                config
-                    .http
-                    .check_grace_budget(crate::shutdown::TAIL)
-                    .unwrap_err()
-            )
-            .to_string(),
+            WorkerError::from(refused).to_string(),
             "configuration is invalid: http.grace_period: (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
         );
     }

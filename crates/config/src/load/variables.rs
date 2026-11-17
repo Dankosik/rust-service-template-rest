@@ -42,17 +42,25 @@ pub(super) struct Variable {
     pub(super) original_name: String,
     pub(super) key: String,
     pub(super) value: String,
+    pub(super) source: &'static str,
 }
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 
-fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> Result<(), Error> {
+fn admit(
+    variables: &mut Variables,
+    name: &str,
+    suffix: &str,
+    value: String,
+    source: &'static str,
+) -> Result<(), Error> {
     let name_key = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
     let variable = Variable {
         original_name: name.to_owned(),
         key,
         value,
+        source,
     };
     match variables.insert(name_key, variable) {
         Some(other) => Err(Error::AmbiguousName {
@@ -114,7 +122,7 @@ where
                 name: name.into_owned(),
             });
         };
-        admit(&mut variables, &name, suffix, value)?;
+        admit(&mut variables, &name, suffix, value, "the environment")?;
     }
     Ok(variables)
 }
@@ -144,7 +152,13 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
         let value = std::fs::read_to_string(&file)
             .and_then(secret_value)
             .map_err(|error| Error::ReadSecret { path: file, error })?;
-        admit(&mut variables, &name, suffix, value)?;
+        admit(
+            &mut variables,
+            &name,
+            suffix,
+            value,
+            "the secrets directory",
+        )?;
     }
     Ok(variables)
 }

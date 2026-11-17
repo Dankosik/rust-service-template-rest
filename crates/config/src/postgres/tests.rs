@@ -14,10 +14,9 @@ fn defaults_are_inert() {
     let input = PostgresInput::default();
     assert!(!input.enabled);
     assert!(input.dsn.is_none());
-    assert_eq!(input.max_connections.get(), 4);
+    assert_eq!(input.max_connections.0.get(), 4);
     assert_eq!(input.password_file, None);
-    assert_eq!(input.session_budgets, PostgresSessionBudgets::Startup);
-    assert_eq!(input.migration_deadline, Duration::from_mins(5));
+    assert_eq!(input.session_budgets.0, PostgresSessionBudgets::Startup);
     assert!(admit_with(|v| input.admit(v)).unwrap().is_none());
 }
 
@@ -59,7 +58,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
     let input = PostgresInput {
         enabled,
         dsn: Some(dsn()),
-        max_connections: NonZeroU32::new(501).unwrap(),
+        max_connections: PoolCapacity(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -70,7 +69,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
 fn every_postgres_violation_is_reported_together() {
     let input = PostgresInput {
         enabled: true,
-        max_connections: NonZeroU32::new(501).unwrap(),
+        max_connections: PoolCapacity(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -95,13 +94,33 @@ fn pool_size_rejects_fractional_toml() {
 }
 
 #[test]
-fn only_migration_loading_enforces_the_deadline_range() {
+fn only_migration_loading_decodes_and_validates_the_deadline() {
     let options = LoadOptions::default();
-    for deadline in ["0s", "25h"] {
+    let defaults = load_migration_from(
+        &options,
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        defaults.postgres().unwrap().migration_deadline,
+        Duration::from_mins(5)
+    );
+    for deadline in ["0s", "25h", "invalid"] {
         let variables = [("APP__POSTGRES__MIGRATION_DEADLINE", deadline)];
         load_from(&options, BUILD, env(&variables)).unwrap();
+        // template:begin jobs:pooled-worker-ignores-migration-deadline
+        crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
+        // template:end jobs:pooled-worker-ignores-migration-deadline
         let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
-        assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"));
+        if deadline == "invalid" {
+            assert_matches!(err, Error::Deserialize(_));
+        } else {
+            assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"));
+        }
     }
 }
 
@@ -112,11 +131,30 @@ fn debug_output_redacts_the_dsn() {
         password_file: None,
         session_budgets: PostgresSessionBudgets::Startup,
         max_connections: NonZeroU32::MIN,
-        migration_deadline: Duration::from_mins(5),
     };
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
 }
+
+// template:begin jobs:exclude-messaging-only-postgres-test
+#[cfg(any())]
+// template:end jobs:exclude-messaging-only-postgres-test
+// template:begin worker:messaging-only-postgres-test
+#[test]
+fn messaging_worker_ignores_the_service_database() {
+    let options = LoadOptions::default();
+    let variables = [
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__MAX_CONNECTIONS", "invalid"),
+    ];
+    crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
+    assert!(load_from(&options, BUILD, env(&variables)).is_err());
+    let unknown =
+        crate::load::load_worker_from(&options, BUILD, env(&[("APP__DATABASE__ENABLED", "true")]))
+            .unwrap_err();
+    assert_matches!(unknown, Error::Deserialize(_));
+}
+// template:end worker:messaging-only-postgres-test
 
 #[test]
 fn migration_snapshot_ignores_the_sections_it_does_not_read() {
@@ -124,7 +162,7 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     let file = write(
         &dir,
         "service.toml",
-        "[http]\nrequest_timeout = \"not a duration\"\n[postgres]\nenabled = true\nmax_connections = 2\n",
+        "[http]\nrequest_timeout = \"not a duration\"\n[postgres]\nenabled = true\nmax_connections = \"bad pool size\"\n",
     );
     let options = LoadOptions {
         config: Some(file),
@@ -136,7 +174,7 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
             "APP__POSTGRES__PASSWORD_FILE",
             "/run/secrets/postgres-password",
         ),
-        ("APP__POSTGRES__SESSION_BUDGETS", "server"),
+        ("APP__POSTGRES__SESSION_BUDGETS", "invalid"),
         ("APP__POSTGRES__MIGRATION_DEADLINE", "2h"),
         ("APP__LOG__FORMAT", "text"),
         ("APP__OBSERVABILITY__METRICS__ADDR", "invalid-listener"),
@@ -160,15 +198,10 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     assert!(load_from(&options, BUILD, env(&variables)).is_err());
 
     let cfg = load_migration_from(&options, BUILD, env(&variables)).unwrap();
-    let postgres = cfg.postgres.unwrap();
-    assert_eq!(postgres.max_connections.get(), 2);
+    let postgres = cfg.postgres().unwrap();
     assert_eq!(
         postgres.password_file.as_deref(),
         Some(std::path::Path::new("/run/secrets/postgres-password"))
-    );
-    assert_eq!(
-        postgres.session_budgets,
-        crate::PostgresSessionBudgets::Server
     );
     assert_eq!(
         postgres.migration_deadline,
@@ -236,14 +269,6 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     assert_matches!(&typo_section, Error::Deserialize(_), "{typo_section}");
     assert!(!typo_section.to_string().contains("secret-pw"));
     assert!(!format!("{typo_section:?}").contains("secret-pw"));
-
-    let unknown_source = load_migration_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__POSTGRES__SESSION_BUDGETS", "pooler")]),
-    )
-    .unwrap_err();
-    assert_matches!(unknown_source, Error::Deserialize(_), "{unknown_source}");
 
     let missing_dsn = load_migration_from(
         &LoadOptions::default(),

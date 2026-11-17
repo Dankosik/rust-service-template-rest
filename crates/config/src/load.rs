@@ -53,7 +53,7 @@ pub enum Error {
     },
     #[error("config file {}: {message}", path.display())]
     ParseFile { path: PathBuf, message: String },
-    #[error("secret key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
+    #[error("secret key `{key}` carries a value in config file {}; use an `{ENV_PREFIX}{ENV_SEPARATOR}` environment variable or a matching file in --secrets-dir", path.display())]
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
@@ -216,15 +216,19 @@ where
             input: variable.original_name.to_ascii_uppercase(),
         });
     }
-    let environment_origin = String::from("the environment");
-    let mut variable_keys = Vec::with_capacity(variables.len());
+    let mut variable_sources = Vec::with_capacity(variables.len());
     for variable in variables.into_values() {
-        datetime_keys.remove(&variable.key);
-        let value = config::Value::new(Some(&environment_origin), variable.value);
+        let mut path = variable.key.as_str();
+        datetime_keys.remove(path);
+        while let Some((parent, _)) = path.rsplit_once('.') {
+            datetime_keys.remove(parent);
+            path = parent;
+        }
+        let value = config::Value::new(Some(&variable.source.to_owned()), variable.value);
         builder = builder
             .set_override(&variable.key, value)
             .map_err(|error| Error::Merge(error.to_string()))?;
-        variable_keys.push(variable.key);
+        variable_sources.push((variable.key, variable.source));
     }
     if let Some((key, path)) = datetime_keys.into_iter().next() {
         return Err(Error::Deserialize(format!(
@@ -236,14 +240,9 @@ where
         .build()
         .map_err(|error| Error::Merge(error.to_string()))?;
 
-    let carrier = if options.secrets_dir.is_some() {
-        "the environment or the secrets directory"
-    } else {
-        &environment_origin
-    };
     merged
         .try_deserialize()
-        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_keys, carrier)))
+        .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_sources)))
 }
 
 #[derive(Clone, derive_more::Debug)]

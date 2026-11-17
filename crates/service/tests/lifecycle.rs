@@ -106,6 +106,25 @@ fn records(stdout: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "observes the standalone CLI's output streams and exit status"
+)]
+fn help_goes_to_stdout_and_usage_errors_go_to_stderr() {
+    for (argument, code) in [("--help", 0), ("--unknown", 2)] {
+        let output = Service::command(&[]).arg(argument).output().unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let (message, silent) = if code == 0 {
+            (output.stdout, output.stderr)
+        } else {
+            (output.stderr, output.stdout)
+        };
+        assert!(String::from_utf8_lossy(&message).contains("Usage:"));
+        assert_eq!(silent.as_slice(), b"");
+    }
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "Drop reaps the owned service child process on teardown"
