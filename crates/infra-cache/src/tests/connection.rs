@@ -414,7 +414,7 @@ async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stop
         );
         if stop.is_none() {
             assert_eq!(parent.check(), Ok(()));
-            assert_eq!(parent.remaining(), Some(reserve - wake_slack));
+            assert_eq!(parent.remaining(), Some(reserve.saturating_sub(wake_slack)));
         }
     }
 }
