@@ -487,9 +487,32 @@ async fn accept_loop<F, Fut, IO>(
 }
 
 fn accept_retry_delay(error: &std::io::Error) -> Duration {
-    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset};
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted};
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use nix::errno::Errno::{
+            self, EHOSTDOWN, EHOSTUNREACH, ENETDOWN, ENETUNREACH, ENONET, ENOPROTOOPT, EOPNOTSUPP,
+            EPROTO,
+        };
+        // Linux accept(2), Error handling.
+        if matches!(
+            error.raw_os_error().map(Errno::from_raw),
+            Some(
+                ENETDOWN
+                    | EPROTO
+                    | ENOPROTOOPT
+                    | EHOSTDOWN
+                    | ENONET
+                    | EHOSTUNREACH
+                    | EOPNOTSUPP
+                    | ENETUNREACH
+            )
+        ) {
+            return Duration::ZERO;
+        }
+    }
     match error.kind() {
-        ConnectionAborted | ConnectionRefused | ConnectionReset => Duration::ZERO,
+        ConnectionAborted | ConnectionRefused | ConnectionReset | Interrupted => Duration::ZERO,
         _ => Duration::from_millis(50),
     }
 }

@@ -37,6 +37,9 @@ rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc:transport-tls-dependencies
 
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 # template:begin grpc:transport-http2-client-tests
 http = { workspace = true }

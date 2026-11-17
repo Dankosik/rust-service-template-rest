@@ -273,6 +273,7 @@ fn transient_accept_errors_retry_without_the_resource_backoff() {
         io::ErrorKind::ConnectionAborted,
         io::ErrorKind::ConnectionReset,
         io::ErrorKind::ConnectionRefused,
+        io::ErrorKind::Interrupted,
     ] {
         assert_eq!(
             accept_retry_delay(&error.into()),
@@ -284,6 +285,15 @@ fn transient_accept_errors_retry_without_the_resource_backoff() {
         accept_retry_delay(&io::ErrorKind::OutOfMemory.into()),
         Duration::from_millis(50)
     );
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use nix::errno::Errno;
+        assert_eq!(accept_retry_delay(&Errno::EPROTO.into()), Duration::ZERO);
+        assert_eq!(
+            accept_retry_delay(&Errno::EMFILE.into()),
+            Duration::from_millis(50)
+        );
+    }
 }
 
 #[tokio::test]
