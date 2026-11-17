@@ -9,8 +9,9 @@ use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use foldhash::{HashMap, HashMapExt as _};
+use utoipa::openapi::path::{Operation, PathItem, Paths};
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
-use utoipa::openapi::{OpenApi, RefOr, path::Operation};
+use utoipa::openapi::{OpenApi, RefOr};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::HardenOptions;
@@ -19,8 +20,29 @@ use crate::probes::ProbeRoutes;
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
 
+mod outcomes;
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FinalizeError {
+    // template:begin http-idempotency:http-store-finalization-error
+    #[error("mounted HTTP idempotency operations require an active idempotency store")]
+    MissingIdempotencyStore,
+    // template:end http-idempotency:http-store-finalization-error
+    #[error(
+        "HTTP contract finalization failed: components.{kind}.{name} conflicts with the shared HTTP contract"
+    )]
+    ConflictingComponent { kind: &'static str, name: String },
+    #[error("HTTP contract composition defines {method} {path} more than once")]
+    DuplicateOperation { path: String, method: String },
+    #[error("HTTP contract composition cannot merge {path} with different path-level {field}")]
+    ConflictingPathItem { path: String, field: &'static str },
+    #[error("HTTP contract finalization failed: {method} {path} response {status}: {fault}")]
+    InvalidResponse {
+        method: String,
+        path: String,
+        status: String,
+        fault: &'static str,
+    },
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
@@ -43,9 +65,36 @@ pub enum Authentication {
     // template:end authn:http-assembly-verifier
 }
 
+#[derive(Clone)]
 pub struct HttpContract<S> {
     routes: OpenApiRouter<S>,
-    probes: Vec<(Box<str>, bool)>,
+    probes: Vec<Box<str>>,
+    // template:begin http-idempotency:http-mounted-operations-field
+    idempotency: MountedOperations,
+    // template:end http-idempotency:http-mounted-operations-field
+}
+
+// template:begin http-idempotency:http-mounted-operations
+#[derive(Clone, Default)]
+pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
+
+impl MountedOperations {
+    pub(crate) fn contains(&self, path: &str, method: &str) -> bool {
+        self.0
+            .iter()
+            .any(|(registered, verb)| registered.as_ref() == path && *verb == method)
+    }
+}
+// template:end http-idempotency:http-mounted-operations
+
+fn nested_path(prefix: &str, path: &str) -> Box<str> {
+    if prefix.ends_with('/') {
+        format!("{prefix}{}", path.trim_start_matches('/')).into()
+    } else if path.is_empty() || path == "/" {
+        prefix.into()
+    } else {
+        format!("{prefix}{path}").into()
+    }
 }
 
 impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
@@ -57,7 +106,7 @@ impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
 impl<S: Clone + Send + Sync + 'static> std::fmt::Debug for HttpContract<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpContract")
-            .field("paths", &self.get_openapi().paths.paths.len())
+            .field("paths", &self.routes.get_openapi().paths.paths.len())
             .finish_non_exhaustive()
     }
 }
@@ -68,42 +117,122 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         Self {
             routes,
             probes: Vec::new(),
+            // template:begin http-idempotency:http-mounted-operations-init
+            idempotency: MountedOperations::default(),
+            // template:end http-idempotency:http-mounted-operations-init
+        }
+    }
+
+    // template:begin http-idempotency:http-typed-registration
+    pub(crate) fn from_idempotent(routes: OpenApiRouter<S>) -> Self {
+        let mut idempotency = MountedOperations::default();
+        for (path, item) in &routes.get_openapi().paths.paths {
+            for (method, op) in self::fixed_path_operations!(item, as_ref) {
+                if op.is_some() {
+                    let path = if path.is_empty() { "/" } else { path.as_str() };
+                    idempotency.0.push((path.into(), method));
+                }
+            }
+        }
+        Self {
+            idempotency,
+            ..Self::new(routes)
         }
     }
 
     #[must_use]
-    pub fn with_probes(mut self, prefix: &str) -> Self
+    pub fn idempotent_operations(&self) -> usize {
+        self.idempotency.0.len()
+    }
+    // template:end http-idempotency:http-typed-registration
+
+    pub fn merge(mut self, mut other: Self) -> Result<Self, FinalizeError> {
+        normalize_root(&mut self.routes.get_openapi_mut().paths)?;
+        normalize_root(&mut other.routes.get_openapi_mut().paths)?;
+        let parent = &self.routes.get_openapi().paths.paths;
+        for (path, incoming) in &other.routes.get_openapi().paths.paths {
+            if let Some(existing) = parent.get(path) {
+                check_path_merge(path, existing, incoming)?;
+            }
+        }
+        self.routes = self.routes.merge(other.routes);
+        self.probes.extend(other.probes);
+        // template:begin http-idempotency:http-merge-mounted-operations
+        self.idempotency.0.extend(other.idempotency.0);
+        // template:end http-idempotency:http-merge-mounted-operations
+        Ok(self)
+    }
+
+    pub fn nest(self, prefix: &str, mut other: Self) -> Result<Self, FinalizeError> {
+        normalize_root(&mut other.routes.get_openapi_mut().paths)?;
+        other.routes = OpenApiRouter::default().nest(prefix, other.routes);
+        for path in &mut other.probes {
+            *path = nested_path(prefix, path);
+        }
+        // template:begin http-idempotency:http-nest-mounted-operations
+        for (path, _) in &mut other.idempotency.0 {
+            *path = nested_path(prefix, path);
+        }
+        // template:end http-idempotency:http-nest-mounted-operations
+        self.merge(other)
+    }
+
+    pub fn with_probes(self, prefix: &str) -> Result<Self, FinalizeError>
     where
         health::ReadinessReader: axum::extract::FromRef<S>,
     {
-        let probes = crate::probes::router();
-        let mounted = if prefix.is_empty() || prefix == "/" {
-            probes
+        let mut probes = Self::new(crate::probes::router());
+        probes.probes = probes
+            .routes
+            .get_openapi()
+            .paths
+            .paths
+            .keys()
+            .map(|path| path.as_str().into())
+            .collect();
+        if prefix.is_empty() || prefix == "/" {
+            self.merge(probes)
         } else {
-            OpenApiRouter::new().nest(prefix, probes)
-        };
-        for path in mounted.get_openapi().paths.paths.keys() {
-            let implicit_head = self
-                .routes
-                .get_openapi()
-                .paths
-                .paths
-                .get(path)
-                .is_none_or(|item| item.head.is_none());
-            self.probes.push((path.as_str().into(), implicit_head));
+            self.nest(prefix, probes)
         }
-        self.routes = self.routes.merge(mounted);
-        self
     }
 
-    #[must_use]
-    pub fn get_openapi(&self) -> &OpenApi {
-        self.routes.get_openapi()
+    fn probe_routes(&self) -> ProbeRoutes {
+        let paths = &self.routes.get_openapi().paths.paths;
+        ProbeRoutes::new(
+            self.probes
+                .iter()
+                .map(|path| {
+                    let implicit_head = paths
+                        .get(path.as_ref())
+                        .is_some_and(|item| item.head.is_none());
+                    (path.clone(), implicit_head)
+                })
+                .collect(),
+        )
     }
 
-    #[must_use]
-    pub fn into_openapi(self) -> OpenApi {
-        self.routes.into_openapi()
+    pub fn into_openapi(mut self) -> Result<OpenApi, FinalizeError> {
+        self.finalize(&self.probe_routes())?;
+        Ok(self.routes.into_openapi())
+    }
+
+    fn finalize(&mut self, probes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
+        let document = self.routes.get_openapi_mut();
+        normalize_root(&mut document.paths)?;
+        let policy = Policy::compile(
+            document,
+            // template:begin http-idempotency:http-policy-compile-mounts
+            &self.idempotency,
+            // template:end http-idempotency:http-policy-compile-mounts
+        )?;
+        outcomes::compose(
+            document, probes,
+            // template:begin authn:http-compose-policy
+            &policy,
+            // template:end authn:http-compose-policy
+        )?;
+        Ok(policy)
     }
 
     pub fn build(
@@ -112,16 +241,58 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         authentication: Authentication,
         options: &HardenOptions,
     ) -> Result<Application, FinalizeError> {
+        self.build_with(
+            state,
+            authentication,
+            options,
+            // template:begin http-idempotency:http-build-no-store
+            None,
+            // template:end http-idempotency:http-build-no-store
+        )
+    }
+
+    // template:begin http-idempotency:http-build-store
+    pub fn build_with_idempotency_store(
+        self,
+        state: S,
+        authentication: Authentication,
+        options: &HardenOptions,
+        store: infra_idempotency_store::Store,
+    ) -> Result<Application, FinalizeError> {
+        self.build_with(state, authentication, options, Some(store))
+    }
+    // template:end http-idempotency:http-build-store
+
+    fn build_with(
+        mut self,
+        state: S,
+        authentication: Authentication,
+        options: &HardenOptions,
+        // template:begin http-idempotency:http-build-store-parameter
+        store: Option<infra_idempotency_store::Store>,
+        // template:end http-idempotency:http-build-store-parameter
+    ) -> Result<Application, FinalizeError> {
+        let probes = self.probe_routes();
+        let policy = self.finalize(&probes)?;
         let routes = match authentication {
-            Authentication::Public => finalize_public(self.routes)?,
+            Authentication::Public => finalize_public(self.routes, policy)?,
             // template:begin authn:http-assembly-finalize
-            Authentication::Bearer(verifier) => crate::authn::finalize(self.routes, *verifier)?,
+            Authentication::Bearer(auth) => crate::authn::finalize(self.routes, policy, *auth),
             // template:end authn:http-assembly-finalize
         };
+        // template:begin http-idempotency:http-build-bind-store
+        let routes = if self.idempotency.0.is_empty() {
+            routes
+        } else {
+            routes.layer(axum::Extension(
+                store.ok_or(FinalizeError::MissingIdempotencyStore)?,
+            ))
+        };
+        // template:end http-idempotency:http-build-bind-store
         Ok(Application(crate::harden::assemble(
             routes.with_state(state),
             options,
-            ProbeRoutes::new(self.probes),
+            probes,
         )))
     }
 }
@@ -157,11 +328,13 @@ impl tower::Service<Request> for Application {
     }
 }
 
-pub(crate) fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
+fn finalize_public<S>(
+    contract: OpenApiRouter<S>,
+    policy: Policy,
+) -> Result<Router<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
 {
-    let policy = Policy::compile(contract.get_openapi())?;
     if let Some((path, method)) = policy.first_protected() {
         return Err(FinalizeError::ProtectedOperation {
             path: path.to_owned(),
@@ -203,6 +376,9 @@ fn compile_operation(
     path: &str,
     method: &str,
     operation: &Operation,
+    // template:begin http-idempotency:http-compile-operation-mounts
+    mounted: &MountedOperations,
+    // template:end http-idempotency:http-compile-operation-mounts
 ) -> Result<Access, FinalizeError> {
     let invalid = |fault| FinalizeError::InvalidPolicy {
         path: path.to_owned(),
@@ -212,12 +388,58 @@ fn compile_operation(
     let access =
         Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
     // template:begin http-idempotency:http-contract-idempotency-policy
-    if matches!(access, Access::Public) && crate::idempotency::declares_replay(operation) {
+    if mounted.contains(path, method) && matches!(access, Access::Public) {
         return Err(invalid("idempotency_requires_authentication"));
+    }
+    if !mounted.contains(path, method) && declares_idempotency(document, path, operation) {
+        return Err(invalid("idempotency_requires_registration"));
     }
     // template:end http-idempotency:http-contract-idempotency-policy
     Ok(access)
 }
+
+// template:begin http-idempotency:http-unmounted-reserved-declarations
+fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -> bool {
+    use crate::idempotency::{KEY_HEADER, REPLAYED_HEADER};
+    use utoipa::openapi::path::ParameterIn;
+    let components = document.components.as_ref();
+    let path_item = document.paths.paths.get(path).or_else(|| {
+        (path == "/")
+            .then(|| document.paths.paths.get(""))
+            .flatten()
+    });
+    let key = path_item
+        .and_then(|item| item.parameters.as_deref())
+        .into_iter()
+        .flatten()
+        .chain(operation.parameters.iter().flatten())
+        .filter_map(|value| match value {
+            RefOr::T(parameter) => Some(parameter),
+            RefOr::Ref(_) => {
+                outcomes::resolve(value, &components?.parameters, "#/components/parameters/")
+            }
+        })
+        .any(|parameter| {
+            parameter.parameter_in == ParameterIn::Header
+                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
+        });
+    key || operation.responses.responses.iter().any(|(status, value)| {
+        status.starts_with('2')
+            && match value {
+                RefOr::T(response) => Some(response),
+                RefOr::Ref(_) => components.and_then(|components| {
+                    outcomes::resolve(value, &components.responses, "#/components/responses/")
+                }),
+            }
+            .is_some_and(|response| {
+                response
+                    .headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
+            })
+    })
+}
+// template:end http-idempotency:http-unmounted-reserved-declarations
 
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<CompiledPolicy>);
@@ -243,12 +465,78 @@ macro_rules! fixed_path_operations {
     };
 }
 
-// template:begin http-idempotency:http-contract-fixed-operations-export
 pub(super) use fixed_path_operations;
-// template:end http-idempotency:http-contract-fixed-operations-export
+
+fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
+    fixed_path_operations!(item, as_ref)
+        .into_iter()
+        .filter_map(|(method, operation)| operation.map(|_| method))
+        .chain(item.additional_operations.keys().map(String::as_str))
+}
+
+fn check_path_merge(
+    path: &str,
+    existing: &PathItem,
+    incoming: &PathItem,
+) -> Result<(), FinalizeError> {
+    let mut incoming_methods = documented_methods(incoming).peekable();
+    if incoming_methods.peek().is_none() && incoming.ref_path.is_none() {
+        return Ok(());
+    }
+    let existing_fixed = fixed_path_operations!(existing, as_ref);
+    if let Some(method) = incoming_methods.find(|method| {
+        existing.additional_operations.contains_key(*method)
+            || existing_fixed
+                .iter()
+                .any(|(name, op)| name == method && op.is_some())
+    }) {
+        return Err(FinalizeError::DuplicateOperation {
+            path: path.to_owned(),
+            method: method.to_owned(),
+        });
+    }
+    let left = existing.parameters.as_deref().unwrap_or_default();
+    let right = incoming.parameters.as_deref().unwrap_or_default();
+    if existing.ref_path != incoming.ref_path {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "$ref",
+        });
+    }
+    if left.len() != right.len() || !left.iter().all(|parameter| right.contains(parameter)) {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "parameters",
+        });
+    }
+    if existing.servers != incoming.servers {
+        return Err(FinalizeError::ConflictingPathItem {
+            path: path.to_owned(),
+            field: "servers",
+        });
+    }
+    Ok(())
+}
+
+fn normalize_root(paths: &mut Paths) -> Result<(), FinalizeError> {
+    if let Some(item) = paths.paths.remove("") {
+        if let Some(root) = paths.paths.get_mut("/") {
+            check_path_merge("/", root, &item)?;
+            root.merge_operations(item);
+        } else {
+            paths.paths.insert("/".to_owned(), item);
+        }
+    }
+    Ok(())
+}
 
 impl Policy {
-    pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
+    fn compile(
+        document: &OpenApi,
+        // template:begin http-idempotency:http-compile-mounts-parameter
+        mounted: &MountedOperations,
+        // template:end http-idempotency:http-compile-mounts-parameter
+    ) -> Result<Self, FinalizeError> {
         let mut routes = HashMap::with_capacity(document.paths.paths.len());
         let mut first_protected = None;
         for (path, item) in &document.paths.paths {
@@ -265,7 +553,12 @@ impl Policy {
                 };
                 ordered_methods.insert(
                     method.to_owned(),
-                    compile_operation(document, &path, method, operation)?,
+                    compile_operation(
+                        document, &path, method, operation,
+                        // template:begin http-idempotency:http-fixed-operation-mounts
+                        mounted,
+                        // template:end http-idempotency:http-fixed-operation-mounts
+                    )?,
                 );
             }
             for (method, operation) in &item.additional_operations {
@@ -281,7 +574,12 @@ impl Policy {
                 }
                 ordered_methods.insert(
                     method.clone(),
-                    compile_operation(document, &path, method, operation)?,
+                    compile_operation(
+                        document, &path, method, operation,
+                        // template:begin http-idempotency:http-additional-operation-mounts
+                        mounted,
+                        // template:end http-idempotency:http-additional-operation-mounts
+                    )?,
                 );
             }
             if first_protected.is_none()
@@ -437,35 +735,66 @@ mod tests {
     }
 
     fn app(contract: OpenApiRouter) -> Application {
-        HttpContract::new(contract)
-            .build(
-                (),
-                Authentication::Public,
-                &HardenOptions {
-                    max_body_bytes: 1024,
-                    request_timeout: Duration::from_secs(1),
-                    max_in_flight: NonZeroU32::new(2),
-                    admission_wait: Duration::from_secs(1),
-                    log_health_probes: false,
-                    draining: None,
-                },
-            )
-            .unwrap()
+        public_app(contract).unwrap()
+    }
+
+    fn public_app(contract: OpenApiRouter) -> Result<Application, FinalizeError> {
+        HttpContract::new(contract).build(
+            (),
+            Authentication::Public,
+            &HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: Duration::from_secs(1),
+                max_in_flight: NonZeroU32::new(2),
+                admission_wait: Duration::from_secs(1),
+                log_health_probes: false,
+                draining: None,
+            },
+        )
     }
 
     #[tokio::test]
     async fn public_query_and_additional_method_reach_the_registered_service() {
-        let document = serde_json::from_value(serde_json::json!({
+        let document: utoipa::openapi::OpenApi = serde_json::from_value(serde_json::json!({
             "openapi": "3.2.0",
             "info": {"title": "method fixture", "version": "1"},
             "paths": {"/_test/method": {
-                "query": {"responses": {"200": {"description": "ok"}}},
+                "query": {"responses": {"200": {"description": "ok"}, "503": {
+                    "description": "index rebuilding",
+                    "content": {"text/plain": {"schema": {"type": "string"}}}
+                }}},
                 "additionalOperations": {
                     "COPY": {"responses": {"200": {"description": "ok"}}}
                 }
             }}
         }))
         .expect("valid OpenAPI fixture");
+        let published = HttpContract::new(OpenApiRouter::<()>::with_openapi(document.clone()))
+            .into_openapi()
+            .unwrap();
+        let published = serde_json::to_value(published).unwrap();
+        let item = &published["paths"]["/_test/method"];
+        let query_unavailable = &item["query"]["responses"]["503"];
+        assert!(
+            query_unavailable["description"]
+                .as_str()
+                .unwrap()
+                .contains("index rebuilding")
+        );
+        assert_eq!(
+            query_unavailable["content"]["text/plain"]["schema"]["type"],
+            "string"
+        );
+        assert_eq!(
+            query_unavailable["content"]["application/problem+json"]["schema"]["$ref"],
+            "#/components/schemas/Problem"
+        );
+        assert!(query_unavailable["headers"]["Retry-After"].is_object());
+        assert_eq!(
+            item["additionalOperations"]["COPY"]["responses"]["503"]["$ref"],
+            "#/components/responses/AdmissionUnavailable"
+        );
+        assert!(published["components"]["responses"]["AdmissionUnavailable"].is_object());
         let service = tower::service_fn(|request: axum::extract::Request| async move {
             Ok::<_, std::convert::Infallible>(request.method().as_str().to_owned())
         });
@@ -502,6 +831,37 @@ mod tests {
         }
     }
 
+    // template:begin http-idempotency:http-unregistered-contract-test
+    #[test]
+    fn unregistered_operations_cannot_publish_idempotency_promises() {
+        for (parameters, success) in [
+            (
+                serde_json::json!([{"in":"header","name":"idempotency-key","required":true}]),
+                serde_json::json!({"description":"ok"}),
+            ),
+            (
+                serde_json::json!([]),
+                serde_json::json!({"$ref":"#/components/responses/Replay"}),
+            ),
+        ] {
+            let document = serde_json::from_value(serde_json::json!({
+                "openapi": "3.1.0", "info": {"title":"fixture","version":"1"},
+                "components": {"responses": {"Replay": {"description": "ok", "headers": {"Idempotent-Replayed":{"schema":{"type":"string"}}}}}},
+                "paths": {"/ordinary": {"parameters": parameters, "post": {"responses": {"201": success}}}}
+            })).unwrap();
+            let contract = HttpContract::new(OpenApiRouter::<()>::with_openapi(document));
+            assert_eq!(
+                contract.into_openapi().map(|_| ()),
+                Err(FinalizeError::InvalidPolicy {
+                    method: "POST".to_owned(),
+                    path: "/ordinary".to_owned(),
+                    fault: "idempotency_requires_registration"
+                })
+            );
+        }
+    }
+    // template:end http-idempotency:http-unregistered-contract-test
+
     #[test]
     fn additional_operations_cannot_redeclare_fixed_methods() {
         let document = serde_json::from_value(serde_json::json!({
@@ -515,13 +875,62 @@ mod tests {
         }))
         .expect("OpenAPI fixture");
         assert_eq!(
-            finalize_public(OpenApiRouter::<()>::with_openapi(document)).map(|_| ()),
+            HttpContract::new(OpenApiRouter::<()>::with_openapi(document))
+                .into_openapi()
+                .map(|_| ()),
             Err(FinalizeError::InvalidPolicy {
                 path: "/_test/method".to_owned(),
                 method: "POST".to_owned(),
                 fault: "fixed_method_in_additional_operations",
             })
         );
+    }
+
+    #[test]
+    fn static_export_rejects_two_declarations_for_the_root_operation() {
+        let operation = serde_json::json!({"get": {"responses": {"200": {"description": "ok"}}}});
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.0", "info": {"title":"fixture","version":"1"},
+            "paths": {"": operation, "/": operation}
+        }))
+        .unwrap();
+        let contract = HttpContract::<()>::new(OpenApiRouter::with_openapi(document));
+        assert_eq!(
+            contract.into_openapi().map(|_| ()),
+            Err(FinalizeError::DuplicateOperation {
+                path: "/".to_owned(),
+                method: "GET".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn nesting_a_get_preserves_the_parent_head_policy() {
+        #[utoipa::path(head, path = "/api/_test/method", security(("bearerAuth" = [])), responses((status = 204)))]
+        async fn protected_head() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.1.0", "info": {"title": "fixture", "version": "1"}, "paths": {},
+            "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}
+        }))
+        .unwrap();
+        let parent = HttpContract::<()>::new(
+            OpenApiRouter::with_openapi(document).routes(utoipa_axum::routes!(protected_head)),
+        );
+        let child = HttpContract::new(
+            OpenApiRouter::default().routes(utoipa_axum::routes!(documented_get)),
+        );
+        let contract = parent.nest("/api", child).unwrap();
+        let document = contract.into_openapi().unwrap();
+        let path = &document.paths.paths["/api/_test/method"];
+        assert!(path.get.is_some());
+        assert!(path.head.as_ref().is_some_and(|operation| {
+            operation
+                .security
+                .as_ref()
+                .is_some_and(|rules| !rules.is_empty())
+        }));
     }
 
     fn protected() -> FinalizeError {
@@ -603,10 +1012,15 @@ mod tests {
                 serde_json::from_value(document.clone()).expect("valid OpenAPI fixture"),
             );
             assert_eq!(
-                finalize_public(contract).map(|_| ()),
+                public_app(contract.clone()).map(|_| ()),
                 expected,
                 "{document}"
             );
+            let export = HttpContract::new(contract).into_openapi().map(|_| ());
+            match &expected {
+                Err(FinalizeError::ProtectedOperation { .. }) => assert_eq!(export, Ok(())),
+                _ => assert_eq!(export, expected, "{document}"),
+            }
         }
     }
 

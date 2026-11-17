@@ -5,13 +5,12 @@ mod identity;
 mod openapi;
 mod stored;
 
-pub use compose::{Activation, Composer};
+pub use compose::route;
 pub use declaration::CompositionError;
-pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Rollback};
+pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback};
 pub use infra_postgres::Tx;
-pub(crate) use openapi::declares_replay;
 pub use stored::ReplayableResponse;
 
-const KEY_HEADER: &str = "Idempotency-Key";
-const REPLAYED_HEADER: &str = "Idempotent-Replayed";
+pub(crate) const KEY_HEADER: &str = "Idempotency-Key";
+pub(crate) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
 const REPLAYED_VALUE: &str = "true";

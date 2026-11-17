@@ -254,10 +254,9 @@ fn path_style_belongs_to_the_generic_provider() {
 fn the_emulator_provider_is_local_only() {
     let mut local = railway();
     local.provider = ProviderKind::Local;
-    assert_eq!(
-        key_of(local.clone(), "production"),
-        "object_storage.provider"
-    );
+    let error = admit(local.clone(), "private-environment-value").unwrap_err();
+    assert!(error.names("object_storage.provider"));
+    assert!(!error.to_string().contains("private-environment-value"));
     for env in ["local", "development"] {
         assert_matches!(
             admit(local.clone(), env).unwrap().unwrap().provider,
@@ -303,9 +302,12 @@ fn limits_are_bounded_even_when_inert() {
 }
 
 #[test]
-fn debug_output_redacts_the_secret() {
-    let rendered = format!("{:?}", admit(railway(), "production").unwrap());
-    assert!(!rendered.contains("hunter2"), "{rendered}");
+fn debug_output_hides_the_secret_and_destination() {
+    let mut input = railway();
+    input.endpoint = "https://bucket.example/private-destination".to_owned();
+    let rendered = format!("{:?}", admit(input, "production").unwrap());
+    assert!(!rendered.contains("hunter2"));
+    assert!(!rendered.contains("private-destination"));
 }
 
 #[test]

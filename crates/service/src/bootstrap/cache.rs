@@ -7,29 +7,24 @@ pub(super) async fn open(
     config: &Config,
     retained: &mut Option<Cache>,
 ) -> Result<(), BootstrapError> {
-    let Some(dsn) = &config.cache.dsn else {
+    let Some(cache) = &config.cache else {
         return Ok(());
     };
-    let client_certificate =
-        config
-            .cache
-            .client_certificate
-            .clone()
-            .map(|certificate| ClientCertificate {
-                cert_path: certificate.cert_path,
-                key_path: certificate.key_path,
-            });
     let options = CacheOptions {
-        dsn: dsn.clone(),
-        password_file: config.cache.password_file.clone(),
-        root_ca_path: config.cache.root_ca_path.clone(),
-        client_certificate,
-        allow_plaintext: config.cache.allow_plaintext,
-        allow_unauthenticated: config.cache.allow_unauthenticated,
-        command_timeout: config.cache.command_timeout,
-        max_key_bytes: usize::try_from(config.cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
-        max_value_bytes: usize::try_from(config.cache.max_value_bytes.as_u64())
-            .unwrap_or(usize::MAX),
+        dsn: cache.dsn.clone(),
+        password_file: cache.password_file.clone(),
+        root_ca_path: cache.root_ca_path.clone(),
+        client_certificate: cache.client_certificate.as_ref().map(|certificate| {
+            ClientCertificate {
+                cert_path: certificate.cert_path.clone(),
+                key_path: certificate.key_path.clone(),
+            }
+        }),
+        allow_plaintext: cache.allow_plaintext,
+        allow_unauthenticated: cache.allow_unauthenticated,
+        command_timeout: cache.command_timeout,
+        max_key_bytes: usize::try_from(cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_value_bytes: usize::try_from(cache.max_value_bytes.as_u64()).unwrap_or(usize::MAX),
     };
     *retained = Some(Cache::start(options).await?);
     Ok(())

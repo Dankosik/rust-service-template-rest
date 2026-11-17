@@ -30,7 +30,12 @@ pub struct Registration<'a> {
     // template:begin outbox:worker-registration-postgres-messages
     postgres_messages: Option<PostgresMessages>,
     // template:end outbox:worker-registration-postgres-messages
-    config: &'a service_config::WorkerConfig,
+    // template:begin webhooks:worker-registration-outbound-webhooks
+    outbound_webhooks: &'a service_config::WebhooksConfig,
+    // template:end webhooks:worker-registration-outbound-webhooks
+    // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints
+    inbound_webhook_endpoints: &'a std::collections::BTreeSet<String>,
+    // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints
     background: &'a background::Background,
 }
 
@@ -41,6 +46,35 @@ type PostgresMessages = Box<
 // template:end outbox:worker-postgres-messages-factory
 
 impl<'a> Registration<'a> {
+    #[allow(
+        clippy::unnecessary_wraps,
+        unused_variables,
+        reason = "only messaging registration is fallible and only webhook registrations use configuration"
+    )]
+    fn new(
+        config: &'a service_config::WorkerConfig,
+        background: &'a background::Background,
+    ) -> Result<Self, bootstrap::WorkerError> {
+        Ok(Self {
+            // template:begin jobs:worker-bootstrap-register-jobs
+            jobs: infra_jobs::KindsBuilder::new(),
+            // template:end jobs:worker-bootstrap-register-jobs
+            // template:begin messaging:worker-bootstrap-register-messaging
+            messages: infra_messaging::Registry::try_new([])?,
+            // template:end messaging:worker-bootstrap-register-messaging
+            // template:begin outbox:worker-bootstrap-postgres-messages-initial
+            postgres_messages: None,
+            // template:end outbox:worker-bootstrap-postgres-messages-initial
+            // template:begin webhooks:worker-registration-outbound-webhooks-value
+            outbound_webhooks: &config.webhooks,
+            // template:end webhooks:worker-registration-outbound-webhooks-value
+            // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
+            inbound_webhook_endpoints: &config.inbound_webhook_endpoints,
+            // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
+            background,
+        })
+    }
+
     // template:begin outbox:worker-with-postgres-messages
     pub fn with_postgres_messages(
         &mut self,
@@ -58,10 +92,18 @@ impl<'a> Registration<'a> {
     }
     // template:end outbox:worker-with-postgres-messages
 
+    // template:begin webhooks:worker-outbound-webhooks-accessor
     #[must_use]
-    pub fn config(&self) -> &'a service_config::WorkerConfig {
-        self.config
+    pub fn outbound_webhooks(&self) -> &service_config::WebhooksConfig {
+        self.outbound_webhooks
     }
+    // template:end webhooks:worker-outbound-webhooks-accessor
+
+    // template:begin inbound-webhooks:worker-inbound-webhook-endpoints-accessor
+    pub fn inbound_webhook_endpoints(&self) -> impl Iterator<Item = &str> {
+        self.inbound_webhook_endpoints.iter().map(String::as_str)
+    }
+    // template:end inbound-webhooks:worker-inbound-webhook-endpoints-accessor
 
     pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where

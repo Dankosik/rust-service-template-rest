@@ -196,7 +196,7 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         env(&[listener.as_slice(), development.as_slice()].concat()),
     )
     .unwrap();
-    for environment in [None, Some(("APP__APP__ENV", "production"))] {
+    for environment in [None, Some(("APP__APP__ENV", "private-environment-value"))] {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,
@@ -204,5 +204,6 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         )
         .unwrap_err();
         assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");
+        assert!(!err.to_string().contains("private-environment-value"));
     }
 }

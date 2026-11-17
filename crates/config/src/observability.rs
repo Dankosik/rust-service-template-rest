@@ -77,7 +77,7 @@ impl Default for OtelConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, derive_more::Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {
     /// OTLP/HTTP traces endpoint. A collector root without a path resolves
@@ -86,6 +86,7 @@ pub struct OtelExporterConfig {
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
     /// the exporter stays disabled.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
+    #[debug(skip)]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`.
     /// Set `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` in the
@@ -186,15 +187,16 @@ mod tests {
     }
 
     #[test]
-    fn headers_never_appear_in_debug_output() {
+    fn collector_credentials_and_destinations_stay_out_of_debug_output() {
         let cfg = OtelExporterConfig {
+            otlp_endpoint: Some("https://collector.example/private-destination".to_owned()),
             otlp_headers: Some(SecretString::from(
                 "authorization=Bearer topsecret".to_owned(),
             )),
-            ..OtelExporterConfig::default()
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("topsecret"), "{rendered}");
+        assert!(!rendered.contains("private-destination"));
         assert!(cfg.otlp_headers.is_some());
     }
 

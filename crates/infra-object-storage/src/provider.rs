@@ -3,25 +3,29 @@ use url::Url;
 use crate::error::ConfigError;
 use crate::put_body::UploadSource;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, derive_more::Debug, PartialEq, Eq)]
 pub enum Provider {
     AmazonS3 {
         region: String,
         expected_bucket_owner: String,
     },
     CloudflareR2 {
+        #[debug(skip)]
         endpoint: String,
     },
     Railway {
+        #[debug(skip)]
         endpoint: String,
         region: String,
     },
     S3Compatible {
+        #[debug(skip)]
         endpoint: String,
         region: String,
         path_style: bool,
     },
     Local {
+        #[debug(skip)]
         endpoint: String,
         region: String,
     },

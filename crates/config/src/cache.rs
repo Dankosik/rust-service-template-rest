@@ -55,35 +55,24 @@ pub(crate) struct CacheInput {
 
 impl Default for CacheInput {
     fn default() -> Self {
-        let CacheConfig {
-            dsn,
-            password_file,
-            root_ca_path,
-            client_certificate: _,
-            allow_plaintext,
-            allow_unauthenticated,
-            command_timeout,
-            max_key_bytes,
-            max_value_bytes,
-        } = CacheConfig::default();
         Self {
-            dsn,
-            password_file,
-            root_ca_path,
+            dsn: None,
+            password_file: None,
+            root_ca_path: None,
             client_cert_path: None,
             client_key_path: None,
-            allow_plaintext,
-            allow_unauthenticated,
-            command_timeout,
-            max_key_bytes,
-            max_value_bytes,
+            allow_plaintext: false,
+            allow_unauthenticated: false,
+            command_timeout: Duration::from_secs(2),
+            max_key_bytes: ByteSize::kib(1),
+            max_value_bytes: ByteSize::kib(64),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
-    pub dsn: Option<SecretString>,
+    pub dsn: SecretString,
     pub password_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub client_certificate: Option<CacheClientCertificate>,
@@ -94,24 +83,12 @@ pub struct CacheConfig {
     pub max_value_bytes: ByteSize,
 }
 
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            dsn: None,
-            password_file: None,
-            root_ca_path: None,
-            client_certificate: None,
-            allow_plaintext: false,
-            allow_unauthenticated: false,
-            command_timeout: Duration::from_secs(2),
-            max_key_bytes: ByteSize::kib(1),
-            max_value_bytes: ByteSize::kib(64),
-        }
-    }
-}
-
 impl CacheInput {
-    pub(crate) fn admit(self, app_env: &str, v: &mut Violations) -> Result<CacheConfig, Rejected> {
+    pub(crate) fn admit(
+        self,
+        app_env: &str,
+        v: &mut Violations,
+    ) -> Result<Option<CacheConfig>, Rejected> {
         v.check(local_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
@@ -155,8 +132,8 @@ impl CacheInput {
         }
         let client_certificate = client_certificate?;
         command_timeout?;
-        Ok(CacheConfig {
-            dsn: self.dsn,
+        Ok(self.dsn.map(|dsn| CacheConfig {
+            dsn,
             password_file: self.password_file,
             root_ca_path: self.root_ca_path,
             client_certificate,
@@ -165,7 +142,7 @@ impl CacheInput {
             command_timeout: self.command_timeout,
             max_key_bytes: self.max_key_bytes,
             max_value_bytes: self.max_value_bytes,
-        })
+        }))
     }
 }
 
