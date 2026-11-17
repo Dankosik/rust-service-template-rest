@@ -125,7 +125,9 @@ infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:service-service-auth-test-dependency
 rstest = { workspace = true }
 nix = { workspace = true, features = ["signal", "fs"] }
+# template:begin service-test-tempfile:service-tempfile-dev-dependency
 tempfile = { workspace = true, features = ["getrandom"] }
+# template:end service-test-tempfile:service-tempfile-dev-dependency
 tokio = { workspace = true, features = [
     "test-util", "io-util",
     # template:begin runtime-progress:service-runtime-progress-tokio-features

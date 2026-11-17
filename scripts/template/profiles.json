@@ -422,6 +422,9 @@
   "service-secrets": {
     "remove_when_unselected": []
   },
+  "service-test-tempfile": {
+    "remove_when_unselected": []
+  },
   "integration": {
     "remove_when_unselected": [
       "env/docker-compose.yml",
