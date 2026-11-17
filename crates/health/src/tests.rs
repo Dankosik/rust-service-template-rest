@@ -360,6 +360,37 @@ async fn a_hanging_probe_times_out_under_its_own_name() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_success_observed_after_the_budget_cannot_admit_startup() {
+    let recorder = recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let readiness = Readiness::new(
+        vec![Box::new(Gated {
+            hold: Arc::new(AtomicBool::new(true)),
+            release: Arc::clone(&release),
+        })],
+        policy(),
+    );
+    let reader = readiness.control().reader();
+    let prepared = readiness.prepare();
+    tokio::pin!(prepared);
+    assert!(futures_util::FutureExt::now_or_never(prepared.as_mut()).is_none());
+    tokio::time::advance(policy().probe_budget + Duration::from_millis(1)).await;
+    release.notify_one();
+    std::assert_matches!(
+        prepared.await,
+        Err(NotReady::TimedOut { probe: "gated", .. })
+    );
+    assert_eq!(reader.verdict(), Err(NotReady::NotEvaluated));
+    let scrape = recorder.handle().render();
+    assert_sample(
+        &scrape,
+        "readiness_probe_checks_total{probe=\"gated\",outcome=\"timed_out\"} 1",
+    );
+    assert_sample(&scrape, "readiness_checks_total{outcome=\"timed_out\"} 1");
+}
+
 #[tokio::test]
 async fn draining_prepared_readiness_vetoes_activation() {
     let (readiness, _, _) = flaky(true);
@@ -658,11 +689,11 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_draining_owner_logs_no_check_outcome() {
+async fn a_draining_owner_skips_probes_and_logs_no_check_outcome() {
     let events = Events::default();
     let _guard = tracing::subscriber::set_default(events.clone());
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let (readiness, flag, _) = flaky(true);
+    let (readiness, flag, calls) = flaky(true);
     let control = readiness.control();
     let mut refresher = activate(readiness).await;
     control.start_drain();
@@ -671,12 +702,13 @@ async fn a_draining_owner_logs_no_check_outcome() {
         refresher.refresh().await;
     }
 
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(events.0.lock().unwrap().is_empty(), "{:?}", events.0);
 }
 
 // template:begin grpc:health-changed-verdict-test
 #[tokio::test(start_paused = true)]
-async fn a_ready_watch_sleeps_through_steady_and_absorbed_refreshes_and_wakes_on_each_flip() {
+async fn a_ready_watch_reports_only_readiness_changes() {
     let (readiness, flag, _) = flaky(true);
     let control = readiness.control();
     let mut refresher = activate(readiness).await;

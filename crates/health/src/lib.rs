@@ -353,8 +353,11 @@ impl PreparedReadiness {
 
 impl ReadinessRefresher {
     async fn refresh(&mut self) {
-        let observed = self.readiness.check_probes().await;
         let control = &self.readiness.control;
+        if control.draining.load(Ordering::Acquire) {
+            return;
+        }
+        let observed = self.readiness.check_probes().await;
         let failure_threshold = control.policy.failure_threshold;
         let stale_after = control.policy.stale_after();
         let mut transition_to_log = None;
@@ -383,7 +386,7 @@ impl ReadinessRefresher {
                 .map(|previous| at.duration_since(previous.at))
                 .filter(|age| *age > stale_after);
             state.last_check = Some(next);
-            was_ready != now_ready
+            true
         });
         if let Some(age) = late_by {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
@@ -430,16 +433,17 @@ impl Readiness {
         let deadline = Instant::now() + budget;
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
             let probe_name = probe.name();
-            let (outcome, label) = match tokio::time::timeout_at(deadline, probe.check()).await {
-                Ok(Ok(())) => (Ok(()), "ok"),
-                Ok(Err(error)) => (
+            let result = tokio::time::timeout_at(deadline, probe.check()).await;
+            let (outcome, label) = match result.ok().filter(|_| Instant::now() <= deadline) {
+                Some(Ok(())) => (Ok(()), "ok"),
+                Some(Err(error)) => (
                     Err(ProbeFailure::Failed {
                         probe: probe_name,
                         error,
                     }),
                     "failed",
                 ),
-                Err(_elapsed) => (
+                None => (
                     Err(ProbeFailure::TimedOut {
                         probe: probe_name,
                         budget,
