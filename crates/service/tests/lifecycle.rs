@@ -351,15 +351,16 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the startup cancellation fixture holds an authenticated silent loopback connection until child teardown"
+)]
 fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
-    #[expect(
-        clippy::disallowed_methods,
-        clippy::disallowed_types,
-        reason = "the startup cancellation fixture holds this silent loopback listener until child teardown"
-    )]
     let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
+    silent.set_nonblocking(true).expect("nonblocking listener");
     let port = silent.local_addr().expect("silent listener").port();
-    let dsn = format!("redis://127.0.0.1:{port}");
+    let dsn = format!("redis://:startup-fixture@127.0.0.1:{port}");
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
         ("APP__CACHE__DSN", &dsn),
@@ -368,6 +369,17 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
     service.await_record("service_starting");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let peer = loop {
+        match silent.accept() {
+            Ok((peer, _)) => break peer,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "cache setup did not connect");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept cache setup: {error}"),
+        }
+    };
     service.terminate();
     let mut messages = Vec::new();
     while let Ok(line) = service.lines.recv_timeout(Duration::from_secs(20)) {
@@ -375,6 +387,7 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
         messages.push(record["message"].as_str().unwrap_or_default().to_owned());
     }
     let (code, stderr) = service.wait();
+    drop(peer);
     drop(silent);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert!(
