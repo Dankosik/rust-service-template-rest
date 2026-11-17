@@ -64,7 +64,8 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
         .bind(id)
         .bind(i32::from(job.attempt()))
         .execute(job.pool())
-        .await?;
+        .await
+        .map_err(|_| JobError::retryable("probe write failed"))?;
     match job.payload().action {
         ProbeAction::Succeed => Ok(()),
         ProbeAction::FailRetryable => Err(JobError::retryable("probe failed retryably")),
@@ -79,7 +80,8 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
                 sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE job_id = $1::uuid")
                     .bind(job.id().to_string())
                     .fetch_one(job.pool())
-                    .await?;
+                    .await
+                    .map_err(|_| JobError::retryable("probe lookup failed"))?;
             if deliveries == 1 {
                 Err(JobError::snooze(Duration::from_millis(millis)).expect("probe delay is valid"))
             } else {

@@ -146,9 +146,9 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // template:begin jobs:worker-shutdown-native-failures
     let background_outcome = if background_outcome == Outcome::Graceful
         && resources
-            .started_engines
-            .iter()
-            .any(|engine| engine.failed().now_or_never().is_some())
+            .started_engine
+            .as_ref()
+            .is_some_and(|engine| engine.failed().now_or_never().is_some())
     {
         Outcome::Degraded
     } else {
@@ -198,7 +198,7 @@ fn stop_work(http: &WorkerHttpConfig, resources: &Resources) {
         tracing::info!("readiness_disabled");
     }
     // template:begin jobs:worker-shutdown-stop-jobs
-    for started in &resources.started_engines {
+    if let Some(started) = &resources.started_engine {
         started.stop_claiming();
         tracing::info!(in_flight = started.in_flight(), "claiming_stopped");
     }
@@ -220,7 +220,7 @@ async fn drain(
     #[allow(unused_variables, reason = "retained profiles supply started work")]
     let work_started = false;
     // template:begin jobs:worker-shutdown-drain-has-jobs
-    let work_started = !resources.started_engines.is_empty();
+    let work_started = resources.started_engine.is_some();
     // template:end jobs:worker-shutdown-drain-has-jobs
     // template:begin messaging:worker-shutdown-drain-has-messaging
     let work_started = work_started || resources.consumer.is_some();
@@ -232,7 +232,7 @@ async fn drain(
     tracing::info!(
         budget = ?drain_budget,
         // template:begin jobs:worker-shutdown-drain-start-log
-        in_flight = resources.started_engines.iter().map(Started::in_flight).sum::<usize>(),
+        in_flight = resources.started_engine.as_ref().map_or(0, Started::in_flight),
         // template:end jobs:worker-shutdown-drain-start-log
         "drain_started"
     );
@@ -240,8 +240,9 @@ async fn drain(
     let joined = async {
         let jobs = async {
             // template:begin jobs:worker-shutdown-drain-jobs
-            futures_util::future::join_all(resources.started_engines.iter().map(Started::drained))
-                .await;
+            if let Some(engine) = &resources.started_engine {
+                engine.drained().await;
+            }
             // template:end jobs:worker-shutdown-drain-jobs
         };
         let messages = async {
@@ -277,10 +278,9 @@ async fn drain(
             tracing::warn!(
                 // template:begin jobs:worker-shutdown-drain-forced-log
                 in_flight = resources
-                    .started_engines
-                    .iter()
-                    .map(Started::in_flight)
-                    .sum::<usize>(),
+                    .started_engine
+                    .as_ref()
+                    .map_or(0, Started::in_flight),
                 // template:end jobs:worker-shutdown-drain-forced-log
                 reason,
                 error,
@@ -294,13 +294,9 @@ async fn drain(
 async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instant) {
     let jobs = async {
         // template:begin jobs:worker-shutdown-finish-jobs
-        futures_util::future::join_all(
-            resources
-                .started_engines
-                .iter()
-                .map(|engine| finish_attempts(engine, deadline)),
-        )
-        .await;
+        if let Some(engine) = &resources.started_engine {
+            finish_attempts(engine, deadline).await;
+        }
         // template:end jobs:worker-shutdown-finish-jobs
     };
     let messages = async {

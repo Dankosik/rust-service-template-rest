@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::engine::{ForcedCleanup, Operation, RECORD_RETRY_INTERVAL, Shared, observe_recovery};
-use crate::kind::{Attempt, HandlerFuture, JobError, JobId, Registered};
+use crate::kind::{Attempt, Completion, HandlerFuture, JobError, JobId, Registered};
 use crate::state::FailureReason;
 
 use completion::complete_batched;
@@ -272,7 +272,7 @@ async fn run_attempt(
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
 ) {
-    if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
+    if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
         observe_uncertain(shared, &attempt);
         return;
     }
@@ -287,8 +287,8 @@ async fn run_attempt(
             generation,
             attempt_deadline,
             cancellation: cancel.clone(),
-            pool: shared.pool.clone(),
         },
+        shared.pool.clone(),
         &payload,
     );
     drop(payload);
@@ -297,7 +297,7 @@ async fn run_attempt(
         Ok(future) => {
             let started = Instant::now();
             let Some(ended) = drive(
-                &shared.cleanup,
+                &shared.lifecycle.cleanup,
                 future,
                 cancel,
                 attempt_deadline,
@@ -311,11 +311,17 @@ async fn run_attempt(
             (ended, Some(started.elapsed()))
         }
     };
+    let committed = matches!(ended, Ended::Success(Completion::Committed));
     let transition = map_outcome(&attempt, policy, ended);
     if matches!(transition, Transition::Release) {
-        shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
+        shared
+            .lifecycle
+            .counters
+            .cancelled
+            .fetch_add(1, Ordering::Relaxed);
     } else {
         shared
+            .lifecycle
             .counters
             .known_results
             .fetch_add(1, Ordering::Relaxed);
@@ -331,6 +337,16 @@ async fn run_attempt(
         observe_attempt(Some(handles), &attempt, &transition);
         None
     };
+    if committed {
+        observe_acknowledged(
+            shared,
+            handles,
+            &attempt,
+            Operation::Record,
+            Written::Applied,
+        );
+        return;
+    }
     let written = persist(
         shared,
         handles,
@@ -351,12 +367,13 @@ async fn run_attempt(
 }
 
 fn prepare_handler(
-    dispatch: &dyn crate::kind::Dispatch,
+    dispatch: &crate::kind::Dispatch,
     attempt: Attempt,
+    pool: infra_postgres::PgPool,
     payload: &[u8],
 ) -> Result<HandlerFuture, Ended> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch.prepare(attempt, payload)
+        dispatch(attempt, pool, payload)
     }))
     .map_err(|_| Ended::Panic)?
     .map_err(Ended::Payload)
@@ -419,6 +436,7 @@ async fn drive(
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
 ) -> Option<Ended> {
+    let _ended = cancel.clone().drop_guard();
     let mut handler = OwnedHandler(Some(future));
     let reason = {
         let mut run =
@@ -462,19 +480,21 @@ async fn drive(
     (Instant::now() < supervisor_deadline && !cleanup.has_ended()).then_some(reason)
 }
 
-fn ended_after_cancel(result: &Result<Result<(), JobError>, Panicked>, reason: Ended) -> Ended {
-    if matches!(result, Ok(Ok(()))) {
-        Ended::Success
-    } else {
-        reason
+fn ended_after_cancel(
+    result: &Result<Result<Completion, JobError>, Panicked>,
+    reason: Ended,
+) -> Ended {
+    match result {
+        Ok(Ok(completion)) => Ended::Success(*completion),
+        _ => reason,
     }
 }
 
 type Panicked = Box<dyn std::any::Any + Send>;
 
-fn ended_from(result: Result<Result<(), JobError>, Panicked>) -> Ended {
+fn ended_from(result: Result<Result<Completion, JobError>, Panicked>) -> Ended {
     match result {
-        Ok(Ok(())) => Ended::Success,
+        Ok(Ok(completion)) => Ended::Success(completion),
         Ok(Err(error)) => Ended::Error(error),
         Err(_) => Ended::Panic,
     }
@@ -496,10 +516,10 @@ async fn persist(
         generation,
     };
     loop {
-        if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
             break;
         }
-        let sent = within(&shared.cleanup, supervisor_deadline, async {
+        let sent = within(&shared.lifecycle.cleanup, supervisor_deadline, async {
             match write {
                 None => complete_batched(shared, fence, supervisor_deadline, slots).await,
                 Some(write) => send_outcome(shared, fence, write, supervisor_deadline).await,
@@ -516,7 +536,7 @@ async fn persist(
         }
         let until = clamped_deadline(Instant::now(), RECORD_RETRY_INTERVAL, supervisor_deadline);
         if within(
-            &shared.cleanup,
+            &shared.lifecycle.cleanup,
             supervisor_deadline,
             tokio::time::sleep_until(until),
         )
@@ -551,12 +571,20 @@ fn observe_acknowledged(
         "job_persistence_finished"
     );
     if written == Written::Applied && operation == Operation::Release {
-        shared.counters.released.fetch_add(1, Ordering::Relaxed);
+        shared
+            .lifecycle
+            .counters
+            .released
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
 fn observe_uncertain(shared: &Shared, attempt: &AttemptId) {
-    shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
+    shared
+        .lifecycle
+        .counters
+        .uncertain
+        .fetch_add(1, Ordering::Relaxed);
     persistence_counter(attempt.kind, Persistence::Unknown).increment(1);
     tracing::warn!(
         job.id = %attempt.job_id,
@@ -611,16 +639,25 @@ mod tests {
             generation: 1,
             attempt_deadline: Instant::now() + Duration::from_secs(1),
             cancellation: CancellationToken::new(),
-            pool: pool.clone(),
         };
-        let failed = prepare_handler(registered.dispatch.as_ref(), attempt(), b"true");
+        let failed = prepare_handler(
+            registered.dispatch.as_ref(),
+            attempt(),
+            pool.clone(),
+            b"true",
+        );
         let Err(ended) = failed else {
             panic!("a preparation panic must not return a handler");
         };
         std::assert_matches!(ended, Ended::Panic);
         assert!(!ran.load(Ordering::Relaxed));
 
-        let Ok(later) = prepare_handler(registered.dispatch.as_ref(), attempt(), b"false") else {
+        let Ok(later) = prepare_handler(
+            registered.dispatch.as_ref(),
+            attempt(),
+            pool.clone(),
+            b"false",
+        ) else {
             panic!("a valid payload still prepares");
         };
         later.await.unwrap();
@@ -663,7 +700,7 @@ mod tests {
             &ForcedCleanup::default(),
             Box::pin(async move {
                 let _ = ran.send(());
-                Ok(())
+                Ok(Completion::Pending)
             }),
             cancel.clone(),
             deadline,
@@ -715,7 +752,7 @@ mod tests {
             Box::pin(async move {
                 suspended.await.unwrap();
                 let _ = ran.send(());
-                Ok(())
+                Ok(Completion::Pending)
             }),
             cancel.clone(),
             deadline,
@@ -744,6 +781,31 @@ mod tests {
         tokio::time::advance(delay).await;
         assert_eq!(work.await, None);
         assert!(!ran.get());
+    }
+
+    #[tokio::test]
+    async fn returning_or_unwinding_cancels_the_handler_children() {
+        for exit in ["success", "failure", "panic"] {
+            let token = CancellationToken::new();
+            let child = token.child_token();
+            let until = Instant::now() + Duration::from_secs(10);
+            let result = drive(
+                &ForcedCleanup::default(),
+                Box::pin(async move {
+                    match exit {
+                        "success" => Ok(Completion::Pending),
+                        "failure" => Err(JobError::permanent("refused")),
+                        _ => panic!("handler panicked"),
+                    }
+                }),
+                token,
+                until,
+                until,
+            )
+            .await;
+            assert!(result.is_some());
+            assert!(child.is_cancelled(), "{exit}");
+        }
     }
 
     #[derive(Clone, Default)]
@@ -794,7 +856,7 @@ mod tests {
         let spans = SpanFields::default();
         tracing::subscriber::with_default(spans.clone(), || {
             for ended in [
-                Ended::Success,
+                Ended::Success(Completion::Pending),
                 Ended::Error(JobError::retryable("fail")),
                 Ended::Error(JobError::permanent("stop")),
                 Ended::Cancelled,

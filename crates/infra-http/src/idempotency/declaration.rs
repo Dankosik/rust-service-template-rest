@@ -53,8 +53,8 @@ enum Rule {
         "request parameters must be inline and header parameters must have valid HTTP field names"
     )]
     FingerprintParameter,
-    #[error("cookie parameters cannot contribute to an idempotent command")]
-    CookieParameter,
+    #[error("cookie parameter {0} is outside the idempotent request fingerprint")]
+    CookieParameter(String),
     #[error("an idempotent operation must not declare informational or redirect response {status}")]
     InformationalOrRedirectResponse { status: String },
     #[error("an idempotent operation must declare a 2xx response")]
@@ -135,7 +135,10 @@ fn collect_fingerprint_headers(
             return Err(invalid());
         };
         if parameter.parameter_in == ParameterIn::Cookie {
-            return Err(CompositionError::new(subject, Rule::CookieParameter));
+            return Err(CompositionError::new(
+                subject,
+                Rule::CookieParameter(parameter.name.clone()),
+            ));
         }
         if parameter.parameter_in == ParameterIn::Header
             && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
@@ -407,29 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn command_declarations_refuse_cookie_parameters_at_both_levels() {
-        for at_path in [true, false] {
-            let (_, mut paths, _): UtoipaMethodRouter = route();
-            let item = paths.paths.get_mut(WIDGETS).unwrap();
-            let parameters = if at_path {
-                &mut item.parameters
-            } else {
-                &mut item.post.as_mut().unwrap().parameters
-            };
-            *parameters = Some(vec![
-                serde_json::from_value(serde_json::json!({
-                    "in": "cookie", "name": "variant", "required": false, "schema": {"type": "string"}
-                }))
-                .unwrap(),
-            ]);
-            assert_eq!(
-                prepare(&mut paths).unwrap_err().rule(),
-                &Rule::CookieParameter
-            );
-        }
-    }
-
-    #[test]
     fn idempotent_features_reject_root_policy_and_conflicting_shared_components() {
         for (field, value, expected) in [
             (
@@ -485,6 +465,30 @@ mod tests {
                 "schema": { "type": "string", "enum": ["true"] }
             })
         );
+    }
+
+    #[test]
+    fn a_declared_cookie_is_rejected_at_either_parameter_location() {
+        for path_level in [true, false] {
+            let (_, mut paths, _): UtoipaMethodRouter = route();
+            let item = paths.paths.get_mut(WIDGETS).unwrap();
+            let parameters = if path_level {
+                &mut item.parameters
+            } else {
+                &mut item.post.as_mut().unwrap().parameters
+            };
+            parameters.get_or_insert_default().push(
+                Parameter::builder()
+                    .name("region")
+                    .parameter_in(ParameterIn::Cookie)
+                    .build()
+                    .into(),
+            );
+            assert_eq!(
+                prepare(&mut paths).unwrap_err().rule(),
+                &Rule::CookieParameter("region".to_owned())
+            );
+        }
     }
 
     #[test]

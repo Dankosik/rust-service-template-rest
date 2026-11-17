@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use axum_test::TestServer;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
-use infra_jobs::{Engine, JobError, KindsBuilder, Policy};
+use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
@@ -295,10 +295,11 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         .await
         .expect("unchanged admission time");
     assert_eq!(timestamp, first);
-    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
-        .fetch_one(&pool)
-        .await
-        .expect("original processing job");
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("original processing job");
     assert_eq!(payload["version"], 1);
     let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
     assert_eq!(incoming.body(), body);
@@ -353,10 +354,11 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
-    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
-        .fetch_one(&pool)
-        .await
-        .expect("winning processing job");
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("winning processing job");
     let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
     let expected = if one == Ok(ReceiptOutcome::Accepted) {
         body.as_slice()
@@ -487,7 +489,7 @@ impl Consumer for EffectConsumer {
             .bind(incoming.content_type())
             .execute(&mut *tx)
             .await
-            .map_err(JobError::from)?;
+            .map_err(|_| JobError::retryable("webhook_effect_write_failed"))?;
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())
@@ -504,7 +506,7 @@ struct RunningProcessor {
 impl RunningProcessor {
     fn start(pool: &PgPool, consumers: Consumers) -> Self {
         let mut kinds = KindsBuilder::new();
-        kinds.register(Policy::default(), Processor::new(consumers));
+        Processor::new(consumers).register(&mut kinds);
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("webhook processor registry"),
@@ -1404,10 +1406,11 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     }
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
-    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM background_jobs")
-        .fetch_one(&pool)
-        .await
-        .expect("mounted processing job");
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("mounted processing job");
     let incoming: Incoming = serde_json::from_value(payload).expect("incoming");
     assert_eq!(incoming.endpoint_id(), ENDPOINT);
     assert_eq!(incoming.message_id(), vec![b'm'; 255]);

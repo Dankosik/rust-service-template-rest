@@ -89,8 +89,8 @@ pub async fn enqueue<K: JobKind>(
     let inserted = observed(
         "enqueue job",
         sqlx::query!(
-            "INSERT INTO background_jobs (id, kind, payload, payload_text, unique_key, not_before, trace_context, trace_state) \
-             VALUES ($7, $1, $2::text::jsonb, $2, $3::text COLLATE \"C\", \
+            "INSERT INTO background_jobs (id, kind, payload_text, unique_key, not_before, trace_context, trace_state) \
+             VALUES ($7, $1, $2, $3::text COLLATE \"C\", \
                      statement_timestamp() + ($4::bigint * interval '1 microsecond'), $5, $6) \
              ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
              DO NOTHING",

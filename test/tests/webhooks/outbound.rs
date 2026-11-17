@@ -188,45 +188,20 @@ async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool
     let configured = outbound(&["partner"]);
     let body = b"\0{\"event\":\"created\"}\xff";
     let id = enqueue(&pool, &configured, "partner", body).await;
-    let row = sqlx::query(
-        "SELECT id::text AS id, payload->>'version' AS version, payload->>'endpoint_id' AS endpoint_id, \
-         payload->>'content_type' AS content_type, payload ? 'destination' AS has_destination, \
-         payload ? 'active_key' AS has_active_key, payload ? 'previous_key' AS has_previous_key, \
-         payload->>'body' AS body FROM background_jobs WHERE id::text = $1",
-    )
-    .bind(&id)
-    .fetch_one(&pool)
-    .await
-    .expect("delivery row");
-    assert_eq!(row.try_get::<String, _>("id").expect("id"), id);
+    let payload: serde_json::Value =
+        sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs WHERE id::text = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("delivery payload");
+    assert_eq!(payload["version"], 2);
+    assert_eq!(payload["endpoint_id"], "partner");
+    assert_eq!(payload["content_type"], "application/webhook+json");
+    for private in ["destination", "active_key", "previous_key"] {
+        assert!(payload.get(private).is_none());
+    }
     assert_eq!(
-        row.try_get::<Option<String>, _>("version")
-            .expect("version"),
-        Some("2".to_owned())
-    );
-    assert_eq!(
-        row.try_get::<String, _>("endpoint_id").expect("endpoint"),
-        "partner"
-    );
-    assert_eq!(
-        row.try_get::<String, _>("content_type")
-            .expect("content type"),
-        "application/webhook+json"
-    );
-    assert!(
-        !row.try_get::<bool, _>("has_destination")
-            .expect("destination")
-    );
-    assert!(
-        !row.try_get::<bool, _>("has_active_key")
-            .expect("active key")
-    );
-    assert!(
-        !row.try_get::<bool, _>("has_previous_key")
-            .expect("previous key")
-    );
-    assert_eq!(
-        row.try_get::<String, _>("body").expect("body"),
+        payload["body"],
         base64::engine::general_purpose::STANDARD.encode(body)
     );
     super::close_pools(&[&pool]).await;
@@ -309,7 +284,7 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
                     row.try_get::<Option<String>, _>("error_summary")
                         .expect("summary")
                         .as_deref(),
-                    Some(format!("response_status_{status}").as_str())
+                    Some("response_status")
                 );
             }
             410 => {
@@ -495,7 +470,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     sqlx::query(
         "UPDATE background_jobs SET payload_text = NULL, payload = jsonb_build_object(\
             'version', 1, 'endpoint_id', 'partner', 'content_type', 'application/webhook+json', \
-            'body', payload->'body', 'destination', 'not a URL', 'active_key', 5, 'previous_key', false \
+            'body', payload_text::jsonb->'body', 'destination', 'not a URL', 'active_key', 5, 'previous_key', false \
          ) WHERE id::text = $1",
     )
     .bind(&id)

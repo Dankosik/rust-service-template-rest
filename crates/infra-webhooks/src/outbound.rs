@@ -2,7 +2,6 @@ mod producer;
 
 use std::{
     collections::BTreeMap,
-    fmt,
     num::NonZeroU32,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -373,15 +372,6 @@ impl DeliveryFailure {
     }
 }
 
-impl fmt::Display for DeliveryFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Status(status) => write!(formatter, "response_status_{}", status.as_u16()),
-            _ => formatter.write_str(self.reason()),
-        }
-    }
-}
-
 impl Endpoint {
     fn signed_request(
         &self,
@@ -429,8 +419,8 @@ fn classify_response(
             let failure = DeliveryFailure::Status(response.status());
             record_failure(endpoint_id, metrics, failure);
             Err(retry_after(response.headers(), response_time)
-                .and_then(|delay| JobError::retry_after_at_least(failure, delay).ok())
-                .unwrap_or_else(|| JobError::retryable(failure)))
+                .and_then(|delay| JobError::retry_after_at_least(failure.reason(), delay).ok())
+                .unwrap_or_else(|| JobError::retryable(failure.reason())))
         }
         Err(error) => Err(fail(
             endpoint_id,
@@ -443,9 +433,9 @@ fn classify_response(
 fn fail(endpoint_id: &str, metrics: &EndpointMetrics, failure: DeliveryFailure) -> JobError {
     record_failure(endpoint_id, metrics, failure);
     if failure.is_permanent() {
-        JobError::permanent(failure)
+        JobError::permanent(failure.reason())
     } else {
-        JobError::retryable(failure)
+        JobError::retryable(failure.reason())
     }
 }
 

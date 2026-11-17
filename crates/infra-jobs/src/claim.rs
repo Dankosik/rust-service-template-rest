@@ -462,7 +462,7 @@ fn dispatch_known(
                     .queue_wait
                     .record(queue_wait_seconds.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
-                    Arc::clone(&shared.drain),
+                    Arc::clone(&shared.lifecycle.drain),
                     stop.clone(),
                     failure.clone(),
                     attempt.job_id,
