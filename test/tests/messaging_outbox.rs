@@ -24,7 +24,7 @@ use infra_messaging::{
 use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
-use infra_jobs::{JobError, KindsBuilder, Policy};
+use infra_jobs::{JobError, KindsBuilder};
 use infra_webhooks::inbound::{
     Consumer as WebhookConsumer, Consumers, Incoming, Processor, Receiver, Verifier,
 };
@@ -261,7 +261,10 @@ struct EngineRun {
 }
 
 async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
-    let engine = Engine::new(pool.clone(), registry, NonZeroU32::MIN);
+    start_engine(Engine::new(pool.clone(), registry, NonZeroU32::MIN)).await
+}
+
+async fn start_engine(engine: Engine) -> EngineRun {
     engine
         .check_startup()
         .await
@@ -1158,12 +1161,20 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
         )
         .expect("first binding");
     let mut webhook_kinds = KindsBuilder::new();
-    webhook_kinds.register(Policy::default(), Processor::new(consumers));
-    let webhook = start(
-        &shared_pool,
+    Processor::new(consumers).register(&mut webhook_kinds);
+    let mut engine = Engine::new(
+        shared_pool.clone(),
         webhook_kinds.validate().expect("webhook registry is valid"),
-    )
-    .await;
+        NonZeroU32::MIN,
+    );
+    engine
+        .add_group(
+            infra_messaging::outbox::kinds(messaging.producer())
+                .expect("dedicated publisher registry is valid"),
+            NonZeroU32::MIN,
+        )
+        .expect("publisher and webhook kinds are disjoint");
+    let worker = start_engine(engine).await;
     let body = b"{\"process\":true}";
     assert!(
         webhook_receiver(shared_pool.clone())
@@ -1187,15 +1198,9 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
             intent.enqueue(tx).await.map_err(Step::from)
         })
         .await
-        .expect("outbox intent commits while real webhook work occupies its engine"),
+        .expect("outbox intent commits while real webhook work occupies its slot"),
         OutboxEnqueued::Created
     );
-    let publisher = start(
-        &shared_pool,
-        infra_messaging::outbox::kinds(messaging.producer())
-            .expect("dedicated publisher registry is valid"),
-    )
-    .await;
     poll_until(
         "dedicated publisher receives the broker ACK despite ordinary saturation",
         WAIT,
@@ -1204,10 +1209,9 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     )
     .await;
 
-    publisher.started.stop_claiming();
-    finish(publisher, &[]).await;
+    worker.started.stop_claiming();
     held.release.notify_one();
-    finish(webhook, &[&shared_pool]).await;
+    finish(worker, &[&shared_pool]).await;
     close(messaging).await;
     fixture.cleanup().await;
 }
