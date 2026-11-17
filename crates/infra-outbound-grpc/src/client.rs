@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -79,7 +78,7 @@ pub struct Client {
     #[debug(skip)]
     destination: crate::observe::Destination,
     timeout: ClientTimeout,
-    series: Arc<crate::observe::Series>,
+    series: &'static crate::observe::Series,
 }
 
 impl Client {
@@ -154,7 +153,7 @@ impl Client {
             caller.map(|budget| Deadline::new(origin, budget)),
             parent_deadline,
         );
-        let call = crate::observe::Call::start(&self.series, &request, &self.destination);
+        let call = crate::observe::Call::start(self.series, &request, &self.destination);
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -440,6 +439,8 @@ fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose,
