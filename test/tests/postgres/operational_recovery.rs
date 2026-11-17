@@ -463,7 +463,8 @@ mod grpc {
         echo_service_client::EchoServiceClient,
         echo_service_server::{EchoService, EchoServiceServer},
     };
-    use infra_grpc::{Client, ClientSecurity, ClientTimeout, Limits, Services};
+    use infra_grpc::{Limits, Services};
+    use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
     use std::pin::Pin;
     use tonic::{Request, Response, Status};
     use tonic_health::pb::{

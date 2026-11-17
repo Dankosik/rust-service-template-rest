@@ -30,6 +30,7 @@
           "crates/infra-messaging/Cargo.toml",
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
+          "crates/infra-outbound-grpc/Cargo.toml",
           "crates/infra-outbound-http/Cargo.toml"
         ]
       }
@@ -49,6 +50,7 @@
           "crates/infra-messaging/Cargo.toml",
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
+          "crates/infra-outbound-grpc/Cargo.toml",
           "crates/infra-outbound-http/Cargo.toml",
           "crates/infra-postgres/Cargo.toml",
           "crates/infra-serviceauth/Cargo.toml",
@@ -66,6 +68,7 @@
     "crates/infra-messaging/Cargo.toml": {"role": "messaging"},
     "crates/infra-oauth2-client-credentials/Cargo.toml": {"role": "oauth"},
     "crates/infra-object-storage/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-outbound-grpc/Cargo.toml": {"role": "outbound-grpc"},
     "crates/infra-outbound-http/Cargo.toml": {"role": "outbound-http"},
     "crates/infra-postgres/Cargo.toml": {"role": "health-provider"},
     "crates/infra-telemetry/Cargo.toml": {"role": "telemetry"},
@@ -81,7 +84,7 @@
   "roles": {
     "root": {
       "rule": "composition-root-direction",
-      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-http", "telemetry", "cache", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
+      "allow_roles": ["config", "health", "contract", "http", "grpc", "bearer", "service-auth", "outbound-grpc", "outbound-http", "telemetry", "cache", "health-provider", "postgres-provider", "webhooks", "messaging", "oauth", "migrator", "feature", "feature-provider"]
     },
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
@@ -89,6 +92,10 @@
     "shared-rules": {"rule": "std-only-shared-rules", "std_only": true},
     "bearer": {"rule": "independent-bearer-provider"},
     "service-auth": {"rule": "independent-service-token-provider"},
+    "outbound-grpc": {
+      "rule": "outbound-grpc-provider-dependencies",
+      "allow_roles": ["service-auth"]
+    },
     "outbound-http": {"rule": "independent-outbound-http-provider"},
     "telemetry": {"rule": "independent-telemetry-provider"},
     "cache": {"rule": "independent-cache-provider"},
@@ -115,6 +122,10 @@
       "allow_members": {
         "crates/infra-http/Cargo.toml": {
           "reason": "Feature HTTP modules consume inbound contracts and register routes.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-grpc/Cargo.toml": {
+          "reason": "Feature gRPC modules consume inbound contracts and register services.",
           "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-cache/Cargo.toml": {
@@ -218,7 +229,7 @@
           "reason": "Private credentials acquisition uses bounded trusted-origin HTTP exchanges.",
           "authority": "docs/repo-architecture.md#global-invariants"
         },
-        "crates/infra-grpc/Cargo.toml": {
+        "crates/infra-outbound-grpc/Cargo.toml": {
           "reason": "The optional bridge supplies an authenticated Service within the private credentials owner.",
           "authority": "docs/repo-architecture.md#global-invariants",
           "optional_only": true

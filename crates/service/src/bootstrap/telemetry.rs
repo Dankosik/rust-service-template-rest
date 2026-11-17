@@ -18,6 +18,7 @@ pub(super) fn install_metrics() -> Result<Metrics, BootstrapError> {
             // template:end outbound-http:service-bootstrap-outbound-histogram
             // template:begin grpc:bootstrap-grpc-histograms
             infra_grpc::HISTOGRAMS,
+            infra_outbound_grpc::HISTOGRAMS,
             // template:end grpc:bootstrap-grpc-histograms
             // template:begin cache:service-bootstrap-cache-histogram
             infra_cache::HISTOGRAMS,

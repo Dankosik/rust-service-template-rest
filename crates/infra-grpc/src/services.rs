@@ -238,3 +238,21 @@ impl Services {
     }
     // template:end service-auth:grpc-services-allow-callers
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn described_contract_records_method_streaming_cardinalities() {
+        let mut services = Services::new();
+        services
+            .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+            .unwrap();
+        let echo = &services.described["example.v1.EchoService"];
+        assert!(echo.contains(&("Unary".to_owned(), CallType::Unary)));
+        assert!(echo.contains(&("ClientStream".to_owned(), CallType::ClientStream)));
+        assert!(echo.contains(&("ServerStream".to_owned(), CallType::ServerStream)));
+        assert!(echo.contains(&("BidiStream".to_owned(), CallType::BidiStream)));
+    }
+}

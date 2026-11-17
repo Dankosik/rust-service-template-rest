@@ -5,7 +5,7 @@ use std::{
 };
 
 use http::{Request, Response};
-use infra_grpc::Client;
+use infra_outbound_grpc::Client;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
