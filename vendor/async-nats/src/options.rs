@@ -31,6 +31,28 @@ use tokio::time::Instant;
 use tokio_rustls::rustls;
 
 /// Connect options. Used to connect with NATS when custom config is needed.
+///
+/// # TLS
+///
+/// The client asks for TLS when any of these is set:
+/// [`require_tls(true)`](ConnectOptions::require_tls), [`tls_first()`](ConnectOptions::tls_first),
+/// a `tls://` or `wss://` server URL, also one given to
+/// [`Client::set_server_pool`](crate::Client::set_server_pool),
+/// [`add_root_certificates()`](ConnectOptions::add_root_certificates),
+/// [`add_client_certificate()`](ConnectOptions::add_client_certificate),
+/// [`tls_client_config()`](ConnectOptions::tls_client_config),
+/// [`tls_server_name()`](ConnectOptions::tls_server_name) or
+/// [`verify_discovered_servers_by_ip()`](ConnectOptions::verify_discovered_servers_by_ip).
+/// Every server is then connected to with TLS, servers discovered from the cluster and
+/// reconnects included, and a `ws://` URL is refused as a configuration error.
+/// [`tls_optional()`](ConnectOptions::tls_optional) opts out and leaves TLS to each server.
+///
+/// [`tls_server_name()`](ConnectOptions::tls_server_name) sets the name every server's
+/// certificate is verified against.
+/// [`verify_discovered_servers_by_ip()`](ConnectOptions::verify_discovered_servers_by_ip)
+/// verifies a discovered IP address against itself, for clusters whose certificates carry only
+/// IP addresses and whose CA is not shared with others.
+///
 /// # Examples
 /// ```no_run
 /// # #[tokio::main]
@@ -53,6 +75,9 @@ pub struct ConnectOptions {
     pub(crate) auth: Auth,
     pub(crate) tls_required: bool,
     pub(crate) tls_first: bool,
+    pub(crate) tls_optional: bool,
+    pub(crate) tls_server_name: Option<String>,
+    pub(crate) verify_discovered_servers_by_ip: bool,
     pub(crate) certificates: Vec<PathBuf>,
     pub(crate) client_cert: Option<PathBuf>,
     pub(crate) client_key: Option<PathBuf>,
@@ -88,6 +113,12 @@ impl fmt::Debug for ConnectOptions {
             .entry(&"client_key", &self.client_key)
             .entry(&"tls_client_config", &"XXXXXXXX")
             .entry(&"tls_first", &self.tls_first)
+            .entry(&"tls_optional", &self.tls_optional)
+            .entry(&"tls_server_name", &self.tls_server_name)
+            .entry(
+                &"verify_discovered_servers_by_ip",
+                &self.verify_discovered_servers_by_ip,
+            )
             .entry(&"ping_interval", &self.ping_interval)
             .entry(&"sender_capacity", &self.sender_capacity)
             .entry(&"inbox_prefix", &self.inbox_prefix)
@@ -108,6 +139,9 @@ impl Default for ConnectOptions {
             initial_connect_deadline: None,
             tls_required: false,
             tls_first: false,
+            tls_optional: false,
+            tls_server_name: None,
+            verify_discovered_servers_by_ip: false,
             certificates: Vec::new(),
             client_cert: None,
             client_key: None,
@@ -533,6 +567,9 @@ impl ConnectOptions {
 
     /// Loads root certificates by providing the path to them.
     ///
+    /// Asks for TLS: every server is then connected to with TLS, as with
+    /// [`ConnectOptions::require_tls`].
+    ///
     /// # Examples
     /// ```no_run
     /// # #[tokio::main]
@@ -551,6 +588,9 @@ impl ConnectOptions {
 
     /// Loads client certificate by providing the path to it.
     ///
+    /// Asks for TLS: every server is then connected to with TLS, as with
+    /// [`ConnectOptions::require_tls`].
+    ///
     /// # Examples
     /// ```no_run
     /// # #[tokio::main]
@@ -568,7 +608,16 @@ impl ConnectOptions {
         self
     }
 
-    /// Sets or disables TLS requirement. If TLS connection is impossible while `options.require_tls(true)` connection will return error.
+    /// Requires TLS for every server when `true`. If TLS connection is impossible while `options.require_tls(true)` connection will return error.
+    ///
+    /// A `tls://` or `wss://` server URL, root certificates, a client certificate, a TLS client
+    /// config, [`ConnectOptions::tls_first`], [`ConnectOptions::tls_server_name`] and
+    /// [`ConnectOptions::verify_discovered_servers_by_ip`] ask for TLS too. TLS then applies to every
+    /// server in the list, servers discovered from the cluster and reconnects included, and
+    /// nothing the server sends turns it off.
+    ///
+    /// `false` is the default, and leaves the other settings asking for TLS. The opt-out
+    /// is [`ConnectOptions::tls_optional`].
     ///
     /// # Examples
     /// ```no_run
@@ -592,6 +641,88 @@ impl ConnectOptions {
     pub fn tls_first(mut self) -> ConnectOptions {
         self.tls_first = true;
         self.tls_required = true;
+        self
+    }
+
+    /// Leaves TLS to each server: the client does not ask for TLS, so root certificates, a
+    /// client certificate, a TLS client config, [`ConnectOptions::tls_server_name`],
+    /// [`ConnectOptions::verify_discovered_servers_by_ip`] or a `tls://` or `wss://` URL in
+    /// the list no longer make the other servers TLS. Each server is connected to as its own
+    /// URL says, or with TLS when its INFO requires it; a `tls://` or `wss://` URL still gets
+    /// TLS, and so does a server discovered on a connection with TLS.
+    ///
+    /// Cannot be set together with `require_tls(true)` or [`ConnectOptions::tls_first`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), async_nats::ConnectError> {
+    /// let nc = async_nats::ConnectOptions::new()
+    ///     .add_root_certificates("mycerts.pem".into())
+    ///     .tls_optional()
+    ///     .connect(["nats://plain.nats.io", "tls://secure.nats.io"].as_slice())
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tls_optional(mut self) -> ConnectOptions {
+        self.tls_optional = true;
+        self
+    }
+
+    /// Sets the name the certificate of every server is verified against, and, unless it is
+    /// an IP address, that is sent as SNI: the configured servers and the servers discovered
+    /// from the cluster alike.
+    ///
+    /// It is the first remedy when a certificate is not valid for the name the client
+    /// verifies it against, for example for a server given by its IP address, and keeps
+    /// verification on.
+    ///
+    /// It overrides the name a discovered server inherits from the server it was learned
+    /// from, and [`ConnectOptions::verify_discovered_servers_by_ip`]. Asks for TLS: every
+    /// server is then connected to with TLS, as with [`ConnectOptions::require_tls`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), async_nats::ConnectError> {
+    /// let nc = async_nats::ConnectOptions::new()
+    ///     .tls_server_name("nats.example.com")
+    ///     .connect("tls://10.0.0.1:4222")
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tls_server_name<T: ToString>(mut self, name: T) -> ConnectOptions {
+        self.tls_server_name = Some(name.to_string());
+        self
+    }
+
+    /// Verifies a discovered server given as an IP address against that address instead of
+    /// the host name it was learned under, and sends it no SNI. It also lets the client
+    /// connect to a discovered IP address that has no name to be verified against, such as
+    /// one learned from a server given by its IP address.
+    ///
+    /// It is meant for clusters whose node certificates carry only IP addresses, and is safe
+    /// only where the CA that issued those certificates is not shared with others: any
+    /// certificate that CA issued for the address is accepted. It has no effect while
+    /// [`ConnectOptions::tls_server_name`] is set. Asks for TLS, as with
+    /// [`ConnectOptions::require_tls`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), async_nats::ConnectError> {
+    /// let nc = async_nats::ConnectOptions::new()
+    ///     .add_root_certificates("cluster-ca.pem".into())
+    ///     .verify_discovered_servers_by_ip()
+    ///     .connect("tls://10.0.0.1:4222")
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn verify_discovered_servers_by_ip(mut self) -> ConnectOptions {
+        self.verify_discovered_servers_by_ip = true;
         self
     }
 
@@ -656,7 +787,9 @@ impl ConnectOptions {
     /// Sets a timeout for the full connection establishment and handshake to avoid
     /// hangs and deadlocks. This includes TCP/WebSocket connection, TLS setup,
     /// waiting for the server INFO message, sending CONNECT/PING, and receiving
-    /// the initial server PONG response. Default is set to 5 seconds.
+    /// the initial server PONG response. On a connection that starts TLS after INFO, to
+    /// nats-server 2.12 or later, the client then waits up to this timeout once more for the
+    /// INFO that follows that PONG before it reports connected. Default is set to 5 seconds.
     ///
     /// # Examples
     /// ```no_run
@@ -962,6 +1095,7 @@ impl ConnectOptions {
     /// By default, a server may advertise other servers in the cluster known to it.
     /// By setting this option, the client will ignore the advertised servers.
     /// This may be useful if the client may not be able to reach them.
+    /// The client then also does not wait for the INFO that follows the first PONG.
     pub fn ignore_discovered_servers(mut self) -> ConnectOptions {
         self.ignore_discovered_servers = true;
         self
@@ -976,6 +1110,9 @@ impl ConnectOptions {
     }
 
     /// Allows passing custom rustls tls config.
+    ///
+    /// Asks for TLS: every server is then connected to with TLS, as with
+    /// [`ConnectOptions::require_tls`].
     ///
     /// # Examples
     /// ```

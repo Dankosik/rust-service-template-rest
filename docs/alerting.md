@@ -251,20 +251,44 @@ lists (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
 ### Changing a durable subscription
 
-Treat a durable's filter and delivery settings as a migration shared by all
-replicas using that stream and durable name. For the first rollout of strict
-admission, deploy every replica with the existing settings before changing
-them. Older workers can still update the durable when they start.
+All replicas sharing a stream and durable name must agree on the handled
+subjects, event types and schema versions, the DLQ stream and subject, and
+the broker's filter and delivery settings. Change these together.
 
-To change an existing durable, stop and drain all workers using it, save the
-current configuration, and inspect its pending deliveries and acknowledgement
-floor. Decide how to handle records entering or leaving the filter. Apply the
-intended settings once with the broker administration account, then start the
-compatible workers. Verify the filter, acknowledgement progress and DLQ on
-the first deliveries. To roll back, drain the new workers and restore the
-saved configuration before restarting the old ones. Restoring the filter
-cannot undo deliveries or effects already acknowledged. Creating a new durable
-also starts a separate delivery history and needs an explicit replay decision.
+1. Generate the target metadata offline with
+   `registry.durable_metadata(dlq_stream, dlq_subject)` from the target
+   binary's registered handlers and resolved DLQ names. Deployments using
+   other languages can calculate the same value using the encoding below.
+   On an existing durable a refused admission also logs `expected_contract`.
+2. Stop and drain **all** workers sharing the durable before changing it,
+   including older binaries that ignore the contract metadata. Save the
+   consumer configuration, pending deliveries and ACK floor. Decide how to
+   handle records entering or leaving the subscription before changing
+   publishers.
+3. With the broker administration account, update the **existing** durable
+   in place, merging the generated metadata entry into its configuration.
+   This step also applies on the first rollout to a durable without the
+   entry. Preserve unrelated metadata, the delivery cursor and broker limits.
+   For a newly named durable the first compatible worker can create it;
+   choose its replay history explicitly.
+4. Verify the stored settings and ACK floor, start the target workers, then
+   verify progress and DLQ disposition before enabling the new publications.
+   For rollback, drain all target workers before restoring the saved
+   configuration and starting compatible binaries. Account for records
+   already acknowledged or transferred and the effects of their handlers.
+
+The metadata key is `service.delivery-contract.v1`. Its value is `sha256-`
+followed by the lowercase hexadecimal SHA-256 digest. Supply the following
+bytes in order:
+
+- The DLQ stream and DLQ subject, each encoded as an unsigned 64-bit
+  big-endian UTF-8 byte length followed by those bytes.
+- Each handled `(subject, event_type, schema_version)` in ascending tuple
+  order (UTF-8 byte order for strings, numeric order for versions). Encode
+  each string as above, followed by the unsigned 16-bit big-endian version.
+  Exclude routes without handlers. This contract describes route ownership;
+  coordinate changes in handler semantics under the same event version
+  through the service's rollout policy.
 
 ### MessagingDeadLettered
 

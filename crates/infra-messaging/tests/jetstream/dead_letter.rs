@@ -32,7 +32,8 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-permanent"), 1024)
+        .publication
+        .prepare(&event("event-permanent"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -126,8 +127,9 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
                 Err(HandlerError::Permanent)
             })
             .unwrap();
-        let prepared = registered
-            .prepare(&fixture.route, &event("lost-transfer-ack"), 1024)
+        let prepared = fixture
+            .publication
+            .prepare(&event("lost-transfer-ack"))
             .unwrap();
         let mut handle = messaging
             .consumer(registered, deadline(), &cancel)
@@ -217,7 +219,8 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     wait_for_source_ack(&fixture).await;
 
     let unknown = fixture
-        .prepare(&event("event-unknown"), 1024)
+        .publication
+        .prepare(&event("event-unknown"))
         .expect("unknown-type fixture starts from a valid production envelope");
     let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown)
         .expect("unknown-type fixture has valid identity headers");
@@ -280,13 +283,15 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
         .start(&cancel);
 
     let newer = fixture
-        .prepare(&event("event-newer-schema"), 1024)
+        .publication
+        .prepare(&event("event-newer-schema"))
         .expect("newer-schema fixture starts from a valid production envelope");
     let mut newer_headers = infra_messaging::wire::encode_prepared(&newer)
         .expect("newer-schema fixture has valid identity headers");
     newer_headers.insert("Event-Schema", "v2");
     let undecodable = fixture
-        .prepare(&event("event-undecodable"), 1024)
+        .publication
+        .prepare(&event("event-undecodable"))
         .expect("undecodable fixture starts from a valid production envelope");
     let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable)
         .expect("undecodable fixture has valid identity headers");
@@ -366,7 +371,8 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
     let prepared = fixture
-        .prepare(&event("event-dlq-refused"), 1024)
+        .publication
+        .prepare(&event("event-dlq-refused"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -414,7 +420,8 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     .await
     .expect("fixture source stream is admitted");
     let prepared = fixture
-        .prepare(&event("event-exhausted"), 1024)
+        .publication
+        .prepare(&event("event-exhausted"))
         .expect("fixture event is prepared");
     messaging
         .producer()
@@ -479,11 +486,10 @@ async fn retain_record_before_shrinking_source(
     ))
     .await
     .expect("fixture producer is admitted against the original source bound");
-    let oversized = fixture
-        .prepare(
-            &event_with_value("event-oversized", &"x".repeat(12 * 1024)),
-            16 * 1024,
-        )
+    let oversized = Registry::default()
+        .declare_publication(&fixture.route, 16 * 1024)
+        .unwrap()
+        .prepare(&event_with_value("event-oversized", &"x".repeat(12 * 1024)))
         .expect("fixture event is valid for the original producer bound");
     producer
         .producer()
@@ -546,8 +552,10 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     );
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
     wait_for_source_ack(&fixture).await;
-    let next = fixture
-        .prepare(&event_with_value("event-after-oversized", "ok"), 32)
+    let next = Registry::default()
+        .declare_publication(&fixture.route, 32)
+        .unwrap()
+        .prepare(&event_with_value("event-after-oversized", "ok"))
         .expect("ordinary event fits the reduced limit");
     let ack = messaging
         .producer()

@@ -155,7 +155,10 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
     messaging
         .producer()
         .publish(
-            &fixture.prepare(&event("publisher-no-dlq"), 1024).unwrap(),
+            &fixture
+                .publication
+                .prepare(&event("publisher-no-dlq"))
+                .unwrap(),
             &context(deadline(), &CancellationToken::new()),
         )
         .await
@@ -245,7 +248,8 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
         } else {
             let mut handle = consumer.unwrap().start(&cancel);
             let prepared = fixture
-                .prepare(&event_with_value("full-transfer", &"x".repeat(1012)), 1024)
+                .publication
+                .prepare(&event_with_value("full-transfer", &"x".repeat(1012)))
                 .unwrap();
             assert_eq!(prepared.payload().len(), 1024);
             let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
@@ -315,12 +319,11 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
         .unwrap()
         .start(&cancel);
 
-    let prepared = infra_messaging::PreparedEvent::prepare_for_subject(
-        subject.clone(),
-        &event_with_value("wildcard-transfer", &"x".repeat(1012)),
-        1024,
-    )
-    .unwrap();
+    let prepared = Registry::default()
+        .declare_publication(&Route::new(subject.clone()), 1024)
+        .unwrap()
+        .prepare(&event_with_value("wildcard-transfer", &"x".repeat(1012)))
+        .unwrap();
     assert_eq!(prepared.payload().len(), 1024);
     let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
     headers.insert("tracestate", "");

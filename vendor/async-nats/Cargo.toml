@@ -417,7 +417,7 @@ features = [
 ]
 
 [dependencies.tokio-rustls]
-version = "0.26"
+version = "0.26.3"
 default-features = false
 
 [dependencies.tokio-stream]

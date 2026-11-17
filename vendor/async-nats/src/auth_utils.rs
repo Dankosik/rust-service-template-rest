@@ -31,7 +31,7 @@ pub(crate) async fn load_creds(path: &Path) -> io::Result<String> {
 
 /// Parses the string, expected to be formatted as credentials file
 #[cfg(feature = "nkeys")]
-pub(crate) fn parse_jwt_and_key_from_creds(contents: &str) -> io::Result<(&str, KeyPair)> {
+pub fn parse_jwt_and_key_from_creds(contents: &str) -> io::Result<(&str, KeyPair)> {
     let jwt = parse_decorated_jwt(contents).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,

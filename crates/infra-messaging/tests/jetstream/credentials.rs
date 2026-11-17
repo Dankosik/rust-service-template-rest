@@ -124,7 +124,8 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
         .expect("tuple A receives fresh source metadata");
     println!("auth_rotation phase=tuple_a_probe_ready");
     let work_a = fixture
-        .prepare(&event("authenticated-work-a"), 1024)
+        .publication
+        .prepare(&event("authenticated-work-a"))
         .expect("A work has a distinct immutable identity");
     messaging
         .producer()
@@ -173,7 +174,8 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
     .await;
     println!("auth_rotation phase=tuple_b_probe_ready");
     let work_b = fixture
-        .prepare(&event("authenticated-work-b"), 1024)
+        .publication
+        .prepare(&event("authenticated-work-b"))
         .expect("B work has a distinct immutable identity");
     messaging
         .producer()

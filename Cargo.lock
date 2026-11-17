@@ -2798,7 +2798,6 @@ dependencies = [
  "health",
  "infra-jobs",
  "infra-postgres",
- "itertools 0.15.0",
  "json-payload",
  "metrics",
  "metrics-exporter-prometheus",

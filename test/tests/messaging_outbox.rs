@@ -65,6 +65,7 @@ struct Fixture {
     stream: String,
     subject: String,
     route: Route<Created>,
+    publication: infra_messaging::PublicationRoute<Created>,
     registry: Registry,
     durable: String,
     dlq_stream: String,
@@ -107,7 +108,14 @@ impl Fixture {
             })
             .await
             .expect("test administrator creates the transfer-sized DLQ");
+        let route = Route::<Created>::new(subject.clone());
+        let mut registry = Registry::default();
+        let publication = registry
+            .declare_publication(&route, 1024)
+            .expect("fixture publication route is valid");
         if with_consumer {
+            let mut handled = registry.clone();
+            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
             jetstream
                 .get_stream(&stream)
                 .await
@@ -116,6 +124,7 @@ impl Fixture {
                     name: Some(durable.clone()),
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
+                    metadata: handled.durable_metadata(&dlq_stream, &dlq_subject),
                     ack_wait: Duration::from_secs(46),
                     max_deliver: -1,
                     max_ack_pending: 1,
@@ -124,16 +133,12 @@ impl Fixture {
                 .await
                 .expect("test administrator provisions durable consumer");
         }
-        let route = Route::<Created>::new(subject.clone());
-        let mut registry = Registry::default();
-        registry
-            .declare(&route)
-            .expect("fixture publication route is valid");
         Self {
             jetstream,
             stream,
             subject,
             route,
+            publication,
             registry,
             durable,
             dlq_stream,
@@ -345,8 +350,8 @@ async fn outbox_count(pool: &PgPool) -> i64 {
 
 fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::PreparedEvent {
     fixture
-        .registry
-        .prepare(&fixture.route, &event(id, value), 1024)
+        .publication
+        .prepare(&event(id, value))
         .expect("fixture event prepares once")
 }
 
@@ -355,6 +360,8 @@ enum Step {
     #[from(skip)]
     #[display("caller refused the transaction")]
     Refused,
+    #[display("envelope: {_0}")]
+    Envelope(EnvelopeError),
     #[display("outbox: {_0}")]
     Outbox(OutboxEnqueueError),
     #[display("jobs: {_0}")]
@@ -383,7 +390,9 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
     let jobs = template_pool(&pool, 3).await;
     let route = Route::<Payload>::new(fixture.subject.clone());
     let mut registry = Registry::default();
-    registry.declare(&route).expect("typed publication route");
+    let publication = registry
+        .declare_publication(&route, 1024)
+        .expect("typed publication route");
     let leaf = serde_json::to_string("[{}]\\\"\\").expect("escaped string");
     let raw127 = format!("{}{leaf}{}", "[".repeat(127), "]".repeat(127));
     let raw128 = format!("[{raw127}]");
@@ -416,7 +425,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             payload: invalid,
         };
         let rejected = in_tx(&jobs, async |tx| -> Result<_, Step> {
-            match registry.prepare(&route, &event, 1024) {
+            match publication.prepare(&event) {
                 Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
                 Err(error) => Ok(Err(error)),
             }
@@ -427,9 +436,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
         assert_eq!(outbox_count(&jobs).await, before);
 
         event.payload = corrected;
-        let prepared = registry
-            .prepare(&route, &event, 1024)
-            .expect("corrected payload");
+        let prepared = publication.prepare(&event).expect("corrected payload");
         assert_eq!(prepared.payload().as_ref(), expected_bytes);
         assert_eq!(
             in_tx(&jobs, async |tx| -> Result<_, Step> {
@@ -738,9 +745,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn local_payload_refusal_is_permanent_and_broker_refusal_exhausts_the_retry_budget(
-    pool: PgPool,
-) {
+async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_intent(pool: PgPool) {
     let fixture = Fixture::create().await;
     let messaging = Box::pin(Messaging::connect(
         MessagingOptions {
@@ -753,7 +758,23 @@ async fn local_payload_refusal_is_permanent_and_broker_refusal_exhausts_the_retr
     .await
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
-    let intent = prepared(&fixture, "event-exhausted", "unpublished");
+    let mut declarations = Registry::default();
+    let publication = declarations
+        .declare_publication(&fixture.route, 64)
+        .unwrap();
+    let too_large = event("oversized-new-intent", &"x".repeat(53));
+    let before = outbox_count(&jobs).await;
+    let refused = in_tx(&jobs, async |tx| -> Result<(), Step> {
+        publication.prepare(&too_large)?.enqueue(tx).await?;
+        Ok(())
+    })
+    .await;
+    std::assert_matches!(refused, Err(Step::Envelope(EnvelopeError::PayloadTooLarge)));
+    assert_eq!(outbox_count(&jobs).await, before);
+    let intent = publication
+        .prepare(&event("event-exhausted", &"x".repeat(52)))
+        .unwrap();
+    assert_eq!(intent.payload().len(), 64);
     let oversized = prepared(&fixture, "event-oversized", &"x".repeat(64));
     in_tx(&jobs, async |tx| -> Result<_, Step> {
         assert_eq!(intent.enqueue(tx).await?, OutboxEnqueued::Created);
@@ -761,7 +782,7 @@ async fn local_payload_refusal_is_permanent_and_broker_refusal_exhausts_the_retr
         Ok(())
     })
     .await
-    .expect("both outbox intents commit");
+    .expect("both the boundary event and an intent from the previous larger route commit");
     let key = event_key("event-exhausted");
     sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = $1 AND unique_key = $2")
         .bind(OUTBOX_KIND)

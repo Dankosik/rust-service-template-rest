@@ -1,5 +1,31 @@
 use super::*;
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ExampleV2;
+
+impl EventPayload for ExampleV2 {
+    const EVENT_TYPE: &'static str = ExampleEvent::EVENT_TYPE;
+    const SCHEMA_VERSION: u16 = 2;
+}
+
+fn handle<T: EventPayload + serde::de::DeserializeOwned + 'static>(
+    registry: &mut Registry,
+    route: &Route<T>,
+) {
+    registry.declare(route).unwrap();
+    registry.register(route, |_, _| async { Ok(()) }).unwrap();
+}
+
+#[test]
+fn operator_metadata_matches_the_deployment_contract_vector() {
+    let mut registry = Registry::default();
+    handle(&mut registry, &Route::<ExampleEvent>::new("orders.created"));
+    assert_eq!(
+        registry.durable_metadata("INCIDENTS", "incidents.orders")["service.delivery-contract.v1"],
+        "sha256-fea68703982d97a95e4eeeb57c7b7e7dd825d0b7aa2994f3828b1bcd4e857951"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_replicas_admit_the_same_new_durable() {
     let fixture = Fixture::create(false).await;
@@ -11,20 +37,46 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     ))
     .await
     .expect("fixture source stream is admitted");
-    let mut registry = fixture.registry.clone();
-    registry
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .expect("fixture handler is registered");
+    let v2 = Route::<ExampleV2>::new(fixture.subject.clone());
+    let mut current = Registry::default();
+    handle(&mut current, &fixture.route);
+    let old = current.clone();
+    let publication = current.declare_publication(&v2, 1024).unwrap();
+    current.register(&v2, |_, _| async { Ok(()) }).unwrap();
+    let mut reordered = Registry::default();
+    handle(&mut reordered, &v2);
+    handle(&mut reordered, &fixture.route);
 
     let (first, second) = tokio::join!(
-        messaging.consumer(registry.clone(), deadline(), &cancel),
-        messaging.consumer(registry, deadline(), &cancel),
+        messaging.consumer(current, deadline(), &cancel),
+        messaging.consumer(reordered, deadline(), &cancel),
     );
-    let mut handle = first
-        .expect("the first replica admits the durable")
-        .start(&cancel);
+    let admitted = first.expect("the first replica admits the durable");
     second.expect("the second replica admits the same durable");
+    let prepared = publication
+        .prepare(&Event {
+            id: "buffered-v2".to_owned(),
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
+            payload: ExampleV2,
+        })
+        .unwrap();
+    messaging
+        .producer()
+        .publish(&prepared, &context(deadline(), &cancel))
+        .await
+        .unwrap();
+    std::assert_matches!(
+        messaging.consumer(old, deadline(), &cancel).await,
+        Err(infra_messaging::MessagingError::Topology)
+    );
     let actual = durable(&fixture).await.cached_info().clone();
+    assert_eq!(actual.ack_floor.stream_sequence, 0);
+    let dlq = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .unwrap();
+    assert_eq!(dlq.cached_info().state.messages, 0);
     assert_eq!(actual.config.filter_subject, fixture.subject);
     assert_eq!(actual.config.max_deliver, -1);
     assert_eq!(actual.config.ack_policy, consumer::AckPolicy::Explicit);
@@ -33,10 +85,12 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
         actual.config.max_ack_pending > 1,
         "the durable keeps the broker default instead of one replica's concurrency"
     );
+    let mut handle = admitted.start(&cancel);
+    wait_for_source_ack(&fixture).await;
     handle
         .finish(deadline())
         .await
-        .expect("empty durable consumer drains within the shared deadline");
+        .expect("compatible durable consumer drains within the shared deadline");
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -95,7 +149,20 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
 
 #[tokio::test]
 async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmission() {
-    for small_pull in [false, true] {
+    enum Change {
+        Delivery,
+        Pull,
+        Legacy,
+        DlqStream,
+        DlqSubject,
+    }
+    for change in [
+        Change::Delivery,
+        Change::Pull,
+        Change::Legacy,
+        Change::DlqStream,
+        Change::DlqSubject,
+    ] {
         let fixture = Fixture::create(true).await;
         let cancel = CancellationToken::new();
         let messaging = Box::pin(Messaging::connect(
@@ -120,10 +187,16 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
 
         let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
         let mut config = after.config;
-        if small_pull {
-            config.max_bytes = 1024;
-        } else {
-            config.max_deliver = 3;
+        match change {
+            Change::Delivery => config.max_deliver = 3,
+            Change::Pull => config.max_bytes = 1024,
+            Change::Legacy => config.metadata.clear(),
+            Change::DlqStream => {
+                config.metadata = registered.durable_metadata("OTHER", &fixture.dlq_subject);
+            }
+            Change::DlqSubject => {
+                config.metadata = registered.durable_metadata(&fixture.dlq_stream, "other.errors");
+            }
         }
         let changed = stream.update_consumer(config).await.unwrap();
         std::assert_matches!(
@@ -304,7 +377,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
     .await
     .unwrap();
     for id in ["before-replacement", "pending-after-replacement"] {
-        let prepared = fixture.prepare(&event(id), 1024).unwrap();
+        let prepared = fixture.publication.prepare(&event(id)).unwrap();
         messaging
             .producer()
             .publish(&prepared, &context(deadline(), &cancel))
@@ -332,6 +405,12 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         .expect("the second pull passes the old durable's identity check")
         .unwrap();
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let metadata = durable(&fixture)
+        .await
+        .cached_info()
+        .config
+        .metadata
+        .clone();
     fixture
         .jetstream
         .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
@@ -341,6 +420,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         .create_consumer(consumer::pull::Config {
             durable_name: Some(fixture.durable.clone()),
             filter_subject: fixture.subject.clone(),
+            metadata,
             ack_policy: consumer::AckPolicy::Explicit,
             ack_wait: Duration::from_secs(46),
             max_deliver: -1,
@@ -408,13 +488,16 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         .await
         .unwrap();
     let prepared = fixture
-        .prepare(&event("waiting-for-identity"), 1024)
+        .publication
+        .prepare(&event("waiting-for-identity"))
         .unwrap();
     messaging
         .producer()
         .publish(&prepared, &context(deadline(), &cancel))
         .await
         .unwrap();
+    let consumer_probe = consumer.probe();
+    assert!(consumer_probe.check().await.is_ok());
     refuse_info.store(true, Ordering::SeqCst);
     let mut handle = consumer.start(&cancel);
     timeout(Duration::from_secs(3), relay.dropped_ack.cancelled())
@@ -432,6 +515,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
     let durable = durable(&fixture).await;
     assert_eq!(durable.cached_info().num_ack_pending, 0);
     assert_eq!(durable.cached_info().num_pending, 1);
+    assert!(consumer_probe.check().await.is_err());
     refuse_info.store(false, Ordering::SeqCst);
     assert_eq!(
         timeout(Duration::from_secs(15), observed_rx.recv())
@@ -440,8 +524,10 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
             .unwrap(),
         "waiting-for-identity"
     );
+    assert!(consumer_probe.check().await.is_ok());
     wait_for_source_ack(&fixture).await;
     handle.finish(deadline()).await.unwrap();
+    assert!(consumer_probe.check().await.is_err());
     close(messaging).await;
     relay.join().await;
     fixture.cleanup().await;
@@ -501,7 +587,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             .unwrap();
         let events = ["drain-with-info-withheld", "drain-release-slot"];
         for id in &events[..=usize::from(admit_delivery)] {
-            let prepared = fixture.prepare(&event(id), 1024).unwrap();
+            let prepared = fixture.publication.prepare(&event(id)).unwrap();
             messaging
                 .producer()
                 .publish(&prepared, &context(deadline(), &cancel))

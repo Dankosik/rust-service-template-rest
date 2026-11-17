@@ -13,7 +13,7 @@ use infra_jobs::{
     EnqueueOptions, Enqueued, Job, JobError, JobKind, Policy, TransactionalHandler,
     TransactionalJob,
 };
-use infra_messaging::PreparedEvent;
+use infra_messaging::{PreparedEvent, PublicationRoute, Registry, RegistryError, Route};
 use infra_postgres::{Dsn, Tx, TxError, in_tx};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use secrecy::ExposeSecret as _;
@@ -24,6 +24,14 @@ use time::{UtcDateTime, format_description::well_known::Rfc3339};
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 pub const MAX_OPERATION_BYTES: usize = 1024;
+pub const SUBJECT: &str = "reading.accepted";
+
+pub fn publication(
+    registry: &mut Registry,
+    subject: &str,
+) -> Result<PublicationRoute<Operation>, RegistryError> {
+    registry.declare_publication(&Route::new(subject), MAX_OPERATION_BYTES)
+}
 pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
 pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";
 pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
@@ -114,7 +122,10 @@ pub struct PreparedRequest {
     event_time: String,
 }
 impl PreparedRequest {
-    pub fn try_new(operation: Operation, subject: &str) -> Result<Self, Error> {
+    pub fn try_new(
+        operation: Operation,
+        publication: &PublicationRoute<Operation>,
+    ) -> Result<Self, Error> {
         operation.validate()?;
         let event = Event {
             id: format!("{}:{}", operation.scope, operation.operation_id),
@@ -125,7 +136,8 @@ impl PreparedRequest {
             .occurred_at
             .format(&Rfc3339)
             .map_err(|_| Error::InvalidOperation)?;
-        let event = PreparedEvent::prepare_for_subject(subject, &event, MAX_OPERATION_BYTES)
+        let event = publication
+            .prepare(&event)
             .map_err(|_| Error::InvalidOperation)?;
         Ok(Self {
             operation,
@@ -275,7 +287,8 @@ pub async fn replay(
         let occurred_at = UtcDateTime::parse(&original.event_time, &Rfc3339).map_err(|_| Error::InvalidOperation)?;
         let subject: String = row.try_get("event_subject")?;
         let event = Event { id: original.event_id, occurred_at, payload: operation.clone() };
-        let prepared = PreparedRequest { operation: operation.clone(), event: PreparedEvent::prepare_for_subject(subject, &event, MAX_OPERATION_BYTES).map_err(|_| Error::InvalidOperation)?, event_time: original.event_time };
+        let publication = publication(&mut Registry::default(), &subject).map_err(|_| Error::InvalidOperation)?;
+        let prepared = PreparedRequest { operation: operation.clone(), event: publication.prepare(&event).map_err(|_| Error::InvalidOperation)?, event_time: original.event_time };
         enqueue_intents(tx, &prepared, outbound, endpoint).await
     }).await
 }
@@ -492,6 +505,8 @@ impl JobKind for HoldConnections {
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
+    let subject = std::env::var("READING_EVENT_SUBJECT").unwrap_or_else(|_| SUBJECT.to_owned());
+    publication(&mut registration.messages, &subject)?;
     let controls = Arc::new(Controls {
         pressure: std::env::var_os(POOL_PRESSURE_DIR).map(PathBuf::from),
         checkpoint: std::env::var_os(LOCAL_CHECKPOINT_DIR).map(PathBuf::from),

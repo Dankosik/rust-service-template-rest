@@ -35,6 +35,10 @@ impl MessagingPlan {
         config: &WorkerConfig,
         registration: Registration<'_>,
     ) -> Result<Option<Self>, WorkerError> {
+        registration.messages.check_publication_limit(
+            usize::try_from(config.messaging.max_payload_bytes.as_u64())
+                .map_err(|_| WorkerError::MessagingPayloadBound)?,
+        )?;
         let consumes_messages = registration.messages.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
         let consumes_messages = consumes_messages || registration.postgres_messages.is_some();
@@ -83,6 +87,9 @@ pub(super) async fn connect_messaging(
     let mut consumer = consumer;
     if let Some(messages) = &mut consumer {
         messages.activate_postgres_messages(resources)?;
+        messages
+            .registry
+            .check_publication_limit(options.max_payload_bytes)?;
     }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;

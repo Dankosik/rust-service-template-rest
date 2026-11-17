@@ -64,6 +64,7 @@ struct Fixture {
     stream: String,
     subject: String,
     route: Route<ExampleEvent>,
+    publication: infra_messaging::PublicationRoute<ExampleEvent>,
     registry: Registry,
     durable: String,
     dlq_stream: String,
@@ -152,12 +153,20 @@ impl Fixture {
             .await
             .expect("test fixture DLQ stream must be created by the NATS test administrator");
 
+        let route = Route::<ExampleEvent>::new(subject.clone());
+        let mut registry = Registry::default();
+        let publication = registry
+            .declare_publication(&route, 1024)
+            .expect("fixture route is valid");
         if with_consumer {
+            let mut handled = registry.clone();
+            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
             created
                 .create_consumer(consumer::pull::Config {
                     name: Some(durable.clone()),
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
+                    metadata: handled.durable_metadata(&dlq_stream, &dlq_subject),
                     ack_wait: Duration::from_secs(46),
                     max_deliver: -1,
                     max_ack_pending: 1,
@@ -169,27 +178,17 @@ impl Fixture {
                 );
         }
 
-        let route = Route::<ExampleEvent>::new(subject.clone());
-        let mut registry = Registry::default();
-        registry.declare(&route).expect("fixture route is valid");
         Self {
             jetstream,
             stream,
             subject,
             route,
+            publication,
             registry,
             durable,
             dlq_stream,
             dlq_subject,
         }
-    }
-
-    fn prepare(
-        &self,
-        event: &Event<ExampleEvent>,
-        limit: usize,
-    ) -> Result<infra_messaging::PreparedEvent, infra_messaging::EnvelopeError> {
-        self.registry.prepare(&self.route, event, limit)
     }
 
     async fn cleanup(self) {

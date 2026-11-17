@@ -1,10 +1,12 @@
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use itertools::Itertools;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
+
+const CREDENTIALS_FILE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
@@ -132,28 +134,19 @@ fn read_file(path: &Path) -> std::io::Result<SecretString> {
     if !file.metadata()?.is_file() {
         return Err(std::io::ErrorKind::InvalidInput.into());
     }
-    std::io::read_to_string(file).map(SecretString::from)
+    let content = SecretString::from(std::io::read_to_string(
+        file.take(CREDENTIALS_FILE_LIMIT as u64 + 1),
+    )?);
+    if content.expose_secret().len() > CREDENTIALS_FILE_LIMIT {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    Ok(content)
 }
 
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
-    let mut values =
-        content
-            .lines()
-            .map(str::trim)
-            .tuple_windows()
-            .filter_map(|(opening, value, closing)| {
-                (is_marker(opening) && !value.is_empty() && !is_marker(value) && is_marker(closing))
-                    .then_some(value)
-            });
-    let (Some(jwt), Some(seed)) = (values.next(), values.next()) else {
-        return Err(CredentialsFileError::Malformed);
-    };
-    let key = nkeys::KeyPair::from_seed(seed).map_err(|_| CredentialsFileError::Malformed)?;
-    Ok((jwt.to_owned(), key))
-}
-
-fn is_marker(line: &str) -> bool {
-    line.len() >= 6 && line.starts_with("---") && line.ends_with("---")
+    async_nats::parse_jwt_and_key_from_creds(content)
+        .map(|(jwt, key)| (jwt.to_owned(), key))
+        .map_err(|_| CredentialsFileError::Malformed)
 }
 
 #[cfg(test)]
@@ -186,12 +179,14 @@ mod tests {
                 .is_ok()
         );
 
-        let (jwt, key) = parse(content.replace('\n', "\r\n").trim_end()).unwrap();
+        let (jwt, key) = parse(&content.replace('\n', "\r\n")).unwrap();
         assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
 
+        let padded = creds(" user.jwt.value", &user);
         for malformed in [
             "",
+            &padded,
             "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln",
             "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n",
             "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n\
@@ -219,7 +214,12 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let file = tempfile::NamedTempFile::new().unwrap();
         let first = nkeys::KeyPair::new_user();
-        std::fs::write(file.path(), creds("first.jwt.value", &first)).unwrap();
+        let mut content = creds("first.jwt.value", &first);
+        content.extend(std::iter::repeat_n(
+            ' ',
+            CREDENTIALS_FILE_LIMIT - content.len(),
+        ));
+        std::fs::write(file.path(), &content).unwrap();
         let credentials = CredentialsFile::admit(file.path().to_owned())
             .await
             .unwrap();
@@ -237,6 +237,14 @@ mod tests {
         credentials.answer(b"repeated-material").await.unwrap();
 
         let rotated = nkeys::KeyPair::new_user();
+        content.push(' ');
+        std::fs::write(file.path(), content).unwrap();
+        assert_eq!(
+            credentials.answer(b"oversize").await.err(),
+            Some(CredentialsFileError::Unreadable(
+                std::io::ErrorKind::InvalidData
+            ))
+        );
         std::fs::write(file.path(), creds("rotated.jwt.value", &rotated)).unwrap();
         let auth = credentials.answer(b"nonce-2").await.unwrap();
         assert_eq!(auth.jwt.as_deref(), Some("rotated.jwt.value"));
@@ -244,13 +252,17 @@ mod tests {
         rotated.verify(b"nonce-2", &signature).unwrap();
         assert!(first.verify(b"nonce-2", &signature).is_err());
         let scrape = recorder.handle().render();
-        let samples: Vec<_> = scrape
+        let mut samples: Vec<_> = scrape
             .lines()
             .filter(|line| line.starts_with("messaging_credentials_file_challenges_total{"))
             .collect();
+        samples.sort_unstable();
         assert_eq!(
             samples,
-            ["messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 3"]
+            [
+                "messaging_credentials_file_challenges_total{outcome=\"failed\",reason=\"unreadable\"} 1",
+                "messaging_credentials_file_challenges_total{outcome=\"prepared\",reason=\"none\"} 3"
+            ]
         );
         for secret in [
             "first.jwt.value",
