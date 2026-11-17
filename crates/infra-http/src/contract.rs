@@ -544,12 +544,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                 }
             }
         }
-        let routes = match authentication {
-            Authentication::Public => finalize_public(routes, policy)?,
-            // template:begin authn:http-assembly-finalize
-            Authentication::Bearer(auth) => crate::authn::finalize(routes, policy, *auth),
-            // template:end authn:http-assembly-finalize
-        };
+        let routes = authentication.finalize(routes, policy)?;
         // template:begin http-idempotency:http-build-bind-store
         let routes = if self.idempotency.0.is_empty() {
             routes
@@ -598,19 +593,28 @@ impl tower::Service<Request> for Application {
     }
 }
 
-fn finalize_public<S>(contract: Router<S>, policy: Policy) -> Result<Router<S>, FinalizeError>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    if let Some((path, method)) = policy.first_protected() {
-        return Err(FinalizeError::ProtectedOperation {
-            path: path.to_owned(),
-            method: method.to_owned(),
-        });
+impl Authentication {
+    fn finalize<S>(self, routes: Router<S>, policy: Policy) -> Result<Router<S>, FinalizeError>
+    where
+        S: Clone + Send + Sync + 'static,
+    {
+        match self {
+            Self::Public => {
+                if let Some((path, method)) = policy.first_protected() {
+                    return Err(FinalizeError::ProtectedOperation {
+                        path: path.to_owned(),
+                        method: method.to_owned(),
+                    });
+                }
+                Ok(layer_routes(routes, |router| {
+                    router.route_layer(middleware::from_fn_with_state(policy, enforce_public))
+                }))
+            }
+            // template:begin authn:http-assembly-finalize
+            Self::Bearer(auth) => Ok(crate::authn::finalize(routes, policy, *auth)),
+            // template:end authn:http-assembly-finalize
+        }
     }
-    Ok(layer_routes(contract, |router| {
-        router.route_layer(middleware::from_fn_with_state(policy, enforce_public))
-    }))
 }
 
 pub(crate) fn layer_routes<S>(
