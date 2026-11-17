@@ -207,12 +207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-take"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8ab6b55fe97976e46f91ddbed8d147d966475dc29b2032757ba47e02376fbc3"
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2611,13 +2605,9 @@ dependencies = [
 name = "infra-grpc"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "async-stream",
- "atomic-take",
  "axum",
  "bytes",
- "derive-where",
- "derive_more",
  "foldhash",
  "futures-util",
  "grpc-contracts",
@@ -2629,6 +2619,7 @@ dependencies = [
  "hyper-util",
  "infra-bearerauthn",
  "infra-http",
+ "infra-outbound-grpc",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2641,6 +2632,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "secrecy",
+ "serde",
  "serde_json",
  "service-failure",
  "shared-rules",
@@ -2827,7 +2819,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "infra-grpc",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "jsonwebtoken",
  "metrics",
@@ -2888,6 +2880,43 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "infra-outbound-grpc"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "derive_more",
+ "foldhash",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper-util",
+ "infra-serviceauth",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "operation-context",
+ "parking_lot",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
+ "secrecy",
+ "shared-rules",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3102,6 +3131,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-jobs",
  "infra-messaging",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "infra-postgres",
  "infra-webhooks",
@@ -5133,6 +5163,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-messaging",
  "infra-object-storage",
+ "infra-outbound-grpc",
  "infra-outbound-http",
  "infra-postgres",
  "infra-serviceauth",
@@ -5983,7 +6014,6 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "rustls-native-certs",
  "socket2",
  "sync_wrapper",
  "tokio",

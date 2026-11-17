@@ -805,9 +805,9 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
 }
 
 async fn exercise_client_destination(address: &str, certificate: String, token: &str) {
-    let transport = infra_grpc::Client::try_new(
+    let transport = infra_outbound_grpc::Client::try_new(
         &format!("https://{address}"),
-        infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
+        infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
             ca_certificate_pem: Some(certificate),
             identity: None,
         }),

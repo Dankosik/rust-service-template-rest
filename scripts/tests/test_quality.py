@@ -98,7 +98,7 @@ class Architecture(unittest.TestCase):
                 self.assertEqual([], self.verdict())
         self.edge("test/Cargo.toml", "crates/service/Cargo.toml", "build")
         self.assertEqual([], self.verdict())
-        self.edge("crates/infra-oauth2-client-credentials/Cargo.toml", "crates/infra-grpc/Cargo.toml")
+        self.edge("crates/infra-oauth2-client-credentials/Cargo.toml", "crates/infra-outbound-grpc/Cargo.toml")
         edge = next(
             p for p in self.meta["packages"] if p["id"] == "crates/infra-oauth2-client-credentials/Cargo.toml"
         )["dependencies"][0]
@@ -169,6 +169,10 @@ class Architecture(unittest.TestCase):
             )
         self.edge(feature, "crates/infra-cache/Cargo.toml")
         self.assertEqual([], self.verdict())
+        self.edge(feature, "crates/infra-grpc/Cargo.toml")
+        self.assertEqual([], self.verdict())
+        self.edge(feature, "crates/infra-outbound-grpc/Cargo.toml")
+        self.assertTrue(self.verdict())
         self.edge(feature, "crates/infra-jobs/Cargo.toml")
         self.assertTrue(self.verdict())
         self.edge(feature, "crates/infra-http/Cargo.toml")
@@ -178,8 +182,14 @@ class Architecture(unittest.TestCase):
             feature: {
                 "reason": "Orders adapter calls the orders use case",
                 "authority": "docs/repo-architecture.md",
-            }
+            },
+            "crates/infra-outbound-grpc/Cargo.toml": {
+                "reason": "Orders adapter calls an upstream gRPC peer",
+                "authority": "docs/repo-architecture.md",
+            },
         }
+        self.assertEqual([], self.verdict())
+        self.edge(provider, "crates/infra-outbound-grpc/Cargo.toml")
         self.assertEqual([], self.verdict())
 
     def test_dependents_allowance_admits_only_listed_members(self) -> None:

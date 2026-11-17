@@ -34,6 +34,6 @@ pub use probes::{liveness_router, router};
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
 pub use server::{
-    AcceptFailure, BoundListener, Drained, HTTP2_CONNECTION_WINDOW, HTTP2_STREAM_WINDOW, Server,
-    ServerError, ServerOptions,
+    AcceptFailure, BoundListener, Drained, Server, ServerError, ServerOptions,
+    take_listener_drain_token,
 };

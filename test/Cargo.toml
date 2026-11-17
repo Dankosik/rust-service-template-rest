@@ -158,6 +158,7 @@ infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
 infra-grpc = { workspace = true }
+infra-outbound-grpc = { workspace = true }
 grpc-contracts = { workspace = true }
 tonic = { workspace = true }
 tonic-health = { workspace = true }

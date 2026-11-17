@@ -1,0 +1,53 @@
+[package]
+name = "infra-outbound-grpc"
+description = "Bounded outbound gRPC client transport."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+bytes = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
+foldhash = { workspace = true, features = ["std"] }
+futures-util = { workspace = true, features = ["std"] }
+http = { workspace = true }
+http-body = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
+# template:begin service-auth:outbound-grpc-service-auth-dependency
+infra-serviceauth = { workspace = true }
+# template:end service-auth:outbound-grpc-service-auth-dependency
+metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+operation-context = { workspace = true }
+parking_lot = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+rustls-platform-verifier = { workspace = true }
+secrecy = { workspace = true }
+shared-rules = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true, features = ["channel"] }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+# template:begin service-auth:outbound-grpc-service-auth-test-dependency
+infra-serviceauth = { workspace = true, features = ["test-support"] }
+# template:end service-auth:outbound-grpc-service-auth-test-dependency
+rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }

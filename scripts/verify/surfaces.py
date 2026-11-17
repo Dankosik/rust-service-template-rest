@@ -403,8 +403,9 @@ def classify_report(
         if outbound_auth == "oauth2-client-credentials" and _matches(
             file,
             "Cargo.toml", "Cargo.lock", "crates/infra-oauth2-client-credentials/*",
-            "crates/infra-outbound-http/*", "scripts/profiles/integration.sh",
-            "scripts/profiles/compose.sh", "make/template.mk", ".github/workflows/ci.yml",
+            "crates/infra-outbound-grpc/*", "crates/infra-outbound-http/*",
+            "scripts/profiles/integration.sh", "scripts/profiles/compose.sh",
+            "make/template.mk", ".github/workflows/ci.yml",
         ):
             mark("oauth_integration")
 
@@ -562,7 +563,8 @@ def classify_report(
             # template:begin grpc:classifier-grpc-initializer
             if _matches(
                 file,
-                "api/proto/*", "crates/infra-grpc/*", "crates/grpc-contracts/*",
+                "api/proto/*", "crates/infra-grpc/*", "crates/infra-outbound-grpc/*",
+                "crates/grpc-contracts/*", "crates/shared-rules/src/grpc.rs",
                 "crates/service/examples/grpc.rs", "tools/grpc-codegen/*", "buf.yaml",
                 "scripts/profiles/grpc_generate.sh", "scripts/profiles/grpc_check.sh",
             ):

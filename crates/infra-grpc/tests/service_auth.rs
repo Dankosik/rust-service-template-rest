@@ -17,8 +17,9 @@ use grpc_contracts::example::v1::{
     echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
-use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
+use infra_grpc::{Caller, Error, Limits, Services, server_options};
 use infra_http::{BoundListener, Drained, Server};
+use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, now_secs, registry},
@@ -187,9 +188,9 @@ fn serve(services: Services) -> (Server, SocketAddr) {
     (server, address)
 }
 
-fn client(address: SocketAddr) -> EchoServiceClient<infra_grpc::Client> {
+fn client(address: SocketAddr) -> EchoServiceClient<Client> {
     EchoServiceClient::new(
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),
@@ -228,7 +229,7 @@ async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
             frame.freeze(),
         )))
         .unwrap();
-    let client = infra_grpc::Client::try_new(
+    let client = Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
@@ -327,7 +328,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     })
     .unwrap();
     let resource = || {
-        infra_grpc::Client::try_new(
+        Client::try_new(
             &format!("http://{address}"),
             ClientSecurity::Plaintext,
             Duration::from_secs(10),

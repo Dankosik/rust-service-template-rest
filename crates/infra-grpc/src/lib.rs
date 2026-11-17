@@ -4,7 +4,6 @@
 mod authn;
 // template:end authn:grpc-authn-module
 mod call;
-mod client;
 mod error;
 mod health;
 mod observe;
@@ -17,17 +16,15 @@ mod services;
 mod status;
 mod tls;
 
-pub use client::{
-    Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
-};
-pub use error::{ClientError, Error, TlsMaterialError};
+// template:begin authn:grpc-authn-exports
+pub use authn::VerifiedPrincipal;
+// template:end authn:grpc-authn-exports
+pub use error::{Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;
-pub use protocol::grpc_timeout;
 pub use router::{Limits, ResponseContext, router, server_options};
-pub use services::Services;
 // template:begin service-auth:grpc-service-auth-exports
-pub use infra_serviceauth::Caller;
-pub use service_auth::{REFLECTION_PATHS, ServiceTokenClient};
+pub use service_auth::{Caller, REFLECTION_PATHS};
 // template:end service-auth:grpc-service-auth-exports
+pub use services::Services;
 pub use status::{ERROR_DOMAIN, Failure};
 pub use tls::{ServerTlsMaterial, server_tls_config};
