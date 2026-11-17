@@ -15,6 +15,7 @@ use crate::probes::ProbeRoutes;
 use crate::problem::responses;
 
 const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
+const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
 
 pub(super) fn compose(
     document: &mut OpenApi,
@@ -94,9 +95,9 @@ fn add_outcomes(
         });
     let responses = &mut operation.responses.responses;
     if declares_json_body
-        && responses.get("415").is_none_or(|response| {
-            resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some()
-        })
+        && responses
+            .get("415")
+            .is_none_or(|response| can_merge_json_media_type_outcome(response, components))
     {
         let (_, common) = responses::UnsupportedMediaType::response();
         merge_response(responses, components, "415", common.clone(), &common)
@@ -129,6 +130,22 @@ fn add_outcomes(
     }
     // template:end authn:http-protected-response-composition
     Ok(())
+}
+
+fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Components) -> bool {
+    resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some_and(|response| {
+        response
+            .content
+            .get("application/problem+json")
+            .is_none_or(|content| {
+                resolve(
+                    content,
+                    &components.media_types,
+                    MEDIA_TYPE_REFERENCE_PREFIX,
+                )
+                .is_some()
+            })
+    })
 }
 
 fn merge_response(
@@ -169,11 +186,15 @@ fn merge_response(
         if slot == content {
             continue;
         }
-        let mut existing = resolve(slot, &components.media_types, "#/components/mediaTypes/")
+        let mut existing = resolve(slot, &components.media_types, MEDIA_TYPE_REFERENCE_PREFIX)
             .ok_or("existing media type must resolve within the service document")?
             .clone();
-        let other = resolve(content, &components.media_types, "#/components/mediaTypes/")
-            .ok_or("shared media type could not be resolved")?;
+        let other = resolve(
+            content,
+            &components.media_types,
+            MEDIA_TYPE_REFERENCE_PREFIX,
+        )
+        .ok_or("shared media type could not be resolved")?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }

@@ -1298,18 +1298,26 @@ mod tests {
         });
         let local = serde_json::json!({"$ref": "#/components/responses/UnsupportedWidgetVersion"});
         let opaque = serde_json::json!({"$ref": "https://api.example/problems.yaml#/Unsupported"});
+        let mut opaque_content = explicit.clone();
+        opaque_content["content"]["application/problem+json"] = serde_json::json!({
+            "$ref": "https://api.example/problems.yaml#/components/mediaTypes/Unsupported"
+        });
         let json_body = serde_json::json!({"$ref": "#/components/requestBodies/Widget"});
         let mixed_body = serde_json::json!({
             "content": {"application/json": {}, "application/octet-stream": {}}
         });
+        let application = utoipa::openapi::OpenApiBuilder::new()
+            .openapi(utoipa::openapi::OpenApiVersion::Version32)
+            .build();
         for (body, response, adds_problem) in [
             (json_body.clone(), explicit.clone(), true),
             (json_body.clone(), local, true),
+            (json_body.clone(), opaque_content, false),
             (json_body, opaque, false),
             (mixed_body, explicit.clone(), false),
         ] {
             let document = serde_json::from_value(serde_json::json!({
-                "openapi": "3.1.0",
+                "openapi": "3.2.0",
                 "info": {"title": "fixture", "version": "1"},
                 "components": {
                     "requestBodies": {"Widget": {
@@ -1323,8 +1331,13 @@ mod tests {
                 }}}
             }))
             .unwrap();
-            let contract = HttpContract::<()>::annotated(document, || async {}).unwrap();
+            let feature = HttpContract::<()>::annotated(document, || async {}).unwrap();
+            let contract = HttpContract::application(application.clone())
+                .unwrap()
+                .merge(feature)
+                .unwrap();
             let published = serde_json::to_value(contract.into_openapi().unwrap()).unwrap();
+            assert_eq!(published["openapi"], "3.2.0");
             let media_type_response = &published["paths"]["/widgets"]["post"]["responses"]["415"];
             if adds_problem {
                 assert_eq!(
