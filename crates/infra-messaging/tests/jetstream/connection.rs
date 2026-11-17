@@ -323,6 +323,48 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
 }
 
 #[tokio::test]
+async fn negotiated_tls_requires_the_account_info_before_reporting_connected() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    let (root, tls) = tls_fixture("127.0.0.1");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("tls://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(&info("127.0.0.1:4222", 1_048_576))
+            .await
+            .unwrap();
+        let mut socket = BufReader::new(tls.accept(socket).await.unwrap());
+        let mut line = String::new();
+        loop {
+            assert!(socket.read_line(&mut line).await.unwrap() > 0);
+            if line == "PING\r\n" {
+                break;
+            }
+            line.clear();
+        }
+        socket.get_mut().write_all(b"PONG\r\n").await.unwrap();
+        line.clear();
+        assert_eq!(socket.read_line(&mut line).await.unwrap_or(0), 0);
+    });
+    let result = async_nats::ConnectOptions::new()
+        .add_root_certificates(root.path().to_owned())
+        .ignore_discovered_servers()
+        .connection_timeout(Duration::from_secs(2))
+        .connect(url)
+        .await;
+    assert_eq!(
+        result.unwrap_err().kind(),
+        async_nats::ConnectErrorKind::TimedOut
+    );
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
     use tokio::io::AsyncWriteExt as _;
 

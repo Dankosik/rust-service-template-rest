@@ -26,18 +26,24 @@ use bytes::Bytes;
 use futures_util::future::TryFutureExt;
 use futures_util::{Sink, SinkExt as _, StreamExt};
 use portable_atomic::AtomicU64;
-use regex::Regex;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::PollSender;
 
-static VERSION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\Av?([0-9]+)\.?([0-9]+)?\.?([0-9]+)?").unwrap());
+pub(crate) fn version_at_least(version: &str, expected: (i64, i64, i64)) -> bool {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.').map(str::parse::<i64>);
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None)
+            if (major, minor, patch) >= expected
+    )
+}
 
 /// An error returned from the [`Client::publish`], [`Client::publish_with_headers`],
 /// [`Client::publish_with_reply`] or [`Client::publish_with_reply_and_headers`] functions.
@@ -420,29 +426,7 @@ impl Client {
     /// # }
     /// ```
     pub fn is_server_compatible(&self, major: i64, minor: i64, patch: i64) -> bool {
-        let info = self.server_info();
-
-        let server_version_captures = match VERSION_RE.captures(&info.version) {
-            Some(captures) => captures,
-            None => return false,
-        };
-
-        let server_major = server_version_captures
-            .get(1)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        let server_minor = server_version_captures
-            .get(2)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        let server_patch = server_version_captures
-            .get(3)
-            .map(|m| m.as_str().parse::<i64>().unwrap())
-            .unwrap();
-
-        (server_major, server_minor, server_patch) >= (major, minor, patch)
+        version_at_least(&self.server_info().version, (major, minor, patch))
     }
 
     /// Publish a [Message] to a given subject.

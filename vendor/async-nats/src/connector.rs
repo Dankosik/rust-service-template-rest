@@ -402,13 +402,7 @@ fn quoted(entry: &str) -> String {
 /// numbers count, so a pre-release counts as its release. A version whose part before any
 /// `-` or `+` is not exactly three numbers counts as earlier.
 fn sends_info_after_first_pong(version: &str) -> bool {
-    let core = version.split(['-', '+']).next().unwrap_or_default();
-    let mut parts = core.split('.').map(str::parse::<u64>);
-    matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None)
-            if (major, minor, patch) >= (2, 12, 0)
-    )
+    crate::client::version_at_least(version, (2, 12, 0))
 }
 
 /// Reads the next operation of an attempt after CONNECT. A PING is answered and `+OK` is
@@ -1015,13 +1009,7 @@ impl Connector {
                     ))
                     .await?;
                     let info = self
-                        .info_after_first_pong(
-                            server_addr,
-                            info,
-                            &mut connection,
-                            tls,
-                            candidate_deadline,
-                        )
+                        .info_after_first_pong(server_addr, info, &mut connection, tls)
                         .await?;
                     Ok::<_, ConnectError>(Handshake {
                         info,
@@ -1521,54 +1509,26 @@ impl Connector {
         })
     }
 
-    /// On a connection that started TLS after its first INFO, `info`, from a server whose
-    /// `version` there is 2.12.0 or later, waits for the INFO that nats-server sends after
-    /// the first PONG, and replaces the discovered servers with the servers it lists. The
-    /// wait has a timer of its own, up to the connection timeout; when the timer runs out,
-    /// the client reports connected without that INFO. Other operations are skipped.
-    /// Returns the INFO of the connection: the one received inside TLS when it came, which
-    /// replaces `info`.
-    ///
-    /// The `version` of `info`, read before the TLS handshake, decides only whether the
-    /// client waits, so a wrong one costs at most one wait.
-    ///
-    /// When that INFO gives lame duck mode, the client raises the lame duck event.
     async fn info_after_first_pong(
         &mut self,
         server_addr: &ServerAddr,
         info: ServerInfo,
         connection: &mut Connection,
         tls: bool,
-        deadline: Instant,
     ) -> Result<ServerInfo, ConnectError> {
         let tls_after_info = tls && !self.options.tls_first && !server_addr.is_websocket();
         if !tls_after_info || !sends_info_after_first_pong(&info.version) {
             return Ok(info);
         }
-        let next_info = async {
-            loop {
-                if let ServerOp::Info(info) = next_op(connection).await? {
-                    return Ok::<_, ConnectError>(info);
-                }
-            }
-        };
-        match timeout_at(deadline, next_info).await {
-            Ok(next_info) => {
-                let next_info = next_info?;
-                if next_info.lame_duck_mode {
+        loop {
+            if let ServerOp::Info(info) = next_op(connection).await? {
+                if info.lame_duck_mode {
                     self.events_tx.try_send(Event::LameDuckMode).ok();
                 }
                 if !self.options.ignore_discovered_servers {
-                    self.replace_discovered_servers(&next_info.connect_urls, server_addr, true);
+                    self.replace_discovered_servers(&info.connect_urls, server_addr, true);
                 }
-                Ok(*next_info)
-            }
-            Err(_) => {
-                tracing::debug!(
-                    server = ?server_addr,
-                    "no INFO after the first PONG, connected without it"
-                );
-                Ok(info)
+                return Ok(*info);
             }
         }
     }
@@ -2561,8 +2521,6 @@ mod tests {
 
     #[test]
     fn waits_after_the_first_pong_only_for_2_12_0_and_later() {
-        // The version comes from the INFO read before TLS: a changed one costs at most one
-        // wait, or leaves the INFO that follows the first PONG to be taken when it arrives.
         for (version, waits) in [
             ("2.12.0", true),
             ("2.12.1", true),
@@ -2579,7 +2537,7 @@ mod tests {
             ("2.12.0+build", true),
             ("2.11.0-beta.1", false),
             ("2.12.0.1", false),
-            ("v2.12.0", false),
+            ("v2.12.0", true),
             ("18446744073709551616.0.0", false),
             ("2.18446744073709551616.0", false),
         ] {

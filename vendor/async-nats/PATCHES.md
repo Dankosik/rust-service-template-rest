@@ -16,6 +16,9 @@ archive SHA-256 `486635b3139935dcea5b88d219c5998aefa3c5b99e9a204312b93ac3aa10b30
 DNS, TCP, TLS and the authenticated INFO exchange share the local attempt
 deadline. Ordinary TLS consumes the authenticated INFO even when peer
 discovery is disabled, so admission sees the negotiated payload limit.
+For servers supporting post-PONG INFO, a missing response expires the address
+attempt. Version checks for that exchange and for JetStream admission use the
+same parser.
 CI runs the upstream connector regressions alongside the native
 ownership tests. TLS settings, including a root CA or a TLS seed, require TLS
 across the pool. Configure DNS seed names covered by the cluster certificate

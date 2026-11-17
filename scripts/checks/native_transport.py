@@ -49,6 +49,7 @@ TARGETS = (
         (
             "tests::initial_connect_deadline_refuses_new_attempts_after_expiry",
             "connector::tests::tls_is_asked_for_by_every_tls_setting",
+            "connector::tests::waits_after_the_first_pong_only_for_2_12_0_and_later",
             "connector::tests::connect_urls_entries_are_host_port",
             "connector::tests::discovered_servers_keep_the_transport_and_tls_they_were_learned_on",
             "connector::tests::a_server_learned_over_tls_is_verified_against_the_name_it_was_learned_under",
