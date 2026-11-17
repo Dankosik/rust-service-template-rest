@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable, namespace};
+use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, OperationError, namespace};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 use tls_test_support::{TlsMaterial, new_issuer};
@@ -305,6 +305,31 @@ async fn roundtrip_hit_miss_and_delete_are_scoped_to_the_namespace() {
 }
 
 #[tokio::test]
+async fn a_ttl_that_overflows_server_time_is_invalid_and_preserves_the_value() {
+    let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
+    let namespace = cache.namespace(namespace!("ttl"));
+    let key = unique_key();
+    namespace
+        .set(&key, b"original", Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        namespace
+            .set(
+                &key,
+                b"replacement",
+                Duration::from_millis(i64::MAX.cast_unsigned())
+            )
+            .await,
+        Err(infra_cache::SetError::InvalidTtl)
+    );
+    assert_eq!(
+        namespace.get(&key).await.unwrap().as_deref(),
+        Some(&b"original"[..])
+    );
+}
+
+#[tokio::test]
 async fn a_short_ttl_expires() {
     let cache = connect_url(&cache_url(), Duration::from_secs(1)).await;
     let namespace = cache.namespace(namespace!("ttl"));
@@ -343,7 +368,7 @@ async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let namespace = cache.namespace(namespace!("down"));
     let started = Instant::now();
     let err = namespace.get(&unique_key()).await.unwrap_err();
-    std::assert_matches!(err, Unavailable);
+    std::assert_matches!(err, OperationError::Unavailable);
     assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
     assert!(
@@ -373,7 +398,7 @@ async fn a_silent_server_times_out_within_the_command_bound() {
     let namespace = cache.namespace(namespace!("silent"));
     let started = Instant::now();
     let err = namespace.get(&unique_key()).await.unwrap_err();
-    std::assert_matches!(err, Unavailable);
+    std::assert_matches!(err, OperationError::Unavailable);
     assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
     assert!(scrape.contains("outcome=\"timeout\""), "{scrape}");
@@ -400,7 +425,7 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
     );
     proxy.stop().await;
     let err = namespace.get(&key).await.unwrap_err();
-    std::assert_matches!(err, Unavailable);
+    std::assert_matches!(err, OperationError::Unavailable);
     proxy.restart_plain(upstream).await;
     let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
@@ -514,7 +539,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
 
     std::assert_matches!(
         namespace.get(&key).await,
-        Err(Unavailable),
+        Err(OperationError::Unavailable),
         "the constructed client must retain its original CA"
     );
     let rebuilt = Cache::start(options(
@@ -554,7 +579,7 @@ async fn an_untrusted_ca_is_unavailable() {
         .get(&unique_key())
         .await
         .unwrap_err();
-    std::assert_matches!(err, Unavailable);
+    std::assert_matches!(err, OperationError::Unavailable);
 }
 
 #[tokio::test]
@@ -605,7 +630,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
         .get(&unique_key())
         .await
         .unwrap_err();
-    std::assert_matches!(err, Unavailable);
+    std::assert_matches!(err, OperationError::Unavailable);
 }
 
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {

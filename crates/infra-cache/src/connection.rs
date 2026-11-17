@@ -17,13 +17,14 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::ServerEndpoint;
 use crate::credentials::{PasswordFile, ReadFailure};
 use crate::dial::{Dial, Dialed};
+use crate::namespace::Operation;
 use crate::observe::{
     ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
     RETIREMENTS_METRIC,
 };
+use crate::{MutationError, OperationError, ServerEndpoint, SetError};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,14 +52,88 @@ pub(crate) enum ErrorType {
     Other,
 }
 
-pub(crate) enum CommandError {
+#[derive(Clone, Copy)]
+pub(crate) enum CommandFailure {
     Stopped(Stopped),
     Failed(ErrorType),
+    InvalidTtl,
+}
+
+impl CommandFailure {
+    fn operation_error(self) -> OperationError {
+        match self {
+            Self::Stopped(stopped) => OperationError::Stopped(stopped),
+            Self::Failed(_) | Self::InvalidTtl => OperationError::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CommandError {
+    NotApplied(CommandFailure),
+    OutcomeUnknown(CommandFailure),
+}
+
+impl CommandError {
+    pub(crate) fn failure(self) -> CommandFailure {
+        match self {
+            Self::NotApplied(failure) | Self::OutcomeUnknown(failure) => failure,
+        }
+    }
+
+    fn from_reply(
+        error: &redis::RedisError,
+        operation: Operation,
+        stopped: Option<CommandFailure>,
+    ) -> Self {
+        if matches!(operation, Operation::Set)
+            && error.code() == Some("ERR")
+            && error.detail().is_some_and(|detail| {
+                detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
+            })
+        {
+            return Self::NotApplied(CommandFailure::InvalidTtl);
+        }
+        let failure = stopped.unwrap_or_else(|| CommandFailure::Failed(error_type(error)));
+        match error.code() {
+            Some(
+                "READONLY" | "NOAUTH" | "NOPERM" | "OOM" | "LOADING" | "MOVED" | "ASK"
+                | "CLUSTERDOWN" | "MASTERDOWN" | "MISCONF",
+            ) => Self::NotApplied(failure),
+            _ => Self::OutcomeUnknown(failure),
+        }
+    }
+}
+
+impl From<CommandError> for OperationError {
+    fn from(error: CommandError) -> Self {
+        error.failure().operation_error()
+    }
+}
+
+impl From<CommandError> for MutationError {
+    fn from(error: CommandError) -> Self {
+        match error {
+            CommandError::NotApplied(failure) => Self::NotApplied(failure.operation_error()),
+            CommandError::OutcomeUnknown(failure) => {
+                Self::OutcomeUnknown(failure.operation_error())
+            }
+        }
+    }
+}
+
+impl From<CommandError> for SetError {
+    fn from(error: CommandError) -> Self {
+        match error {
+            CommandError::NotApplied(CommandFailure::InvalidTtl) => Self::InvalidTtl,
+            _ => Self::Mutation(error.into()),
+        }
+    }
 }
 
 impl From<ErrorType> for CommandError {
     fn from(error: ErrorType) -> Self {
-        Self::Failed(error)
+        Self::NotApplied(CommandFailure::Failed(error))
     }
 }
 
@@ -233,8 +308,20 @@ impl<T: Send + 'static> Drop for Exchange<'_, T> {
 async fn query<T: redis::FromRedisValue>(
     command: redis::Cmd,
     mut connection: MultiplexedConnection,
+    operation: Operation,
 ) -> redis::RedisResult<T> {
-    tokio::task::unconstrained(command.query_async(&mut connection)).await
+    let mut reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
+    while let redis::Value::Attribute { data, .. } = reply {
+        reply = *data;
+    }
+    let value = match (operation, reply) {
+        (_, redis::Value::ServerError(error)) => return Err(error.into()),
+        (Operation::Get, value) => value.extract_error()?,
+        (Operation::Set, value @ redis::Value::Okay)
+        | (Operation::Delete, value @ redis::Value::Int(0 | 1)) => value,
+        _ => return Err((redis::ErrorKind::Parse, "unexpected cache mutation reply").into()),
+    };
+    Ok(T::from_redis_value(value)?)
 }
 
 impl std::fmt::Debug for Link {
@@ -373,50 +460,75 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
         &self,
         build_command: impl FnOnce() -> redis::Cmd,
-        context: &OperationContext,
+        parent: Option<&OperationContext>,
+        operation: Operation,
     ) -> Result<T, CommandError> {
-        context.check().map_err(CommandError::Stopped)?;
+        let context = parent.map_or_else(
+            || OperationContext::with_timeout(self.command_timeout),
+            |caller| caller.child(self.command_timeout),
+        );
+        let stop = |_: Stopped| {
+            parent.and_then(OperationContext::stopped).map_or(
+                CommandFailure::Failed(ErrorType::Timeout),
+                CommandFailure::Stopped,
+            )
+        };
+        let check = || {
+            context
+                .check()
+                .map_err(|stopped| CommandError::NotApplied(stop(stopped)))
+        };
+        check()?;
         let _slot = self.claim_slot()?;
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
-            stopped = context.wait_stopped() => return Err(CommandError::Stopped(stopped)),
+            stopped = context.wait_stopped() => return Err(CommandError::NotApplied(stop(stopped))),
         };
-        context.check().map_err(CommandError::Stopped)?;
+        check()?;
         let generation = generation?;
-        let exchange = async {
+        let reserve = async {
             let reservation = generation.reserve().await?;
             tokio::task::consume_budget().await;
-            let check_dispatch = || {
-                context.check().map_err(CommandError::Stopped)?;
-                if generation.retired.is_cancelled() {
-                    return Err(CommandError::Failed(ErrorType::Io));
-                }
-                Ok(())
-            };
-            check_dispatch()?;
-            let command = build_command();
-            check_dispatch()?;
-            let wire_deadline = Deadline::new(Instant::now(), self.command_timeout);
-            let mut exchange = Exchange::new(
-                &generation,
-                reservation,
-                query(command, generation.connection.clone()),
-                wire_deadline,
-            );
-            let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
-            drop(exchange);
-            reply.map_err(|error| {
-                context
-                    .stopped()
-                    .map_or_else(|| error_type(&error).into(), CommandError::Stopped)
-            })
+            Ok::<_, ErrorType>(reservation)
         };
+        let reservation = tokio::select! {
+            biased;
+            result = reserve => result?,
+            stopped = context.wait_stopped() => return Err(CommandError::NotApplied(stop(stopped))),
+            () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
+        };
+        let check_dispatch = || {
+            check()?;
+            if generation.retired.is_cancelled() {
+                return Err(ErrorType::Io.into());
+            }
+            Ok::<(), CommandError>(())
+        };
+        check_dispatch()?;
+        let command = build_command();
+        check_dispatch()?;
+        let mut exchange = Exchange::new(
+            &generation,
+            reservation,
+            query(command, generation.connection.clone(), operation),
+            Deadline::new(Instant::now(), self.command_timeout),
+        );
         tokio::select! {
             biased;
-            reply = exchange => reply,
-            stopped = context.wait_stopped() => Err(CommandError::Stopped(stopped)),
-            () = generation.retired.cancelled() => Err(ErrorType::Io.into()),
+            reply = poll_fn(|cx| exchange.poll_reply(cx)) => {
+                match reply {
+                    Ok(value) => {
+                        if matches!(operation, Operation::Get) {
+                            check()?;
+                        }
+                        Ok(value)
+                    }
+                    Err(error) => Err(CommandError::from_reply(&error, operation, context.stopped().map(stop))),
+                }
+            }
+            stopped = context.wait_stopped() => Err(CommandError::OutcomeUnknown(stop(stopped))),
+            () = generation.retired.cancelled() => Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io))),
         }
     }
 

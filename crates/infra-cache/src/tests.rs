@@ -257,6 +257,17 @@ async fn serve_resp(
             }
             _ => b"+OK\r\n",
         };
+        let reply = if matches!(arguments.first().map(String::as_str), Some("SET" | "DEL")) {
+            socket
+                .observed
+                .next_mutation_reply
+                .lock()
+                .expect("mutation reply lock")
+                .take()
+                .unwrap_or(reply)
+        } else {
+            reply
+        };
         let reply_delay = socket.observed.reply_delay(&arguments);
         if !reply_delay.is_zero() {
             tokio::time::sleep(reply_delay).await;
@@ -295,6 +306,7 @@ struct SocketObservations {
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
     next_set_reply: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    next_mutation_reply: std::sync::Mutex<Option<&'static [u8]>>,
     slow_get_delay: std::sync::Mutex<Duration>,
     changed: tokio::sync::Notify,
 }

@@ -2,8 +2,10 @@ use std::sync::atomic::Ordering;
 
 use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use operation_context::Stopped;
 
 use super::*;
+use crate::{MutationError, OperationError, SetError};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -183,7 +185,10 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
     let namespace = cache.namespace(namespace!("replies"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
-    assert_eq!(namespace.get("wrongtype").await, Err(crate::Unavailable));
+    assert_eq!(
+        namespace.get("wrongtype").await,
+        Err(OperationError::Unavailable)
+    );
     assert_eq!(namespace.get("after").await, Ok(None));
     assert_eq!(
         server.connections(),
@@ -218,7 +223,9 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
     server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::SetError::Unavailable(crate::Unavailable))
+        Err(SetError::Mutation(MutationError::NotApplied(
+            OperationError::Unavailable
+        )))
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -236,6 +243,41 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         server.connections() >= 2,
         "READONLY must open a connection to the new primary"
     );
+}
+
+#[tokio::test]
+async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
+    let refused = MutationError::NotApplied(OperationError::Unavailable);
+    let unknown = MutationError::OutcomeUnknown(OperationError::Unavailable);
+    for (set, reply, expected) in [
+        (true, &b"-NOPERM access denied\r\n"[..], Err(refused)),
+        (false, b"-ERR unspecified failure\r\n", Err(unknown)),
+        (true, b":1\r\n", Err(unknown)),
+        (false, b"+OK\r\n", Err(unknown)),
+        (false, b":2\r\n", Err(unknown)),
+        (false, b":0\r\n", Ok(())),
+    ] {
+        let server = FakeServer::start().await;
+        let cache = admitted(&format!("redis://{}", server.address), true, true).await;
+        wait_until_connected(&cache, Duration::from_secs(2)).await;
+        let namespace = cache.namespace(namespace!("replies"));
+        *server
+            .observed
+            .next_mutation_reply
+            .lock()
+            .expect("mutation reply lock") = Some(reply);
+        if set {
+            assert_eq!(
+                namespace.set("key", b"value", Duration::from_secs(1)).await,
+                expected.map_err(SetError::Mutation),
+                "{reply:?}"
+            );
+        } else {
+            assert_eq!(namespace.delete("key").await, expected, "{reply:?}");
+        }
+        let command = if set { "SET" } else { "DEL" };
+        assert_eq!(server.command_count(command, Some("replies:key")), 1);
+    }
 }
 
 #[tokio::test]
@@ -276,7 +318,9 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
     context.cancel();
     assert_eq!(
         tokio::time::timeout(limit, write).await,
-        Ok(Err(crate::SetError::Unavailable(crate::Unavailable)))
+        Ok(Err(SetError::Mutation(MutationError::OutcomeUnknown(
+            OperationError::Stopped(Stopped::Cancelled)
+        ))))
     );
     assert_eq!(server.connections(), 1);
     assert!(
@@ -327,7 +371,7 @@ async fn a_refused_hello_is_reported_as_auth() {
         .expect("the refused password was not reported as auth");
     assert_eq!(
         cache.namespace(namespace!("auth")).get("key").await,
-        Err(crate::Unavailable)
+        Err(OperationError::Unavailable)
     );
 }
 
@@ -375,12 +419,12 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     cancelled.cancel();
     assert_eq!(
         namespace.get_with_context("key", &cancelled).await,
-        Err(crate::Unavailable)
+        Err(OperationError::Stopped(Stopped::Cancelled))
     );
     let expired = OperationContext::with_timeout(Duration::ZERO);
     assert_eq!(
         namespace.get_with_context("key", &expired).await,
-        Err(crate::Unavailable)
+        Err(OperationError::Stopped(Stopped::Deadline))
     );
 
     let scrape = recorder.handle().render();
@@ -399,12 +443,13 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             during_build.cancel();
             command
         },
-        &during_build,
+        Some(&during_build),
+        crate::namespace::Operation::Delete,
     );
     assert!(matches!(
         write.await,
-        Err(crate::connection::CommandError::Stopped(
-            operation_context::Stopped::Cancelled
+        Err(crate::connection::CommandError::NotApplied(
+            crate::connection::CommandFailure::Stopped(Stopped::Cancelled)
         ))
     ));
     assert_eq!(namespace.get("after").await, Ok(None));
@@ -573,7 +618,9 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
     server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
-        Err(crate::SetError::Unavailable(crate::Unavailable))
+        Err(SetError::Mutation(MutationError::NotApplied(
+            OperationError::Unavailable
+        )))
     );
 
     server
@@ -631,7 +678,7 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::connection::{CommandError, ErrorType};
+    use crate::connection::{CommandError, CommandFailure, ErrorType};
 
     let server = FakeServer::start().await;
     *server
@@ -662,15 +709,19 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     let mut excess = Box::pin(namespace.get("refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
-        Poll::Ready(Err(crate::Unavailable))
+        Poll::Ready(Err(OperationError::Unavailable))
     );
     let context = operation_context::OperationContext::unbounded();
-    let refused = cache
-        .link
-        .command::<()>(|| panic!("a refused command must not be built"), &context);
+    let refused = cache.link.command::<()>(
+        || panic!("a refused command must not be built"),
+        Some(&context),
+        crate::namespace::Operation::Delete,
+    );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(CommandError::Failed(ErrorType::Other)))
+        Poll::Ready(Err(CommandError::NotApplied(CommandFailure::Failed(
+            ErrorType::Other
+        ))))
     ));
     assert_work_metrics(&metrics, 256, 2, 0);
     drop(waiting.pop());
@@ -719,7 +770,7 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     let mut excess = Box::pin(sibling.delete("refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
-        Poll::Ready(Err(crate::Unavailable))
+        Poll::Ready(Err(MutationError::NotApplied(OperationError::Unavailable)))
     );
     server
         .wait_for(
@@ -770,7 +821,9 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
             namespace
                 .set(&key, b"effect-may-have-happened", Duration::from_secs(1))
                 .await,
-            Err(crate::SetError::Unavailable(crate::Unavailable))
+            Err(SetError::Mutation(MutationError::OutcomeUnknown(
+                OperationError::Unavailable
+            )))
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -802,7 +855,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let old = server.stall_existing();
     assert_eq!(
         namespace.delete("delete-once").await,
-        Err(crate::Unavailable)
+        Err(MutationError::OutcomeUnknown(OperationError::Unavailable))
     );
     metrics.wait_for_retirements(4).await;
     assert_work_metrics(&metrics, 0, 0, 4);
@@ -872,13 +925,13 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
         tokio::time::timeout(Duration::from_secs(6), first)
             .await
             .expect("command must observe its own reply timeout"),
-        Err(crate::Unavailable)
+        Err(OperationError::Unavailable)
     );
     metrics.wait_for_retirements(1).await;
     assert_work_metrics(&metrics, 2, 0, 1);
     assert_eq!(
         futures_util::poll!(peer.as_mut()),
-        Poll::Ready(Err(crate::Unavailable))
+        Poll::Ready(Err(OperationError::Unavailable))
     );
     assert_work_metrics(&metrics, 1, 0, 1);
     let mut replacement = Box::pin(namespace.get("replacement"));
@@ -894,7 +947,7 @@ async fn reliability_a_command_reply_timeout_retires_the_connection() {
     assert!(server.connections() > old);
     assert_eq!(
         futures_util::poll!(late.as_mut()),
-        Poll::Ready(Err(crate::Unavailable))
+        Poll::Ready(Err(OperationError::Unavailable))
     );
     assert_work_metrics(&metrics, 0, 0, 1);
     assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
@@ -937,7 +990,7 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
         dropped.is_err(),
         "the dropped GET was answered first: {dropped:?}"
     );
-    assert_eq!(stopped, Err(crate::Unavailable));
+    assert_eq!(stopped, Err(OperationError::Stopped(Stopped::Deadline)));
     assert_eq!(namespace.get("after").await, Ok(None));
     assert_eq!(
         server.command_count("GET", Some("caller_stop:slow")),
@@ -979,28 +1032,29 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
     let namespace = cache.namespace(namespace!("context"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
-    for expired in [false, true] {
-        let context = OperationContext::with_timeout(if expired {
-            Duration::ZERO
-        } else {
-            Duration::from_secs(1)
-        });
-        if !expired {
-            context.cancel();
-        }
+    for reason in [Stopped::Cancelled, Stopped::Deadline] {
+        let context = match reason {
+            Stopped::Cancelled => {
+                let context = OperationContext::unbounded();
+                context.cancel();
+                context
+            }
+            Stopped::Deadline => OperationContext::with_timeout(Duration::ZERO),
+        };
+        let cause = OperationError::Stopped(reason);
         assert_eq!(
             namespace.get_with_context("stopped", &context).await,
-            Err(crate::Unavailable)
+            Err(cause)
         );
         assert_eq!(
             namespace
                 .set_with_context("stopped", b"value", Duration::from_secs(1), &context)
                 .await,
-            Err(crate::SetError::Unavailable(crate::Unavailable))
+            Err(SetError::Mutation(MutationError::NotApplied(cause)))
         );
         assert_eq!(
             namespace.delete_with_context("stopped", &context).await,
-            Err(crate::Unavailable)
+            Err(MutationError::NotApplied(cause))
         );
     }
     assert_eq!(namespace.get("live").await, Ok(None));
@@ -1071,13 +1125,13 @@ async fn caller_cutoff_bounds_connection_acquisition() {
         )
         .await
         .expect("parent cutoff must end acquisition before the five-second local ceiling"),
-        Err(crate::Unavailable)
+        Err(OperationError::Stopped(Stopped::Deadline))
     );
     assert_eq!(server.command_count("GET", Some("acquire:pending")), 0);
 }
 
 #[tokio::test]
-async fn acknowledged_write_keeps_its_result_after_disconnect() {
+async fn acknowledged_write_keeps_its_result_after_cancellation_and_disconnect() {
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(10),
@@ -1087,7 +1141,8 @@ async fn acknowledged_write_keeps_its_result_after_disconnect() {
     .expect("start cache");
     let namespace = cache.namespace(namespace!("acknowledged_write"));
     assert_eq!(namespace.get("ready").await, Ok(None));
-    let write = namespace.set("key", b"value", Duration::from_secs(10));
+    let context = operation_context::OperationContext::unbounded();
+    let write = namespace.set_with_context("key", b"value", Duration::from_secs(10), &context);
     tokio::pin!(write);
     assert!(futures_util::poll!(write.as_mut()).is_pending());
     server
@@ -1098,6 +1153,7 @@ async fn acknowledged_write_keeps_its_result_after_disconnect() {
     assert_eq!(namespace.get("fence").await, Ok(None));
     let old = server.connections();
     assert_eq!(old, 1);
+    context.cancel();
     server.hang_up();
     server
         .wait_for(Duration::from_secs(5), "cache did not reconnect", || {
@@ -1133,7 +1189,7 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
     assert_eq!(namespace.get("fence").await, Ok(None));
 
     context.cancel();
-    assert_eq!(read.await, Err(crate::Unavailable));
+    assert_eq!(read.await, Err(OperationError::Stopped(Stopped::Cancelled)));
     assert_eq!(namespace.get("live").await, Ok(None));
     assert_eq!(server.connections(), 1);
 }
@@ -1181,7 +1237,7 @@ fn a_command_after_the_supervisor_exited_fails_instead_of_hanging() {
         let namespace = cache.namespace(namespace!("supervisor_exit"));
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), namespace.get("key")).await,
-            Ok(Err(crate::Unavailable))
+            Ok(Err(OperationError::Unavailable))
         );
     });
     let scrape = recorder.handle().render();
@@ -1222,7 +1278,9 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         tokio::time::timeout(Duration::from_millis(200), write)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
-        Err(crate::SetError::Unavailable(crate::Unavailable))
+        Err(SetError::Mutation(MutationError::OutcomeUnknown(
+            OperationError::Stopped(Stopped::Cancelled)
+        )))
     );
     assert_work_metrics(&metrics, 0, 0, 0);
     server
@@ -1520,66 +1578,103 @@ async fn a_password_the_server_keeps_refusing_is_reported_once() {
     assert_eq!(namespace.get("still-usable").await, Ok(None));
 }
 
+#[test]
+fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() {
+    let password = temp_file("admitted\n");
+    let file = crate::credentials::PasswordFile::admit(password.path().to_owned(), None)
+        .expect("admit password file");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || gate.blocking_recv());
+        let options = with_password_file("redis://127.0.0.1:6379", password.path().to_owned());
+        let error = tokio::time::timeout(Duration::from_secs(7), Cache::start(options))
+            .await
+            .expect("admission must time out while the blocking worker is unavailable")
+            .unwrap_err();
+        assert_eq!(error, CacheError::AdmissionTimedOut);
+
+        {
+            let mut read = std::pin::pin!(file.read());
+            assert!(futures_util::poll!(read.as_mut()).is_pending());
+        }
+        std::assert_matches!(
+            futures_util::poll!(std::pin::pin!(file.read())),
+            std::task::Poll::Ready(Err(crate::credentials::ReadFailure::Busy))
+        );
+        release.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert_eq!(file.read().await.unwrap().as_str(), "admitted");
+    });
+}
+
 #[cfg(unix)]
-#[tokio::test]
+#[test]
 #[expect(
     clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "test-owned password fixtures; the FIFO writer runs on an owned blocking thread"
+    reason = "test-owned credential files are rotated atomically"
 )]
-async fn a_hung_password_read_is_never_joined_by_a_second() {
-    let directory = tempfile::tempdir().expect("password directory");
-    let path = directory.path().join("password");
-    std::fs::write(&path, "admitted\n").expect("admitted password");
-    let file =
-        crate::credentials::PasswordFile::admit(path.clone(), None).expect("admit password file");
-    std::fs::remove_file(&path).expect("remove password");
-    let status = std::process::Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .expect("run mkfifo");
-    assert!(status.success());
+fn replacing_an_unserviced_fifo_restores_password_refresh_and_reconnect() {
+    use nix::sys::stat::Mode;
 
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), file.read())
+    super::admission::with_unserviced_fifo(async {
+        for reconnect in [false, true] {
+            let (captured, _subscriber) = capture_logs();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("password");
+            let replacement = directory.path().join("replacement");
+            let initial = ephemeral_password();
+            let rotated = ephemeral_password();
+            let server = FakeServer::start().await;
+            server.require_password(&initial);
+            std::fs::write(&path, initial).unwrap();
+            let cache = Cache::start(with_password_file(
+                &format!("redis://{}", server.address),
+                path.clone(),
+            ))
             .await
-            .is_err(),
-        "the FIFO read must hang"
-    );
-    let second = tokio::time::timeout(Duration::from_secs(1), file.read()).await;
-
-    let fifo = directory.path().join("stale");
-    std::fs::rename(&path, &fifo).expect("move FIFO aside");
-    std::fs::write(&path, "rotated\n").expect("rotated password");
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(fifo)
-            .and_then(|mut writer| writer.write_all(b"stale"))
-    })
-    .await
-    .expect("FIFO writer task")
-    .expect("release the hung read");
-    assert_eq!(
-        second,
-        Ok(Err(crate::credentials::ReadFailure::Busy)),
-        "a second read must fail at once instead of starting another"
-    );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match file.read().await {
-            Ok(password) => {
-                assert_eq!(password.as_str(), "rotated");
-                break;
+            .unwrap();
+            let namespace = cache.namespace(namespace!("recover_password_file"));
+            assert_eq!(namespace.get("ready").await, Ok(None));
+            nix::unistd::mkfifo(&replacement, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            if reconnect {
+                server.hang_up();
             }
-            Err(error) => assert!(
-                tokio::time::Instant::now() < deadline,
-                "the released read never finished: {error}"
-            ),
+            captured
+                .wait_for(Duration::from_secs(7), |logs| {
+                    if reconnect {
+                        connection_failed_with(logs, "other")
+                    } else {
+                        logs.contains("cache_password_file_unreadable")
+                    }
+                })
+                .await
+                .expect("the cache must observe the unusable FIFO");
+            if !reconnect {
+                assert_eq!(namespace.get("during-outage").await, Ok(None));
+            }
+
+            server.require_password(&rotated);
+            std::fs::write(&replacement, rotated).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            server
+                .wait_for(
+                    Duration::from_secs(7),
+                    "replacement password was not accepted",
+                    || server.observed.auth_successes.load(Ordering::SeqCst) == 2,
+                )
+                .await;
+            wait_until_connected(&cache, Duration::from_secs(1)).await;
+            assert_eq!(namespace.get("recovered").await, Ok(None));
+            assert_eq!(server.connections(), if reconnect { 2 } else { 1 });
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    });
 }
 
 fn password_refresh_samples(metrics: &TestMetrics) -> Vec<(String, String, u64)> {
@@ -1839,7 +1934,12 @@ async fn caller_timeout_after_setup_wait_keeps_the_healthy_connection() {
     .expect("start cache");
     let namespace = cache.namespace(namespace!("setup_wait"));
 
-    assert_eq!(namespace.get("slow").await, Err(crate::Unavailable));
+    let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(5));
+    assert_eq!(
+        namespace.get_with_context("slow", &parent).await,
+        Err(OperationError::Unavailable)
+    );
+    assert_eq!(parent.check(), Ok(()));
     assert_eq!(
         server.command_count("GET", Some("setup_wait:slow")),
         1,
@@ -1888,7 +1988,7 @@ async fn commands_fail_fast_while_a_background_setup_retry_is_in_flight() {
     let mut command = Box::pin(namespace.get("key"));
     assert_eq!(
         futures_util::poll!(command.as_mut()),
-        Poll::Ready(Err(crate::Unavailable))
+        Poll::Ready(Err(OperationError::Unavailable))
     );
     assert_eq!(server.command_count("GET", None), 0);
 }
@@ -1917,7 +2017,7 @@ async fn commands_fail_fast_during_generation_cooldown_after_early_disconnect() 
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let started = tokio::time::Instant::now();
-    assert_eq!(namespace.get("key").await, Err(crate::Unavailable));
+    assert_eq!(namespace.get("key").await, Err(OperationError::Unavailable));
     assert!(
         started.elapsed() < Duration::from_millis(50),
         "command blocked during generation cooldown instead of failing fast"
