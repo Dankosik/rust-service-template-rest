@@ -467,6 +467,42 @@ mod tests {
     use super::{WorkerConfig, WorkerError};
 
     #[cfg(unix)]
+    async fn prepare_worker_and_check_http(
+        background: &super::Background,
+        resources: &mut super::Resources,
+    ) -> super::PreparedReadiness {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let mut config = WorkerConfig::default();
+        config.http.addr = "127.0.0.1:0".parse().unwrap();
+        config.observability.metrics.addr = None;
+        let metrics = infra_telemetry::Metrics::install(&[]).unwrap();
+        let prepared = super::prepare_readiness(&config, &metrics, background, resources)
+            .await
+            .unwrap();
+        let address = resources.listeners.health.as_ref().unwrap().local_addr();
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket
+                .write_all(
+                    b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            BufReader::new(socket)
+                .lines()
+                .next_line()
+                .await
+                .unwrap()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
+        prepared
+    }
+
+    #[cfg(unix)]
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -515,34 +551,14 @@ mod tests {
             .unwrap()
             .block_on(async {
                 use futures_util::FutureExt;
-                use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
                 use tokio::signal::unix::{SignalKind, signal};
 
                 let mut signals = super::Signals::install().unwrap();
                 let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
                 let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
-                let mut config = WorkerConfig::default();
-                config.http.addr = "127.0.0.1:0".parse().unwrap();
-                config.observability.metrics.addr = None;
                 let background = super::Background::new();
                 let mut resources = super::Resources::default();
-                let metrics = infra_telemetry::Metrics::install(&[]).unwrap();
-                let prepared =
-                    super::prepare_readiness(&config, &metrics, &background, &mut resources)
-                        .await
-                        .unwrap();
-                let address = resources.listeners.health.as_ref().unwrap().local_addr();
-                let response = tokio::time::timeout(Duration::from_secs(2), async {
-                    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-                    socket
-                        .write_all(b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                        .await
-                        .unwrap();
-                    BufReader::new(socket).lines().next_line().await.unwrap().unwrap()
-                })
-                .await
-                .unwrap();
-                assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
+                let prepared = prepare_worker_and_check_http(&background, &mut resources).await;
                 let process = std::process::id().to_string();
                 for signal in ["-TERM", "-INT"] {
                     assert!(
@@ -585,7 +601,13 @@ mod tests {
                 background.cancel.cancel();
                 background.tracker.close();
                 background.tracker.wait().await;
-                resources.listeners.health.unwrap().drain(Duration::from_secs(2)).await.unwrap();
+                resources
+                    .listeners
+                    .health
+                    .unwrap()
+                    .drain(Duration::from_secs(2))
+                    .await
+                    .unwrap();
             });
     }
 
