@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use axum::http::{HeaderMap, HeaderValue, Uri};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::{Router, routing::get};
-use axum_extra::TypedHeader;
-use axum_extra::extract::Query;
 use axum_extra::headers::{ContentLength, HeaderMapExt, UserAgent};
 use axum_test::TestServer;
-use infra_http::extract::Json;
+use infra_http::extract::{Json, Query};
 use serde::Deserialize;
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -19,36 +17,42 @@ struct Filters {
     tag: Vec<String>,
 }
 
-#[test]
-fn query_lists_handle_zero_one_and_multiple_occurrences() {
-    for (query, expected) in [
-        ("/tags", vec![]),
-        ("/tags?tag=rust", vec!["rust"]),
-        ("/tags?tag=rust&tag=backend", vec!["rust", "backend"]),
-    ] {
-        let uri: Uri = query.parse().unwrap();
-        let parsed = Query::<Filters>::try_from_uri(&uri).unwrap();
-        assert_eq!(parsed.tag, expected);
-    }
-    let uri: Uri = "/tags?unknown=value".parse().unwrap();
-    assert!(Query::<Filters>::try_from_uri(&uri).is_err());
-}
-
 async fn inspect_query(
     Query(filters): Query<Filters>,
-    TypedHeader(agent): TypedHeader<UserAgent>,
+    headers: HeaderMap,
 ) -> Json<serde_json::Value> {
-    Json(json!({"tags": filters.tag, "agent": agent.as_str()}))
+    let agent = headers.typed_get::<UserAgent>();
+    Json(json!({"tags": filters.tag, "agent": agent.as_ref().map(UserAgent::as_str)}))
 }
 
-#[tokio::test]
 #[expect(
     clippy::disallowed_methods,
     reason = "this test-local router exercises library extractors rather than application operations"
 )]
-async fn typed_header_and_query_extractors_compose_on_axum() {
-    let server = TestServer::new(Router::new().route("/tags", get(inspect_query)));
-    let response = server
+fn tags_server() -> TestServer {
+    TestServer::new(Router::new().route("/tags", get(inspect_query)))
+}
+
+#[tokio::test]
+async fn query_lists_handle_zero_one_and_multiple_occurrences() {
+    let server = tags_server();
+    for (query, expected) in [
+        ("/tags", json!([])),
+        ("/tags?tag=rust", json!(["rust"])),
+        ("/tags?tag=rust&tag=backend", json!(["rust", "backend"])),
+    ] {
+        let response = server.get(query).await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<serde_json::Value>()["tags"], expected);
+    }
+    let response = server.get("/tags?unknown=value").await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    response.assert_header("content-type", "application/problem+json");
+}
+
+#[tokio::test]
+async fn typed_header_and_query_readers_compose_on_axum() {
+    let response = tags_server()
         .get("/tags?tag=rust&tag=backend")
         .add_header("user-agent", "utility-recipes")
         .await;

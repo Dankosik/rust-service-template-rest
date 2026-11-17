@@ -687,7 +687,6 @@ checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
 dependencies = [
  "axum-core",
  "bytes",
- "form_urlencoded",
  "futures-core",
  "futures-util",
  "headers",
@@ -696,9 +695,6 @@ dependencies = [
  "http-body-util",
  "mime",
  "pin-project-lite",
- "serde_core",
- "serde_html_form",
- "serde_path_to_error",
  "tower-layer",
  "tower-service",
 ]
@@ -2703,6 +2699,7 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
+ "serde_html_form",
  "serde_json",
  "serde_path_to_error",
  "serde_with",
@@ -5013,7 +5010,6 @@ dependencies = [
  "form_urlencoded",
  "indexmap 2.14.2",
  "itoa",
- "ryu",
  "serde_core",
 ]
 
