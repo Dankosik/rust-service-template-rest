@@ -234,4 +234,7 @@ disallowed-types = [
     { path = "axum::Json", reason = "use infra_http::extract::Json: its rejections are Problems and it renders the same response", allow-invalid = true },
     { path = "axum::extract::Query", reason = "use infra_http::extract::Query: its rejections are Problems", allow-invalid = true },
     { path = "axum::extract::Path", reason = "use infra_http::extract::Path: its rejections are Problems" },
+    { path = "axum_extra::extract::Query", reason = "use infra_http::extract::Query: its rejections are Problems and it reads a repeated key into a list", allow-invalid = true },
+    { path = "axum_extra::extract::OptionalQuery", reason = "use infra_http::extract::Query with optional members: its rejections are Problems", allow-invalid = true },
+    { path = "axum_extra::TypedHeader", reason = "read the header with HeaderMapExt::typed_try_get and answer a Problem: this extractor rejects with text/plain", allow-invalid = true },
 ]

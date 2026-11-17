@@ -98,7 +98,7 @@ impl JwtVerifier {
         let bytes = token.as_bytes();
         if let Some(remembered) = self.remembered.get(bytes) {
             if remembered.key_generation == self.key_store.generation() {
-                let verified = remembered.verified.deliver(now()?.as_secs());
+                let verified = remembered.verified.deliver(now()?.as_secs(), token);
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -107,7 +107,7 @@ impl JwtVerifier {
             self.remembered.invalidate(bytes);
         }
         let remembered = self.verify_uncached(token, &now).await?;
-        let principal = remembered.verified.principal.clone();
+        let principal = remembered.verified.identity.presented_as(token);
         self.remembered.insert(bytes.into(), remembered);
         Ok(principal)
     }
@@ -141,7 +141,6 @@ impl JwtVerifier {
                 &self.claim_policy,
                 self.token_profile,
                 now.as_secs(),
-                token.to_secret(),
             )
         };
         let key_generation = self
@@ -157,7 +156,7 @@ impl JwtVerifier {
         let verified = admitted_claims(payload, now)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR
-                .min(Duration::from_secs(verified.principal.expires_at()).saturating_sub(now)),
+                .min(Duration::from_secs(verified.identity.expires_at()).saturating_sub(now)),
             sampled_at,
             verified,
             key_generation,

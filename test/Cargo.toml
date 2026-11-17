@@ -128,7 +128,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sy
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
 axum-test = { workspace = true }
-axum-extra = { workspace = true, features = ["query", "typed-header"] }
+axum-extra = { workspace = true, features = ["typed-header"] }
 axum = { workspace = true, features = ["json", "query"] }
 derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
 serde_with = { workspace = true, features = ["std", "macros"] }

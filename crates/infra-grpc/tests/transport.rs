@@ -1833,7 +1833,10 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
         reason = "the loopback peer echoes the timeout it received over HTTP/2"
     )]
     let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
-    let server = Server::bind(loopback(), app, server_options(limits())).unwrap();
+    let server =
+        BoundListener::bind(loopback())
+            .unwrap()
+            .serve_h2(app, server_options(limits()), None);
     let client = plaintext_client(server.local_addr());
     for original in [None, Some("30S")] {
         let mut request = http::Request::builder()
@@ -2919,7 +2922,10 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
         let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
-        let server = Server::bind(loopback(), app, server_options(limits())).unwrap();
+        let server =
+            BoundListener::bind(loopback())
+                .unwrap()
+                .serve_h2(app, server_options(limits()), None);
         let adapter = Client::try_new(
             &format!("http://{}", server.local_addr()),
             ClientSecurity::Plaintext,

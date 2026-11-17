@@ -32,8 +32,8 @@ serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
-# template:begin webhooks:webhooks-outbound-dependencies
 enum-map = { workspace = true, features = ["derive"] }
+# template:begin webhooks:webhooks-outbound-dependencies
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
@@ -42,6 +42,12 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 async-trait = { workspace = true }
+axum = { workspace = true }
+http-body-util = { workspace = true }
+infra-http = { workspace = true }
+parking_lot = { workspace = true }
+utoipa = { workspace = true, features = ["macros"] }
+utoipa-axum = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
@@ -49,5 +55,8 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 metrics-util = { workspace = true, features = ["debugging"] }
+# template:begin inbound-webhooks:webhooks-inbound-test-dependencies
+tower = { workspace = true, features = ["util"] }
+# template:end inbound-webhooks:webhooks-inbound-test-dependencies
 proptest = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

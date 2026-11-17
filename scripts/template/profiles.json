@@ -467,7 +467,6 @@
     "remove_when_unselected": [
       "crates/config/src/inbound_webhooks.rs",
       "crates/config/src/inbound_webhooks/",
-      "crates/infra-http/src/webhooks.rs",
       "crates/service/src/bootstrap/inbound_webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
       "crates/infra-webhooks/src/inbound/",

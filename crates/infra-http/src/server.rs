@@ -132,7 +132,7 @@ impl BoundListener {
 
     #[must_use]
     pub fn serve(self, app: Router, options: ServerOptions) -> Server {
-        let builder = connection_builder(options);
+        let builder = connection_builder(options).http1_only();
         serve_plaintext(self, app, options, builder)
     }
 
@@ -483,7 +483,11 @@ where
             let Some((io, scheme)) = io else {
                 return;
             };
-            let io = SniffDeadline::new(io, options.header_read_timeout);
+            let io = if builder.is_http2_available() {
+                SniffDeadline::new(io, options.header_read_timeout)
+            } else {
+                SniffDeadline::decided(io)
+            };
             let service = ServiceBuilder::new()
                 .layer(Extension(ConnectionInfo {
                     scheme,
