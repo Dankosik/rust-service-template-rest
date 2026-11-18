@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde::de::Unexpected;
+use serde::de::{IntoDeserializer as _, Unexpected};
 
 #[derive(Deserialize)]
 #[serde(transparent)]
@@ -102,7 +102,7 @@ where
     T: serde::Deserialize<'de>,
 {
     let raw = string(deserializer)?;
-    T::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&raw))
+    T::deserialize(raw.as_str().into_deserializer())
 }
 
 #[allow(dead_code, reason = "only optional profiles use optional enums")]
@@ -112,7 +112,7 @@ where
     T: serde::Deserialize<'de>,
 {
     optional_string(deserializer)?
-        .map(|raw| T::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&raw)))
+        .map(|raw| T::deserialize(raw.as_str().into_deserializer()))
         .transpose()
 }
 

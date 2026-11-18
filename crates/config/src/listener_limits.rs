@@ -7,14 +7,6 @@ pub(super) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
 pub(super) const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(1);
 pub(super) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
-pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), ValidationError> {
-    duration_range(
-        key,
-        value,
-        Duration::from_millis(100)..=Duration::from_mins(10),
-    )
-}
-
 pub(super) fn admission_wait_range(key: &str, value: Duration) -> Result<(), ValidationError> {
     duration_range(key, value, Duration::ZERO..=Duration::from_mins(10))
 }
@@ -23,13 +15,20 @@ pub(super) fn admission_wait_cap(wait: Duration, request_timeout: Duration) -> D
     wait.min(request_timeout)
 }
 
-pub(super) fn request_budget_fits_drain(
+pub(super) fn validate_request_timeout(
     key: &str,
     timeout: Duration,
-    drain: Duration,
+    drain_budget: Option<Duration>,
     subject: &str,
 ) -> Result<(), ValidationError> {
-    if timeout > drain {
+    duration_range(
+        key,
+        timeout,
+        Duration::from_millis(100)..=Duration::from_mins(10),
+    )?;
+    if let Some(drain) = drain_budget
+        && timeout > drain
+    {
         return Err(ValidationError::new(
             key,
             format!(

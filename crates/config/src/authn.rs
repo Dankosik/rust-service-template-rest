@@ -258,6 +258,8 @@ fn deserialize_optional_algorithms<'de, D>(
 where
     D: Deserializer<'de>,
 {
+    use serde::de::IntoDeserializer as _;
+
     #[derive(Deserialize)]
     #[serde(transparent)]
     struct StrictAlgorithm(#[serde(deserialize_with = "crate::de::string_enum")] JwtAlgorithm);
@@ -283,12 +285,8 @@ where
         Input::Text(value) => value
             .0
             .split(',')
-            .map(|item| {
-                JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(
-                    item.trim(),
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()
+            .map(|item| JwtAlgorithm::deserialize(item.trim().into_deserializer()))
+            .collect::<Result<Vec<_>, D::Error>>()
             .map(Some)
             .map_err(|_| {
                 serde::de::Error::invalid_value(
@@ -348,19 +346,15 @@ impl AuthnInput {
     )]
     fn reject_jwt_fields(&self, v: &mut Violations) {
         // template:begin oidc-jwt:authn-reject-jwt-fields
-        for (key, present) in [
-            ("authn.token_profile", self.token_profile.is_some()),
-            ("authn.algorithms", self.algorithms.is_some()),
-            ("authn.jwks_uri", self.jwks_uri.is_some()),
-            ("authn.jwks_max_age", self.jwks_max_age.is_some()),
-        ] {
-            if present {
-                v.reject(ValidationError::new(
-                    key,
-                    "is only valid when authn.mode = oidc-jwt",
-                ));
-            }
-        }
+        v.reject_present(
+            &[
+                ("authn.token_profile", self.token_profile.is_some()),
+                ("authn.algorithms", self.algorithms.is_some()),
+                ("authn.jwks_uri", self.jwks_uri.is_some()),
+                ("authn.jwks_max_age", self.jwks_max_age.is_some()),
+            ],
+            "is only valid when authn.mode = oidc-jwt",
+        );
         // template:end oidc-jwt:authn-reject-jwt-fields
     }
 
@@ -371,34 +365,30 @@ impl AuthnInput {
     )]
     fn reject_introspection_fields(&self, v: &mut Violations) {
         // template:begin oidc-introspection:authn-reject-introspection-fields
-        for (key, present) in [
-            (
-                "authn.introspection_endpoint",
-                self.introspection_endpoint.is_some(),
-            ),
-            (
-                "authn.introspection_client_id",
-                self.introspection_client_id.is_some(),
-            ),
-            (
-                "authn.introspection_client_secret",
-                self.introspection_client_secret.is_some(),
-            ),
-            (
-                "authn.provider_concurrency",
-                self.provider_concurrency.is_some(),
-            ),
-            ("authn.cache_enabled", self.cache_enabled.is_some()),
-            ("authn.cache_capacity", self.cache_capacity.is_some()),
-            ("authn.cache_ttl", self.cache_ttl.is_some()),
-        ] {
-            if present {
-                v.reject(ValidationError::new(
-                    key,
-                    "is only valid when authn.mode = oidc-introspection",
-                ));
-            }
-        }
+        v.reject_present(
+            &[
+                (
+                    "authn.introspection_endpoint",
+                    self.introspection_endpoint.is_some(),
+                ),
+                (
+                    "authn.introspection_client_id",
+                    self.introspection_client_id.is_some(),
+                ),
+                (
+                    "authn.introspection_client_secret",
+                    self.introspection_client_secret.is_some(),
+                ),
+                (
+                    "authn.provider_concurrency",
+                    self.provider_concurrency.is_some(),
+                ),
+                ("authn.cache_enabled", self.cache_enabled.is_some()),
+                ("authn.cache_capacity", self.cache_capacity.is_some()),
+                ("authn.cache_ttl", self.cache_ttl.is_some()),
+            ],
+            "is only valid when authn.mode = oidc-introspection",
+        );
         // template:end oidc-introspection:authn-reject-introspection-fields
     }
 
@@ -504,18 +494,14 @@ impl AuthnInput {
             AuthnMode::OidcIntrospection => self.admit_introspection(v),
             // template:end oidc-introspection:authn-config-introspection-validation
             AuthnMode::None => {
-                for (key, present) in [
-                    ("authn.issuer", self.issuer.is_some()),
-                    ("authn.audience", self.audience.is_some()),
-                    ("authn.audiences", self.audiences.is_some()),
-                ] {
-                    if present {
-                        v.reject(ValidationError::new(
-                            key,
-                            "is only valid when authn.mode is not none",
-                        ));
-                    }
-                }
+                v.reject_present(
+                    &[
+                        ("authn.issuer", self.issuer.is_some()),
+                        ("authn.audience", self.audience.is_some()),
+                        ("authn.audiences", self.audiences.is_some()),
+                    ],
+                    "is only valid when authn.mode is not none",
+                );
                 self.reject_jwt_fields(v);
                 self.reject_introspection_fields(v);
                 Ok(AuthnConfig::None)
