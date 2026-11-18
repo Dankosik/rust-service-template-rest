@@ -36,7 +36,7 @@ fn app() -> (axum::Router, ::health::Readiness) {
     ));
     services.attach_reflection().unwrap();
     services
-        .learn(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .unwrap();
     let methods = Arc::new(services.methods());
     let routes = services.routes.routes().into_axum_router();

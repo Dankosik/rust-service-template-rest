@@ -108,7 +108,6 @@ const ACCEPTED: &str = "accepted";
 const UNSCOPED: &str = "unscoped";
 // template:end oidc-introspection:grpc-transport-test-introspection-tokens
 // template:begin authn:grpc-transport-test-unary-path
-const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 const ORDERS_READ: &str = "orders.read";
 const STREAM_PATHS: [&str; 3] = [
     "/example.v1.EchoService/ClientStream",
@@ -155,7 +154,7 @@ impl Hold {
         }
     }
 
-    async fn wait(&self) {
+    async fn enter_and_wait_for_release(&self) {
         self.entered.send_modify(|entered| *entered += 1);
         let _ = self
             .released
@@ -164,7 +163,7 @@ impl Hold {
             .await;
     }
 
-    async fn wait_for(&self, expected: usize) {
+    async fn wait_for_entries(&self, expected: usize) {
         timeout(
             FILL,
             self.entered
@@ -310,13 +309,13 @@ impl EchoService for Echo {
                 .field_violation("message", "is reserved")
                 .into()),
             "hold" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 Ok(Response::new(UnaryResponse {
                     message: "released".to_owned(),
                 }))
             }
             "deadline" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 std::future::pending().await
             }
             message => Ok(Response::new(UnaryResponse {
@@ -356,7 +355,7 @@ impl EchoService for Echo {
         })]);
         Ok(Response::new(match message.as_str() {
             "hold-before-headers" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 Box::pin(first.chain(futures_util::stream::pending()))
             }
             "hold-after-first" => {
@@ -364,7 +363,7 @@ impl EchoService for Echo {
                 let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
                 Box::pin(first.chain(futures_util::stream::once(async move {
                     let _dropped = dropped;
-                    hold.wait().await;
+                    hold.enter_and_wait_for_release().await;
                     let request_cancelled = request_context
                         .is_some_and(|context| context.cancellation().is_cancelled());
                     Ok(ServerStreamResponse {
@@ -590,7 +589,7 @@ impl Fixture {
             .expect("echo registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
-            .require_scopes_for_delegation(UNARY_PATH, &[ORDERS_READ])
+            .require_scopes_for_delegation(ECHO_SERVICE_UNARY, &[ORDERS_READ])
             .expect("unary scopes register once");
         for path in STREAM_PATHS {
             if Some(path) != omitted_method {
@@ -1258,7 +1257,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
     let (verifier, fixture) = BearerFixture::start().await;
     let mut services = described();
     services.add(EchoServiceServer::new(Echo::new())).unwrap();
-    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
+    for path in std::iter::once(ECHO_SERVICE_UNARY).chain(STREAM_PATHS) {
         if path != SERVER_STREAM_PATH {
             services.require_scopes(path, &[]).unwrap();
         }
@@ -1282,8 +1281,8 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
 fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
     let mut services = described();
     assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.read"]),
-        Err(Error::UnregisteredMethodPath(path)) if path == UNARY_PATH
+        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.read"]),
+        Err(Error::UnregisteredMethodPath(path)) if path == ECHO_SERVICE_UNARY
     );
     services
         .add(EchoServiceServer::new(Echo::new()))
@@ -1304,11 +1303,11 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         );
     }
     services
-        .require_scopes(UNARY_PATH, &["echo.read"])
+        .require_scopes(ECHO_SERVICE_UNARY, &["echo.read"])
         .expect("first requirement");
     assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.write"]),
-        Err(Error::DuplicateScopeRequirement(path)) if path == UNARY_PATH
+        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.write"]),
+        Err(Error::DuplicateScopeRequirement(path)) if path == ECHO_SERVICE_UNARY
     );
 }
 
@@ -1318,15 +1317,15 @@ fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
     services.add(EchoServiceServer::new(Echo::new())).unwrap();
 
     assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
-        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
+        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.read", "echo.read echo.write"]),
+        Err(Error::InvalidScopeToken { path, index: 1 }) if path == ECHO_SERVICE_UNARY
     );
     assert_matches!(
-        services.require_scopes_for_delegation(UNARY_PATH, &[""]),
-        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
+        services.require_scopes_for_delegation(ECHO_SERVICE_UNARY, &[""]),
+        Err(Error::InvalidScopeToken { path, index: 0 }) if path == ECHO_SERVICE_UNARY
     );
     services
-        .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])
+        .require_scopes_for_delegation(ECHO_SERVICE_UNARY, &["echo.read", "echo.write"])
         .unwrap();
 }
 // template:end authn:grpc-transport-test-insufficient-scope
@@ -1428,7 +1427,7 @@ fn opening_app_waiting(
 ) -> infra_grpc::Application {
     let mut services = described();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
-    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
+    for path in std::iter::once(ECHO_SERVICE_UNARY).chain(STREAM_PATHS) {
         services.require_scopes(path, &[]).unwrap();
     }
     infra_grpc::router(
@@ -1500,20 +1499,20 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     let gate = Arc::new(Hold::new());
     *provider.gate.lock() = Some(Arc::clone(&gate));
     let mut leader = Box::pin(app.clone().oneshot(opening_request(
-        UNARY_PATH,
+        ECHO_SERVICE_UNARY,
         Some(ACCEPTED),
         "first",
     )));
     timeout(WAIT, async {
         tokio::select! {
-            () = gate.wait_for(1) => {},
+            () = gate.wait_for_entries(1) => {},
             result = &mut leader => panic!("authentication must wait: {result:?}"),
         }
     })
     .await
     .unwrap();
     let mut follower = Box::pin(app.clone().oneshot(opening_request(
-        UNARY_PATH,
+        ECHO_SERVICE_UNARY,
         Some(ACCEPTED),
         "follower",
     )));
@@ -1523,7 +1522,9 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         let response = timeout(
             WAIT,
             app.clone().oneshot(impatient_raw(opening_request(
-                UNARY_PATH, bearer, "overflow",
+                ECHO_SERVICE_UNARY,
+                bearer,
+                "overflow",
             ))),
         )
         .await
@@ -1557,7 +1558,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     let response = app
         .clone()
         .oneshot(pending_upload(
-            opening_request(UNARY_PATH, None, "draining"),
+            opening_request(ECHO_SERVICE_UNARY, None, "draining"),
             "50m",
         ))
         .await
@@ -1573,7 +1574,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     drop(follower);
     let response = app
         .clone()
-        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .oneshot(opening_request(ECHO_SERVICE_UNARY, None, "missing"))
         .await
         .unwrap();
     assert_eq!(
@@ -1585,7 +1586,11 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     gate.release();
     let response = timeout(
         WAIT,
-        app.oneshot(opening_request(UNARY_PATH, Some("recovered"), "recovered")),
+        app.oneshot(opening_request(
+            ECHO_SERVICE_UNARY,
+            Some("recovered"),
+            "recovered",
+        )),
     )
     .await
     .unwrap()
@@ -1605,7 +1610,13 @@ async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
     let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
-    let call = || opening_request(UNARY_PATH, Some(BearerMode::SELECTED.token(true)), "echo");
+    let call = || {
+        opening_request(
+            ECHO_SERVICE_UNARY,
+            Some(BearerMode::SELECTED.token(true)),
+            "echo",
+        )
+    };
     let warm = app.clone().oneshot(call()).await.unwrap();
     assert!(grpc_status(&warm).is_none());
     drop(warm);
@@ -1657,13 +1668,13 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     assert!(grpc_status(&first).is_none());
     let gate = Arc::new(Hold::new());
     *provider.gate.lock() = Some(Arc::clone(&gate));
-    let mut slow = opening_request(UNARY_PATH, Some("slow"), "slow");
+    let mut slow = opening_request(ECHO_SERVICE_UNARY, Some("slow"), "slow");
     slow.headers_mut()
         .insert("grpc-timeout", "1500m".parse().unwrap());
     let mut authenticating = Box::pin(app.clone().oneshot(slow));
     timeout(WAIT, async {
         tokio::select! {
-            () = gate.wait_for(1) => {},
+            () = gate.wait_for_entries(1) => {},
             result = &mut authenticating => panic!("authentication must wait: {result:?}"),
         }
     })
@@ -1683,7 +1694,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     assert!(grpc_status(&second).is_none());
     let missing = app
         .clone()
-        .oneshot(opening_request(UNARY_PATH, None, "missing"))
+        .oneshot(opening_request(ECHO_SERVICE_UNARY, None, "missing"))
         .await
         .unwrap();
     assert_eq!(grpc_status(&missing).unwrap().code(), Code::Unauthenticated);
@@ -1697,7 +1708,11 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     drop(first);
     drop(second);
     let recovered = app
-        .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "recovered"))
+        .oneshot(opening_request(
+            ECHO_SERVICE_UNARY,
+            Some(ACCEPTED),
+            "recovered",
+        ))
         .await
         .unwrap();
     assert!(grpc_status(&recovered).is_none());
@@ -1712,20 +1727,20 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         let app = opening_app(verifier, &echo, capacity);
         let gate = Arc::new(Hold::new());
         *provider.gate.lock() = Some(Arc::clone(&gate));
-        let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "slow");
+        let mut request = opening_request(ECHO_SERVICE_UNARY, Some(ACCEPTED), "slow");
         request
             .headers_mut()
             .insert("grpc-timeout", "100m".parse().unwrap());
         let mut slow = Box::pin(app.clone().oneshot(request));
         timeout(WAIT, async {
             tokio::select! {
-                () = gate.wait_for(1) => {},
+                () = gate.wait_for_entries(1) => {},
                 result = &mut slow => panic!("authentication must wait: {result:?}"),
             }
         })
         .await
         .unwrap();
-        let missing = opening_request(UNARY_PATH, None, "missing");
+        let missing = opening_request(ECHO_SERVICE_UNARY, None, "missing");
         let response = app
             .clone()
             .oneshot(if capacity == 0 {
@@ -1785,7 +1800,7 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     let held = hold_capacity(&app).await;
     assert!(grpc_status(&held).is_none());
     let mut waiting = Box::pin(app.clone().oneshot(opening_request(
-        UNARY_PATH,
+        ECHO_SERVICE_UNARY,
         Some(BearerMode::SELECTED.token(true)),
         "waited",
     )));
@@ -1860,7 +1875,7 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     let response = timeout(
         WAIT,
         app.clone().oneshot(opening_request(
-            UNARY_PATH,
+            ECHO_SERVICE_UNARY,
             Some(BearerMode::SELECTED.token(true)),
             "refused",
         )),
@@ -1898,7 +1913,7 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     )));
     timeout(WAIT, async {
         tokio::select! {
-            () = echo.hold.wait_for(1) => {},
+            () = echo.hold.wait_for_entries(1) => {},
             result = &mut holding => panic!("the stream must hold its opening: {result:?}"),
         }
     })
@@ -1908,7 +1923,7 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     tokio::time::pause();
     let started = tokio::time::Instant::now();
     let mut waiting = Box::pin(app.oneshot(opening_request(
-        UNARY_PATH,
+        ECHO_SERVICE_UNARY,
         Some(BearerMode::SELECTED.token(true)),
         "queued",
     )));
@@ -1951,7 +1966,7 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     let response = timeout(
         WAIT,
         app.clone().oneshot(opening_request(
-            UNARY_PATH,
+            ECHO_SERVICE_UNARY,
             Some(BearerMode::SELECTED.token(true)),
             "refused",
         )),
@@ -1980,7 +1995,7 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
             progressed.store(true, Ordering::Release);
         }
     });
-    let mut request = opening_request(UNARY_PATH, None, "");
+    let mut request = opening_request(ECHO_SERVICE_UNARY, None, "");
     *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::iter(
         std::iter::repeat_n(Ok::<_, std::convert::Infallible>(bytes::Bytes::new()), 1024),
     ));
@@ -2017,7 +2032,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let app = opening_app(verifier, &echo, 4);
 
     let mut request = opening_request(
-        UNARY_PATH,
+        ECHO_SERVICE_UNARY,
         Some(BearerMode::SELECTED.token(true)),
         "genuine",
     )
@@ -2049,7 +2064,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     assert!(calls[0].had_checksum);
     assert!(!calls[0].had_authorization);
 
-    let mut spoofed = opening_request(UNARY_PATH, None, "spoofed");
+    let mut spoofed = opening_request(ECHO_SERVICE_UNARY, None, "spoofed");
     spoofed.extensions_mut().insert(captured);
     spoofed.extensions_mut().insert(forged);
     let rejected = timeout(WAIT, app.oneshot(spoofed)).await.unwrap().unwrap();
@@ -2076,7 +2091,7 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
         let mut client = held.clone();
         tokio::spawn(async move { client.unary(request(unary("hold"))).await })
     });
-    fixture.echo.hold.wait_for(2).await;
+    fixture.echo.hold.wait_for_entries(2).await;
 
     let exhausted = timeout(
         WAIT,
@@ -2144,7 +2159,7 @@ async fn one_connection_serves_concurrent_rpcs_and_capacity_returns_after_it_clo
             first.unary(request(unary("hold"))),
             second.unary(request(unary("hold"))),
             async {
-                fixture.echo.hold.wait_for(2).await;
+                fixture.echo.hold.wait_for_entries(2).await;
                 let mut excess = TcpStream::connect(fixture.address).await.unwrap();
                 match excess.read(&mut [0]).await {
                     Ok(bytes) => assert_eq!(bytes, 0, "excess peer received HTTP/2 bytes"),
@@ -2207,7 +2222,7 @@ async fn opened_stream_holds_capacity_until_terminal_release() {
             .message,
         "hold-after-first"
     );
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     let second = timeout(WAIT, client.unary(impatient(request(unary("must shed")))))
         .await
         .expect("overload is answered");
@@ -2322,7 +2337,7 @@ async fn client_clones_share_opening_capacity_until_cancellation_or_response_hea
     let mut opening = Box::pin(client.unary(held_request));
     timeout(WAIT, async {
         tokio::select! {
-            () = fixture.echo.hold.wait_for(1) => {},
+            () = fixture.echo.hold.wait_for_entries(1) => {},
             result = &mut opening => panic!("the opening must remain held: {result:?}"),
         }
     })
@@ -2374,7 +2389,7 @@ async fn client_clones_share_opening_capacity_until_cancellation_or_response_hea
             .message,
         "hold-after-first"
     );
-    fixture.echo.hold.wait_for(2).await;
+    fixture.echo.hold.wait_for_entries(2).await;
     let second = timeout(WAIT, client.unary(request(unary("after-headers"))))
         .await
         .unwrap()
@@ -2433,7 +2448,7 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
             .unwrap()
             .is_some()
     );
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     assert!(
         timeout(Duration::from_millis(200), response.message())
             .await
@@ -2645,7 +2660,7 @@ async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     let fixture = Fixture::plaintext().await;
     let address = fixture.address;
     let call = tokio::spawn(async move { raw_call(address, ECHO_SERVICE_UNARY).await });
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     let status = timeout(WAIT, call)
         .await
         .expect("raw deadline response")
@@ -2987,7 +3002,7 @@ async fn cooperative_stream_closes_on_listener_drain_while_inflight_unary_comple
     let mut unary_client = stream_client.clone();
     let inflight_unary =
         tokio::spawn(async move { unary_client.unary(request(unary("hold"))).await });
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
 
     let server = fixture.take_server();
     let drain_started = tokio::time::Instant::now();
@@ -3347,7 +3362,7 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
         let MessageResponse::FileDescriptorResponse(files) = next().await else {
             panic!("a described symbol is answered with its file descriptor");
         };
-        assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
+        assert!(!files.file_descriptor_proto.is_empty());
     }
 
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
@@ -3560,7 +3575,7 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         let mut client = client.clone();
         async move { client.unary(request(unary("hold"))).await }
     });
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
 
@@ -4007,7 +4022,7 @@ async fn answer_introspection(
             calls.fetch_add(1, Ordering::Release);
             let held = gate.lock().clone();
             if let Some(held) = held {
-                held.wait().await;
+                held.enter_and_wait_for_release().await;
             }
             if silent.load(Ordering::Acquire) {
                 std::future::pending::<()>().await;

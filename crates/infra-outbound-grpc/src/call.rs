@@ -13,7 +13,7 @@ use tokio_util::sync::DropGuard;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{header_status_code, http_status_code};
+use crate::protocol::{grpc_code_from_http_status, header_status_code};
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
 type FramePoll = Poll<Option<Result<Frame<Bytes>, tonic::Status>>>;
@@ -73,14 +73,14 @@ fn watcher_lost_status() -> tonic::Status {
 #[derive(Clone, Copy)]
 struct ClientOutcome {
     metric_code: tonic::Code,
-    wire_code: Option<tonic::Code>,
+    status_hook_code: Option<tonic::Code>,
 }
 
 impl ClientOutcome {
     const fn local(code: tonic::Code) -> Self {
         Self {
             metric_code: code,
-            wire_code: None,
+            status_hook_code: None,
         }
     }
 
@@ -96,7 +96,7 @@ impl ClientOutcome {
         };
         Some(Self {
             metric_code,
-            wire_code: Some(wire_code),
+            status_hook_code: Some(wire_code),
         })
     }
 }
@@ -134,7 +134,9 @@ impl<B> StreamCompletion<B> {
             ClientObservation::Transport(call) => call.finish(self.outcome.metric_code),
             ClientObservation::Decoded { observer, .. } => observer.finish_stop(),
         }
-        if let (Some(code), Some(on_status)) = (self.outcome.wire_code, self.active.on_status) {
+        if let (Some(code), Some(on_status)) =
+            (self.outcome.status_hook_code, self.active.on_status)
+        {
             on_status(code);
         }
     }
@@ -239,11 +241,11 @@ pub(crate) fn attach_client_response(
     } else {
         ClientOutcome::from_headers(&observation, response.headers())
     };
-    let missing_status = http_status_code(response.status()).map_or(
+    let missing_status = grpc_code_from_http_status(response.status()).map_or(
         ClientOutcome::local(tonic::Code::Unknown),
         |code| ClientOutcome {
             metric_code: code,
-            wire_code: Some(code),
+            status_hook_code: Some(code),
         },
     );
     response
@@ -367,9 +369,9 @@ where
         let this = self.get_mut();
         this.reap_watcher(context);
         let mut state = this.state.lock();
-        let mut caught_panic = None;
         let (polled, completion) = if let Some(status) = state.stopped_status() {
-            state.end_stopped(&status)
+            let (frame, completion) = state.end_stopped(&status);
+            (Ok(frame), completion)
         } else {
             let StreamPhase::Open(active) = &mut state.phase else {
                 return state.take_terminal();
@@ -383,20 +385,20 @@ where
             };
             match polled {
                 Ok(polled) => {
-                    if let Some(status) = state.stopped_status() {
+                    let (frame, completion) = if let Some(status) = state.stopped_status() {
                         state.end_stopped(&status)
                     } else {
                         let completion = state.complete_polled(&polled);
                         (polled, completion)
-                    }
+                    };
+                    (Ok(frame), completion)
                 }
                 Err(panic) => {
-                    caught_panic = Some(panic);
                     let completion = state.transition(
                         StreamPhase::Done,
                         ClientOutcome::local(tonic::Code::Cancelled),
                     );
-                    (Poll::Ready(None), completion)
+                    (Err(panic), completion)
                 }
             }
         };
@@ -405,10 +407,10 @@ where
             this.watcher = None;
             completion.finish();
         }
-        if let Some(panic) = caught_panic {
-            std::panic::resume_unwind(panic);
+        match polled {
+            Ok(frame) => frame,
+            Err(panic) => std::panic::resume_unwind(panic),
         }
-        polled
     }
 
     fn is_end_stream(&self) -> bool {

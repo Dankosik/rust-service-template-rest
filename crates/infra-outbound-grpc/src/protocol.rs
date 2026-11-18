@@ -19,7 +19,7 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
+pub(crate) fn grpc_code_from_http_status(status: StatusCode) -> Option<tonic::Code> {
     match status {
         StatusCode::OK => None,
         StatusCode::BAD_REQUEST => Some(tonic::Code::Internal),
@@ -58,13 +58,13 @@ mod tests {
 
     #[test]
     fn http_status_codes_follow_grpc_mappings() {
-        assert_eq!(http_status_code(StatusCode::OK), None);
+        assert_eq!(grpc_code_from_http_status(StatusCode::OK), None);
         assert_eq!(
-            http_status_code(StatusCode::UNAUTHORIZED),
+            grpc_code_from_http_status(StatusCode::UNAUTHORIZED),
             Some(tonic::Code::Unauthenticated)
         );
         assert_eq!(
-            http_status_code(StatusCode::SERVICE_UNAVAILABLE),
+            grpc_code_from_http_status(StatusCode::SERVICE_UNAVAILABLE),
             Some(tonic::Code::Unavailable)
         );
     }

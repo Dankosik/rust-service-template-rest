@@ -12,20 +12,20 @@ use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
 use tower::Service as _;
 
 const CLIENT_METHOD_LIMIT: usize = 256;
+const ECHO_UNARY_PATH: &str = "/example.v1.EchoService/Unary";
+const WAIT: Duration = Duration::from_secs(5);
+const CANCELLED_STREAM_METRIC: &str = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="Canceled"} 1"#;
+const EMPTY_STREAM_METRIC: &str = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="OK"} 1"#;
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "native gRPC wire fixture uses the native path extractor; its handler retains runtime checks"
+)]
+type NativePath = axum::extract::Path<String>;
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
-)]
 async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     const OWN_PROCESS: &str = "INFRA_GRPC_CLIENT_OBSERVATION_OWN_PROCESS";
-    const WAIT: Duration = Duration::from_secs(5);
-    #[expect(
-        clippy::disallowed_types,
-        reason = "native gRPC wire fixture uses the native path extractor; its handler retains runtime checks"
-    )]
-    type NativePath = axum::extract::Path<String>;
     if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() != Ok("process-per-test")
         && std::env::var_os(OWN_PROCESS).is_none()
     {
@@ -51,62 +51,64 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let handler_1 = |path: NativePath| async move {
-        let method = path.0;
-        if method == "Header" {
-            return tonic::Status::new(tonic::Code::Ok, "").into_http();
-        }
-        if method == "Proxy" {
-            return http::Response::builder()
-                .status(http::StatusCode::UNAUTHORIZED)
-                .body(tonic::body::Body::empty())
-                .unwrap();
-        }
-        let body = if method == "Trailer" {
-            let mut trailers = http::HeaderMap::new();
-            tonic::Status::aborted("peer trailers")
-                .add_header(&mut trailers)
-                .unwrap();
-            tonic::body::Body::new(http_body_util::StreamBody::new(futures_util::stream::iter(
-                [
-                    Ok::<_, tonic::Status>(http_body::Frame::data(bytes::Bytes::from_static(
-                        b"data",
-                    ))),
-                    Ok(http_body::Frame::trailers(trailers)),
-                ],
-            )))
-        } else {
-            tonic::body::Body::new(http_body_util::StreamBody::new(
-                futures_util::stream::pending::<
-                    Result<http_body::Frame<bytes::Bytes>, tonic::Status>,
-                >(),
-            ))
-        };
-        http::Response::builder()
-            .status(if method == "Trailer" {
-                http::StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                http::StatusCode::OK
-            })
-            .header("content-type", "application/grpc")
-            .body(body)
+    let server = start_observation_server();
+    let destination = format!("http://{}", server.local_addr());
+    check_transport_statuses(&destination).await;
+    check_decoded_statuses(&destination).await;
+    check_unpolled_stream_statuses(&destination, &handle).await;
+    let mut refusing = Client::with_opening_limit(
+        &destination,
+        ClientSecurity::Plaintext,
+        ClientTimeout::FullRpc(WAIT),
+        Some(NonZeroUsize::MIN),
+    )
+    .unwrap();
+    check_opening_refusals(&mut refusing);
+    let mut proxied = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    check_proxy_status(&mut proxied).await;
+    let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
+    record_unverified_methods(&destination, oversized);
+    let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
+    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    drop(client.call(client_request(
+        &format!("/{boundary}/{boundary}"),
+        Some((boundary, boundary)),
+    )));
+    fill_method_series(&destination);
+    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    drop(client.call(client_request(
+        "/test.Observation/Header",
+        Some(("test.Observation", "Header")),
+    )));
+    let rendered = handle.render();
+    assert_observation_totals(&rendered, boundary, oversized);
+    drop(client);
+    assert_eq!(
+        tokio::time::timeout(WAIT, server.drain(Duration::from_secs(1)))
+            .await
             .unwrap()
-    };
+            .unwrap(),
+        infra_http_transport::Drained::Complete
+    );
+    check_expired_unpolled_call().await;
+}
+
+fn start_observation_server() -> infra_http_transport::Server {
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
     let app = axum::Router::new()
-        .route("/test.Observation/{method}", axum::routing::post(handler_1))
         .route(
-            "/example.v1.EchoService/Unary",
-            axum::routing::post(client_status_fixture),
+            "/test.Observation/{method}",
+            axum::routing::post(transport_status_fixture),
         )
+        .route(ECHO_UNARY_PATH, axum::routing::post(client_status_fixture))
         .route(
             "/example.v1.EchoService/ServerStream",
             axum::routing::post(client_status_fixture),
         );
-    let server = infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+    infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap())
         .unwrap()
         .serve_h2(
             app,
@@ -119,8 +121,55 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
                 },
             },
             None,
-        );
-    let destination = format!("http://{}", server.local_addr());
+        )
+}
+
+#[allow(
+    clippy::unused_async,
+    reason = "axum's wire fixture handler must return a future"
+)]
+async fn transport_status_fixture(path: NativePath) -> http::Response<tonic::body::Body> {
+    use http_body::Frame;
+    use http_body_util::StreamBody;
+    use tonic::body::Body;
+
+    let (status, body) = match path.0.as_str() {
+        "Header" => return tonic::Status::new(tonic::Code::Ok, "").into_http(),
+        "Proxy" => {
+            return http::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .unwrap();
+        }
+        "Trailer" => {
+            let mut trailers = http::HeaderMap::new();
+            tonic::Status::aborted("peer trailers")
+                .add_header(&mut trailers)
+                .unwrap();
+            let frames = [
+                Ok::<_, tonic::Status>(Frame::data(bytes::Bytes::from_static(b"data"))),
+                Ok(Frame::trailers(trailers)),
+            ];
+            (
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                Body::new(StreamBody::new(futures_util::stream::iter(frames))),
+            )
+        }
+        _ => (
+            http::StatusCode::OK,
+            Body::new(StreamBody::new(futures_util::stream::pending::<
+                Result<Frame<bytes::Bytes>, tonic::Status>,
+            >())),
+        ),
+    };
+    http::Response::builder()
+        .status(status)
+        .header("content-type", "application/grpc")
+        .body(body)
+        .unwrap()
+}
+
+async fn check_transport_statuses(destination: &str) {
     for (method, expected) in [
         ("Header", tonic::Code::Ok),
         ("Trailer", tonic::Code::Aborted),
@@ -128,7 +177,7 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         ("Deadline", tonic::Code::DeadlineExceeded),
     ] {
         let mut client = Client::try_new(
-            &destination,
+            destination,
             ClientSecurity::Plaintext,
             Duration::from_millis(200),
         )
@@ -167,11 +216,11 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             assert!(body.frame().await.is_none());
         }
     }
-    let adapter = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
-    let mut raw = client_request(
-        "/example.v1.EchoService/Unary",
-        Some(("example.v1.EchoService", "Unary")),
-    );
+}
+
+async fn check_decoded_statuses(destination: &str) {
+    let adapter = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let mut raw = client_request(ECHO_UNARY_PATH, Some(("example.v1.EchoService", "Unary")));
     raw.headers_mut()
         .insert("x-test-reply", "malformed-status-head".parse().unwrap());
     let (report, wire_code) = tokio::sync::oneshot::channel();
@@ -224,8 +273,14 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     assert_eq!(status.code(), tonic::Code::Internal);
     drop(stream);
     drop(generated);
+}
+
+async fn check_unpolled_stream_statuses(
+    destination: &str,
+    handle: &metrics_exporter_prometheus::PrometheusHandle,
+) {
     let parent = tokio_util::sync::CancellationToken::new();
-    let client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
     let mut generated =
         grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(client);
     let mut request = tonic::Request::new(grpc_contracts::example::v1::ServerStreamRequest {
@@ -246,9 +301,8 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         .unwrap()
         .into_inner();
     parent.cancel();
-    let canceled = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="Canceled"} 1"#;
     tokio::time::timeout(WAIT, async {
-        while !handle.render().contains(canceled) {
+        while !handle.render().contains(CANCELLED_STREAM_METRIC) {
             tokio::task::yield_now().await;
         }
     })
@@ -274,23 +328,14 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         .unwrap()
         .unwrap()
         .into_inner();
-    let empty_ok = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="OK"} 1"#;
-    assert!(handle.render().contains(empty_ok));
+    assert!(handle.render().contains(EMPTY_STREAM_METRIC));
     drop(empty);
     drop(generated);
-    let mut refusing = Client::with_opening_limit(
-        &destination,
-        ClientSecurity::Plaintext,
-        ClientTimeout::FullRpc(WAIT),
-        Some(NonZeroUsize::MIN),
-    )
-    .unwrap();
-    let unary_request = || {
-        client_request(
-            "/example.v1.EchoService/Unary",
-            Some(("example.v1.EchoService", "Unary")),
-        )
-    };
+}
+
+fn check_opening_refusals(refusing: &mut Client) {
+    let unary_request =
+        || client_request(ECHO_UNARY_PATH, Some(("example.v1.EchoService", "Unary")));
     let abandoned = refusing.call(unary_request());
     let at_capacity = refusing
         .clone()
@@ -307,7 +352,9 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         .unwrap()
         .refuse(tonic::Status::unavailable("credentials unavailable"));
     assert_eq!(status.code(), tonic::Code::Unavailable);
-    let mut proxied = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+}
+
+async fn check_proxy_status(proxied: &mut Client) {
     let response = tokio::time::timeout(
         WAIT,
         proxied.call(client_request(
@@ -319,8 +366,9 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     .unwrap()
     .unwrap();
     drop(response);
+}
 
-    let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
+fn record_unverified_methods(destination: &str, oversized: &'static str) {
     for (path, method) in [
         ("/raw.Service/Chosen".to_owned(), None),
         (
@@ -337,30 +385,23 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             Some(("overlong.Service", oversized)),
         ),
     ] {
-        let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
         drop(client.call(client_request(&path, method)));
     }
-    let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
-    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
-    drop(client.call(client_request(
-        &format!("/{boundary}/{boundary}"),
-        Some((boundary, boundary)),
-    )));
+}
 
+fn fill_method_series(destination: &str) {
     for index in 0..=CLIENT_METHOD_LIMIT {
         let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
-        let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
         drop(client.call(client_request(
             &format!("/bounded.Service/{method}"),
             Some(("bounded.Service", method)),
         )));
     }
-    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
-    drop(client.call(client_request(
-        "/test.Observation/Header",
-        Some(("test.Observation", "Header")),
-    )));
-    let rendered = handle.render();
+}
+
+fn assert_observation_totals(rendered: &str, boundary: &str, oversized: &str) {
     assert_eq!(
         rendered
             .lines()
@@ -427,8 +468,8 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         );
     }
     assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="Internal"} 1"#), "{rendered}");
-    assert!(rendered.contains(canceled), "{rendered}");
-    assert!(rendered.contains(empty_ok), "{rendered}");
+    assert!(rendered.contains(CANCELLED_STREAM_METRIC), "{rendered}");
+    assert!(rendered.contains(EMPTY_STREAM_METRIC), "{rendered}");
     assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Header",grpc_code="Canceled"} 1"#), "{rendered}");
     assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Proxy",grpc_code="Unauthenticated"} 1"#), "{rendered}");
     assert!(
@@ -457,15 +498,9 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             "unexpected client identity {forbidden}: {rendered}"
         );
     }
-    drop(client);
-    assert_eq!(
-        tokio::time::timeout(WAIT, server.drain(Duration::from_secs(1)))
-            .await
-            .unwrap()
-            .unwrap(),
-        infra_http_transport::Drained::Complete
-    );
+}
 
+async fn check_expired_unpolled_call() {
     tokio::time::pause();
     let mut client = Client::try_new(
         "http://127.0.0.1:1",

@@ -134,7 +134,7 @@ pub fn router(
     if services.reflection {
         services.attach_reflection()?;
     }
-    services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+    services.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
     // template:begin service-auth:grpc-router-caller-rules
     let requires_tls = matches!(authentication, Authentication::ServiceTokens(_));
     if requires_tls {
@@ -297,11 +297,11 @@ async fn business_call(
         call_deadlines(request.headers(), state.limits.request_timeout);
 
     let call_type = method.call_type;
-    let is_streaming = matches!(
+    let streams_response = matches!(
         call_type,
         Some(CallType::ServerStream | CallType::BidiStream)
     );
-    let response_token = match connection.filter(|_| is_streaming) {
+    let response_token = match connection.filter(|_| streams_response) {
         Some(info) => info.child_drain_token(),
         None => CancellationToken::new(),
     };

@@ -40,7 +40,11 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const TYPE: &str = "example-svc+jwt";
 const ECHO: &str = "/example.v1.EchoService";
 
-type Seen = (Option<String>, bool);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Seen {
+    caller: Option<String>,
+    authorization_present: bool,
+}
 
 #[derive(Clone, Default)]
 struct Echo {
@@ -53,8 +57,11 @@ impl Echo {
             .extensions()
             .get::<Caller>()
             .map(|caller| caller.name().as_str().to_owned());
-        let authorization = request.metadata().get("authorization").is_some();
-        self.seen.lock().push((caller, authorization));
+        let authorization_present = request.metadata().get("authorization").is_some();
+        self.seen.lock().push(Seen {
+            caller,
+            authorization_present,
+        });
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -345,7 +352,13 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
         .unwrap()
         .into_inner();
     assert_eq!(admitted.message, "orders");
-    assert_eq!(echo.seen(), [(Some("orders".to_owned()), false)]);
+    assert_eq!(
+        echo.seen(),
+        [Seen {
+            caller: Some("orders".to_owned()),
+            authorization_present: false,
+        }]
+    );
 
     for (label, token) in [
         ("no token", None),
@@ -436,7 +449,16 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         assert_eq!(response.into_inner().message, "signed");
     }
     assert!(has_cached_authorization(&catalog_tokens));
-    assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
+    assert_eq!(
+        echo.seen(),
+        vec![
+            Seen {
+                caller: Some("orders".to_owned()),
+                authorization_present: false,
+            };
+            2
+        ]
+    );
     let mut elsewhere = bound(&source, "billing");
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
     assert_eq!(status.code(), Code::Unauthenticated);
@@ -518,7 +540,16 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     let token = Keys::token(&Keys::new().orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&token)).await.unwrap(), "hello");
     assert_eq!(unary(address, None).await.unwrap(), "hello");
-    assert_eq!(echo.seen(), vec![(None, false), (None, false)]);
+    assert_eq!(
+        echo.seen(),
+        vec![
+            Seen {
+                caller: None,
+                authorization_present: false,
+            };
+            2
+        ]
+    );
     assert_eq!(
         server.drain(Duration::from_secs(3)).await.unwrap(),
         Drained::Complete

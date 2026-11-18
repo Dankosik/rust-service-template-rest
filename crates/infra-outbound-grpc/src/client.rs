@@ -159,12 +159,13 @@ impl Client {
     }
 
     pub fn prepare_call(&self, mut request: Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let origin = Instant::now();
-        let caller = crate::grpc_timeout(request.headers());
-        if caller.is_none() {
+        let started_at = Instant::now();
+        let caller_timeout = crate::grpc_timeout(request.headers());
+        if caller_timeout.is_none() {
             request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
         }
-        let (local_opening, local_lifetime) = self.timeout.deadlines(origin, caller);
+        let (opening_before_parent, lifetime_before_parent) =
+            self.timeout.deadlines(started_at, caller_timeout);
         let parent = request.extensions().get::<OperationContext>();
         let has_parent = parent.is_some();
         let parent_deadline = parent.and_then(OperationContext::deadline);
@@ -172,11 +173,11 @@ impl Client {
             parent.cancellation().child_token()
         });
         let opening = OperationContext::new(
-            earliest(Some(local_opening), parent_deadline),
+            earliest(Some(opening_before_parent), parent_deadline),
             cancellation.clone(),
         );
         let lifetime = OperationContext::new(
-            earliest(local_lifetime, parent_deadline),
+            earliest(lifetime_before_parent, parent_deadline),
             cancellation.clone(),
         );
         let watch_stop = has_parent || lifetime.deadline().is_some();
@@ -318,32 +319,31 @@ impl PreparedCall {
         .instrument(call.span().clone())
         .await;
         drop(permit);
-        match result {
-            Ok(mut response) => {
-                let observation = if track_decoded_status {
-                    let span = call.span().clone();
-                    let observer = DecodedStatusObserver::new(move |code| call.finish(code));
-                    response.extensions_mut().insert(observer.clone());
-                    ClientObservation::Decoded { span, observer }
-                } else {
-                    ClientObservation::Transport(call)
-                };
-                Ok(attach_client_response(
-                    response,
-                    observation,
-                    ClientCustody {
-                        lifetime,
-                        watch_stop,
-                        guards: ClientGuards {
-                            upload,
-                            cancel_on_drop: Some(guard),
-                        },
-                        on_status,
-                    },
-                ))
-            }
-            Err(status) => Err(call.refuse(status)),
-        }
+        let mut response = match result {
+            Ok(response) => response,
+            Err(status) => return Err(call.refuse(status)),
+        };
+        let observation = if track_decoded_status {
+            let span = call.span().clone();
+            let observer = DecodedStatusObserver::new(move |code| call.finish(code));
+            response.extensions_mut().insert(observer.clone());
+            ClientObservation::Decoded { span, observer }
+        } else {
+            ClientObservation::Transport(call)
+        };
+        Ok(attach_client_response(
+            response,
+            observation,
+            ClientCustody {
+                lifetime,
+                watch_stop,
+                guards: ClientGuards {
+                    upload,
+                    cancel_on_drop: Some(guard),
+                },
+                on_status,
+            },
+        ))
     }
 }
 

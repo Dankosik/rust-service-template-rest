@@ -106,6 +106,11 @@ pub struct Services {
     // template:end service-auth:grpc-services-callers-field
 }
 
+fn same_methods(previous: &[(String, CallType)], incoming: &[(String, CallType)]) -> bool {
+    previous == incoming
+        || previous.iter().collect::<HashSet<_>>() == incoming.iter().collect::<HashSet<_>>()
+}
+
 impl Services {
     #[must_use]
     pub fn new() -> Self {
@@ -126,15 +131,18 @@ impl Services {
     }
 
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
-        self.learn(encoded_file_descriptor_set)?;
+        self.index_descriptor_services(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
         Ok(())
     }
 
-    pub(crate) fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
+    pub(crate) fn index_descriptor_services(
+        &mut self,
+        encoded_file_descriptor_set: &[u8],
+    ) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
             .map_err(Error::DecodeDescriptorSet)?;
-        let mut described: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
+        let mut pending_descriptions: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
         for file in set.file {
             let package = file.package.as_deref().unwrap_or_default();
             for service in file.service {
@@ -153,19 +161,21 @@ impl Services {
                         (method.name.unwrap_or_default(), call_type)
                     })
                     .collect();
-                if let Some(previous) = described.get(&name).or_else(|| self.described.get(&name)) {
-                    if previous != &methods
-                        && previous.iter().collect::<HashSet<_>>()
-                            != methods.iter().collect::<HashSet<_>>()
-                    {
+                match pending_descriptions
+                    .get(&name)
+                    .or_else(|| self.described.get(&name))
+                {
+                    Some(previous) if !same_methods(previous, &methods) => {
                         return Err(Error::ConflictingServiceDescription(name));
                     }
-                } else {
-                    described.insert(name, methods);
+                    Some(_) => {}
+                    None => {
+                        pending_descriptions.insert(name, methods);
+                    }
                 }
             }
         }
-        self.described.extend(described);
+        self.described.extend(pending_descriptions);
         Ok(())
     }
 
@@ -201,8 +211,8 @@ impl Services {
     }
 
     pub(crate) fn attach_reflection(&mut self) -> Result<(), Error> {
-        self.learn(v1::FILE_DESCRIPTOR_SET)?;
-        self.learn(v1alpha::FILE_DESCRIPTOR_SET)?;
+        self.index_descriptor_services(v1::FILE_DESCRIPTOR_SET)?;
+        self.index_descriptor_services(v1alpha::FILE_DESCRIPTOR_SET)?;
         let sets = REFLECTION_DESCRIPTORS
             .into_iter()
             .chain(self.descriptor_sets.iter().copied());
@@ -231,7 +241,7 @@ impl Services {
         let v1alpha = builder()
             .build_v1alpha()
             .map_err(Error::BuildReflectionV1Alpha)?;
-        let layer = MapRequestLayer::new(reflection::cancel_request_body);
+        let layer = MapRequestLayer::new(reflection::stop_request_body_on_cancellation);
         self.add(layer.named_layer(v1))?;
         self.add(layer.named_layer(v1alpha))
     }
