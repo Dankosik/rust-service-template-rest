@@ -14,22 +14,22 @@ fn redis_errors_map_to_bounded_error_types() {
     ];
     for (kind, expected) in cases {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
-        assert_eq!(crate::connection::error_type(&error).label(), expected);
+        assert_eq!(crate::error::error_type(&error).label(), expected);
     }
     for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
         let timed_out = redis::RedisError::from(std::io::Error::from(kind));
-        assert_eq!(crate::connection::error_type(&timed_out).label(), "timeout");
+        assert_eq!(crate::error::error_type(&timed_out).label(), "timeout");
     }
     let server = redis::RedisError::from((
         redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
         "NOAUTH hunter2",
     ));
-    assert_eq!(crate::connection::error_type(&server).label(), "response");
+    assert_eq!(crate::error::error_type(&server).label(), "response");
 }
 
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
-    use crate::connection::ErrorType;
+    use crate::error::ErrorType;
     use crate::namespace::Operation;
     use crate::observe::{NamespaceHistograms, OperationGuard};
 

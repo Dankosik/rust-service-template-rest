@@ -6,7 +6,8 @@ use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
 use tokio::time::Instant;
 
-use crate::connection::{CommandError, ErrorType, query_mutation, query_read};
+use crate::connection::{query_mutation, query_read};
+use crate::error::{CommandError, ErrorType};
 use crate::observe::{LocalSizeRefusal, OperationGuard, Outcome};
 use crate::{
     Cache, CacheLookup, CacheNamespace, MutationError, Namespace, OperationError, SetError,

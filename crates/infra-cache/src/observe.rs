@@ -7,7 +7,7 @@ use operation_context::Stopped;
 use tracing::Span;
 
 use crate::ServerEndpoint;
-use crate::connection::{CommandError, CommandFailure, ErrorType};
+use crate::error::{CommandError, CommandFailure, ErrorType};
 use crate::namespace::Operation;
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
