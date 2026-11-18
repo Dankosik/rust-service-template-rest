@@ -38,6 +38,9 @@ use tokio::time::{Instant, timeout};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
+#[path = "messaging_outbox/upgrade.rs"]
+mod upgrade;
+
 const WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
@@ -454,7 +457,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(pool: PgPool) {
-    let fixture = Fixture::create().await;
+    let fixture = Fixture::create_with_window(false, Duration::from_secs(1)).await;
     let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
@@ -502,7 +505,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::kinds(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -551,9 +554,60 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         1
     );
 
+    verify_completed_identity(&fixture, &messaging, &business, &committed, &row.id).await;
     finish(run, &[&publisher, &business]).await;
     close(messaging).await;
     fixture.cleanup().await;
+}
+
+async fn verify_completed_identity(
+    fixture: &Fixture,
+    messaging: &Messaging,
+    business: &PgPool,
+    committed: &infra_messaging::PreparedEvent,
+    job_id: &str,
+) {
+    let cleanup = Engine::new(
+        business.clone(),
+        infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap(),
+        NonZeroU32::MIN,
+    );
+    let changed = prepared(fixture, committed.message_id(), "changed");
+    for retained in [true, false] {
+        if !retained {
+            sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
+                .bind(job_id)
+                .execute(business)
+                .await
+                .unwrap();
+            assert_eq!(cleanup.remove_expired().await.unwrap(), 1);
+            tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
+        }
+        let conflicting = in_tx(business, async |tx| -> Result<_, Step> {
+            sqlx::query("INSERT INTO business_effects (id) VALUES ('conflicting')")
+                .execute(&mut *tx)
+                .await?;
+            changed.enqueue(tx).await.map_err(Step::from)
+        })
+        .await;
+        std::assert_matches!(
+            conflicting,
+            Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
+        );
+        let same = in_tx(business, async |tx| -> Result<_, Step> {
+            committed.enqueue(tx).await.map_err(Step::from)
+        })
+        .await
+        .unwrap();
+        assert_eq!(same, OutboxEnqueued::Duplicate);
+        assert_eq!(outbox_count(business).await, i64::from(retained));
+    }
+    let business_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM business_effects")
+        .fetch_one(business)
+        .await
+        .unwrap();
+    assert_eq!(business_rows, 1);
+    assert_eq!(fixture.published().await, 1);
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -580,8 +634,47 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
         .expect("same immutable intent is accepted while its key is live"),
         OutboxEnqueued::Duplicate
     );
-    let held = prepared(&fixture, "event-concurrent-conflict", "first");
-    let conflicting = prepared(&fixture, "event-concurrent-conflict", "second");
+    let same_id = race_ordered_enqueues(
+        &fixture,
+        &jobs,
+        &competing,
+        "by-id",
+        "event-conflict",
+        "event-conflict",
+    )
+    .await;
+    std::assert_matches!(
+        same_id,
+        Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
+    );
+    let same_version = race_ordered_enqueues(
+        &fixture,
+        &jobs,
+        &competing,
+        "by-version",
+        "event-one",
+        "event-two",
+    )
+    .await;
+    std::assert_matches!(
+        same_version,
+        Err(Step::Outbox(OutboxEnqueueError::OrderConflict))
+    );
+    assert_eq!(outbox_count(&jobs).await, 3);
+    close_pools(&[&competing, &jobs]).await;
+    fixture.cleanup().await;
+}
+
+async fn race_ordered_enqueues(
+    fixture: &Fixture,
+    jobs: &PgPool,
+    competing: &PgPool,
+    aggregate: &'static str,
+    first_id: &str,
+    second_id: &str,
+) -> Result<OutboxEnqueued, Step> {
+    let held = prepared(fixture, first_id, "first");
+    let conflicting = prepared(fixture, second_id, "second");
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let first_pool = jobs.clone();
@@ -589,7 +682,7 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
     let first_release = Arc::clone(&release);
     let first_task = tokio::spawn(async move {
         in_tx(&first_pool, async |tx| -> Result<_, Step> {
-            let result = held.enqueue(tx).await?;
+            let result = held.enqueue_ordered(tx, aggregate, 1).await?;
             first_entered.notify_one();
             first_release.notified().await;
             Ok(result)
@@ -602,7 +695,10 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
     let second_pool = competing.clone();
     let second_task = tokio::spawn(async move {
         in_tx(&second_pool, async |tx| -> Result<_, Step> {
-            conflicting.enqueue(tx).await.map_err(Step::from)
+            conflicting
+                .enqueue_ordered(tx, aggregate, 1)
+                .await
+                .map_err(Step::from)
         })
         .await
     });
@@ -617,7 +713,7 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
                AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
             )
             .bind(APP)
-            .fetch_one(&jobs)
+            .fetch_one(jobs)
             .await
             .expect("concurrent lock observation");
             (waiting > 0).then_some(())
@@ -633,18 +729,10 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
             .expect("first immutable intent commits"),
         OutboxEnqueued::Created
     );
-    std::assert_matches!(
-        timeout(WAIT, second_task)
-            .await
-            .expect("conflicting transaction joins")
-            .expect("conflicting task does not panic"),
-        Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
-    );
-    assert_eq!(outbox_count(&jobs).await, 2);
-
-    close_pools(&[&competing]).await;
-    close_pools(&[&jobs]).await;
-    fixture.cleanup().await;
+    timeout(WAIT, second_task)
+        .await
+        .expect("conflicting transaction joins")
+        .expect("conflicting task does not panic")
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -672,7 +760,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     let first_pool = template_pool(&pool, 3).await;
     let first_run = start(
         &first_pool,
-        infra_messaging::outbox::kinds(first_messaging.producer())
+        infra_messaging::outbox::kinds(first_messaging.outbox_producer().unwrap())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -722,7 +810,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     let retry_pool = template_pool(&pool, 3).await;
     let retry_run = start(
         &retry_pool,
-        infra_messaging::outbox::kinds(retry_messaging.producer())
+        infra_messaging::outbox::kinds(retry_messaging.outbox_producer().unwrap())
             .expect("retry publisher registry is valid"),
     )
     .await;
@@ -795,7 +883,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::kinds(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -825,29 +913,192 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     .execute(&jobs)
     .await
     .expect("final retry is due");
-    let failed = poll_until(
-        "a refused final attempt leaves the job visibly failed",
+    let deferred = poll_until(
+        "a refused final attempt remains eligible for recovery",
         WAIT,
         POLL,
         async || {
             let row = job(&jobs, &key).await;
-            (row.state == "failed").then_some(row)
+            (row.state == "pending" && row.attempts == 25).then_some(row)
         },
     )
     .await;
-    assert_eq!(failed.attempts, 25);
-    assert_eq!(failed.failure_reason.as_deref(), Some("exhausted"));
-
-    finish(run, &[&publisher, &jobs]).await;
+    assert_eq!(deferred.id, pending.id);
+    assert!(deferred.failure_reason.is_none());
+    let interrupted = prepared(&fixture, "final-lease", "interrupted");
+    in_tx(&jobs, async |tx| -> Result<(), Step> {
+        interrupted.enqueue(tx).await?;
+        sqlx::query(
+            "UPDATE background_jobs SET state='running', attempts=25,
+             claim_generation=nextval('background_jobs_claim_generation'),
+             claim_expires_at=now() - interval '1 second' WHERE unique_key=$1",
+        )
+        .bind(event_key(interrupted.message_id()))
+        .execute(&mut *tx)
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     fixture.restore_source().await;
+    poll_until(
+        "restoring the stream resumes the outstanding publication without redrive",
+        Duration::from_secs(30),
+        POLL,
+        async || {
+            (job(&jobs, &key).await.state == "completed"
+                && job(&jobs, &event_key(interrupted.message_id())).await.state == "completed")
+                .then_some(())
+        },
+    )
+    .await;
+    let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut ids = Vec::new();
+    for seq in 1..=2 {
+        let message = stream.get_raw_message(seq).await.unwrap();
+        let id = message.headers.get("Message-Id").unwrap().as_str();
+        let expected = if id == intent.message_id() {
+            &intent
+        } else {
+            &interrupted
+        };
+        assert_eq!(id, expected.message_id());
+        assert_eq!(message.payload, *expected.payload());
+        ids.push(id.to_owned());
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(fixture.published().await, 2);
+    assert_eq!(job(&jobs, &oversized_key).await.state, "failed");
+    finish(run, &[&publisher, &jobs]).await;
     close(messaging).await;
     fixture.cleanup().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: PgPool) {
+    use infra_jobs::operator::{self, OperatorError, RecoveryTarget};
+    let fixture = Fixture::create().await;
+    let jobs = template_pool(&pool, 3).await;
+    let first = prepared(&fixture, "A1", &"a".repeat(100));
+    let second = prepared(&fixture, "A2", "second");
+    let independent = prepared(&fixture, "B1", "independent");
+    in_tx(&jobs, async |tx| -> Result<_, Step> {
+        std::assert_matches!(
+            second.enqueue_ordered(tx, "A", 2).await,
+            Err(OutboxEnqueueError::OrderConflict)
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    in_tx(&jobs, async |tx| -> Result<_, Step> {
+        assert_eq!(
+            first.enqueue_ordered(tx, "A", 1).await?,
+            OutboxEnqueued::Created
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    in_tx(&jobs, async |tx| -> Result<_, Step> {
+        std::assert_matches!(
+            independent.enqueue_ordered(tx, "A", 1).await,
+            Err(OutboxEnqueueError::OrderConflict)
+        );
+        assert_eq!(
+            second.enqueue_ordered(tx, "A", 2).await?,
+            OutboxEnqueued::Created
+        );
+        assert_eq!(
+            independent.enqueue_ordered(tx, "B", 1).await?,
+            OutboxEnqueued::Created
+        );
+        assert_eq!(
+            first.enqueue_ordered(tx, "A", 1).await?,
+            OutboxEnqueued::Duplicate
+        );
+        std::assert_matches!(
+            first.enqueue(tx).await,
+            Err(OutboxEnqueueError::EventIdConflict)
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let connect = async |limit| {
+        let mut options = messaging_options(&fixture);
+        options.max_payload_bytes = limit;
+        Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+            .await
+            .unwrap()
+    };
+    let publisher_a = template_pool(&pool, 3).await;
+    let publisher_b = template_pool(&pool, 3).await;
+    let start_publisher = async |pool: &PgPool, messaging: &Messaging| {
+        let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap();
+        start(pool, kinds).await
+    };
+    let restricted = connect(64).await;
+    let a = start_publisher(&publisher_a, &restricted).await;
+    let b = start_publisher(&publisher_b, &restricted).await;
+    poll_until(
+        "independent entity publishes despite the failed predecessor",
+        WAIT,
+        POLL,
+        async || {
+            (job(&jobs, &event_key("B1")).await.state == "completed"
+                && job(&jobs, &event_key("A1")).await.state == "failed")
+                .then_some(())
+        },
+    )
+    .await;
+    finish(a, &[]).await;
+    finish(b, &[]).await;
+    close(restricted).await;
+    assert_eq!(fixture.published().await, 1);
+    assert_eq!(job(&jobs, &event_key("A2")).await.attempts, 0);
+    let (id, generation): (String, String) = sqlx::query_as(
+        "SELECT id::text, claim_generation::text FROM background_jobs WHERE kind=$1 AND unique_key=$2"
+    ).bind(OUTBOX_KIND).bind(event_key("A1")).fetch_one(&jobs).await.unwrap();
+    let target = RecoveryTarget::try_new(&id, OUTBOX_KIND, &generation).unwrap();
+    let discard = in_tx(&jobs, async |tx| operator::discard(tx, &target).await).await;
+    std::assert_matches!(discard, Err(OperatorError::Conflict));
+    in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
+        .await
+        .unwrap();
+    let recovered = connect(1024).await;
+    let a = start_publisher(&publisher_a, &recovered).await;
+    let b = start_publisher(&publisher_b, &recovered).await;
+    poll_until(
+        "successor completes after redrive",
+        WAIT,
+        POLL,
+        async || (job(&jobs, &event_key("A2")).await.state == "completed").then_some(()),
+    )
+    .await;
+    let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    for (seq, expected) in [(1, &independent), (2, &first), (3, &second)] {
+        let message = stream.get_raw_message(seq).await.unwrap();
+        assert_eq!(
+            message.headers.get("Message-Id").unwrap().as_str(),
+            expected.message_id()
+        );
+        assert_eq!(message.payload, *expected.payload());
+    }
+    finish(a, &[&publisher_a]).await;
+    finish(b, &[&publisher_b, &jobs]).await;
+    close(recovered).await;
+    fixture.cleanup().await;
+}
+
+#[sqlx::test(migrations = false)]
 async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchanged(pool: PgPool) {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+    migrate::MIGRATOR
+        .run_to(upgrade::HISTORICAL_SCHEMA, &pool)
+        .await
+        .unwrap();
     let fixture = Fixture::create().await;
     let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
@@ -883,36 +1134,41 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .map(|(id, body, _)| (*id, body))
         .chain([("valid", &valid_body)])
     {
-        let intent = prepared(&fixture, id, "stored before replacement");
-        let key = event_key(id);
+        upgrade::stage_encoded(&pool, &fixture.subject, id, encoded).await;
+    }
+    migrate::MIGRATOR.run(&pool).await.unwrap();
+    for id in ["substituted", "malformed-outer"] {
+        let intent = prepared(&fixture, id, "original");
         in_tx(&jobs, async |tx| -> Result<_, Step> {
-            assert_eq!(intent.enqueue(tx).await?, OutboxEnqueued::Created);
-            Ok(())
+            intent.enqueue(tx).await.map_err(Step::from)
         })
         .await
-        .expect("canonical outbox intent commits");
-        let updated = sqlx::query(
-            "UPDATE background_jobs \
-             SET payload_text = jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb($3::text), false)::text \
-             WHERE kind = $1 AND unique_key = $2",
+        .unwrap();
+        let changed = sqlx::query(
+            "UPDATE background_jobs SET payload_text = CASE WHEN $2 THEN '{' ELSE
+             jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb($3::text), false)::text END
+             WHERE unique_key = $1",
         )
-        .bind(OUTBOX_KIND)
-        .bind(&key)
-        .bind(encoded)
+        .bind(event_key(id))
+        .bind(id == "malformed-outer")
+        .bind(&valid_body)
         .execute(&jobs)
         .await
-        .expect("only the persisted body is replaced");
-        assert_eq!(updated.rows_affected(), 1);
+        .unwrap();
+        assert_eq!(changed.rows_affected(), 1);
     }
 
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::kinds(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap())
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    for (id, _, reason) in corrupt {
+    for (id, reason) in corrupt.iter().map(|(id, _, reason)| (*id, *reason)).chain([
+        ("substituted", "outbox_receipt_mismatch"),
+        ("malformed-outer", "outbox_receipt_mismatch"),
+    ]) {
         let key = event_key(id);
         let failed = poll_until("corrupt intent is terminal", WAIT, POLL, async || {
             let row = job(&jobs, &key).await;
@@ -1270,7 +1526,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     );
     engine
         .add_group(
-            infra_messaging::outbox::kinds(messaging.producer())
+            infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap())
                 .expect("dedicated publisher registry is valid"),
             NonZeroU32::MIN,
         )

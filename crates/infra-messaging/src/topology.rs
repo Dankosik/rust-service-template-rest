@@ -10,6 +10,9 @@ use async_nats::jetstream::stream::{
     Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, PersistenceMode,
     RetentionPolicy, StorageType, Stream,
 };
+// template:begin outbox:messaging-outbox-topology-imports
+use async_nats::jetstream::stream::DiscardPolicy;
+// template:end outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::{Context, ErrorCode};
 use sha2::{Digest as _, Sha256};
 use tokio::time::Instant;
@@ -58,6 +61,14 @@ impl Registry {
             wire::prefixed_digest_hex("sha256-", &hash.finalize().into()),
         )])
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TopologyAdmission {
+    pub(crate) consumer: Option<ConsumerAdmission>,
+    // template:begin outbox:messaging-outbox-topology-field
+    pub(crate) outbox_source: Result<(), Refusal>,
+    // template:end outbox:messaging-outbox-topology-field
 }
 
 #[derive(Clone, Debug)]
@@ -141,7 +152,7 @@ pub(crate) async fn admit_topology(
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<Option<ConsumerAdmission>, MessagingError> {
+) -> Result<TopologyAdmission, MessagingError> {
     validate_server(client, envelope_limit).map_err(|refusal| {
         refusal_failure(
             "server",
@@ -158,12 +169,19 @@ pub(crate) async fn admit_topology(
         cancel,
     )
     .await?;
-    validate_stream_publication(&source.cached_info().config)
+    let source_config = &source.cached_info().config;
+    validate_stream_publication(source_config)
         .map_err(|refusal| refusal_failure("source_stream", refusal, envelope_limit, None))?;
-    let Some(consumer) = &options.consumer else {
-        return Ok(None);
+    let mut admission = TopologyAdmission {
+        consumer: None,
+        // template:begin outbox:messaging-outbox-topology-value
+        outbox_source: validate_outbox_source(source_config),
+        // template:end outbox:messaging-outbox-topology-value
     };
-    let raw_source_limit = source.cached_info().config.max_message_size;
+    let Some(consumer) = &options.consumer else {
+        return Ok(admission);
+    };
+    let raw_source_limit = source_config.max_message_size;
     let source_max_message_bytes =
         source_message_limit(raw_source_limit, envelope_limit).map_err(|refusal| {
             refusal_failure(
@@ -209,7 +227,7 @@ pub(crate) async fn admit_topology(
             None,
         ));
     }
-    Ok(Some(ConsumerAdmission {
+    admission.consumer = Some(ConsumerAdmission {
         options: consumer.clone(),
         dead_letter: DeadLetterTopology {
             stream: dead_letter_name,
@@ -218,7 +236,8 @@ pub(crate) async fn admit_topology(
                 .ok()
                 .and_then(NonZeroUsize::new),
         },
-    }))
+    });
+    Ok(admission)
 }
 
 fn source_message_limit(raw: i32, envelope_limit: usize) -> Result<usize, Refusal> {
@@ -247,6 +266,18 @@ fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
     }
     Ok(())
 }
+
+// template:begin outbox:messaging-outbox-topology-validation
+fn validate_outbox_source(config: &StreamConfig) -> Result<(), Refusal> {
+    if (config.max_messages > 0 || config.max_bytes > 0) && config.discard != DiscardPolicy::New {
+        return Err(Refusal::OutboxDiscardOld);
+    }
+    if config.max_messages_per_subject > 0 && !config.discard_new_per_subject {
+        return Err(Refusal::OutboxDiscardOldPerSubject);
+    }
+    Ok(())
+}
+// template:end outbox:messaging-outbox-topology-validation
 
 async fn get_stream(
     jetstream: &async_nats::jetstream::Context,
@@ -433,6 +464,10 @@ pub(crate) enum Refusal {
     StreamNoAck,
     StreamInterestRetention,
     StreamSealed,
+    // template:begin outbox:messaging-outbox-topology-refusals
+    OutboxDiscardOld,
+    OutboxDiscardOldPerSubject,
+    // template:end outbox:messaging-outbox-topology-refusals
     DeadLetterBoundsUnavailable,
     DeadLetterHeaderSize,
 }
@@ -453,6 +488,10 @@ impl Refusal {
             Self::StreamNoAck => "stream_no_ack",
             Self::StreamInterestRetention => "stream_interest_retention",
             Self::StreamSealed => "stream_sealed",
+            // template:begin outbox:messaging-outbox-topology-refusal-types
+            Self::OutboxDiscardOld => "outbox_discard_old",
+            Self::OutboxDiscardOldPerSubject => "outbox_discard_old_per_subject",
+            // template:end outbox:messaging-outbox-topology-refusal-types
             Self::DeadLetterBoundsUnavailable => "dead_letter_bounds_unavailable",
             Self::DeadLetterHeaderSize => "dead_letter_header_bytes",
         }
@@ -460,6 +499,14 @@ impl Refusal {
 
     const fn failure(self) -> MessagingError {
         match self {
+            // template:begin outbox:messaging-outbox-topology-errors
+            Self::OutboxDiscardOld => {
+                MessagingError::OutboxSource("bounded message or byte capacity requires DiscardNew")
+            }
+            Self::OutboxDiscardOldPerSubject => MessagingError::OutboxSource(
+                "a per-subject message limit requires DiscardNewPerSubject",
+            ),
+            // template:end outbox:messaging-outbox-topology-errors
             Self::ServerMaxPayload
             | Self::StreamMessageSizeUnset
             | Self::StreamMessageSize
@@ -479,7 +526,7 @@ impl Refusal {
     }
 }
 
-fn refusal_failure(
+pub(crate) fn refusal_failure(
     operation: &'static str,
     refusal: Refusal,
     required_bytes: usize,

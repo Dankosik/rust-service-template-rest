@@ -693,7 +693,7 @@ mod tests {
                     number: 1,
                 },
                 generation: 1,
-                payload: b"null".to_vec(),
+                payload: Ok(b"null".to_vec()),
                 trace: crate::trace_context::Carrier::default(),
                 slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
                 kind_slot: None,
@@ -909,7 +909,7 @@ mod tests {
                         number: 1,
                     },
                     generation: 1,
-                    payload: b"null".to_vec(),
+                    payload: Ok(b"null".to_vec()),
                     trace: crate::trace_context::Carrier::default(),
                     slot: Arc::clone(&engine.shared.slots)
                         .try_acquire_owned()

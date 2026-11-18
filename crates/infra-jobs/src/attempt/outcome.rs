@@ -4,7 +4,9 @@ use tokio::time::Instant;
 
 use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
-use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
+use crate::kind::{
+    Disposition, JobError, MAX_ATTEMPTS, MAX_ERROR_SUMMARY_BYTES, Policy, UNAVAILABLE_DELAY_MICROS,
+};
 use crate::state::FailureReason;
 
 #[derive(Debug)]
@@ -13,6 +15,7 @@ pub(super) enum Transition {
     Retry {
         summary: String,
         base_micros: f64,
+        floor_micros: i64,
         cause: RetryCause,
     },
     Fail {
@@ -35,7 +38,7 @@ impl Transition {
                 ..
             } => "timeout",
             Self::Retry {
-                cause: RetryCause::Failure { .. },
+                cause: RetryCause::Failure,
                 ..
             } => "retry",
             Self::Fail { reason, .. } => reason.as_str(),
@@ -103,11 +106,12 @@ pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
         Transition::Retry {
             summary,
             base_micros,
-            cause,
+            floor_micros,
+            ..
         } => Write::Retry {
             summary,
             base_micros: *base_micros,
-            floor_micros: cause.floor_micros(),
+            floor_micros: *floor_micros,
         },
         Transition::Snooze { delay_micros, .. } => Write::Snooze {
             delay_micros: *delay_micros,
@@ -163,13 +167,15 @@ async fn execute(
                  SET state = 'pending', not_before = statement_timestamp() + \
                      GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
                      claim_expires_at = NULL, error_summary = $5, \
-                     errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
+                     errors = (CASE WHEN jsonb_array_length(errors) >= $6 THEN errors - 0 ELSE errors END) \
+                         || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
                  WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
                 base_micros,
                 floor_micros,
                 summary,
+                i32::from(MAX_ATTEMPTS),
             ),
         ),
         Write::Snooze { delay_micros } => {
@@ -207,12 +213,14 @@ async fn execute(
                 "UPDATE background_jobs \
                  SET state = 'failed', failure_reason = $3, finished_at = statement_timestamp(), \
                      claim_expires_at = NULL, error_summary = $4, \
-                     errors = errors || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
+                     errors = (CASE WHEN jsonb_array_length(errors) >= $5 THEN errors - 0 ELSE errors END) \
+                         || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
                  WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
                 reason.as_str(),
                 summary,
+                i32::from(MAX_ATTEMPTS),
             ),
         ),
     };
@@ -231,7 +239,12 @@ pub(super) enum Ended {
     Cancelled,
 }
 
-pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> Transition {
+pub(super) fn map_outcome(
+    attempt: &AttemptId,
+    policy: Policy,
+    recover_at_exhaustion: bool,
+    ended: Ended,
+) -> Transition {
     let number = attempt.number;
     match ended {
         Ended::Success(_) => Transition::Complete,
@@ -249,18 +262,34 @@ pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> 
                 number,
                 policy,
                 &error.summary,
-                RetryCause::Failure { floor_micros },
+                RetryCause::Failure,
+                floor_micros,
+                recover_at_exhaustion,
             ),
-            Disposition::Retry => {
-                retry_or_exhaust(number, policy, &error.summary, RetryCause::FAILURE)
-            }
+            Disposition::Retry => retry_or_exhaust(
+                number,
+                policy,
+                &error.summary,
+                RetryCause::Failure,
+                0,
+                recover_at_exhaustion,
+            ),
         },
-        Ended::Panic => retry_or_exhaust(number, policy, "handler panicked", RetryCause::FAILURE),
+        Ended::Panic => retry_or_exhaust(
+            number,
+            policy,
+            "handler panicked",
+            RetryCause::Failure,
+            0,
+            false,
+        ),
         Ended::Payload(error) => retry_or_exhaust(
             number,
             policy,
             &payload_summary(attempt.kind, &error),
-            RetryCause::FAILURE,
+            RetryCause::Failure,
+            0,
+            false,
         ),
         Ended::Timeout => retry_or_exhaust(
             number,
@@ -271,38 +300,41 @@ pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> 
                     .unsigned_duration_to_string(&policy.timeout)
             ),
             RetryCause::Timeout,
+            0,
+            recover_at_exhaustion,
         ),
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RetryCause {
-    Failure { floor_micros: i64 },
+    Failure,
     Timeout,
 }
 
-impl RetryCause {
-    const FAILURE: Self = Self::Failure { floor_micros: 0 };
-
-    const fn floor_micros(self) -> i64 {
-        match self {
-            Self::Failure { floor_micros } => floor_micros,
-            Self::Timeout => 0,
-        }
-    }
-}
-
-fn retry_or_exhaust(number: u16, policy: Policy, text: &str, cause: RetryCause) -> Transition {
+fn retry_or_exhaust(
+    number: u16,
+    policy: Policy,
+    text: &str,
+    cause: RetryCause,
+    floor_micros: i64,
+    recover_at_exhaustion: bool,
+) -> Transition {
     let summary = sanitize_summary(text);
-    if number >= policy.max_attempts {
+    let (base_micros, floor_micros) = if number < policy.max_attempts {
+        (f64::from(number).powi(4) * 1_000_000.0, floor_micros)
+    } else if recover_at_exhaustion {
+        (0.0, floor_micros.max(UNAVAILABLE_DELAY_MICROS))
+    } else {
         return Transition::Fail {
             reason: FailureReason::Exhausted,
             summary,
         };
-    }
+    };
     Transition::Retry {
         summary,
-        base_micros: f64::from(number).powi(4) * 1_000_000.0,
+        base_micros,
+        floor_micros,
         cause,
     }
 }
@@ -347,7 +379,7 @@ mod tests {
             kind: "sample",
             number,
         };
-        map_outcome(&attempt, Policy::default(), ended)
+        map_outcome(&attempt, Policy::default(), false, ended)
     }
 
     #[test]
@@ -382,9 +414,8 @@ mod tests {
             ),
             Transition::Retry {
                 base_micros,
-                cause: RetryCause::Failure {
-                    floor_micros: 2_000_001
-                },
+                cause: RetryCause::Failure,
+                floor_micros: 2_000_001,
                 ..
             } if base_micros == 1_000_000.0
         );
@@ -397,9 +428,8 @@ mod tests {
             ),
             Transition::Retry {
                 base_micros,
-                cause: RetryCause::Failure {
-                    floor_micros: 2_000_000
-                },
+                cause: RetryCause::Failure,
+                floor_micros: 2_000_000,
                 ..
             } if base_micros == 81_000_000.0
         );
@@ -421,7 +451,7 @@ mod tests {
             outcome(Ended::Panic, 1),
             Transition::Retry {
                 ref summary,
-                cause: RetryCause::FAILURE,
+                cause: RetryCause::Failure,
                 ..
             } if summary == "handler panicked"
         );
@@ -442,6 +472,35 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_recoverable_attempts_retry_after_the_budget_without_reopening_invalid_work() {
+        let attempt = AttemptId {
+            job_id: ID,
+            kind: "sample",
+            number: 25,
+        };
+        let outcome = |ended| map_outcome(&attempt, Policy::default(), true, ended);
+        std::assert_matches!(
+            outcome(Ended::Timeout),
+            Transition::Retry {
+                base_micros,
+                floor_micros: 10_000_000,
+                cause: RetryCause::Timeout,
+                ..
+            } if base_micros == 0.0
+        );
+        let decode_error = serde_json::from_str::<u64>("null").unwrap_err();
+        for ended in [Ended::Panic, Ended::Payload(decode_error)] {
+            std::assert_matches!(
+                outcome(ended),
+                Transition::Fail {
+                    reason: FailureReason::Exhausted,
+                    ..
+                }
+            );
+        }
+    }
+
+    #[test]
     fn a_completed_attempt_selects_no_single_row_write() {
         assert!(write_of(&Transition::Complete).is_none());
         std::assert_matches!(write_of(&Transition::Release), Some(Write::Release));
@@ -453,9 +512,8 @@ mod tests {
         let retry = Transition::Retry {
             summary: "retry me".to_owned(),
             base_micros: 81_000_000.0,
-            cause: RetryCause::Failure {
-                floor_micros: 2_000_000,
-            },
+            floor_micros: 2_000_000,
+            cause: RetryCause::Failure,
         };
         std::assert_matches!(
             write_of(&retry),

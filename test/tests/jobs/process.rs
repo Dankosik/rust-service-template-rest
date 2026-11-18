@@ -651,6 +651,32 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
 }
 // template:end outbox:test-jobs-process-outbox-capacity
 
+// template:begin outbox:test-jobs-process-outbox-source
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn outbox_source_refusal_prevents_worker_startup(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    let source = nats.jetstream.get_stream(&nats.stream).await.unwrap();
+    let mut config = source.cached_info().config.clone();
+    config.max_messages = 1;
+    config.discard = stream::DiscardPolicy::Old;
+    nats.jetstream.delete_stream(&nats.stream).await.unwrap();
+    nats.jetstream.create_stream(config).await.unwrap();
+
+    let mut worker = Worker::spawn(&database_url, &nats, &[]);
+    let refusal = worker.await_record("messaging_admission_failed").await;
+    assert_eq!(refusal["operation"], "source_stream");
+    assert_eq!(refusal["error.type"], "outbox_discard_old");
+    let (code, stderr, stdout) = worker.wait().await;
+    assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(stderr.is_empty(), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(!stdout.contains("\"message\":\"jobs_worker_ready\""));
+    assert!(!stdout.contains("\"message\":\"messaging_consuming_started\""));
+    assert!(stdout.contains("\"message\":\"postgres_pool_closed\""));
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-outbox-source
+
 // template:begin outbox:test-jobs-process-deferred-messages
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) {

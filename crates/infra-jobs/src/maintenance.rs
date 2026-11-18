@@ -277,6 +277,8 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                              WHERE job.kind = registered.kind \
                                AND job.state = 'pending' \
                                AND job.not_before <= sampled.observed_at \
+                               AND NOT EXISTS (SELECT 1 FROM background_jobs prior \
+                                               WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') \
                              ORDER BY job.not_before, job.id \
                              LIMIT $2 \
                          ) AS capped \
@@ -288,7 +290,9 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                              FROM background_jobs AS job \
                              WHERE job.kind = registered.kind \
                                AND job.state = 'pending' \
-                               AND job.not_before > sampled.observed_at \
+                               AND (job.not_before > sampled.observed_at OR EXISTS ( \
+                                   SELECT 1 FROM background_jobs prior \
+                                   WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed')) \
                             LIMIT $2 \
                          ) AS capped \
                      ) AS scheduled \

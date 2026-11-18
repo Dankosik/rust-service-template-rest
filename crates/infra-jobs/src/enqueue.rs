@@ -9,6 +9,10 @@ use tokio::time::Instant;
 use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
 
+// template:begin outbox:jobs-outbox-module
+pub mod outbox;
+// template:end outbox:jobs-outbox-module
+
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
 const MIN_PAYLOAD_CAPACITY: usize = 256;
@@ -36,6 +40,10 @@ pub enum LivePayloadComparison {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
+    // template:begin outbox:jobs-outbox-enqueue-error
+    #[error("publish_domain_event requires the dedicated outbox enqueue operation")]
+    OutboxKind,
+    // template:end outbox:jobs-outbox-enqueue-error
     #[error("job kind {0:?} is not a valid kind name")]
     InvalidKind(&'static str),
     #[error(
@@ -83,6 +91,11 @@ pub async fn enqueue<K: JobKind>(
     payload: &K,
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
+    // template:begin outbox:jobs-outbox-enqueue-guard
+    if K::NAME == outbox::KIND {
+        return Err(EnqueueError::OutboxKind);
+    }
+    // template:end outbox:jobs-outbox-enqueue-guard
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
@@ -108,19 +121,26 @@ pub async fn enqueue<K: JobKind>(
     if inserted.rows_affected() == 0 {
         return Ok(Enqueued::Duplicate);
     }
-    if prepared.delay_micros == 0 && take_wake_slot(K::NAME, Instant::now()) {
+    if prepared.delay_micros == 0 {
+        wake_workers(tx, K::NAME).await?;
+    }
+    Ok(Enqueued::Created(id))
+}
+
+async fn wake_workers(tx: &mut Tx<'_>, kind: &'static str) -> Result<(), sqlx::Error> {
+    if take_wake_slot(kind, Instant::now()) {
         observed(
             "wake job workers",
             sqlx::query!(
                 "SELECT pg_notify($1, $2)",
                 crate::listener::WAKE_CHANNEL,
-                K::NAME
+                kind
             )
             .execute(&mut *tx),
         )
         .await?;
     }
-    Ok(Enqueued::Created(id))
+    Ok(())
 }
 
 pub async fn compare_live_payload<K: JobKind>(
@@ -259,6 +279,16 @@ fn prepare<'a, K: JobKind>(
         return Err(EnqueueError::InvalidUniqueKey);
     }
     let delay_micros = checked_delay_micros(options.delay)?;
+    Ok(Prepared {
+        payload: encode_payload(payload)?,
+        unique_key: options.unique_key,
+        delay_micros,
+    })
+}
+
+fn encode_payload<K: serde::Serialize + serde::de::DeserializeOwned>(
+    payload: &K,
+) -> Result<String, EnqueueError> {
     let mut writer = PayloadWriter::default();
     json_payload::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
     if writer.total > MAX_PAYLOAD_BYTES {
@@ -276,11 +306,7 @@ fn prepare<'a, K: JobKind>(
         return Err(EnqueueError::PayloadContainsNul);
     }
     serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    Ok(Prepared {
-        payload,
-        unique_key: options.unique_key,
-        delay_micros,
-    })
+    Ok(payload)
 }
 
 fn is_valid_unique_key(key: &str) -> bool {

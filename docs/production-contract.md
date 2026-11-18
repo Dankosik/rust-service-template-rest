@@ -49,6 +49,20 @@ unable to serve, and budget every downstream deadline inside
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
+<!-- template:begin outbox:outbox-effect-contract -->
+- For each outbox consumer, record its logical subscription and effect key.
+  Commit the key and the business mutation together. For an external effect,
+  reuse the remote operation's idempotency key or reconcile an uncertain
+  result there before retrying. Retain evidence through the last permitted
+  replay, including operator redrive. Exercise both a lost consumer ACK after
+  commit and a repeated publication beyond the stream's duplicate window.
+  The [consumer recovery examples](../test/tests/messaging_recovery.rs) cover
+  matching and conflicting identities, rollback and uncertain commit.
+- For a route requiring order, assign one contiguous event version per
+  namespaced aggregate key, starting at one, in the transaction that updates
+  that aggregate. Consumers applying ordered changes must also guard their
+  own applied version. Redelivery can reintroduce an earlier version.
+<!-- template:end outbox:outbox-effect-contract -->
 <!-- template:begin http-idempotency:production-contract-retry-window -->
 - For mounted idempotent HTTP operations, publish the client retry window and
   how to look up the original effect in the service's public API documentation.
@@ -138,6 +152,39 @@ snapshot guarantee. Any multi-store recovery runbook must:
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
 
+<!-- template:begin outbox:outbox-delivery-rollout -->
+### Activating outbox delivery guarantees
+
+Set the source stream's retention for the longest promised consumer outage
+and recovery interval. Use Limits retention for independent subscriptions.
+A WorkQueue stream serves one competing group. Provision capacity and
+verify discard and per-subject limits, MaxAge, storage, replication and
+sync policy before enabling publishers or changing stream configuration.
+Monitor rejection on a full stream and free capacity by the retention policy.
+
+Fence all producers, workers, cleanup and operator processes before applying
+the receipt and recovery migrations. The backfill uses retained queue rows.
+Recover previously pruned identities from authoritative business history or
+adopt a disjoint ID namespace and fence historical submissions. Resolve
+conflicting historical intents against business records before migration.
+Verify failed, pending and completed rows against their receipts, then start
+the new cohort. Keep permanent receipts while replay remains possible.
+For a stalled ordered aggregate, look up its versions and the queue status
+of each original job. Redrive a verified failed predecessor after resolving
+its cause. A receipt can outlive a completed job's cleanup.
+
+```sql
+SELECT r.aggregate_version, r.job_id, j.state, j.error_summary, j.not_before
+FROM outbox_event_receipts AS r
+LEFT JOIN background_jobs AS j ON j.id = r.job_id
+WHERE r.aggregate_key = $1
+ORDER BY r.aggregate_version;
+```
+
+An old writer or worker can bypass these guarantees. After new writes, fence
+all participants and reconcile identity, aggregate progress and external
+effects before permitting a rollback.
+<!-- template:end outbox:outbox-delivery-rollout -->
 <!-- template:begin jobs:production-contract-jobs-rollout -->
 ### First HTTP operation that enqueues a job
 
