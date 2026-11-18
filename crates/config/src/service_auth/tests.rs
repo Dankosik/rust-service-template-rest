@@ -200,7 +200,7 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
     let err = load_from(
         &LoadOptions::default(),
         BUILD,
-        listener.into_iter().chain(development).chain(jwt),
+        env(&[listener.as_slice(), development.as_slice(), jwt.as_slice()].concat()),
     )
     .unwrap_err();
     assert_matches!(&err, Error::Validate(errors) if errors.names("grpc.security"), "{err}");
@@ -218,7 +218,7 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,
-            listener.into_iter().chain(environment),
+            env(&[listener.as_slice(), environment.as_slice()].concat()),
         )
         .unwrap_err();
         assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");

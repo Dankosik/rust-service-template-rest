@@ -95,7 +95,6 @@ impl Violations {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn admit_with<T>(
     admit: impl FnOnce(&mut Violations) -> Result<T, Rejected>,
 ) -> Result<T, ValidationErrors> {

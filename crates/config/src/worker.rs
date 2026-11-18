@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::validate::{Rejected, Violations};
+use crate::validate::admit_with;
 use crate::{
     AppConfig, HealthConfig, LogConfig, ObservabilityConfig, RuntimeConfig, ShutdownTail,
     ValidationErrors, WorkerHttpConfig,
@@ -37,34 +37,28 @@ impl WorkerInput {
         self,
         shutdown_tail: Option<ShutdownTail>,
     ) -> Result<WorkerConfig, ValidationErrors> {
-        let mut violations = Violations::default();
-        let v = &mut violations;
-        self.app.validate(v);
-        let http = self.http.admit(shutdown_tail, v);
-        // template:begin inbound-webhooks:worker-inbound-webhooks-validate
-        let inbound_webhook_endpoints = self.inbound_webhooks.admit(self.postgres.enabled, v);
-        // template:end inbound-webhooks:worker-inbound-webhooks-validate
-        self.health.validate(v);
-        self.log.validate(v);
-        self.runtime.validate(v);
-        self.observability.validate(v);
-        // template:begin messaging:worker-messaging-admit
-        let messaging = self.messaging.admit(self.app.is_local_development(), v);
-        // template:end messaging:worker-messaging-admit
-        // template:begin jobs:worker-postgres-admit
-        let postgres = self.postgres.admit(v);
-        // template:end jobs:worker-postgres-admit
-        // template:begin jobs:worker-jobs-validate
-        self.jobs.validate(v);
-        // template:end jobs:worker-jobs-validate
-        // template:begin webhooks:worker-webhooks-validate
-        self.webhooks.validate(v);
-        // template:end webhooks:worker-webhooks-validate
-        #[allow(
-            clippy::redundant_closure_call,
-            reason = "the closure scopes `?` on admitted sections; jobs-only or messaging-only subsets vary"
-        )]
-        let admitted: Result<WorkerConfig, Rejected> = (|| {
+        admit_with(|v| {
+            self.app.validate(v);
+            let http = self.http.admit(shutdown_tail, v);
+            // template:begin inbound-webhooks:worker-inbound-webhooks-validate
+            let inbound_webhook_endpoints = self.inbound_webhooks.admit(self.postgres.enabled, v);
+            // template:end inbound-webhooks:worker-inbound-webhooks-validate
+            self.health.validate(v);
+            self.log.validate(v);
+            self.runtime.validate(v);
+            self.observability.validate(v);
+            // template:begin messaging:worker-messaging-admit
+            let messaging = self.messaging.admit(self.app.is_local_development(), v);
+            // template:end messaging:worker-messaging-admit
+            // template:begin jobs:worker-postgres-admit
+            let postgres = self.postgres.admit(v);
+            // template:end jobs:worker-postgres-admit
+            // template:begin jobs:worker-jobs-validate
+            self.jobs.validate(v);
+            // template:end jobs:worker-jobs-validate
+            // template:begin webhooks:worker-webhooks-validate
+            self.webhooks.validate(v);
+            // template:end webhooks:worker-webhooks-validate
             Ok(WorkerConfig(WorkerSections {
                 app: self.app,
                 log: self.log,
@@ -88,8 +82,7 @@ impl WorkerInput {
                 inbound_webhook_endpoints,
                 // template:end inbound-webhooks:worker-inbound-webhooks-admitted-field
             }))
-        })();
-        violations.finish(admitted)
+        })
     }
 }
 

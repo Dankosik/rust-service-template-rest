@@ -76,15 +76,10 @@ fn admit(
     }
 }
 
-pub(super) fn collect_variables<I, K, V>(
+pub(super) fn collect_variables(
     secrets_dir: Option<&Path>,
-    environment: I,
-) -> Result<Variables, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<Variables, Error> {
     let mut variables = match secrets_dir {
         Some(dir) => read_secrets_dir(dir)?,
         None => Variables::new(),
@@ -103,16 +98,12 @@ where
     Ok(variables)
 }
 
-fn read_environment<I, K, V>(environment: I) -> Result<Variables, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+fn read_environment(
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<Variables, Error> {
     let prefix = variable_prefix();
     let mut variables = Variables::new();
     for (key, value) in environment {
-        let key = key.into();
         let name = key.to_string_lossy();
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
@@ -122,7 +113,7 @@ where
                 name: name.into_owned(),
             });
         }
-        let Ok(value) = value.into().into_string() else {
+        let Ok(value) = value.into_string() else {
             return Err(Error::NonUnicodeEnvValue {
                 name: name.into_owned(),
             });

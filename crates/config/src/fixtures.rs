@@ -9,7 +9,9 @@ pub fn service(
         &LoadOptions::default(),
         build,
         Some(tail),
-        environment.iter().copied(),
+        environment
+            .iter()
+            .map(|&(key, value)| (key.into(), value.into())),
     )
 }
 
@@ -23,7 +25,9 @@ pub fn worker(
         &LoadOptions::default(),
         build,
         Some(tail),
-        environment.iter().copied(),
+        environment
+            .iter()
+            .map(|&(key, value)| (key.into(), value.into())),
     )
 }
 // template:end worker:config-worker-fixture
