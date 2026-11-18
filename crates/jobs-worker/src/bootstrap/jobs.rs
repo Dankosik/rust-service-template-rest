@@ -1,6 +1,5 @@
 use std::num::NonZeroU32;
 
-use futures_util::FutureExt;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::{ValidationError, WorkerConfig};
 
@@ -89,19 +88,13 @@ pub(super) fn start_engine(
     None
 }
 
-pub(super) fn engine_failure(resources: &Resources) -> Option<WorkerError> {
-    resources
-        .started_engine
-        .as_ref()?
-        .failed()
-        .now_or_never()
-        .map(|()| WorkerError::EngineStopped)
-}
-
-pub(super) async fn engine_stopped(resources: &Resources) {
+pub(super) async fn engine_failure(resources: &Resources) -> WorkerError {
     match &resources.started_engine {
-        Some(engine) => engine.failed().await,
-        None => std::future::pending::<()>().await,
+        Some(engine) => {
+            engine.failed().await;
+            WorkerError::EngineStopped
+        }
+        None => std::future::pending().await,
     }
 }
 
