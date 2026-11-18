@@ -152,23 +152,14 @@ impl Cpu {
                 Status::resource_exhausted("finite CPU work is occupied or closed")
             })?;
         let id = self.counts.cpu_admitted.fetch_add(1, Ordering::SeqCst) + 1;
-        let started = Instant::now();
+        let admitted_at = Instant::now();
         let input = CPU_SOURCE.to_vec();
         let counts = Arc::clone(&self.counts);
         let occupancy = Arc::clone(&self.occupancy);
         let work = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let _active = ActiveCpu::start(Arc::clone(&counts), occupancy, id, started);
-            let mut output = Vec::with_capacity(CPU_BYTES);
-            for record in input.as_chunks::<16>().0.iter().take(CPU_ITEMS) {
-                let mut value = u128::from_le_bytes(*record);
-                for round in 0..CPU_ROUNDS {
-                    value = std::hint::black_box(value).rotate_left(7).wrapping_mul(3)
-                        ^ u128::from(round);
-                }
-                output.extend_from_slice(&value.to_le_bytes());
-            }
-            output
+            let _active = ActiveCpu::start(counts, occupancy, id, admitted_at);
+            transform_cpu_records(&input)
         });
         let (tx, rx) = oneshot::channel();
         let counts = Arc::clone(&self.counts);
@@ -247,9 +238,21 @@ impl Cpu {
     }
 }
 
+fn transform_cpu_records(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(CPU_BYTES);
+    for record in input.as_chunks::<16>().0.iter().take(CPU_ITEMS) {
+        let mut value = u128::from_le_bytes(*record);
+        for round in 0..CPU_ROUNDS {
+            value = std::hint::black_box(value).rotate_left(7).wrapping_mul(3) ^ u128::from(round);
+        }
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output
+}
+
 struct ActiveCpu {
     counts: Arc<Counts>,
-    started: Instant,
+    admitted_at: Instant,
     occupancy: Arc<Mutex<CpuOccupancy>>,
 }
 
@@ -258,20 +261,20 @@ impl ActiveCpu {
         counts: Arc<Counts>,
         occupancy: Arc<Mutex<CpuOccupancy>>,
         id: u64,
-        started: Instant,
+        admitted_at: Instant,
     ) -> Self {
         {
             let mut interval = occupancy
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            interval.enter(Instant::now(), started);
+            interval.enter(Instant::now(), admitted_at);
         }
         counts.active_id.store(id, Ordering::SeqCst);
         let active = counts.cpu_running.fetch_add(1, Ordering::SeqCst) + 1;
         counts.cpu_max_active.fetch_max(active, Ordering::SeqCst);
         Self {
             counts,
-            started,
+            admitted_at,
             occupancy,
         }
     }
@@ -287,7 +290,7 @@ impl Drop for ActiveCpu {
             interval.exit(Instant::now());
         }
         self.counts.cpu_max_ns.fetch_max(
-            u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(self.admitted_at.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::SeqCst,
         );
         self.counts.active_id.store(0, Ordering::SeqCst);

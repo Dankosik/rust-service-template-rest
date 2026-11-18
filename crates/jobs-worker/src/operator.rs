@@ -462,26 +462,18 @@ async fn verify_and_execute(
     signals: &mut Signals,
     request: &Request,
 ) -> Result<Executed, FailureReceipt> {
-    match bounded(
+    bounded(
         signals,
         migrate::HISTORY_VERIFY_BUDGET,
         migrate::verify_history(pool),
     )
     .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            return Err(request.refused(Cause::MigrationHistory, history_detail(error)));
-        }
-        Err(cause) => return Err(request.failed_before_start(cause)),
-    }
-    match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            return Err(request.refused(Cause::SessionAdmission, startup_detail(error)));
-        }
-        Err(cause) => return Err(request.failed_before_start(cause)),
-    }
+    .map_err(|cause| request.failed_before_start(cause))?
+    .map_err(|error| request.refused(Cause::MigrationHistory, history_detail(error)))?;
+    bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool))
+        .await
+        .map_err(|cause| request.failed_before_start(cause))?
+        .map_err(|error| request.refused(Cause::SessionAdmission, startup_detail(error)))?;
     let invoked = Cell::new(false);
     let operation = async {
         invoked.set(true);

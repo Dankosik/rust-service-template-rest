@@ -258,7 +258,7 @@ async fn serve(
     let mut logger = None;
 
     let failure = AssertUnwindSafe(async {
-        let race = {
+        let startup_result = {
             let startup = async {
                 let provider = tracer_provider
                     .insert(install_tracer_provider(&telemetry::tracing_options(&config)).await?);
@@ -276,13 +276,7 @@ async fn serve(
                 let metrics = telemetry::install_metrics()?;
                 metrics.record_trace_exporter(Some(&provider.exporter_state));
                 telemetry::log_startup_summary(&config, &provider.exporter_state);
-                background.spawn_with_token("metrics_upkeep", |stop| metrics.clone().upkeep(stop));
-                background.spawn_with_token("runtime_progress", |stop| {
-                    metrics.clone().runtime_progress(stop)
-                });
-                background.spawn_with_token("runtime_metrics", |stop| {
-                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, stop)
-                });
+                spawn_metrics_tasks(&metrics, &mut background);
                 start(
                     &config,
                     registration,
@@ -301,7 +295,7 @@ async fn serve(
             }
         };
         drop(config);
-        finish_startup(race, signals, &mut background, &mut serving)?;
+        finish_startup(startup_result, signals, &mut background, &mut serving)?;
         if !serving.admitted {
             return Ok(());
         }
@@ -341,6 +335,16 @@ async fn serve(
     }
 }
 
+fn spawn_metrics_tasks(metrics: &Metrics, background: &mut Background) {
+    background.spawn_with_token("metrics_upkeep", |stop| metrics.clone().upkeep(stop));
+    background.spawn_with_token("runtime_progress", |stop| {
+        metrics.clone().runtime_progress(stop)
+    });
+    background.spawn_with_token("runtime_metrics", |stop| {
+        runtime_metrics(METRICS_MAINTENANCE_INTERVAL, stop)
+    });
+}
+
 fn raise_open_file_limit(config: &Config) {
     let connection_caps = config.finite_listener_connection_caps();
     match rlimit::increase_nofile_limit(u64::MAX) {
@@ -366,7 +370,7 @@ fn finish_startup(
         return Err(error);
     }
     if let Some(prepared) = started?
-        && !signals.pending()?
+        && !signals.take_pending()?
     {
         let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
         serving.admitted = true;
@@ -470,7 +474,7 @@ async fn start(
         ),
         // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
-        service_tokens: service_auth.tokens.clone(),
+        service_tokens: service_auth.tokens,
         // template:end service-auth:bootstrap-service-auth-route-state
     };
 
@@ -485,7 +489,7 @@ async fn start(
             bearer.as_ref(),
             // template:end grpc-authn:bootstrap-grpc-bearer-argument
             // template:begin service-auth:bootstrap-grpc-service-auth-argument
-            &service_auth,
+            service_auth.verifier,
             // template:end service-auth:bootstrap-grpc-service-auth-argument
             // template:begin grpc:bootstrap-grpc-prepare-finish
             background,

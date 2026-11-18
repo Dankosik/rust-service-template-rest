@@ -57,7 +57,7 @@ impl Signals {
         Ok(())
     }
 
-    pub(crate) fn pending(&mut self) -> Result<bool, SignalError> {
+    pub(crate) fn take_pending(&mut self) -> Result<bool, SignalError> {
         self.wait()
             .now_or_never()
             .transpose()

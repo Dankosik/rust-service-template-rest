@@ -7,7 +7,7 @@ use service_config::{GrpcConfig, GrpcListenerSecurity, ValidationError};
 
 use super::background::{Background, BackgroundRegistration};
 // template:begin service-auth:bootstrap-grpc-service-auth-import
-use super::service_auth::PreparedServiceAuth;
+use infra_serviceauth::Verifier;
 // template:end service-auth:bootstrap-grpc-service-auth-import
 use super::BootstrapError;
 
@@ -26,7 +26,7 @@ pub(super) fn prepare(
     bearer: Option<&infra_bearerauthn::Verifier>,
     // template:end grpc-authn:bootstrap-grpc-bearer-parameter
     // template:begin service-auth:bootstrap-grpc-service-auth-parameter
-    service_auth: &PreparedServiceAuth,
+    service_verifier: Option<Verifier>,
     // template:end service-auth:bootstrap-grpc-service-auth-parameter
     background: &mut Background,
 ) -> Result<Prepared, BootstrapError> {
@@ -37,10 +37,7 @@ pub(super) fn prepare(
         .map_or(authentication, GrpcAuthentication::Bearer);
     // template:end grpc-authn:bootstrap-grpc-bearer
     // template:begin service-auth:bootstrap-grpc-service-tokens
-    let authentication = service_auth
-        .verifier
-        .clone()
-        .map_or(authentication, GrpcAuthentication::ServiceTokens);
+    let authentication = service_verifier.map_or(authentication, GrpcAuthentication::ServiceTokens);
     // template:end service-auth:bootstrap-grpc-service-tokens
     // template:begin grpc-authn:bootstrap-grpc-verifier
     if matches!(authentication, GrpcAuthentication::None) {
