@@ -50,6 +50,8 @@ unable to serve, and budget every downstream deadline inside
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
 <!-- template:begin http-idempotency:production-contract-retry-window -->
+- [HTTP idempotency decisions](decisions/http-idempotency-decisions.md) give
+  the reasons for the replay policy and when a derived service should revisit it.
 - For mounted idempotent HTTP operations, publish the client retry window and
   how to look up the original effect in the service's public API documentation.
   Measure the window from the client's first send to the database check on
