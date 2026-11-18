@@ -44,10 +44,7 @@ async fn listen(shared: &Shared, engine: &Engine, pool: &PgPool) -> ! {
                 loop {
                     match listener.try_recv().await {
                         Ok(Some(notification)) => {
-                            if let Some(group) = engine
-                                .groups()
-                                .find(|group| group.registry.get(notification.payload()).is_some())
-                            {
+                            if let Some(group) = engine.group_for_kind(notification.payload()) {
                                 group.claim_wake.notify_one();
                             }
                         }

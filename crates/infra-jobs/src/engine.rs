@@ -93,10 +93,10 @@ impl Engine {
     }
 
     pub fn add_group(&mut self, registry: Kinds, max_workers: NonZeroU32) -> Result<(), KindError> {
-        if let Some(duplicate) = registry.names().find(|name| {
-            self.groups()
-                .any(|group| group.registry.get(name).is_some())
-        }) {
+        if let Some(duplicate) = registry
+            .names()
+            .find(|name| self.group_for_kind(name).is_some())
+        {
             return Err(KindError::Duplicate(duplicate));
         }
         self.additional.push(Arc::new(Shared::new(
@@ -111,6 +111,12 @@ impl Engine {
 
     pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<Shared>> {
         std::iter::once(&self.shared).chain(&self.additional)
+    }
+
+    pub(crate) fn group_for_kind(&self, name: &str) -> Option<&Shared> {
+        self.groups()
+            .find(|group| group.registry.get(name).is_some())
+            .map(Arc::as_ref)
     }
 
     pub async fn check_startup(&self) -> Result<(), StartupError> {

@@ -385,7 +385,7 @@ impl<'a> PolicyBinds<'a> {
                     registered.name,
                     i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX),
                     saturating_micros(lease_offset(registered.policy.timeout)),
-                    registered.recover_at_exhaustion,
+                    registered.is_outbox,
                 )
             })
             .collect();
@@ -452,7 +452,7 @@ fn dispatch_known(
                 attempt,
                 error_summary,
             } => {
-                attempt::record_exhausted(&attempt, error_summary.as_deref());
+                attempt::record_exhausted(&attempt, error_summary.unwrap_or_default());
             }
             Drawn::Running {
                 job,
@@ -552,7 +552,7 @@ impl ClaimRow {
         }
         let payload = match self.payload {
             Some(payload) => Ok(payload.into_bytes()),
-            None if registered.recover_at_exhaustion => {
+            None if registered.is_outbox => {
                 Err(crate::JobError::permanent("outbox_receipt_mismatch"))
             }
             None => return Err(ClaimDecodeError::MissingPayload),
