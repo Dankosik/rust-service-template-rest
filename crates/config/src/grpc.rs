@@ -27,6 +27,8 @@ pub enum GrpcSecurity {
 pub(crate) struct GrpcInput {
     #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
+    #[serde(deserialize_with = "crate::de::boolean")]
+    trust_trace_context: bool,
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::optional_listen_addr")]
@@ -55,6 +57,7 @@ impl Default for GrpcInput {
     fn default() -> Self {
         Self {
             enabled: false,
+            trust_trace_context: false,
             addr: None,
             security: None,
             certificate: None,
@@ -82,6 +85,7 @@ impl GrpcInput {
         self.check_limits(drain_budget, violations);
         let security = self.admit_security(violations);
         Ok(Some(GrpcConfig {
+            trust_trace_context: self.trust_trace_context,
             addr: addr?,
             security: security?,
             request_timeout: self.request_timeout,
@@ -166,6 +170,7 @@ impl GrpcInput {
 
 #[derive(Clone, Debug)]
 pub struct GrpcConfig {
+    pub trust_trace_context: bool,
     pub addr: SocketAddr,
     pub security: GrpcListenerSecurity,
     pub request_timeout: Duration,

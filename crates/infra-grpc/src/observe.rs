@@ -163,7 +163,12 @@ pub(crate) fn propagated_parent(
     span: &tracing::Span,
     headers: &http::HeaderMap,
 ) -> Option<opentelemetry::Context> {
-    set_parent_or_fallback(span, otel_http::extract_context(headers))
+    let parent = if headers.contains_key("traceparent") {
+        otel_http::extract_context(headers)
+    } else {
+        opentelemetry::Context::new()
+    };
+    set_parent_or_fallback(span, parent)
 }
 
 fn open_server_span(path: &str, metrics: &MethodMetrics) -> tracing::Span {

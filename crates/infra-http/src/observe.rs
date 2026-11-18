@@ -1,19 +1,22 @@
 use std::mem::DropGuard;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{Method, StatusCode, Uri};
+use axum::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use axum::http::{Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
+use http_body::Body as _;
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
 use shared_rules::otel_http::{request_method, response_status_code};
+use tokio::time::Instant;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -22,10 +25,10 @@ use tracing_opentelemetry_instrumentation_sdk::{
     find_context_from_tracing, otel_trace_span, set_parent_or_fallback,
 };
 
-use crate::body::hold_guard_until_end;
+use crate::body::{BodyEnd, on_body_end};
 use crate::harden::AdmissionShed;
 use crate::probes::ProbeRoutes;
-use crate::problem::Problem;
+use crate::problem::{Code, Problem};
 use infra_http_transport::ConnectionInfo;
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
@@ -68,24 +71,25 @@ pub(crate) fn describe() {
     );
 }
 
-pub(crate) const UNMATCHED_ROUTE: &str = "<unmatched>";
-
-const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
-    Ok(status) => status,
-    Err(_) => panic!("499 is a valid status code"),
-};
+const UNMATCHED_ROUTE: &str = "<unmatched>";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Observer {
     log_health_probes: bool,
+    trust_trace_context: bool,
     probes: ProbeRoutes,
     series: Arc<Series>,
 }
 
 impl Observer {
-    pub(crate) fn new(log_health_probes: bool, probes: ProbeRoutes) -> Self {
+    pub(crate) fn new(
+        log_health_probes: bool,
+        trust_trace_context: bool,
+        probes: ProbeRoutes,
+    ) -> Self {
         Self {
             log_health_probes,
+            trust_trace_context,
             probes,
             series: Arc::default(),
         }
@@ -95,6 +99,7 @@ impl Observer {
 pub(crate) async fn observe(
     State(Observer {
         log_health_probes,
+        trust_trace_context,
         probes,
         series,
     }): State<Observer>,
@@ -108,41 +113,51 @@ pub(crate) async fn observe(
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
+    let participant =
+        infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
     let method = request.method();
     let method_label = request_method(method.as_str());
-    let span = make_span(
-        &request,
-        method_label,
-        matched.as_ref(),
-        request_id_text,
-        connection.as_ref(),
+    let version = request.version();
+    let scheme = url_scheme(request.uri(), connection.as_ref());
+    let route = matched.as_ref().map(MatchedPath::as_str);
+    let span = make_span(version, method_label, route, request_id_text, scheme);
+    let parent = if participant {
+        otel_http::extract_context(request.headers())
+    } else {
+        opentelemetry::Context::new()
+    };
+    let fallback = set_parent_or_fallback(&span, parent);
+    let response_context = participant.then(|| {
+        fallback
+            .clone()
+            .unwrap_or_else(|| find_context_from_tracing(&span))
+    });
+    let log_access = !suppresses_access_log(
+        log_health_probes,
+        &probes,
+        method,
+        route.unwrap_or(UNMATCHED_ROUTE),
     );
-    let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
-    let trace_context = fallback
-        .clone()
-        .unwrap_or_else(|| find_context_from_tracing(&span));
-    let route = matched
-        .as_ref()
-        .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let log_access = !suppresses_access_log(log_health_probes, &probes, method, route);
-    let gauge = series.active_gauge(method_label);
+    let gauge = series.active_gauge(method_label, scheme);
     gauge.increment(1);
-    let active = DropGuard::new(gauge, |gauge| gauge.decrement(1));
-    let pending = DropGuard::new(
-        Pending {
+    let mut observation = DropGuard::new(
+        RequestObservation {
             log_access,
-            series: &series,
+            series,
+            gauge,
             method_label,
-            route,
-            request_id: request_id_text,
-            span: &span,
+            scheme,
+            matched,
+            request_id,
+            span,
             started,
             connection,
+            head: None,
         },
-        Pending::abandon,
+        RequestObservation::abandon,
     );
 
-    let traced = next.run(request).instrument(span.clone());
+    let traced = next.run(request).instrument(observation.span.clone());
     let mut response = match fallback {
         None => traced.await,
         Some(context) => traced.with_context(context).await,
@@ -156,64 +171,145 @@ pub(crate) async fn observe(
             .get::<crate::authn::InsufficientScope>()
             .is_some()
     {
-        span.set_attribute("authz.reason", "insufficient_scope");
+        observation
+            .span
+            .set_attribute("authz.reason", "insufficient_scope");
     }
     // template:end authn:http-observe-scope-refusal
-    let problem_code = extensions
-        .get::<Problem>()
-        .map(|problem| problem.code().as_str());
-    let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
-    DropGuard::dismiss(pending).record(status, problem_code, termination);
-    update_span_from_response(&span, status);
-    otel_http::inject_context(&trace_context, response.headers_mut());
-    response.map(|body| hold_guard_until_end(body, active))
+    observation.head = Some(ResponseHead {
+        status,
+        problem_code: extensions.get::<Problem>().map(Problem::code),
+        load_shed: extensions.get::<AdmissionShed>().is_some(),
+    });
+    let headers = response.headers_mut();
+    headers.remove("traceparent");
+    headers.remove("tracestate");
+    if let Some(context) = response_context {
+        otel_http::inject_context(&context, headers);
+    }
+    if method_label == "HEAD"
+        || method_label == "CONNECT" && status.is_success()
+        || status.is_informational()
+        || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED)
+    {
+        DropGuard::dismiss(observation).record(None, None);
+        return response;
+    }
+    let remaining = http1_response_length(version, &response);
+    response.map(|body| {
+        on_body_end(body, remaining, move |end| {
+            let error = match end {
+                BodyEnd::Complete => None,
+                BodyEnd::Error => Some("response_body_error"),
+            };
+            DropGuard::dismiss(observation).record(error, None);
+        })
+    })
 }
 
-struct Pending<'a> {
+fn http1_response_length(version: Version, response: &Response) -> Option<u64> {
+    if version > Version::HTTP_11 || response.headers().contains_key(TRANSFER_ENCODING) {
+        return None;
+    }
+    response.body().size_hint().exact().or_else(|| {
+        response
+            .headers()
+            .get(CONTENT_LENGTH)?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()
+    })
+}
+
+struct ResponseHead {
+    status: StatusCode,
+    problem_code: Option<Code>,
+    load_shed: bool,
+}
+
+struct RequestObservation {
     log_access: bool,
-    series: &'a Series,
+    series: Arc<Series>,
+    gauge: Gauge,
     method_label: &'static str,
-    route: &'a str,
-    request_id: Option<&'a str>,
-    span: &'a tracing::Span,
+    scheme: Scheme,
+    matched: Option<MatchedPath>,
+    request_id: Option<RequestId>,
+    span: tracing::Span,
     started: Instant,
     connection: Option<ConnectionInfo>,
+    head: Option<ResponseHead>,
 }
 
-impl Pending<'_> {
+impl RequestObservation {
     fn abandon(self) {
-        if self
+        let (reason, log_status) = if self
             .connection
             .as_ref()
             .is_some_and(ConnectionInfo::was_forced)
         {
-            self.record(
-                StatusCode::SERVICE_UNAVAILABLE,
-                None,
-                Some("server_shutdown"),
-            );
+            ("server_shutdown", 503)
         } else {
-            self.record(CLIENT_CLOSED_REQUEST, None, None);
-        }
+            ("client_closed", 499)
+        };
+        self.record(Some(reason), Some(log_status));
     }
 
-    fn record(self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
+    fn record(self, interruption: Option<&'static str>, log_status: Option<u16>) {
         let elapsed = self.started.elapsed();
-        self.series
-            .record_duration(self.method_label, self.route, status, elapsed);
+        let route = self.matched.as_ref().map(MatchedPath::as_str);
+        let status = self.head.as_ref().map(|head| head.status);
+        let error_type =
+            interruption.or_else(|| status.filter(StatusCode::is_server_error).map(status_label));
+        self.gauge.decrement(1);
+        self.series.record_duration(
+            route,
+            DurationLabels {
+                method: self.method_label,
+                scheme: self.scheme,
+                status,
+                error_type,
+            },
+            elapsed,
+        );
+        if let Some(status) = status {
+            self.span
+                .set_attribute("http.response.status_code", i64::from(status.as_u16()));
+        }
+        if let Some(error_type) = error_type {
+            self.span.set_attribute("error.type", error_type);
+            self.span
+                .set_status(opentelemetry::trace::Status::error(""));
+        }
         if !self.log_access {
             return;
         }
+        let status = status.map(|value| value.as_u16()).or(log_status);
+        let termination = interruption.or_else(|| {
+            self.head
+                .as_ref()
+                .filter(|head| head.load_shed)
+                .map(|_| "load_shed")
+        });
+        let problem_code = self
+            .head
+            .and_then(|head| head.problem_code)
+            .map(Code::as_str);
+        let request_id = self
+            .request_id
+            .as_ref()
+            .and_then(|id| id.header_value().to_str().ok());
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.span.in_scope(|| {
             tracing::info!(
                 method = self.method_label,
-                route = %self.route,
-                status = status.as_u16(),
+                route = route.unwrap_or(UNMATCHED_ROUTE),
+                status,
                 duration_ms,
                 problem_code,
                 termination,
-                request_id = self.request_id,
+                request_id,
                 "http_request"
             );
         });
@@ -222,16 +318,16 @@ impl Pending<'_> {
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
-    request: &Request,
+    version: Version,
     method: &'static str,
-    matched: Option<&MatchedPath>,
+    route: Option<&str>,
     request_id: Option<&str>,
-    connection: Option<&ConnectionInfo>,
+    scheme: Scheme,
 ) -> tracing::Span {
-    let route = matched.map(MatchedPath::as_str);
+    let name_method = if method == "_OTHER" { "HTTP" } else { method };
     let span_name = match route {
-        Some(route) => format_compact!("{method} {route}"),
-        None => CompactString::const_new(method),
+        Some(route) => format_compact!("{name_method} {route}"),
+        None => CompactString::const_new(name_method),
     };
     let span = otel_trace_span!(
         "HTTP request",
@@ -243,29 +339,33 @@ fn make_span(
     if let Some(route) = route {
         span.set_attribute("http.route", route.to_owned());
     }
-    span.set_attribute(
-        "network.protocol.version",
-        otel_http::http_flavor(request.version()),
-    );
-    span.set_attribute("url.scheme", url_scheme(request.uri(), connection));
-    span.set_attribute("span.type", "web");
+    span.set_attribute("network.protocol.version", otel_http::http_flavor(version));
+    span.set_attribute("url.scheme", scheme.as_str());
     span
 }
 
-fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
-    match uri.scheme_str() {
-        Some("https") => "https",
-        None => connection.map_or("http", ConnectionInfo::scheme),
-        Some(_) => "http",
+#[derive(Clone, Copy, Debug, Enum, Eq, Hash, PartialEq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
-    span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
-    if status.is_server_error() {
-        span.set_attribute("error.type", status_label(status));
-        span.set_status(opentelemetry::trace::Status::error(""));
+fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> Scheme {
+    match uri
+        .scheme_str()
+        .or_else(|| connection.map(ConnectionInfo::scheme))
+    {
+        Some("https") => Scheme::Https,
+        _ => Scheme::Http,
     }
 }
 
@@ -302,38 +402,44 @@ impl MethodSlot {
     }
 }
 
-type RouteDurations = HashMap<(&'static str, u16), Histogram>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DurationLabels {
+    method: &'static str,
+    scheme: Scheme,
+    status: Option<StatusCode>,
+    error_type: Option<&'static str>,
+}
+
+type RouteDurations = HashMap<DurationLabels, Histogram>;
 
 #[derive(Debug, Default)]
 struct Series {
-    active: EnumMap<MethodSlot, OnceLock<Gauge>>,
+    active: EnumMap<MethodSlot, EnumMap<Scheme, OnceLock<Gauge>>>,
     durations: ArcSwap<HashMap<Box<str>, RouteDurations>>,
     durations_write: Mutex<()>,
 }
 
 impl Series {
-    fn active_gauge(&self, method: &'static str) -> Gauge {
-        self.active[MethodSlot::from_label(method)]
-            .get_or_init(
-                || metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method),
-            )
+    fn active_gauge(&self, method: &'static str, scheme: Scheme) -> Gauge {
+        self.active[MethodSlot::from_label(method)][scheme]
+            .get_or_init(|| {
+                metrics::gauge!(
+                    ACTIVE_REQUESTS_METRIC,
+                    "http_request_method" => method,
+                    "url_scheme" => scheme.as_str()
+                )
+            })
             .clone()
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn record_duration(
-        &self,
-        method: &'static str,
-        route: &str,
-        status: StatusCode,
-        elapsed: Duration,
-    ) {
-        let key = (method, status.as_u16());
+    fn record_duration(&self, route: Option<&str>, key: DurationLabels, elapsed: Duration) {
+        let route_key = route.unwrap_or_default();
         let seconds = elapsed.as_secs_f64();
         if let Some(histogram) = self
             .durations
             .load()
-            .get(route)
+            .get(route_key)
             .and_then(|route_durations| route_durations.get(&key))
         {
             histogram.record(seconds);
@@ -342,15 +448,15 @@ impl Series {
         let _guard = self.durations_write.lock();
         let current = self.durations.load_full();
         if let Some(histogram) = current
-            .get(route)
+            .get(route_key)
             .and_then(|route_durations| route_durations.get(&key))
         {
             histogram.record(seconds);
             return;
         }
-        let histogram = duration_histogram(method, route, status);
+        let histogram = duration_histogram(route, key);
         let mut next = (*current).clone();
-        next.entry(route.into())
+        next.entry(route_key.into())
             .or_default()
             .insert(key, histogram.clone());
         self.durations.store(Arc::new(next));
@@ -358,12 +464,25 @@ impl Series {
     }
 }
 
-fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> Histogram {
-    let labels = vec![
-        Label::new("http_request_method", method),
-        Label::new("http_response_status_code", status_label(status)),
-        Label::new("http_route", SharedString::from(Arc::<str>::from(route))),
-    ];
+fn duration_histogram(route: Option<&str>, key: DurationLabels) -> Histogram {
+    let mut labels = Vec::with_capacity(5);
+    labels.push(Label::new("http_request_method", key.method));
+    labels.push(Label::new("url_scheme", key.scheme.as_str()));
+    if let Some(status) = key.status {
+        labels.push(Label::new(
+            "http_response_status_code",
+            status_label(status),
+        ));
+    }
+    if let Some(route) = route {
+        labels.push(Label::new(
+            "http_route",
+            SharedString::from(Arc::<str>::from(route)),
+        ));
+    }
+    if let Some(error_type) = key.error_type {
+        labels.push(Label::new("error_type", error_type));
+    }
     metrics::histogram!(REQUEST_DURATION_METRIC, labels)
 }
 
@@ -407,9 +526,13 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             for code in 100..=999 {
                 series.record_duration(
-                    "_OTHER",
-                    UNMATCHED_ROUTE,
-                    StatusCode::from_u16(code).unwrap(),
+                    None,
+                    DurationLabels {
+                        method: "_OTHER",
+                        scheme: Scheme::Https,
+                        status: Some(StatusCode::from_u16(code).unwrap()),
+                        error_type: None,
+                    },
                     Duration::from_millis(1),
                 );
             }
@@ -418,8 +541,8 @@ mod tests {
             .map(|code: u16| {
                 vec![
                     Label::new("http_request_method", "_OTHER"),
+                    Label::new("url_scheme", "https"),
                     Label::new("http_response_status_code", code.to_string()),
-                    Label::new("http_route", "<unmatched>"),
                 ]
             })
             .collect();
@@ -434,7 +557,16 @@ mod tests {
         let series = Series::default();
         metrics::with_local_recorder(&recorder, || {
             for status in [StatusCode::OK, StatusCode::OK, StatusCode::NOT_FOUND] {
-                series.record_duration("GET", "/items/{id}", status, Duration::from_millis(1));
+                series.record_duration(
+                    Some("/items/{id}"),
+                    DurationLabels {
+                        method: "GET",
+                        scheme: Scheme::Http,
+                        status: Some(status),
+                        error_type: None,
+                    },
+                    Duration::from_millis(1),
+                );
             }
         });
         let mut samples: Vec<_> = snapshotter
@@ -459,67 +591,129 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_active_gauge_returns_to_zero_at_eof_before_the_body_is_dropped() {
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_records_full_duration_and_the_known_status_for_each_terminal_outcome() {
+        use axum::body::Bytes;
+        use futures_util::{StreamExt as _, stream};
         use http_body_util::BodyExt as _;
         use tower::ServiceExt as _;
 
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
-        )]
-        let routes = axum::Router::new().route("/", axum::routing::get(|| async { "complete" }));
-        let app = crate::harden(
-            routes,
-            &crate::HardenOptions {
-                max_body_bytes: 64,
-                request_timeout: Duration::from_secs(1),
-                max_in_flight: None,
-                admission_wait: Duration::from_secs(1),
-                log_health_probes: false,
-                draining: None,
-            },
-        );
-        let mut body = app
-            .oneshot(Request::new(Body::empty()))
-            .await
-            .unwrap()
-            .into_body();
-        assert_eq!(
-            body.frame().await.unwrap().unwrap().into_data().unwrap(),
-            "complete"
-        );
-        assert!(body.frame().await.is_none());
-        assert_eq!(gauge_values(&snapshotter), [("GET".to_owned(), 0.0)]);
-        drop(body);
+        let delay = Duration::from_secs(2);
+        for (fail, abandon, error_type) in [
+            (false, false, None),
+            (true, false, Some("response_body_error")),
+            (false, true, Some("client_closed")),
+        ] {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            let handler = move || async move {
+                let initial = stream::iter([Ok(Bytes::from_static(b"initial"))]);
+                let tail = stream::once(async move {
+                    tokio::time::sleep(delay).await;
+                    if fail {
+                        Err(std::io::Error::other("injected response body error"))
+                    } else {
+                        Ok(Bytes::from_static(b"tail"))
+                    }
+                });
+                Body::from_stream(initial.chain(tail))
+            };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+            )]
+            let app = crate::harden(
+                axum::Router::new().route("/stream", axum::routing::get(handler)),
+                &crate::HardenOptions {
+                    max_body_bytes: 64,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: None,
+                    admission_wait: Duration::from_secs(1),
+                    log_health_probes: false,
+                    trust_trace_context: false,
+                    draining: None,
+                },
+            );
+            let request = Request::builder()
+                .uri("https://example.test/stream")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut body = response.into_body();
+            assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                "initial"
+            );
+            let metrics = snapshotter.snapshot().into_vec();
+            assert_eq!(metrics.len(), 1, "{metrics:?}");
+            let (key, _, _, value) = &metrics[0];
+            assert_eq!(key.key().name(), ACTIVE_REQUESTS_METRIC);
+            assert_eq!(
+                key.key().labels().cloned().collect::<Vec<_>>(),
+                [
+                    Label::new("http_request_method", "GET"),
+                    Label::new("url_scheme", "https"),
+                ]
+            );
+            assert_eq!(*value, DebugValue::Gauge(1.0.into()));
+
+            if abandon {
+                tokio::time::advance(delay).await;
+                drop(std::mem::take(&mut body));
+            } else {
+                let frame = body.frame().await.unwrap();
+                if fail {
+                    assert!(frame.is_err());
+                } else {
+                    assert_eq!(frame.unwrap().into_data().unwrap(), "tail");
+                    assert!(body.frame().await.is_none());
+                }
+            }
+            let metrics = snapshotter.snapshot().into_vec();
+            assert_eq!(metrics.len(), 2, "{metrics:?}");
+            for (key, _, _, value) in metrics {
+                match key.key().name() {
+                    ACTIVE_REQUESTS_METRIC => {
+                        assert_eq!(value, DebugValue::Gauge((-1.0).into()));
+                    }
+                    REQUEST_DURATION_METRIC => {
+                        let mut expected = vec![
+                            Label::new("http_request_method", "GET"),
+                            Label::new("url_scheme", "https"),
+                            Label::new("http_response_status_code", "200"),
+                            Label::new("http_route", "/stream"),
+                        ];
+                        if let Some(error_type) = error_type {
+                            expected.push(Label::new("error_type", error_type));
+                        }
+                        assert_eq!(key.key().labels().cloned().collect::<Vec<_>>(), expected);
+                        let DebugValue::Histogram(samples) = value else {
+                            panic!("expected a duration histogram, got {value:?}");
+                        };
+                        assert_eq!(samples.len(), 1, "{samples:?}");
+                        assert!(
+                            (2.0..2.01).contains(&samples[0].into_inner()),
+                            "{samples:?}"
+                        );
+                    }
+                    name => panic!("unexpected metric {name}"),
+                }
+            }
+            drop(body);
+            assert!(snapshotter.snapshot().into_vec().into_iter().all(
+                |(_, _, _, value)| match value {
+                    DebugValue::Gauge(value) => value.into_inner() == 0.0,
+                    DebugValue::Histogram(samples) => samples.is_empty(),
+                    _ => false,
+                }
+            ));
+        }
     }
 
-    fn gauge_values(snapshotter: &Snapshotter) -> Vec<(String, f64)> {
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, ..)| key.key().name() == ACTIVE_REQUESTS_METRIC)
-            .filter_map(|(key, _, _, value)| match value {
-                DebugValue::Gauge(value) => Some((
-                    key.key()
-                        .labels()
-                        .next()
-                        .expect("method label")
-                        .value()
-                        .to_owned(),
-                    value.into_inner(),
-                )),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn a_request_dropped_before_its_response_head_is_recorded_as_499() {
+    #[tokio::test(start_paused = true)]
+    async fn a_request_dropped_before_its_response_head_has_no_response_status_metric_label() {
         use tower::ServiceExt as _;
 
         let recorder = DebuggingRecorder::new();
@@ -538,6 +732,7 @@ mod tests {
                 max_in_flight: std::num::NonZeroU32::new(2),
                 admission_wait: Duration::from_mins(1),
                 log_health_probes: false,
+                trust_trace_context: false,
                 draining: None,
             },
         );
@@ -550,8 +745,9 @@ mod tests {
             duration_series(&snapshotter),
             [vec![
                 Label::new("http_request_method", "GET"),
-                Label::new("http_response_status_code", "499"),
+                Label::new("url_scheme", "http"),
                 Label::new("http_route", "/hang"),
+                Label::new("error_type", "client_closed"),
             ]]
         );
     }
@@ -601,11 +797,12 @@ mod tests {
     }
 
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {
-        served(request).await.1
+        served(request, false).await.1
     }
 
     async fn served(
         request: Request,
+        trust_trace_context: bool,
     ) -> (axum::http::HeaderMap, opentelemetry_sdk::trace::SpanData) {
         use axum::Router;
         use axum::routing::get;
@@ -634,44 +831,81 @@ mod tests {
                 max_in_flight: std::num::NonZeroU32::new(2),
                 admission_wait: Duration::from_secs(5),
                 log_health_probes: false,
+                trust_trace_context,
                 draining: None,
             },
         );
-        let headers = app.oneshot(request).await.unwrap().into_parts().0.headers;
+        let (parts, body) = app.oneshot(request).await.unwrap().into_parts();
+        http_body_util::BodyExt::collect(body).await.unwrap();
 
         let mut spans = exporter.get_finished_spans().unwrap();
         assert_eq!(spans.len(), 1, "one server span, got {spans:?}");
-        (headers, spans.remove(0))
+        (parts.headers, spans.remove(0))
     }
 
     #[tokio::test]
-    async fn a_response_names_the_server_span_in_traceparent() {
+    async fn only_a_trusted_trace_participant_receives_the_server_context() {
         opentelemetry::global::set_text_map_propagator(
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
-        let request = Request::builder()
-            .uri("/items/1")
-            .header(
-                "traceparent",
-                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
-            )
-            .body(Body::empty())
-            .unwrap();
-
-        let (headers, span) = served(request).await;
-
-        let context = &span.span_context;
-        assert_eq!(
-            context.trace_id().to_string(),
-            "0af7651916cd43dd8448eb211c80319c"
-        );
-        let expected = format!("00-{}-{}-01", context.trace_id(), context.span_id());
-        let sent: Vec<_> = headers
-            .get_all("traceparent")
-            .iter()
-            .map(|value| value.to_str().unwrap())
-            .collect();
-        assert_eq!(sent, [expected.as_str()]);
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let parent_id = "b7ad6b7169203331";
+        let fields = format!("{trace_id}-{parent_id}");
+        let valid = format!("00-{fields}-01");
+        for (trusted, parents, accepted) in [
+            (true, vec![valid.clone()], true),
+            (true, vec![format!("0a-{fields}-ff-opaque-?")], true),
+            (true, vec![format!("01-{fields}-01")], true),
+            (false, vec![valid.clone()], false),
+            (false, vec![format!("00-{fields}-00")], false),
+            (true, vec![], false),
+            (true, vec![valid.clone(), valid], false),
+            (true, vec![format!("00-abc-{parent_id}-01")], false),
+            (true, vec![format!("00-{trace_id}-def-01")], false),
+            (true, vec![format!("00-{fields}-1")], false),
+            (true, vec![format!("00-{fields}-01-")], false),
+            (true, vec![format!("ff-{fields}-01")], false),
+            (true, vec![format!("01-{fields}-01opaque")], false),
+            (
+                true,
+                vec![format!("01-{}-{parent_id}-01", "0".repeat(32))],
+                false,
+            ),
+            (
+                true,
+                vec![format!("00-{trace_id}-0000000000000000-01")],
+                false,
+            ),
+            (true, vec![format!("0A-{fields}-01")], false),
+        ] {
+            let mut request = Request::builder()
+                .uri("/items/1")
+                .header("tracestate", "first=one")
+                .header("tracestate", "second=two");
+            for parent in &parents {
+                request = request.header("traceparent", parent);
+            }
+            let (headers, span) = served(request.body(Body::empty()).unwrap(), trusted).await;
+            let context = span.span_context;
+            if accepted {
+                assert_eq!(span.parent_span_id.to_string(), parent_id, "{parents:?}");
+                assert_eq!(context.trace_id().to_string(), trace_id);
+                assert_eq!(context.trace_state().header(), "first=one,second=two");
+                let expected = format!("00-{trace_id}-{}-01", context.span_id());
+                assert_eq!(headers["traceparent"], expected);
+                assert_eq!(headers["tracestate"], "first=one,second=two");
+            } else {
+                assert_eq!(
+                    span.parent_span_id,
+                    opentelemetry::trace::SpanId::INVALID,
+                    "{parents:?}"
+                );
+                assert_ne!(context.trace_id().to_string(), trace_id);
+                assert!(context.trace_state().header().is_empty());
+                assert!(!headers.contains_key("traceparent"));
+                assert!(!headers.contains_key("tracestate"));
+            }
+        }
     }
 
     fn attribute(
@@ -690,6 +924,7 @@ mod tests {
             "server.port",
             "url.path",
             "url.query",
+            "http.request.method_original",
             "user_agent.original",
         ] {
             assert_eq!(attribute(span, absent), None, "{absent}");
@@ -752,7 +987,6 @@ mod tests {
             KeyValue::new("network.protocol.version", "1.1"),
             KeyValue::new("url.scheme", "http"),
             KeyValue::new("error.type", "500"),
-            KeyValue::new("span.type", "web"),
         ] {
             assert_eq!(attribute(&span, key.as_str()), Some(value), "{key}");
         }
@@ -817,7 +1051,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap();
             let span = exported_span(request).await;
-            assert_eq!(span.name, normalized);
+            let span_method = if normalized == "_OTHER" {
+                "HTTP"
+            } else {
+                normalized
+            };
+            assert_eq!(span.name, span_method);
             assert_eq!(
                 attribute(&span, "http.request.method"),
                 Some(normalized.into())
@@ -831,6 +1070,7 @@ mod tests {
                 Some(protocol.into())
             );
             assert_eq!(attribute(&span, "http.route"), None);
+            assert_eq!(attribute(&span, "error.type"), None);
         }
     }
 }

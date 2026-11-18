@@ -40,7 +40,7 @@ pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
     registry: Registry,
     metrics: HandlerMetrics,
-    filter_subject: String,
+    pub(super) filter_subject: String,
     span_name: String,
     dead_letter_subject: String,
     dead_letter_stream: String,
@@ -179,7 +179,7 @@ impl DeliveryHandler {
             Some((info, attempt))
         }) else {
             tracing::warn!(
-                subject = message.subject.as_str(),
+                messaging.destination.template = self.filter_subject.as_str(),
                 "messaging_delivery_metadata_missing"
             );
             return Ok(());
@@ -219,10 +219,9 @@ impl DeliveryHandler {
             "messaging_process",
             otel.name = self.span_name.as_str(),
             otel.kind = "consumer",
-            messaging.system = "nats",
+            messaging.system.name = "nats",
             messaging.operation.type = "process",
             messaging.operation.name = "process",
-            messaging.destination.name = message.subject.as_str(),
             messaging.destination.template = self.filter_subject.as_str(),
             outcome = tracing::field::Empty,
             error.type = tracing::field::Empty,
@@ -263,14 +262,14 @@ impl DeliveryHandler {
         match outcome {
             Outcome::Success => {}
             Outcome::Panicked => tracing::error!(
-                subject = message.subject.as_str(),
+                messaging.destination.template = self.filter_subject.as_str(),
                 event_type,
                 attempt = delivery_attempt,
                 outcome = label,
                 "messaging_delivery_failed"
             ),
             _ => tracing::warn!(
-                subject = message.subject.as_str(),
+                messaging.destination.template = self.filter_subject.as_str(),
                 event_type,
                 attempt = delivery_attempt,
                 outcome = label,
@@ -279,13 +278,22 @@ impl DeliveryHandler {
         }
 
         match settlement(outcome, delivery_attempt) {
-            Settlement::Acknowledge => acknowledge(&self.shared.connection.client, message).await,
+            Settlement::Acknowledge => {
+                acknowledge(
+                    &self.shared.connection.client,
+                    message,
+                    &self.filter_subject,
+                )
+                .await
+            }
             Settlement::DeadLetter(reason) => {
                 return self
                     .dead_letter(message, info, reason, event_type, cancel)
                     .await;
             }
-            Settlement::Redeliver(delay) => redeliver_after(message, delay).await,
+            Settlement::Redeliver(delay) => {
+                redeliver_after(message, delay, &self.filter_subject).await
+            }
         }
         Ok(())
     }
@@ -300,11 +308,11 @@ impl DeliveryHandler {
     ) -> Result<(), ConsumerError> {
         let Some(message) = transfer_message(source, info, &self.dead_letter_stream, reason) else {
             tracing::error!(
-                subject = source.subject.as_str(),
+                messaging.destination.template = self.filter_subject.as_str(),
                 reason = reason.label(),
                 "messaging_dead_letter_identity_unavailable"
             );
-            redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+            redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
             return Ok(());
         };
         let reason = reason.label();
@@ -342,11 +350,11 @@ impl DeliveryHandler {
             .set(timestamp.as_secs_f64());
         }
         let Err(failure) = result else {
-            acknowledge(&self.shared.connection.client, source).await;
+            acknowledge(&self.shared.connection.client, source, &self.filter_subject).await;
             return Ok(());
         };
         tracing::error!(
-            subject = source.subject.as_str(),
+            messaging.destination.template = self.filter_subject.as_str(),
             event_type,
             reason,
             outcome,
@@ -364,7 +372,7 @@ impl DeliveryHandler {
                 })
             }
             PublishError::Rejected(_) | PublishError::Ambiguous => {
-                redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+                redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
                 Ok(())
             }
         }
@@ -404,8 +412,8 @@ async fn run_handler(
     }
 }
 
-async fn acknowledge(client: &async_nats::Client, source: &Message) {
-    let span = settlement_span(source, "ack");
+async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
+    let span = settlement_span(filter_subject, "ack");
     let error_type = if let Some(reply) = source.reply.clone() {
         match tokio::time::timeout(
             BROKER_OPERATION_BUDGET,
@@ -428,7 +436,7 @@ async fn acknowledge(client: &async_nats::Client, source: &Message) {
     record_settlement_failure(&span, "unconfirmed", error_type);
     span.in_scope(|| {
         tracing::warn!(
-            subject = source.subject.as_str(),
+            messaging.destination.template = filter_subject,
             error.type = error_type,
             "messaging_source_ack_unconfirmed"
         );
@@ -436,8 +444,8 @@ async fn acknowledge(client: &async_nats::Client, source: &Message) {
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "ack").increment(1);
 }
 
-pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
-    let span = settlement_span(source, "nak");
+pub(super) async fn redeliver_after(source: &Message, delay: Duration, filter_subject: &str) {
+    let span = settlement_span(filter_subject, "nak");
     let error_type = match tokio::time::timeout(
         BROKER_OPERATION_BUDGET,
         source.ack_with(AckKind::Nak(Some(delay))),
@@ -455,7 +463,7 @@ pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
     record_settlement_failure(&span, "failed", error_type);
     span.in_scope(|| {
         tracing::warn!(
-            subject = source.subject.as_str(),
+            messaging.destination.template = filter_subject,
             error.type = error_type,
             "messaging_redelivery_request_failed"
         );
@@ -463,16 +471,15 @@ pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "nak").increment(1);
 }
 
-fn settlement_span(source: &Message, operation: &'static str) -> tracing::Span {
+fn settlement_span(filter_subject: &str, operation: &'static str) -> tracing::Span {
     tracing::info_span!(
         "messaging_settle",
         otel.name = operation,
         otel.kind = "client",
-        messaging.system = "nats",
         messaging.system.name = "nats",
         messaging.operation.type = "settle",
         messaging.operation.name = operation,
-        messaging.destination.name = source.subject.as_str(),
+        messaging.destination.template = filter_subject,
         outcome = tracing::field::Empty,
         error.type = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,

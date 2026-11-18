@@ -62,14 +62,8 @@ pub struct AppConfig {
     /// "use the revision stamped into the binary".
     #[serde(deserialize_with = "crate::de::string")]
     pub commit: String,
-    /// Replica identity published as `service.instance.id`.
-    ///
-    /// `None` (missing, empty, or whitespace-only wire value) is a vacant
-    /// replica id: the telemetry resource builder fills the hostname (the pod
-    /// name on Kubernetes). Version and commit empty sentinels are replaced from
-    /// [`BuildInfo`] before validation; this field is not. Without an
-    /// instance identity every replica pushes the same resource and their
-    /// cumulative counters collide into one series.
+    /// Replica identity published as `service.instance.id`. Set it to a distinct
+    /// value per replica. An omitted or blank value uses a process-local UUID.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub instance_id: Option<String>,
 }

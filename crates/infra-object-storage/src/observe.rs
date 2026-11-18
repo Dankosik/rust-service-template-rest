@@ -38,13 +38,13 @@ impl Operation {
         }
     }
 
-    fn rpc_names(self) -> (&'static str, &'static str) {
+    fn span_names(self) -> (&'static str, Option<&'static str>) {
         match self {
-            Self::Put => ("S3.PutObject", "PutObject"),
-            Self::Get => ("S3.GetObject", "GetObject"),
-            Self::Head => ("S3.HeadObject", "HeadObject"),
-            Self::Delete => ("S3.DeleteObject", "DeleteObject"),
-            Self::PresignGet => ("S3.PresignGetObject", "PresignGetObject"),
+            Self::Put => ("S3.PutObject", Some("PutObject")),
+            Self::Get => ("S3.GetObject", Some("GetObject")),
+            Self::Head => ("S3.HeadObject", Some("HeadObject")),
+            Self::Delete => ("S3.DeleteObject", Some("DeleteObject")),
+            Self::PresignGet => ("S3.PresignGetObject", None),
         }
     }
 }
@@ -121,13 +121,13 @@ impl OperationGuard {
         operation: Operation,
         cloud_region: Option<&str>,
     ) -> Self {
-        let (span_name, method) = operation.rpc_names();
+        let (span_name, method) = operation.span_names();
         let span = tracing::info_span!(
             "object_storage",
             otel.name = span_name,
-            otel.kind = "client",
-            rpc.system = "aws-api",
-            rpc.service = "S3",
+            otel.kind = if method.is_some() { "client" } else { "internal" },
+            rpc.system = method.map(|_| "aws-api"),
+            rpc.service = method.map(|_| "S3"),
             rpc.method = method,
             cloud.region = cloud_region,
             object_storage.outcome = tracing::field::Empty,

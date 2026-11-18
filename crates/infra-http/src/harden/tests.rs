@@ -22,6 +22,7 @@ fn options() -> HardenOptions {
         max_in_flight: NonZeroU32::new(2),
         admission_wait: Duration::from_millis(200),
         log_health_probes: false,
+        trust_trace_context: false,
         draining: None,
     }
 }
@@ -690,7 +691,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
             admit,
         ))
         .layer(middleware::from_fn_with_state(
-            Observer::new(false, ProbeRoutes::default()),
+            Observer::new(false, false, ProbeRoutes::default()),
             observe::observe,
         ));
     let fields = Arc::new(Mutex::new(Vec::new()));

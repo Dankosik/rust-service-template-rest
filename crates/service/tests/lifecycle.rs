@@ -197,10 +197,15 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
             "metrics missing {family}:\n{metrics}"
         );
     }
-    assert!(
-        metrics.contains("http_route=\"<unmatched>\""),
-        "404 must be labelled with the bounded unmatched route:\n{metrics}"
-    );
+    let unmatched = metrics
+        .lines()
+        .find(|line| {
+            line.starts_with("http_server_request_duration_seconds_count{")
+                && line.contains("http_response_status_code=\"404\"")
+        })
+        .expect("the unmatched 404 is observed");
+    assert!(unmatched.contains("url_scheme=\"http\""), "{unmatched}");
+    assert!(!unmatched.contains("http_route="), "{unmatched}");
 
     let started = Instant::now();
     service.terminate();
@@ -940,6 +945,7 @@ fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
             ("APP__HTTP__ADDR", &api),
             ("APP__LOG__FORMAT", format),
             ("APP__LOG__LEVEL", "trace"),
+            ("APP__HTTP__TRUST_TRACE_CONTEXT", "true"),
         ]);
         assert!(poll_until(
             &format!("http://{api}/health/ready"),

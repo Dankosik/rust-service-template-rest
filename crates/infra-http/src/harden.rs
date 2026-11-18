@@ -44,6 +44,7 @@ pub struct HardenOptions {
     pub max_in_flight: Option<NonZeroU32>,
     pub admission_wait: Duration,
     pub log_health_probes: bool,
+    pub trust_trace_context: bool,
     pub draining: Option<ReadinessReader>,
 }
 
@@ -83,7 +84,11 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
             HeaderValue::from_static("nosniff"),
         ))
         .layer(middleware::from_fn_with_state(
-            Observer::new(options.log_health_probes, probes),
+            Observer::new(
+                options.log_health_probes,
+                options.trust_trace_context,
+                probes,
+            ),
             observe::observe,
         ))
         .layer(middleware::from_fn(crate::context::finish_response))

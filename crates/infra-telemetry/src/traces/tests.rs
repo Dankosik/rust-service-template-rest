@@ -127,29 +127,25 @@ pub(super) fn options(endpoint: &str) -> TracingOptions {
 }
 
 #[test]
-fn the_span_queue_is_larger_than_the_sdk_default_unless_the_operator_sets_one() {
-    assert!(format!("{:?}", batch_config(&env(&[]))).contains("max_queue_size: 16384"));
-    assert!(
-        format!(
-            "{:?}",
-            batch_config(&env(&[("OTEL_BSP_MAX_QUEUE_SIZE", "2048")]))
-        )
-        .contains("max_queue_size: 2048")
-    );
-    assert!(
-        format!(
-            "{:?}",
-            batch_config(&env(&[("OTEL_BSP_MAX_QUEUE_SIZE", "16k")]))
-        )
-        .contains("max_queue_size: 16384")
-    );
-    assert!(
-        format!(
-            "{:?}",
-            batch_config(&env(&[("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "4096")]))
-        )
-        .contains("max_export_batch_size: 4096")
-    );
+fn span_processor_uses_positive_sizes_and_preserves_valid_overrides() {
+    let queue = sdktrace::OTEL_BSP_MAX_QUEUE_SIZE;
+    let batch = sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
+    for (vars, queue_size, batch_size, expected_invalid) in [
+        (vec![], 16_384, 512, vec![]),
+        (vec![(queue, "2048")], 2048, 512, vec![]),
+        (vec![(queue, "16k")], 16_384, 512, vec![queue]),
+        (vec![(queue, "0")], 16_384, 512, vec![queue]),
+        (vec![(batch, "0")], 16_384, 512, vec![batch]),
+        (vec![(queue, "2"), (batch, "0")], 2, 2, vec![batch]),
+        (vec![(batch, "")], 16_384, 512, vec![]),
+        (vec![(batch, "4096")], 16_384, 4096, vec![]),
+    ] {
+        let (config, invalid) = batch_config(&env(&vars));
+        let config = format!("{config:?}");
+        assert!(config.contains(&format!("max_queue_size: {queue_size},")));
+        assert!(config.contains(&format!("max_export_batch_size: {batch_size},")));
+        assert_eq!(invalid, expected_invalid, "{vars:?}");
+    }
     assert!(std::mem::size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
 }
 
@@ -223,16 +219,18 @@ fn finished_exports_are_counted_by_outcome() {
         );
     });
     let snapshot = snapshotter.snapshot().into_vec();
+    let metric = "telemetry_trace_exporter_sdk_result_spans_total";
+    assert_eq!(snapshot.len(), 3, "{snapshot:?}");
     for (target, expected) in [
-        (metrics::Key::from_name(TRACE_SPANS_EXPORTED_METRIC), 3),
+        (metrics::Key::from_parts(metric, &[("outcome", "ok")]), 3),
         (
-            metrics::Key::from_parts(TRACE_SPANS_EXPORTED_METRIC, &[("error_type", "timeout")]),
+            metrics::Key::from_parts(metric, &[("outcome", "error"), ("error_type", "timeout")]),
             6,
         ),
         (
             metrics::Key::from_parts(
-                TRACE_SPANS_EXPORTED_METRIC,
-                &[("error_type", "internal_failure")],
+                metric,
+                &[("outcome", "error"), ("error_type", "internal_failure")],
             ),
             1,
         ),
@@ -249,7 +247,7 @@ fn finished_exports_are_counted_by_outcome() {
 }
 
 #[test]
-fn resource_carries_typed_identity() {
+fn resource_carries_typed_identity_and_defaults_to_a_stable_process_uuid() {
     let mut options = options("");
     options.instance_id = Some("instance-1".to_owned());
     let resource = resource(&options);
@@ -273,4 +271,15 @@ fn resource_carries_typed_identity() {
         Some("abc")
     );
     assert!(get("telemetry.sdk.language").is_some());
+
+    let instance_key = opentelemetry::Key::new(attribute::SERVICE_INSTANCE_ID);
+    options.instance_id = None;
+    let generated = super::resource(&options).get(&instance_key).unwrap();
+    let uuid = Uuid::parse_str(&generated.to_string()).unwrap();
+    assert_eq!(uuid.get_version(), Some(uuid::Version::Random));
+    options.instance_id = Some("  ".to_owned());
+    assert_eq!(
+        super::resource(&options).get(&instance_key),
+        Some(generated)
+    );
 }

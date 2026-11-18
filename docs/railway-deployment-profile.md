@@ -100,6 +100,12 @@ when lifecycle budgets move.
 
 ## Operator-owned configuration
 
+- Keep inbound trace trust disabled on public listeners. To continue inter-service
+  traces, enable `APP__HTTP__TRUST_TRACE_CONTEXT` or `APP__GRPC__TRUST_TRACE_CONTEXT`
+  only on a listener reachable exclusively by trusted peers, or behind a gateway
+  that starts a fresh trace for every untrusted request. The gateway must strip
+  trace response headers before forwarding responses to public clients. If public
+  callers can bypass the gateway or share the listener directly, leave trust disabled.
 - **Size `APP__RUNTIME__WORKER_THREADS` to the replica's CPU allocation:**
   `.railway/railway.ts` sets `2`. Unset, `crates/config` reads cgroup
   parallelism (it ignores `TOKIO_WORKER_THREADS`), and an unthrottled Railway

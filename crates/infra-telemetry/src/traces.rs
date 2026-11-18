@@ -2,7 +2,7 @@ mod exporter;
 
 use exporter::{CollectorConfig, CollectorTrust, compression, export_timeout, span_exporter};
 use std::ffi::OsString;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opentelemetry::trace::TracerProvider;
@@ -16,8 +16,10 @@ use opentelemetry_sdk::trace::{
 use opentelemetry_semantic_conventions::attribute;
 use parking_lot::Mutex;
 use secrecy::SecretString;
+use uuid::Uuid;
 
-pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
+const TRACE_EXPORT_SDK_RESULT_SPANS_METRIC: &str =
+    "telemetry_trace_exporter_sdk_result_spans_total";
 
 pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
@@ -71,6 +73,7 @@ pub enum ExporterState {
         has_certificate_file: bool,
         has_client_certificate: bool,
         ignored_compression: Vec<&'static str>,
+        invalid_batch_sizes: Vec<&'static str>,
     },
     Disabled,
 }
@@ -91,11 +94,18 @@ impl ExporterState {
                 has_certificate_file,
                 has_client_certificate,
                 ignored_compression,
+                invalid_batch_sizes,
             } => {
                 for name in ignored_compression {
                     tracing::warn!(
                         variable = *name,
                         "unsupported OTLP compression setting ignored"
+                    );
+                }
+                for name in invalid_batch_sizes {
+                    tracing::warn!(
+                        variable = *name,
+                        "invalid trace batch processor size ignored"
                     );
                 }
                 tracing::info!(
@@ -200,6 +210,7 @@ async fn prepare_tracer_provider(
         None => ExporterState::Disabled,
         Some(collector) => {
             let (compression, ignored_compression) = compression(&env);
+            let (batch_config, invalid_batch_sizes) = batch_config(&env);
             let trust_files = trust.clone();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             let preparation = tokio::task::spawn_blocking(move || {
@@ -223,7 +234,7 @@ async fn prepare_tracer_provider(
                     timeout,
                     drain: Arc::clone(&drain),
                 })
-                .with_batch_config(batch_config(&env))
+                .with_batch_config(batch_config)
                 .build(),
             );
             ExporterState::Initialized {
@@ -231,6 +242,7 @@ async fn prepare_tracer_provider(
                 has_certificate_file: trust.certificate.is_some(),
                 has_client_certificate: trust.client_certificate.is_some(),
                 ignored_compression,
+                invalid_batch_sizes,
             }
         }
     };
@@ -242,16 +254,33 @@ async fn prepare_tracer_provider(
     })
 }
 
-fn batch_config(env: &impl Fn(&str) -> Option<OsString>) -> sdktrace::BatchConfig {
-    let size = |name| env(name)?.to_str()?.parse::<usize>().ok();
-    let config = sdktrace::BatchConfigBuilder::default().with_max_queue_size(
-        size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE).unwrap_or(SPAN_QUEUE_CAPACITY),
+fn batch_config(
+    env: &impl Fn(&str) -> Option<OsString>,
+) -> (sdktrace::BatchConfig, Vec<&'static str>) {
+    let mut invalid = Vec::new();
+    let mut size = |name: &'static str, default| {
+        let Some(value) = env(name).filter(|value| !value.is_empty()) else {
+            return default;
+        };
+        if let Some(size) = value
+            .to_str()
+            .and_then(|text| text.parse::<std::num::NonZeroUsize>().ok())
+        {
+            return size.get();
+        }
+        invalid.push(name);
+        default
+    };
+    let queue_size = size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_CAPACITY);
+    let batch_size = size(
+        sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
+        sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE_DEFAULT,
     );
-    match size(sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE) {
-        Some(batch) => config.with_max_export_batch_size(batch),
-        None => config,
-    }
-    .build()
+    let config = sdktrace::BatchConfigBuilder::default()
+        .with_max_queue_size(queue_size)
+        .with_max_export_batch_size(batch_size)
+        .build();
+    (config, invalid)
 }
 
 impl TracerProviderHandle {
@@ -382,8 +411,8 @@ pub(crate) fn describe_metrics() {
         "1 when the OTLP trace exporter is configured and initialized, 0 otherwise."
     );
     metrics::describe_counter!(
-        TRACE_SPANS_EXPORTED_METRIC,
-        "Spans in batches whose SDK exporter returned success or failure; error_type marks failure, not receiver acceptance or persistence."
+        TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+        "Spans in batches grouped by the SDK export call result. An ok outcome can include partial rejection or a response decoding error."
     );
 }
 
@@ -400,12 +429,19 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
         let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
         match &result {
-            Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
+            Ok(()) => {
+                metrics::counter!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok")
+                    .increment(spans);
+            }
             Err(error) => {
                 let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
-                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => failure.label())
-                    .increment(spans);
+                metrics::counter!(
+                    TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                    "outcome" => "error",
+                    "error_type" => failure.label()
+                )
+                .increment(spans);
             }
         }
         result
@@ -434,6 +470,13 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
 }
 
 fn resource(options: &TracingOptions) -> Resource {
+    static PROCESS_INSTANCE_ID: OnceLock<Uuid> = OnceLock::new();
+    let instance_id = options
+        .instance_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string());
     let attributes = [
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),
         KeyValue::new(attribute::SERVICE_VERSION, options.service_version.clone()),
@@ -445,16 +488,9 @@ fn resource(options: &TracingOptions) -> Resource {
             attribute::DEPLOYMENT_ENVIRONMENT_NAME,
             options.deployment_environment.clone(),
         ),
+        KeyValue::new(attribute::SERVICE_INSTANCE_ID, instance_id),
     ];
-    let instance_id = options
-        .instance_id
-        .clone()
-        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
-    let instance = (!instance_id.trim().is_empty())
-        .then(|| KeyValue::new(attribute::SERVICE_INSTANCE_ID, instance_id));
-    Resource::builder()
-        .with_attributes(attributes.into_iter().chain(instance))
-        .build()
+    Resource::builder().with_attributes(attributes).build()
 }
 
 impl ResolvedSampler {

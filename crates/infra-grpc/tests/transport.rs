@@ -591,7 +591,7 @@ impl Fixture {
             }
         }
         // template:end authn:grpc-transport-test-scope-requirement
-        let app = infra_grpc::router(services, control.reader(), authentication, limits)
+        let app = infra_grpc::router(services, control.reader(), authentication, limits, false)
             .expect("router builds");
         let tls = tls.map(|(pki, mtls)| {
             let certificate = pem(&pki.server_certificate);
@@ -1123,6 +1123,7 @@ async fn verify_http_order_reads(fixture: &Fixture) {
                 max_in_flight: None,
                 admission_wait: Duration::ZERO,
                 log_health_probes: false,
+                trust_trace_context: false,
                 draining: None,
             },
         )
@@ -1250,6 +1251,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
             readiness().control().reader(),
             infra_grpc::Authentication::Bearer(verifier),
             limits(),
+            false,
         )
         .unwrap_err(),
         Error::MissingScopeRequirement(SERVER_STREAM_PATH.to_owned())
@@ -1401,6 +1403,7 @@ fn opening_app_waiting(
             max_admission_wait,
             ..limits()
         },
+        false,
     )
     .unwrap()
 }

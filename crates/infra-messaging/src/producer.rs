@@ -76,7 +76,7 @@ impl Producer {
             "messaging_publish",
             otel.name = format!("publish {}", event.subject()),
             otel.kind = "producer",
-            messaging.system = "nats",
+            messaging.system.name = "nats",
             messaging.operation.type = "send",
             messaging.operation.name = "publish",
             messaging.destination.name = event.subject(),

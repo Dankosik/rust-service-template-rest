@@ -89,6 +89,108 @@ tests:
           - labels: 'ALERTS{alertname="HTTPLatencyBudgetBurn",alertstate="firing",job="service",long_window="1h",severity="page"}'
             value: 1
 
+  - name: "HTTP counts a new failure series after a healthy baseline and counts a failed body once"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
+        values: "0+10x12"
+      - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="500",error_type="response_body_error"}'
+        values: "_x9 1x3"
+      - series: 'http_server_request_duration_seconds_bucket{job="service",instance="a",http_response_status_code="200",le="0.5"}'
+        values: "0+10x12"
+      - series: 'http_server_request_duration_seconds_bucket{job="service",instance="a",http_response_status_code="500",error_type="response_body_error",le="0.5"}'
+        values: "_x9 1x3"
+      - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200",error_type="response_body_error"}'
+        values: "_x9 1x3"
+    promql_expr_test:
+      - expr: job:slo_http_errors:ratio_rate5m
+        eval_time: 8m
+        exp_samples:
+          - labels: 'job:slo_http_errors:ratio_rate5m{job="service"}'
+            value: 0
+      - expr: instance:slo_http_errors:sum
+        eval_time: 11m
+        exp_samples:
+          - labels: 'instance:slo_http_errors:sum{job="service",instance="a"}'
+            value: 2
+      - expr: instance:slo_http_fast_responses:sum
+        eval_time: 11m
+        exp_samples:
+          - labels: 'instance:slo_http_fast_responses:sum{job="service",instance="a"}'
+            value: 110
+      - expr: job:slo_http_errors:ratio_rate5m > bool 0
+        eval_time: 11m
+        exp_samples:
+          - labels: '{job="service"}'
+            value: 1
+      - expr: job:slo_http_errors:ratio_rate5m{job="jobs-worker"}
+        eval_time: 11m
+        exp_samples: []
+
+  - name: "All reachable API targets must report unready before paging, without request traffic"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'up{job="service",instance="b"}'
+        values: "1x30"
+      - series: 'readiness_ready{job="service",instance="a"}'
+        values: "0x30"
+      - series: 'readiness_ready{job="service",instance="b"}'
+        values: "_x6 1x4 0x9 1x9"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing",alertname="ServiceNoReadyTargets"}'
+        eval_time: 6m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing",alertname="ServiceNoReadyTargets"}'
+        eval_time: 11m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing",alertname="ServiceNoReadyTargets"}'
+        eval_time: 19m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ServiceNoReadyTargets",alertstate="firing",job="service",severity="page"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",alertname="ServiceNoReadyTargets"}'
+        eval_time: 24m
+        exp_samples: []
+
+  - name: "Persistent loss opens tickets only on affected log sinks and enabled trace exporters"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'telemetry_log_records_dropped_total{job="service",instance="log",reason="queue_full"}'
+        values: "0+1x20"
+      - series: 'telemetry_log_sink_errors_total{job="service",instance="brief",operation="write"}'
+        values: "0 1x20"
+      - series: 'telemetry_trace_exporter_sdk_result_spans_total{job="service",instance="trace",outcome="error",error_type="timeout"}'
+        values: "0+4x20"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="trace"}'
+        values: "1x20"
+      - series: 'telemetry_sdk_reported_rejected_spans_total{job="service",instance="partial"}'
+        values: "0+2x20"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="partial"}'
+        values: "1x20"
+      - series: 'telemetry_sdk_diagnostics_total{job="service",instance="off",event="response_parse_error"}'
+        values: "0+1x20"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="off"}'
+        values: "0x20"
+      - series: 'runtime_scheduler_sample_age_seconds{job="service",instance="lag"}'
+        values: "0+60x20"
+      - series: 'runtime_scheduler_freshness_limit_seconds{job="service",instance="lag"}'
+        values: "1x20"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TelemetryRecordsLost",alertstate="firing",job="service",instance="log",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TelemetryRecordsLost",alertstate="firing",job="service",instance="trace",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TelemetryRecordsLost",alertstate="firing",job="service",instance="partial",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RuntimeSchedulerSampleStale",alertstate="firing",job="service",instance="lag",severity="ticket"}'
+            value: 1
+
   - name: "A job with no reachable target pages; the lost replica becomes a ticket"
     interval: 1m
     input_series:
@@ -122,6 +224,8 @@ tests:
     input_series:
       - series: 'up{job="service",instance="a"}'
         values: "1x20"
+      - series: 'up{job="service",instance="b"}'
+        values: "1x30"
       - series: 'process_start_time_seconds{job="service",instance="a"}'
         values: "100 100 200 200 300 300 400 400"
       - series: 'process_start_time_seconds{job="service",instance="b"}'
@@ -238,6 +342,25 @@ tests:
           - labels: 'ALERTS{alertname="GRPCErrorBudgetBurn",alertstate="firing",job="service",long_window="1h",severity="page"}'
             value: 1
           - labels: 'ALERTS{alertname="GRPCLatencyBudgetBurn",alertstate="firing",job="service",long_window="1h",severity="page"}'
+            value: 1
+  - name: "gRPC reports zero before the first server failure and includes that first failure"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="OK"}'
+        values: "0+10x12"
+      - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="Internal"}'
+        values: "_x9 1x3"
+    promql_expr_test:
+      - expr: job:slo_grpc_errors:ratio_rate5m
+        eval_time: 8m
+        exp_samples:
+          - labels: 'job:slo_grpc_errors:ratio_rate5m{job="service"}'
+            value: 0
+      - expr: job:slo_grpc_errors:ratio_rate5m > bool 0
+        eval_time: 11m
+        exp_samples:
+          - labels: '{job="service"}'
             value: 1
   # template:end grpc:monitoring-grpc-fixture
 
