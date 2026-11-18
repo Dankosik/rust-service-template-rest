@@ -12,7 +12,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{
-    Isolation, TxError, TxOptions, failure_cause, in_tx_with_acquire_deadline, observed, sqlstate,
+    Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
@@ -173,7 +173,7 @@ impl Receiver {
         let message_id = admit(verifier.as_ref(), headers, body.as_ref(), now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_with_acquire_deadline(
+        in_tx_with_deadline(
             &self.pool,
             deadline,
             READ_COMMITTED,
@@ -224,6 +224,8 @@ impl fmt::Debug for Receiver {
 
 #[derive(Debug, thiserror::Error)]
 enum ReceiptFailure {
+    #[error(transparent)]
+    Deadline(#[from] infra_postgres::OperationDeadlineElapsed),
     #[error("webhook receipt query failed")]
     Query(#[from] sqlx::Error),
     #[error("webhook receipt enqueue failed")]
@@ -241,7 +243,7 @@ impl ReceiptFailure {
         match self {
             Self::Query(_) => "insert_receipt",
             Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::PayloadTooLarge => "enqueue",
-            Self::Transaction(_) => "transaction",
+            Self::Transaction(_) | Self::Deadline(_) => "transaction",
         }
     }
 
@@ -250,7 +252,9 @@ impl ReceiptFailure {
             Self::UnexpectedDuplicate => "integrity",
             Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
             Self::PayloadTooLarge => PAYLOAD_TOO_LARGE.reason(),
-            Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) => "unavailable",
+            Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) | Self::Deadline(_) => {
+                "unavailable"
+            }
         }
     }
 
@@ -258,7 +262,10 @@ impl ReceiptFailure {
         match self {
             Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
             Self::Transaction(err) => Some(err.driver()),
-            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::PayloadTooLarge => None,
+            Self::Enqueue(_)
+            | Self::UnexpectedDuplicate
+            | Self::PayloadTooLarge
+            | Self::Deadline(_) => None,
         }
     }
 }

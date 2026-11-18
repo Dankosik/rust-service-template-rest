@@ -314,11 +314,66 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     }
 }
 
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the synchronous child process isolates the installed global tracer provider"
+)]
+fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
+    const CHILD: &str = "OTLP_TEST_PENDING_PREPARATION";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "traces::tests::delivery::stopped_or_timed_out_collector_preparation_never_installs_a_late_provider",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let spans = CapturedSpans::default();
+    global::set_tracer_provider(
+        SdkTracerProvider::builder()
+            .with_simple_exporter(spans.clone())
+            .build(),
+    );
+    for expire in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (release, wait) = mpsc::channel();
+        let gate = runtime.spawn_blocking(move || wait.recv_timeout(WAIT).unwrap());
+        runtime.block_on(async {
+            let options = options("https://127.0.0.1:1");
+            let pending = install_tracer_provider(&options);
+            tokio::pin!(pending);
+            assert!(futures_util::poll!(&mut pending).is_pending());
+            if expire {
+                tokio::time::advance(Duration::from_secs(5)).await;
+                std::assert_matches!(pending.await, Err(TracingError::PreparationTimeout));
+            }
+        });
+        release.send(()).unwrap();
+        runtime.block_on(gate).unwrap();
+        drop(runtime);
+        global::tracer("startup witness")
+            .start("original provider")
+            .end();
+    }
+    assert_eq!(spans.0.lock().len(), 2);
 }
 
 #[test]

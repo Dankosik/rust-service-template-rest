@@ -2,12 +2,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _, TryFutureExt as _};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
-    PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
+    PgArguments, PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
 use sqlx::{Connection, Either, Execute, Executor, SqlStr};
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::error::sqlstate;
@@ -39,9 +40,136 @@ impl TxError {
 }
 
 #[derive(Debug)]
-pub struct Tx<'c> {
+pub struct Tx<'c, Mode = ()> {
     conn: &'c mut PgConnection,
     proven_alive: bool,
+    mode: Mode,
+}
+
+pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
+
+#[derive(Debug)]
+pub struct OperationDeadline {
+    at: Instant,
+    caller_limit: Option<i32>,
+    expired: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("postgres operation deadline elapsed before commit")]
+pub struct OperationDeadlineElapsed;
+
+pub trait TxMode: std::fmt::Debug + Send {
+    fn operation_deadline(&mut self) -> Option<&mut OperationDeadline>;
+}
+
+impl TxMode for () {
+    fn operation_deadline(&mut self) -> Option<&mut OperationDeadline> {
+        None
+    }
+}
+
+impl TxMode for OperationDeadline {
+    fn operation_deadline(&mut self) -> Option<&mut OperationDeadline> {
+        Some(self)
+    }
+}
+
+trait TransactionMode<E>: TxMode {
+    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E>;
+}
+
+impl<E> TransactionMode<E> for () {
+    fn check_expiry(&self, _: &mut TransactionObservation) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+impl<E: From<OperationDeadlineElapsed>> TransactionMode<E> for OperationDeadline {
+    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E> {
+        if self.expired {
+            observation.end(TransactionOutcome::RolledBack);
+            return Err(OperationDeadlineElapsed.into());
+        }
+        Ok(())
+    }
+}
+
+fn elapsed() -> sqlx::Error {
+    sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
+}
+
+impl OperationDeadline {
+    async fn remaining_ms(&mut self) -> Option<i32> {
+        let ms = self
+            .at
+            .saturating_duration_since(Instant::now())
+            .as_millis();
+        if self.expired || ms == 0 {
+            self.expired = true;
+            if Instant::now() < self.at {
+                tokio::time::sleep_until(self.at).await;
+            }
+            return None;
+        }
+        Some(i32::try_from(ms).unwrap_or(i32::MAX))
+    }
+
+    async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+        let remaining = self.remaining_ms().await.ok_or_else(elapsed)?;
+        let result = sqlx::query_as::<_, (String, bool)>(
+            "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
+             WHERE name = 'statement_timeout') \
+             SELECT set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
+             ms = 0 OR $1 < ms OR (ms = $1 AND ms IS NOT DISTINCT FROM $2) FROM prior",
+        )
+        .bind(remaining)
+        .bind(self.caller_limit)
+        .fetch_one(conn)
+        .await;
+        let (_, caller_limited) = self.finish(result).await?;
+        self.caller_limit = caller_limited.then_some(remaining);
+        self.remaining_ms().await.map(|_| ()).ok_or_else(elapsed)
+    }
+
+    fn finish<T>(
+        &mut self,
+        result: Result<T, sqlx::Error>,
+    ) -> impl Future<Output = Result<T, sqlx::Error>> + use<T> {
+        let rounded_expiry = self.caller_limit.is_some()
+            && result
+                .as_ref()
+                .is_err_and(|e| sqlstate(e).as_deref() == Some("57014"))
+            && self.at.saturating_duration_since(Instant::now()) < Duration::from_millis(1);
+        self.expired |= rounded_expiry;
+        let at = self.at;
+        async move {
+            if rounded_expiry && Instant::now() < at {
+                tokio::time::sleep_until(at).await;
+            }
+            result
+        }
+    }
+}
+
+struct SingleStatement<E>(E);
+
+impl<'q, E: Execute<'q, Postgres>> Execute<'q, Postgres> for SingleStatement<E> {
+    fn sql(self) -> SqlStr {
+        self.0.sql()
+    }
+
+    fn statement(&self) -> Option<&PgStatement> {
+        self.0.statement()
+    }
+
+    fn take_arguments(&mut self) -> Result<Option<PgArguments>, sqlx::error::BoxDynError> {
+        Ok(Some(self.0.take_arguments()?.unwrap_or_default()))
+    }
+
+    fn persistent(&self) -> bool {
+        self.0.persistent()
+    }
 }
 
 impl Tx<'_> {
@@ -67,7 +195,7 @@ pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result
 type DriverFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
 type DriverStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
 
-impl<'c> Executor<'c> for &'c mut Tx<'_> {
+impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     type Database = Postgres;
 
     fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> DriverStream<'e, Either<PgQueryResult, PgRow>>
@@ -76,8 +204,22 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         E: 'q + Execute<'q, Postgres>,
     {
         self.proven_alive = false;
+        let statement = if let Some(budget) = self.mode.operation_deadline() {
+            let conn = &mut *self.conn;
+            Box::pin(
+                async move {
+                    budget.arm(conn).await?;
+                    Ok(conn
+                        .fetch_many(SingleStatement(query))
+                        .then(move |item| budget.finish(item)))
+                }
+                .try_flatten_stream(),
+            ) as DriverStream<'_, _>
+        } else {
+            self.conn.fetch_many(query)
+        };
         Box::pin(Proving {
-            statement: self.conn.fetch_many(query),
+            statement,
             proof_to_restore: Some(&mut self.proven_alive),
         })
     }
@@ -88,11 +230,16 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         E: 'q + Execute<'q, Postgres>,
     {
         self.proven_alive = false;
-        let statement = self.conn.fetch_optional(query);
-        let proven_alive = &mut self.proven_alive;
         Box::pin(async move {
-            let row = statement.await?;
-            *proven_alive = true;
+            let row = if let Some(budget) = self.mode.operation_deadline() {
+                budget.arm(self.conn).await?;
+                budget
+                    .finish(self.conn.fetch_optional(SingleStatement(query)).await)
+                    .await?
+            } else {
+                self.conn.fetch_optional(query).await?
+            };
+            self.proven_alive = true;
             Ok(row)
         })
     }
@@ -106,7 +253,16 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         'c: 'e,
     {
         self.proven_alive = false;
-        self.conn.prepare_with(sql, parameters)
+        let Some(budget) = self.mode.operation_deadline() else {
+            return self.conn.prepare_with(sql, parameters);
+        };
+        let conn = &mut *self.conn;
+        Box::pin(async move {
+            budget.arm(conn).await?;
+            budget
+                .finish(conn.prepare_with(sql, parameters).await)
+                .await
+        })
     }
 
     fn describe<'e>(self, sql: SqlStr) -> DriverFuture<'e, sqlx::Describe<Postgres>>
@@ -114,7 +270,14 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         'c: 'e,
     {
         self.proven_alive = false;
-        self.conn.describe(sql)
+        let Some(budget) = self.mode.operation_deadline() else {
+            return self.conn.describe(sql);
+        };
+        let conn = &mut *self.conn;
+        Box::pin(async move {
+            budget.arm(conn).await?;
+            budget.finish(conn.describe(sql).await).await
+        })
     }
 }
 
@@ -214,7 +377,7 @@ where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
-    transaction(pool, options, None, f).await
+    transaction(pool, options, None, (), f).await
 }
 
 pub async fn in_tx_with_acquire_deadline<T, E, F>(
@@ -227,17 +390,36 @@ where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
 {
-    transaction(pool, options, Some(deadline), f).await
+    transaction(pool, options, Some(deadline), (), f).await
 }
 
-async fn transaction<T, E, F>(
+pub async fn in_tx_with_deadline<T, E, F>(
     pool: &PgPool,
+    deadline: Instant,
     options: TxOptions,
-    deadline: Option<tokio::time::Instant>,
     f: F,
 ) -> Result<T, E>
 where
-    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
+    F: AsyncFnOnce(&mut BudgetedTx<'_>) -> Result<T, E>,
+    E: From<TxError> + From<OperationDeadlineElapsed>,
+{
+    let mode = OperationDeadline {
+        at: deadline,
+        caller_limit: None,
+        expired: false,
+    };
+    transaction(pool, options, Some(deadline), mode, f).await
+}
+
+async fn transaction<M: TransactionMode<E>, T, E, F>(
+    pool: &PgPool,
+    options: TxOptions,
+    deadline: Option<tokio::time::Instant>,
+    mut mode: M,
+    f: F,
+) -> Result<T, E>
+where
+    F: AsyncFnOnce(&mut Tx<'_, M>) -> Result<T, E>,
     E: From<TxError>,
 {
     let span = observe::transaction_span(pool);
@@ -251,6 +433,12 @@ where
         })
         .await;
         observed.waited();
+        if matches!(acquired, Err(sqlx::Error::PoolTimedOut))
+            && let Some(budget) = mode.operation_deadline()
+        {
+            budget.expired = Instant::now() >= budget.at;
+            mode.check_expiry(&mut observed)?;
+        }
         let connection = acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?;
         let mut guard = DiscardOnDrop {
             connection,
@@ -266,8 +454,11 @@ where
         let mut handle = Tx {
             conn: &mut tx,
             proven_alive: true,
+            mode,
         };
-        let value = match f(&mut handle).await {
+        let result = f(&mut handle).await;
+        handle.mode.check_expiry(&mut observed)?;
+        let value = match result {
             Ok(value) => value,
             Err(err) => {
                 observed.end(TransactionOutcome::RolledBack);
@@ -275,10 +466,14 @@ where
             }
         };
         if !(options.read_only || handle.proven_alive) {
-            (&mut *tx)
-                .execute("SELECT 1")
-                .await
-                .map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
+            let proof = (&mut handle).execute("SELECT 1").await;
+            handle.mode.check_expiry(&mut observed)?;
+            proof.map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
+        }
+        if let Some(budget) = handle.mode.operation_deadline()
+            && budget.remaining_ms().await.is_none()
+        {
+            handle.mode.check_expiry(&mut observed)?;
         }
         observed.begin_commit();
         tx.commit()
@@ -352,5 +547,30 @@ mod tests {
         }
         let err = classify_commit(sqlx::Error::Io(std::io::Error::other("reset")));
         std::assert_matches!(err, TxError::CommitUnknown(_), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_caller_limited_cancellation_in_the_rounding_window_reaches_the_cutoff() {
+        for (caller_limit, remaining_us, sqlstate, expires) in [
+            (Some(10), 750, "57014", true),
+            (Some(10), 1_000, "57014", false),
+            (None, 750, "57014", false),
+            (Some(10), 750, "23505", false),
+        ] {
+            let start = Instant::now();
+            let mut budget = OperationDeadline {
+                at: start + Duration::from_micros(remaining_us),
+                caller_limit,
+                expired: false,
+            };
+            let original = crate::error::tests::database(sqlstate);
+            let result = budget.finish(Err::<(), _>(original)).await;
+            assert_eq!(
+                crate::sqlstate(&result.unwrap_err()).as_deref(),
+                Some(sqlstate)
+            );
+            assert_eq!(Instant::now() >= budget.at, expires);
+            assert_eq!(budget.expired, expires);
+        }
     }
 }

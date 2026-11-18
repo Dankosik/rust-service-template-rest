@@ -144,7 +144,7 @@ impl CreateWidgets for SqlWidgets {
             sqlx::query_scalar("INSERT INTO widgets (name, color) VALUES ($1, $2) RETURNING id")
                 .bind(&input.name)
                 .bind(&input.color)
-                .fetch_one(tx.connection())
+                .fetch_one(tx)
                 .await
                 .map_err(CreateError::Store)?;
         self.hold.pass().await;
@@ -2045,6 +2045,95 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CommandFailures {
             self.0.lock().expect("command failure events").push(fields);
         }
     }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(pool: PgPool) {
+    create_widgets(&pool).await;
+    pool.execute(
+        "CREATE SEQUENCE widget_statement_ms MINVALUE 0; CREATE SEQUENCE cancelled_widget_writes;
+         CREATE FUNCTION block_widget_write() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM setval('widget_statement_ms', setting::bigint)
+                 FROM pg_settings WHERE name = 'statement_timeout';
+             PERFORM pg_advisory_xact_lock(734091);
+             RETURN NEW;
+         EXCEPTION WHEN query_canceled THEN
+             PERFORM nextval('cancelled_widget_writes');
+             RAISE;
+         END $$;
+         CREATE TRIGGER block_widget_write BEFORE INSERT ON widgets
+             FOR EACH ROW EXECUTE FUNCTION block_widget_write()",
+    )
+    .await
+    .unwrap();
+    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET).await;
+    let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
+    let mut connection = infra_postgres::acquire(&pool, "hold widget inserts")
+        .await
+        .unwrap();
+    let mut holder = sqlx::Connection::begin(&mut *connection).await.unwrap();
+    (&mut *holder)
+        .execute("SELECT pg_advisory_xact_lock(734091)")
+        .await
+        .unwrap();
+
+    mounted
+        .store_pool
+        .execute("SET statement_timeout = '150ms'")
+        .await
+        .unwrap();
+    let inherited = mounted
+        .create(ALICE, "deadline", &input, "inherited-limit")
+        .await;
+    problem(
+        &inherited,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "idempotency_unavailable",
+        "inherited-limit",
+    );
+    assert_eq!(retry_after(&inherited).as_deref(), Some("1"));
+    assert_eq!(
+        count(&pool, "SELECT last_value FROM widget_statement_ms").await,
+        150
+    );
+
+    mounted
+        .store_pool
+        .execute("SET statement_timeout = '8s'")
+        .await
+        .unwrap();
+    let limited = mounted
+        .create(ALICE, "deadline", &input, "command-limit")
+        .await;
+    command_timed_out(&limited, "command-limit");
+    let command_ms = count(&pool, "SELECT last_value FROM widget_statement_ms").await;
+    assert!(
+        (1..=1000).contains(&command_ms),
+        "widget INSERT received {command_ms} ms"
+    );
+    integration_tests::poll_until(
+        "the server cancelled both inserts with the lock still held",
+        Duration::from_secs(2),
+        RETRY_PAUSE,
+        async || {
+            (count(&pool, "SELECT last_value FROM cancelled_widget_writes").await == 2)
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        0
+    );
+    holder.rollback().await.unwrap();
+    let retry = mounted.create(ALICE, "deadline", &input, "retry").await;
+    let replay = mounted.create(ALICE, "deadline", &input, "replay").await;
+    assert_eq!(created(&retry, "retry"), created(&replay, "replay"));
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    mounted.finish().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

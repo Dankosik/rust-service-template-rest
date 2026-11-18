@@ -947,17 +947,21 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     let _ = example_binary();
     let oidc = OidcFixture::new(2);
     let client_collector = Collector::start(&oidc.runtime);
-    let provider = infra_telemetry::install_tracer_provider(&infra_telemetry::TracingOptions {
-        service_name: "grpc-process-client".to_owned(),
-        service_version: "test".to_owned(),
-        vcs_revision: "test".to_owned(),
-        instance_id: Some("grpc-client-fixture".to_owned()),
-        deployment_environment: "test".to_owned(),
-        sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
-        otlp_endpoint: Some(client_collector.endpoint.clone()),
-        otlp_headers: None,
-    })
-    .expect("client provider");
+    let provider = oidc
+        .runtime
+        .block_on(infra_telemetry::install_tracer_provider(
+            &infra_telemetry::TracingOptions {
+                service_name: "grpc-process-client".to_owned(),
+                service_version: "test".to_owned(),
+                vcs_revision: "test".to_owned(),
+                instance_id: Some("grpc-client-fixture".to_owned()),
+                deployment_environment: "test".to_owned(),
+                sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
+                otlp_endpoint: Some(client_collector.endpoint.clone()),
+                otlp_headers: None,
+            },
+        ))
+        .expect("client provider");
     let logger = infra_telemetry::install_subscriber(&infra_telemetry::LoggingOptions {
         level: "off",
         format: infra_telemetry::LoggingFormat::Json,

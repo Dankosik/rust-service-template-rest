@@ -194,21 +194,32 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     );
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        server.drain(Duration::from_millis(20)),
-    )
-    .await
-    .unwrap();
+    let now = Instant::now();
+    let (result, residue) = server
+        .drain_until(
+            now + Duration::from_millis(20),
+            now + Duration::from_secs(2),
+        )
+        .await;
     std::assert_matches!(result, Err(ServerError::AcceptTimeout));
+    assert_eq!(residue, DrainResidue::default());
+    assert!(abort.is_finished());
     assert_peer_closed(peer).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !abort.is_finished() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+}
+
+#[tokio::test]
+async fn expired_confirmation_reports_a_live_accept_producer_even_with_no_connections() {
+    let mut server = Server::bind(loopback(), app(), options()).unwrap();
+    let stalled = tokio::spawn(std::future::pending::<()>());
+    let accept = std::mem::replace(&mut server.accept_loop, AbortOnDropHandle::new(stalled));
+    accept.abort();
+    assert!(accept.await.unwrap_err().is_cancelled());
+    let now = Instant::now();
+    let (cause, residue) = server.drain_until(now, now).await;
+    std::assert_matches!(cause, Err(ServerError::AcceptTimeout));
+    assert!(residue.accept_unconfirmed);
+    assert_eq!(residue.remaining_connections, 0);
+    assert_eq!(residue.remaining_delegated_tasks, 0);
 }
 
 #[tokio::test]
@@ -488,6 +499,86 @@ fn http2_options() -> Http2Options {
         preface_timeout: Duration::from_millis(300),
         max_header_list_size: 8 * 1024,
         connections: options().connections,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_http2_drain_waits_for_the_stream_handler_or_reports_it_at_cutoff() {
+    for confirm in [false, true] {
+        let entered = CancellationToken::new();
+        let (release, held) = std::sync::mpsc::channel();
+        let held = Arc::new(std::sync::Mutex::new(held));
+        let handler = {
+            let entered = entered.clone();
+            move || {
+                let entered = entered.clone();
+                let held = held.clone();
+                async move {
+                    entered.cancel();
+                    tokio::task::block_in_place(|| {
+                        held.lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                    });
+                    "released"
+                }
+            }
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "transport fixture registers a raw route"
+        )]
+        let app = Router::new().route("/", get(handler));
+        let server = BoundListener::bind(loopback())
+            .unwrap()
+            .serve_h2(app, http2_options(), None);
+        let stream = TcpStream::connect(server.local_addr()).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+                .await
+                .unwrap();
+        let client = tokio::spawn(connection);
+        let request = http::Request::builder()
+            .uri("http://localhost/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = sender.send_request(request);
+        tokio::time::timeout(Duration::from_secs(2), entered.cancelled())
+            .await
+            .unwrap();
+        let force = server.connection_shutdown.force.clone();
+        let grace = Instant::now() + Duration::from_millis(30);
+        let cutoff = if confirm {
+            grace + Duration::from_secs(2)
+        } else {
+            grace
+        };
+        let mut draining = tokio::spawn(server.drain_until(grace, cutoff));
+        force.cancelled().await;
+        if confirm {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut draining)
+                    .await
+                    .is_err()
+            );
+            release.send(()).unwrap();
+        }
+        let (cause, residue) = tokio::time::timeout(Duration::from_secs(1), draining)
+            .await
+            .unwrap()
+            .unwrap();
+        std::assert_matches!(cause, Ok(Drained::TimedOut { .. }));
+        if confirm {
+            assert_eq!(residue, DrainResidue::default());
+        } else {
+            assert_eq!(residue.remaining_delegated_tasks, 1);
+            release.send(()).unwrap();
+        }
+        drop(response);
+        drop(sender);
+        client.abort();
+        let _ = client.await;
     }
 }
 

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use foldhash::HashSet;
 use http::HeaderValue;
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
-use infra_postgres::Tx;
+use infra_postgres::{Tx, TxMode};
 
 use super::{Delivery, EMPTY_DELIVERY_JSON, delivery_version};
 use crate::protocol::MAX_BODY_BYTES;
@@ -28,7 +28,7 @@ impl Producer {
 
     pub async fn enqueue(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut Tx<'_, impl TxMode>,
         endpoint_id: &str,
         body: Vec<u8>,
         content_type: &str,

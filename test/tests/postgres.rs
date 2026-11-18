@@ -26,7 +26,7 @@ use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
     PostgresProbe, SessionSettingsSource, TxError, TxOptions, in_tx, in_tx_with,
-    refresh_password_periodically, sqlstate,
+    in_tx_with_deadline, refresh_password_periodically, sqlstate,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
@@ -302,6 +302,7 @@ async fn applied_count(pool: &PgPool) -> i64 {
 #[derive(Debug, derive_more::From)]
 enum AppError {
     Tx(TxError),
+    Deadline(infra_postgres::OperationDeadlineElapsed),
     Query(sqlx::Error),
     #[from(skip)]
     Business,
@@ -1144,6 +1145,111 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 1, "the failed closure's insert was rolled back");
+}
+
+#[sqlx::test(migrations = false)]
+async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(pool: PgPool) {
+    use tokio::time::Instant;
+
+    const SETTINGS: &str = "SELECT pg_backend_pid(), setting::integer FROM pg_settings \
+                           WHERE name = 'statement_timeout'";
+    pool.execute("CREATE TABLE effects (id int PRIMARY KEY)")
+        .await
+        .unwrap();
+    alter_database(&pool, "statement_timeout = '4s'").await;
+    alter_database(&pool, "idle_in_transaction_session_timeout = '8s'").await;
+    let writer = pool_with_server_budgets(&dsn_for(&pool).await, Isolation::ServerDefault)
+        .await
+        .unwrap();
+    let session: (i32, i32) = sqlx::query_as(SETTINGS).fetch_one(&writer).await.unwrap();
+    assert_eq!(session.1, 4000);
+    let options = TxOptions::default();
+    for (seconds, expected_ms) in [(10, 4000..=4000), (2, 1..=2000)] {
+        let committed: Result<(i32, i32), AppError> = in_tx_with_deadline(
+            &writer,
+            Instant::now() + Duration::from_secs(seconds),
+            options,
+            async |tx| Ok(sqlx::query_as(SETTINGS).fetch_one(tx).await?),
+        )
+        .await;
+        let (pid, effective_ms) = committed.unwrap();
+        assert_eq!(pid, session.0);
+        assert!(
+            expected_ms.contains(&effective_ms),
+            "active limit was {effective_ms} ms"
+        );
+        let after_commit: (i32, i32) = sqlx::query_as(SETTINGS).fetch_one(&writer).await.unwrap();
+        assert_eq!(session, after_commit);
+    }
+
+    let mut connection = infra_postgres::acquire(&pool, "hold advisory lock")
+        .await
+        .unwrap();
+    let mut holder = connection.begin().await.unwrap();
+    (&mut *holder)
+        .execute("SELECT pg_advisory_xact_lock(1234567)")
+        .await
+        .unwrap();
+    let cutoff = Instant::now() + Duration::from_secs(2);
+    let attempt = in_tx_with_deadline(&writer, cutoff, options, async |tx| {
+        tx.execute("INSERT INTO effects VALUES (2)").await?;
+        tokio::time::sleep_until(cutoff - Duration::from_millis(700)).await;
+        let (pid, later): (i32, i32) = sqlx::query_as(SETTINGS).fetch_one(&mut *tx).await?;
+        assert_eq!(pid, session.0);
+        assert!((1..=700).contains(&later), "later statement got {later} ms");
+        let cancelled = tx
+            .execute("SELECT pg_advisory_xact_lock(1234567)")
+            .await
+            .unwrap_err();
+        assert_eq!(sqlstate(&cancelled).as_deref(), Some("57014"));
+        Err::<(), _>(AppError::Business)
+    });
+    let expired = tokio::time::timeout_at(cutoff + Duration::from_secs(1), attempt)
+        .await
+        .expect("PostgreSQL cancels the blocked statement while the lock is still held");
+    std::assert_matches!(expired, Err(AppError::Deadline(_)));
+    holder.rollback().await.unwrap();
+    let restored: (i32, i32) = sqlx::query_as(SETTINGS).fetch_one(&writer).await.unwrap();
+    assert_eq!(session, restored);
+    let effects: Vec<i32> = sqlx::query_scalar("SELECT id FROM effects")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(effects.is_empty());
+    writer.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_budgeted_attempt_rejects_multi_statement_sql_and_an_expired_commit(pool: PgPool) {
+    use tokio::time::Instant;
+
+    pool.execute("CREATE TABLE effects (id int)").await.unwrap();
+    let options = TxOptions::default();
+    let multiple = in_tx_with_deadline(
+        &pool,
+        Instant::now() + Duration::from_secs(5),
+        options,
+        async |tx| {
+            tx.execute("INSERT INTO effects VALUES (1); INSERT INTO effects VALUES (2)")
+                .await?;
+            Ok::<_, AppError>(())
+        },
+    )
+    .await;
+    std::assert_matches!(multiple, Err(AppError::Query(ref error)) if sqlstate(error).as_deref() == Some("42601"));
+    let cutoff = Instant::now() + Duration::from_secs(1);
+    let expired = in_tx_with_deadline(&pool, cutoff, options, async |tx| {
+        tx.execute("INSERT INTO effects VALUES (3)").await?;
+        tokio::time::sleep_until(cutoff).await;
+        Ok::<_, AppError>(())
+    })
+    .await;
+    std::assert_matches!(expired, Err(AppError::Deadline(_)));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM effects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[sqlx::test(migrations = false)]

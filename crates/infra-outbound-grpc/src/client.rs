@@ -149,10 +149,6 @@ impl Client {
             cancellation.clone(),
         );
         let watch_stop = has_parent || lifetime.deadline().is_some();
-        let forwarded = earliest(
-            caller.map(|budget| Deadline::new(origin, budget)),
-            parent_deadline,
-        );
         let call = crate::observe::Call::start(self.series, &request, &self.destination);
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
@@ -164,7 +160,6 @@ impl Client {
             opening,
             lifetime,
             watch_stop,
-            forwarded,
             call,
             guard: cancellation.drop_guard(),
         }
@@ -194,8 +189,6 @@ pub struct PreparedCall {
     opening: OperationContext,
     lifetime: OperationContext,
     watch_stop: bool,
-    #[debug(skip)]
-    forwarded: Option<Deadline>,
     #[debug(skip)]
     call: crate::observe::Call,
     #[debug(skip)]
@@ -242,7 +235,6 @@ impl PreparedCall {
             opening,
             lifetime,
             watch_stop,
-            forwarded,
             call,
             guard,
         } = self;
@@ -259,7 +251,7 @@ impl PreparedCall {
                     opening.check().map_err(client_stopped)?;
                     prepare_dispatch(request.headers_mut())?;
                     opening.check().map_err(client_stopped)?;
-                    apply_forwarded_timeout(request.headers_mut(), forwarded)?;
+                    apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
                     ready.call(request).await.map_err(|err| transport_status(&err))
                 } => dispatched,
             };

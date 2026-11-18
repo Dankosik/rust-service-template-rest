@@ -620,16 +620,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_task_that_returns_early_is_reported_by_name() {
+    async fn a_task_that_cancels_itself_and_returns_is_reported_by_name() {
         let background = Background::new();
         background.spawn("waits", CancellationToken::cancelled_owned);
-        background.spawn("returns", |_cancel| async {});
+        background.spawn("returns", |cancel| async move { cancel.cancel() });
         assert_eq!(
             tokio::time::timeout(BACKGROUND_JOIN, background.wait_for_failure())
                 .await
                 .unwrap(),
             "returns"
         );
+        assert!(!background.cancel.is_cancelled());
         assert_eq!(
             join_background(&background, BACKGROUND_JOIN).await,
             Outcome::Degraded

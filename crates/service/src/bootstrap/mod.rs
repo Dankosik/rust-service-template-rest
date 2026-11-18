@@ -257,9 +257,8 @@ async fn serve(
     let failure = AssertUnwindSafe(async {
         let race = {
             let startup = async {
-                let provider = tracer_provider.insert(install_tracer_provider(
-                    &telemetry::tracing_options(&config),
-                )?);
+                let provider = tracer_provider
+                    .insert(install_tracer_provider(&telemetry::tracing_options(&config)).await?);
                 logger = Some(install_subscriber(&LoggingOptions {
                     level: &config.log.level,
                     format: match config.log.format {

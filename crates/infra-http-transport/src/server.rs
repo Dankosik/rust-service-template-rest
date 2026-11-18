@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::{Extension, Router};
+use hyper::rt::Executor;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -80,6 +81,13 @@ pub enum Drained {
     TimedOut { remaining_connections: usize },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrainResidue {
+    pub accept_unconfirmed: bool,
+    pub remaining_connections: usize,
+    pub remaining_delegated_tasks: usize,
+}
+
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
@@ -87,6 +95,7 @@ pub struct Server {
     accept_failure: watch::Receiver<Option<AcceptFailure>>,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
+    delegated: ListenerExecutor,
 }
 
 #[derive(Clone, Debug)]
@@ -266,26 +275,75 @@ impl Server {
         }
     }
 
-    pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
+    pub async fn drain(self, budget: Duration) -> Result<Drained, ServerError> {
         let deadline = deadline_after(budget);
-        self.connection_shutdown.finish.cancel();
-        let Ok(joined) = timeout_at(deadline, &mut self.accept_loop).await else {
-            self.connection_shutdown.force.cancel();
-            return Err(ServerError::AcceptTimeout);
-        };
+        self.drain_until(deadline, deadline).await.0
+    }
 
-        self.connections.close();
-        let drained = if timeout_at(deadline, self.connections.wait()).await.is_ok() {
-            Drained::Complete
-        } else {
-            let remaining_connections = self.connections.len();
-            self.connection_shutdown.force.cancel();
-            Drained::TimedOut {
-                remaining_connections,
+    pub async fn drain_until(
+        mut self,
+        graceful_deadline: Instant,
+        confirmation_deadline: Instant,
+    ) -> (Result<Drained, ServerError>, DrainResidue) {
+        self.connection_shutdown.finish.cancel();
+        let joined = self.join_accept_until(graceful_deadline).await;
+        let mut accept_unconfirmed = joined.is_none();
+        let cause = match joined {
+            None => {
+                self.accept_loop.abort();
+                Err(ServerError::AcceptTimeout)
+            }
+            Some(Err(error)) => Err(ServerError::AcceptTask(error)),
+            Some(Ok(())) => {
+                if self.wait_for_work(graceful_deadline).await {
+                    return (Ok(Drained::Complete), DrainResidue::default());
+                }
+                Ok(Drained::TimedOut {
+                    remaining_connections: self.connections.len(),
+                })
             }
         };
-        joined.map(|()| drained).map_err(ServerError::AcceptTask)
+        self.connection_shutdown.force.cancel();
+        if accept_unconfirmed {
+            accept_unconfirmed = self
+                .join_accept_until(confirmation_deadline)
+                .await
+                .is_none();
+        }
+        let producers_stopped =
+            !accept_unconfirmed && close_and_wait(&self.connections, confirmation_deadline).await;
+        self.delegated.force.cancel();
+        if producers_stopped {
+            close_and_wait(&self.delegated.tasks, confirmation_deadline).await;
+        }
+        let residue = DrainResidue {
+            accept_unconfirmed,
+            remaining_connections: self.connections.len(),
+            remaining_delegated_tasks: self.delegated.tasks.len(),
+        };
+        (cause, residue)
     }
+
+    async fn join_accept_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Option<Result<(), tokio::task::JoinError>> {
+        if !self.accept_loop.is_finished() && deadline <= Instant::now() {
+            return None;
+        }
+        timeout_at(deadline, &mut self.accept_loop).await.ok()
+    }
+
+    async fn wait_for_work(&self, deadline: Instant) -> bool {
+        close_and_wait(&self.connections, deadline).await
+            && close_and_wait(&self.delegated.tasks, deadline).await
+    }
+}
+
+async fn close_and_wait(tasks: &TaskTracker, deadline: Instant) -> bool {
+    tasks.close();
+    tasks.is_empty()
+        || (deadline > Instant::now() && timeout_at(deadline, tasks.wait()).await.is_ok())
 }
 
 fn deadline_after(budget: Duration) -> Instant {
@@ -298,12 +356,34 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.connection_shutdown.finish.cancel();
         self.connection_shutdown.force.cancel();
+        self.delegated.force.cancel();
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ListenerExecutor {
+    tasks: TaskTracker,
+    force: CancellationToken,
+}
+
+impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
+    fn execute(&self, future: F) {
+        let force = self.force.clone();
+        let task = self.tasks.track_future(async move {
+            tokio::select! {
+                biased;
+                () = force.cancelled() => {},
+                _ = future => {},
+            }
+        });
+        TokioExecutor::new().execute(task);
     }
 }
 
 #[derive(Clone)]
 struct ConnectionDriver {
-    builder: auto::Builder<TokioExecutor>,
+    builder: auto::Builder<ListenerExecutor>,
+    executor: ListenerExecutor,
     // template:begin grpc:http2-driver-preface-budget
     preface_timeout: Option<Duration>,
     // template:end grpc:http2-driver-preface-budget
@@ -320,7 +400,8 @@ const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 // template:end grpc:http2-wire-limits
 
 fn http1_driver(options: Http1Options) -> ConnectionDriver {
-    let mut builder = auto::Builder::new(TokioExecutor::new());
+    let executor = ListenerExecutor::default();
+    let mut builder = auto::Builder::new(executor.clone());
     builder
         .http1()
         .timer(TokioTimer::new())
@@ -333,6 +414,7 @@ fn http1_driver(options: Http1Options) -> ConnectionDriver {
         .keep_alive(true);
     ConnectionDriver {
         builder: builder.http1_only(),
+        executor,
         // template:begin grpc:http1-driver-no-preface
         preface_timeout: None,
         // template:end grpc:http1-driver-no-preface
@@ -341,7 +423,8 @@ fn http1_driver(options: Http1Options) -> ConnectionDriver {
 
 // template:begin grpc:http2-driver
 fn http2_driver(options: Http2Options) -> ConnectionDriver {
-    let mut builder = auto::Builder::new(TokioExecutor::new());
+    let executor = ListenerExecutor::default();
+    let mut builder = auto::Builder::new(executor.clone());
     builder
         .http2()
         .timer(TokioTimer::new())
@@ -353,6 +436,7 @@ fn http2_driver(options: Http2Options) -> ConnectionDriver {
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
     ConnectionDriver {
         builder: builder.http2_only(),
+        executor,
         preface_timeout: Some(options.preface_timeout),
     }
 }
@@ -400,6 +484,7 @@ where
             }
         },
     );
+    let delegated = driver.executor.clone();
     let accept = accept_loop(
         bound,
         app,
@@ -419,6 +504,7 @@ where
         accept_failure,
         connection_shutdown,
         connections,
+        delegated,
     }
 }
 

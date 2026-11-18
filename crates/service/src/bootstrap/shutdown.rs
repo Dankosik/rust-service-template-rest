@@ -22,6 +22,7 @@ use super::background::{Background, JoinOutcome};
 use super::signals::Signals;
 
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
+const FORCED_LISTENER_JOIN: Duration = Duration::from_millis(500);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
@@ -359,11 +360,16 @@ async fn stop_serving(
     } else {
         http_config.drain_timeout
     };
-    let drain_budget = wanted.min(drain_deadline.saturating_duration_since(Instant::now()));
+    let graceful_deadline = budget.stage_deadline(wanted).min(drain_deadline);
+    let confirmation_deadline = budget
+        .async_deadline
+        .min(graceful_deadline + FORCED_LISTENER_JOIN);
+    let drain_budget = graceful_deadline.saturating_duration_since(Instant::now());
     tracing::info!(budget = ?drain_budget, "drain_started");
     let drain_failed = drain_listener(
         serving.app_listener.take(),
-        drain_budget,
+        graceful_deadline,
+        confirmation_deadline,
         ListenerKind::Http,
     );
     // template:begin grpc:shutdown-concurrent-grpc-drain
@@ -372,7 +378,8 @@ async fn stop_serving(
             drain_failed,
             drain_listener(
                 serving.grpc_listener.take(),
-                drain_budget,
+                graceful_deadline,
+                confirmation_deadline,
                 ListenerKind::Grpc
             )
         );
@@ -415,12 +422,20 @@ impl ListenerKind {
     }
 }
 
-async fn drain_listener(listener: Option<Server>, budget: Duration, kind: ListenerKind) -> bool {
+async fn drain_listener(
+    listener: Option<Server>,
+    graceful_deadline: Instant,
+    confirmation_deadline: Instant,
+    kind: ListenerKind,
+) -> bool {
     let Some(listener) = listener else {
         return false;
     };
     let events = kind.drain_events();
-    match listener.drain(budget).await {
+    let (drained, residue) = listener
+        .drain_until(graceful_deadline, confirmation_deadline)
+        .await;
+    match drained {
         Ok(Drained::Complete) => {
             tracing::info!("{}", events.completed);
             false
@@ -430,6 +445,9 @@ async fn drain_listener(listener: Option<Server>, budget: Duration, kind: Listen
         }) => {
             tracing::warn!(
                 remaining = remaining_connections,
+                accept_unconfirmed = residue.accept_unconfirmed,
+                remaining_connections = residue.remaining_connections,
+                remaining_delegated_tasks = residue.remaining_delegated_tasks,
                 reason = "in_flight_requests_outlived_drain_budget",
                 "{}",
                 events.forced
@@ -437,7 +455,13 @@ async fn drain_listener(listener: Option<Server>, budget: Duration, kind: Listen
             true
         }
         Err(error) => {
-            tracing::error!(%error, "{}", events.failed);
+            tracing::error!(
+                %error,
+                accept_unconfirmed = residue.accept_unconfirmed,
+                remaining_connections = residue.remaining_connections,
+                remaining_delegated_tasks = residue.remaining_delegated_tasks,
+                "{}", events.failed
+            );
             true
         }
     }
@@ -538,4 +562,111 @@ mod tests {
             Outcome::Degraded
         );
     }
+
+    // template:begin postgres:shutdown-test-listener-before-pool-close
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_handler_releases_before_postgres_close_and_shutdown_stays_degraded() {
+        use std::sync::{Arc, Mutex, mpsc};
+
+        use infra_http_transport::{ConnectionLimits, Http1Options};
+        use tokio::io::AsyncWriteExt;
+
+        let entered = CancellationToken::new();
+        let dropping = CancellationToken::new();
+        let released_before_close = CancellationToken::new();
+        let (release, held) = mpsc::channel();
+        let held = Arc::new(Mutex::new(held));
+        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let handler = {
+            let entered = entered.clone();
+            let dropping = dropping.clone();
+            let pool = pool.clone();
+            let released_before_close = released_before_close.clone();
+            move || {
+                let entered = entered.clone();
+                let dropping = dropping.clone();
+                let held = held.clone();
+                let pool = pool.clone();
+                let released_before_close = released_before_close.clone();
+                async move {
+                    let _guard = std::mem::DropGuard::new(held, move |held| {
+                        dropping.cancel();
+                        tokio::task::block_in_place(|| {
+                            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(3));
+                        });
+                        if !pool.is_closed() {
+                            released_before_close.cancel();
+                        }
+                    });
+                    entered.cancel();
+                    std::future::pending::<&'static str>().await
+                }
+            }
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "shutdown fixture registers a raw route"
+        )]
+        let app = axum::Router::new().route("/", axum::routing::get(handler));
+        let server = Server::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            app,
+            Http1Options {
+                header_read_timeout: Duration::from_secs(2),
+                max_read_buffer_bytes: 8 * 1024,
+                connections: ConnectionLimits {
+                    max_connections: None,
+                    max_connection_age: None,
+                },
+            },
+        )
+        .unwrap();
+        let mut peer = tokio::net::TcpStream::connect(server.local_addr())
+            .await
+            .unwrap();
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.cancelled())
+            .await
+            .unwrap();
+        let mut config = super::super::test_config(&[]);
+        config.http.drain_timeout = Duration::from_millis(30);
+        let mut signals = Signals::install().unwrap();
+        let shutdown = run(Plan {
+            http_config: &config.http,
+            signals: &mut signals,
+            deadline: Instant::now() + config.http.grace_period,
+            serving: Serving {
+                app_listener: Some(server),
+                ..Serving::default()
+            },
+            background: Background::new(CancellationToken::new()),
+            dependencies: Dependencies {
+                postgres: Some(pool.clone()),
+                ..Dependencies::default()
+            },
+            tracer_provider: None,
+            logger: None,
+        });
+        let check_order = async {
+            tokio::time::timeout(Duration::from_secs(2), dropping.cancelled())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), pool.close_event())
+                    .await
+                    .is_err()
+            );
+            release.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(shutdown, check_order);
+        assert_eq!(outcome, Outcome::Degraded);
+        assert!(
+            released_before_close.is_cancelled(),
+            "dependencies closed before handler release"
+        );
+        assert!(pool.is_closed());
+    }
+    // template:end postgres:shutdown-test-listener-before-pool-close
 }
