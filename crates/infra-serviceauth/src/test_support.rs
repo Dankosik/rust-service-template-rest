@@ -16,6 +16,8 @@ use jsonwebtoken::{
     jwk::{Jwk, PublicKeyUse},
 };
 
+use crate::{JwtType, KeyId, ServiceName, SigningOptions};
+
 #[cfg(feature = "test-support")]
 pub use crate::source::has_cached_authorization;
 
@@ -59,6 +61,16 @@ impl TestKey {
     #[must_use]
     pub fn kid(&self) -> &str {
         &self.kid
+    }
+
+    #[must_use]
+    pub fn signing_options(&self, service: &str, jwt_type: &str) -> SigningOptions {
+        SigningOptions {
+            name: ServiceName::parse(service).expect("valid fixture service name"),
+            jwt_type: JwtType::parse(jwt_type).expect("valid fixture JWT type"),
+            key_id: KeyId::parse(self.kid()).expect("valid fixture key id"),
+            private_key: self.pem().into(),
+        }
     }
 
     #[must_use]

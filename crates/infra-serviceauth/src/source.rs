@@ -239,12 +239,7 @@ mod tests {
     }
 
     fn options(key: &TestKey) -> SigningOptions {
-        SigningOptions {
-            name: ServiceName::parse("orders").unwrap(),
-            jwt_type: JwtType::parse("example-svc+jwt").unwrap(),
-            key_id: KeyId::parse(key.kid()).unwrap(),
-            private_key: key.pem().into(),
-        }
+        key.signing_options("orders", "example-svc+jwt")
     }
 
     fn at(tokens: &ReceiverTokens, now: u64) -> HeaderValue {

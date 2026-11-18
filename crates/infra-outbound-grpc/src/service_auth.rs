@@ -83,9 +83,7 @@ mod tests {
     use std::assert_matches;
     use std::time::Duration;
 
-    use infra_serviceauth::{
-        JwtType, KeyId, ServiceName, SigningOptions, TokenSource, test_support::TestKey,
-    };
+    use infra_serviceauth::{TokenSource, test_support::TestKey};
     use operation_context::OperationContext;
     use tower::ServiceExt as _;
 
@@ -95,13 +93,8 @@ mod tests {
     #[tokio::test]
     async fn service_token_client_redacts_debug_and_checks_stops_before_authorization() {
         let key = TestKey::new("orders/2026-10");
-        let source = TokenSource::try_new(SigningOptions {
-            name: ServiceName::parse("orders").unwrap(),
-            jwt_type: JwtType::parse("example-svc+jwt").unwrap(),
-            key_id: KeyId::parse(key.kid()).unwrap(),
-            private_key: key.pem().into(),
-        })
-        .unwrap();
+        let source =
+            TokenSource::try_new(key.signing_options("orders", "example-svc+jwt")).unwrap();
         let origin = http::Uri::from_static("https://peer.example:443");
         let tokens = source.receiver("catalog", origin.clone()).unwrap();
         let plain = Client::try_new(

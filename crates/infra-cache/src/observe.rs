@@ -59,6 +59,13 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
+    fn error_label(self) -> Option<&'static str> {
+        match self {
+            Self::Failed(error_type) => Some(error_type.label()),
+            Self::Hit | Self::Miss | Self::Ok | Self::Cancelled => None,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Hit => "hit",
@@ -82,10 +89,7 @@ impl NamespaceHistograms {
         operation: Operation,
         outcome: Outcome,
     ) -> &Histogram {
-        let error_label = match outcome {
-            Outcome::Failed(error_type) => Some(error_type.label()),
-            Outcome::Hit | Outcome::Miss | Outcome::Ok | Outcome::Cancelled => None,
-        };
+        let error_label = outcome.error_label();
         self.0[operation][outcome].get_or_init(|| {
             if let Some(error_label) = error_label {
                 metrics::histogram!(
@@ -253,10 +257,7 @@ mod tests {
         let outcomes = EnumMap::<Outcome, ()>::default();
         let mut series = HashSet::new();
         for (outcome, ()) in &outcomes {
-            let error_label = match outcome {
-                Outcome::Failed(error_type) => Some(error_type.label()),
-                _ => None,
-            };
+            let error_label = outcome.error_label();
             assert!(
                 series.insert((outcome.label(), error_label)),
                 "{} {error_label:?} is used twice",

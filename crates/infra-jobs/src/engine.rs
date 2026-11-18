@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
-use sqlx::postgres::PgPool;
+use sqlx::{Postgres, pool::PoolConnection, postgres::PgPool};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -452,6 +452,15 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    pub(crate) async fn acquire(
+        &self,
+        operation: &'static str,
+    ) -> Result<PoolConnection<Postgres>, OperationError> {
+        infra_postgres::acquire(&self.pool, operation)
+            .await
+            .map_err(OperationError::Acquire)
+    }
+
     fn new(
         pool: PgPool,
         registry: Kinds,
