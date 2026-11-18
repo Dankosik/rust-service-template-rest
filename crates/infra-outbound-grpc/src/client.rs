@@ -20,7 +20,7 @@ use tokio_util::sync::DropGuard;
 use tonic::body::Body;
 use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
 use tonic::transport::{Channel, Endpoint};
-use tower::{Service, ServiceExt as _};
+use tower::{BoxError, Service, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
@@ -34,7 +34,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type TlsTarget = (TlsConnector, rustls::pki_types::ServerName<'static>);
 type TransportStream = Either<TcpStream, TlsStream<TcpStream>>;
 
@@ -369,9 +368,7 @@ impl Service<http::Uri> for GrpcConnector {
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.http
-            .poll_ready(context)
-            .map_err(|error| Box::new(error) as BoxError)
+        self.http.poll_ready(context).map_err(BoxError::from)
     }
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
@@ -379,23 +376,17 @@ impl Service<http::Uri> for GrpcConnector {
         let tls = self.tls.clone();
         Box::pin(async move {
             let dial = async move {
-                let tcp = http
-                    .call(uri)
-                    .await
-                    .map_err(|error| Box::new(error) as BoxError)?;
-                let tcp = tcp.into_inner();
+                let tcp = http.call(uri).await?.into_inner();
                 match tls {
-                    None => Ok(TokioIo::new(Either::Left(tcp))),
+                    None => Ok::<_, BoxError>(TokioIo::new(Either::Left(tcp))),
                     Some((connector, server_name)) => {
-                        let tls_stream = connector
-                            .connect(server_name, tcp)
-                            .await
-                            .map_err(|error| Box::new(error) as BoxError)?;
+                        let tls_stream = connector.connect(server_name, tcp).await?;
                         if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-                            return Err(Box::new(std::io::Error::new(
+                            return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 "TLS peer did not negotiate h2 ALPN",
-                            )) as BoxError);
+                            )
+                            .into());
                         }
                         Ok(TokioIo::new(Either::Right(tls_stream)))
                     }

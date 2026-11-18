@@ -92,7 +92,7 @@ struct ActiveStream<B: Body> {
     waker: Option<Waker>,
 }
 
-enum StreamStage<B: Body> {
+enum ServerState<B: Body> {
     Active(ActiveStream<B>),
     PendingTrailers(HeaderMap),
     Closed,
@@ -112,27 +112,19 @@ impl<B: Body> StreamFinalizer<B> {
     }
 }
 
-struct ServerState<B: Body> {
-    stage: StreamStage<B>,
-}
-
 impl<B: Body> ServerState<B> {
     fn is_expired(&self) -> bool {
-        let StreamStage::Active(active) = &self.stage else {
+        let Self::Active(active) = self else {
             return false;
         };
         active.deadline.is_some_and(Deadline::expired)
     }
 
-    fn transition(
-        &mut self,
-        next: StreamStage<B>,
-        outcome: ServerOutcome,
-    ) -> Option<StreamFinalizer<B>> {
-        match std::mem::replace(&mut self.stage, next) {
-            StreamStage::Active(active) => Some(StreamFinalizer { active, outcome }),
+    fn transition(&mut self, next: Self, outcome: ServerOutcome) -> Option<StreamFinalizer<B>> {
+        match std::mem::replace(self, next) {
+            Self::Active(active) => Some(StreamFinalizer { active, outcome }),
             other => {
-                self.stage = other;
+                *self = other;
                 None
             }
         }
@@ -142,7 +134,7 @@ impl<B: Body> ServerState<B> {
         let mut trailers = HeaderMap::new();
         let _ = status.add_header(&mut trailers);
         self.transition(
-            StreamStage::PendingTrailers(trailers),
+            Self::PendingTrailers(trailers),
             ServerOutcome::from_status(status),
         )
     }
@@ -164,16 +156,14 @@ impl<B: Body> ServerState<B> {
             Poll::Ready(Some(Err(_)) | None) => ServerOutcome::unknown(),
             Poll::Pending => return None,
         };
-        self.transition(StreamStage::Closed, outcome)
+        self.transition(Self::Closed, outcome)
     }
 
     fn pop_terminal(&mut self) -> FramePoll<B::Error> {
-        match std::mem::replace(&mut self.stage, StreamStage::Closed) {
-            StreamStage::PendingTrailers(trailers) => {
-                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-            }
+        match std::mem::replace(self, Self::Closed) {
+            Self::PendingTrailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             stage => {
-                self.stage = stage;
+                *self = stage;
                 Poll::Ready(None)
             }
         }
@@ -221,30 +211,28 @@ where
         initial: Option<ServerOutcome>,
     ) -> Self {
         let body_ended = body.is_end_stream();
-        let mut state = ServerState {
-            stage: StreamStage::Active(ActiveStream {
-                body,
-                call,
-                _permit: custody.permit,
-                _cancel_on_drop: custody.cancel_on_drop,
-                deadline: custody.deadline,
-                fallback,
-                waker: None,
-            }),
-        };
+        let mut state = ServerState::Active(ActiveStream {
+            body,
+            call,
+            _permit: custody.permit,
+            _cancel_on_drop: custody.cancel_on_drop,
+            deadline: custody.deadline,
+            fallback,
+            waker: None,
+        });
         let finalizer = if let Some(outcome) = initial {
-            state.transition(StreamStage::Closed, outcome)
+            state.transition(ServerState::Closed, outcome)
         } else if state.is_expired() {
             state.stage_status_trailers(&deadline_status())
         } else if body_ended {
-            state.transition(StreamStage::Closed, ServerOutcome::unknown())
+            state.transition(ServerState::Closed, ServerOutcome::unknown())
         } else {
             None
         };
         if let Some(finalizer) = finalizer {
             finalizer.emit();
         }
-        let response_active = matches!(state.stage, StreamStage::Active(_));
+        let response_active = matches!(state, ServerState::Active(_));
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
             timer: None,
@@ -340,7 +328,7 @@ where
         let (polled, finalizer) = if state.is_expired() {
             state.cut_off(&deadline_status())
         } else {
-            let StreamStage::Active(active) = &mut state.stage else {
+            let ServerState::Active(active) = &mut *state else {
                 return state.pop_terminal();
             };
             register_waker(&mut active.waker, cx.waker());
@@ -373,14 +361,14 @@ where
 
     fn is_end_stream(&self) -> bool {
         let guard = self.state.lock();
-        matches!(guard.stage, StreamStage::Closed)
+        matches!(*guard, ServerState::Closed)
     }
 
     fn size_hint(&self) -> SizeHint {
         let guard = self.state.lock();
-        match &guard.stage {
-            StreamStage::Active(active) => active.body.size_hint(),
-            StreamStage::PendingTrailers(_) | StreamStage::Closed => SizeHint::with_exact(0),
+        match &*guard {
+            ServerState::Active(active) => active.body.size_hint(),
+            ServerState::PendingTrailers(_) | ServerState::Closed => SizeHint::with_exact(0),
         }
     }
 }
@@ -389,7 +377,7 @@ impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
         let stage = {
             let mut guard = self.state.lock();
-            std::mem::replace(&mut guard.stage, StreamStage::Closed)
+            std::mem::replace(&mut *guard, ServerState::Closed)
         };
         drop(self.timer.take());
         drop(stage);

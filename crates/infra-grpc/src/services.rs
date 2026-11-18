@@ -253,18 +253,24 @@ impl Services {
         })
     }
 
+    fn method_paths(
+        &self,
+        services: impl Iterator<Item = &'static str>,
+    ) -> impl Iterator<Item = (String, CallType)> {
+        services.flat_map(|service| {
+            self.described
+                .get(service)
+                .into_iter()
+                .flatten()
+                .map(move |(method, call_type)| (method_path(service, method), *call_type))
+        })
+    }
+
     pub(crate) fn methods(&self) -> Methods {
+        let services = self.names.iter().copied().chain([HealthServer::NAME]);
         Methods::new(
-            self.names
-                .iter()
-                .copied()
-                .chain([HealthServer::NAME])
-                .flat_map(|service| {
-                    let methods = self.described.get(service).into_iter().flatten();
-                    methods.map(move |(method, call_type)| {
-                        (method_path(service, method).into_boxed_str(), *call_type)
-                    })
-                }),
+            self.method_paths(services)
+                .map(|(path, kind)| (path.into_boxed_str(), kind)),
         )
     }
 
@@ -316,13 +322,11 @@ impl Services {
                 self.scopes.entry(path.to_owned()).or_default();
             }
         }
-        for service in &self.names {
-            for (method, _) in self.described.get(*service).into_iter().flatten() {
-                let path = method_path(service, method);
-                if !self.scopes.contains_key(&path) {
-                    return Err(Error::MissingScopeRequirement(path));
-                }
-            }
+        if let Some((path, _)) = self
+            .method_paths(self.names.iter().copied())
+            .find(|(path, _)| !self.scopes.contains_key(path))
+        {
+            return Err(Error::MissingScopeRequirement(path));
         }
         Ok(())
     }
@@ -355,13 +359,11 @@ impl Services {
     }
 
     pub(crate) fn validate_caller_rules(&self) -> Result<(), Error> {
-        for service in &self.names {
-            for (method, _) in self.described.get(*service).into_iter().flatten() {
-                let path = method_path(service, method);
-                if !self.caller_rules.contains_key(&path) {
-                    return Err(Error::MissingCallerRule(path));
-                }
-            }
+        if let Some((path, _)) = self
+            .method_paths(self.names.iter().copied())
+            .find(|(path, _)| !self.caller_rules.contains_key(path))
+        {
+            return Err(Error::MissingCallerRule(path));
         }
         Ok(())
     }
