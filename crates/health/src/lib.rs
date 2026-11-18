@@ -434,27 +434,21 @@ impl Readiness {
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
             let probe_name = probe.name();
             let result = tokio::time::timeout_at(deadline, probe.check()).await;
-            let (outcome, label) = match result.ok().filter(|_| Instant::now() <= deadline) {
-                Some(Ok(())) => (Ok(()), "ok"),
-                Some(Err(error)) => (
-                    Err(ProbeFailure::Failed {
-                        probe: probe_name,
-                        error,
-                    }),
-                    "failed",
-                ),
-                None => (
-                    Err(ProbeFailure::TimedOut {
-                        probe: probe_name,
-                        budget,
-                    }),
-                    "timed_out",
-                ),
+            let outcome = match result.ok().filter(|_| Instant::now() <= deadline) {
+                Some(Ok(())) => Ok(()),
+                Some(Err(error)) => Err(ProbeFailure::Failed {
+                    probe: probe_name,
+                    error,
+                }),
+                None => Err(ProbeFailure::TimedOut {
+                    probe: probe_name,
+                    budget,
+                }),
             };
             metrics::counter!(
                 PROBE_CHECKS_METRIC,
                 "probe" => probe_name,
-                "outcome" => label
+                "outcome" => outcome_label(&outcome)
             )
             .increment(1);
             outcome

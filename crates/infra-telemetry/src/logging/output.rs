@@ -27,9 +27,7 @@ pub(super) fn on_writer_thread() -> bool {
     WRITER_CONTEXT.try_with(Cell::get).unwrap_or(false)
 }
 
-pub(super) struct Record {
-    pub(super) bytes: Box<[u8]>,
-}
+pub(super) type Record = Box<[u8]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum DropReason {
@@ -378,13 +376,13 @@ fn write_records<W: Write>(
             gather(&records, BATCH_WINDOW);
         }
         batch.clear();
-        batch.push(&first.bytes);
+        batch.push(&first);
         while let Ok(record) = records.try_recv() {
-            if !batch.fits(record.bytes.len()) {
+            if !batch.fits(record.len()) {
                 carried = Some(record);
                 break;
             }
-            batch.push(&record.bytes);
+            batch.push(&record);
         }
         batch.write(&mut writer, shared);
         last_write = Some(Instant::now());
@@ -544,9 +542,7 @@ mod tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
     fn record(bytes: &[u8]) -> Record {
-        Record {
-            bytes: bytes.into(),
-        }
+        bytes.into()
     }
 
     struct GatedWriter {
@@ -924,9 +920,7 @@ mod tests {
         for line in &lines {
             let mut bytes = padded.to_vec();
             bytes.extend_from_slice(line.as_bytes());
-            output.submit(Record {
-                bytes: bytes.into(),
-            });
+            output.submit(bytes.into());
         }
         assert_eq!(guard.snapshot().dropped.into_array(), [0; 6]);
         release.send(()).expect("resume sink");
