@@ -434,6 +434,36 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
+    create_effects(&pool).await;
+    let store = Store::new(pool.clone(), RETENTION)
+        .unwrap()
+        .with_terminal_refusals(true);
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let refusal = Record::capture_terminal_refusal(
+        StatusCode::CONFLICT,
+        &HeaderMap::new(),
+        Bytes::from_static(b"refused"),
+    )
+    .unwrap();
+    let result = store
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            if tx.begin_command_savepoint().await.is_ok() {
+                tx.rollback_command_savepoint().await.unwrap();
+            }
+            Ok(refusal.clone())
+        })
+        .await;
+    assert_eq!(committed(result), refusal);
+    assert_eq!(records(&pool, &scope).await, 1);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
     const CHANNEL: &str = "idempotency_test_wakeup";
     let mut listener = sqlx::postgres::PgListener::connect_with(&pool)

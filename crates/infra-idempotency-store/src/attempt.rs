@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    BudgetedTx, CommandSavepoint, Tx, TxError, TxMode, failure_cause, in_tx_with,
-    in_tx_with_acquire_deadline, in_tx_with_deadline, is_transient, observed, sqlstate,
+    BudgetedTx, Tx, TxError, TxMode, failure_cause, in_tx_with, in_tx_with_acquire_deadline,
+    in_tx_with_deadline, is_transient, observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -187,24 +187,21 @@ impl Store {
         if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
             return Err(Stop::Decided(decision));
         }
-        let savepoint =
-            if self.terminal_refusals {
-                Some(CommandSavepoint::begin(tx).await.map_err(|err| {
-                    failed(&err, "savepoint", AttemptError::classify_sql(&err), None)
-                })?)
-            } else {
-                None
-            };
+        if self.terminal_refusals {
+            tx.begin_command_savepoint()
+                .await
+                .map_err(|err| failed(&err, "savepoint", AttemptError::classify_sql(&err), None))?;
+        }
         let record = work(tx).await.map_err(Stop::RolledBack)?;
         if record.is_terminal_refusal() {
-            let savepoint = savepoint.ok_or_else(|| {
-                refused(
+            if !self.terminal_refusals {
+                return Err(Stop::Failed(refused(
                     "command",
                     AttemptError::Internal,
                     "undeclared_terminal_refusal",
-                )
-            })?;
-            savepoint.rollback(tx).await.map_err(|err| {
+                )));
+            }
+            tx.rollback_command_savepoint().await.map_err(|err| {
                 failed(
                     &err,
                     "rollback_command",
