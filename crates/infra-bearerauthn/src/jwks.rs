@@ -13,10 +13,12 @@ use jsonwebtoken::{
     jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse},
 };
 use serde::Deserialize;
+use tokio::time::Instant;
 
 use crate::{
-    EndpointUrl, JsonObject, PreparationReason, ProviderFailure, VerificationError,
-    VerificationReason,
+    EndpointUrl, IssuerUrl, JsonObject, PreparationError, PreparationPhase, PreparationReason,
+    ProviderFailure, VerificationError, VerificationReason,
+    jwt::discover_jwks_uri,
     provider::{Document, ProviderClient},
 };
 
@@ -463,39 +465,71 @@ fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(bytes[start..].to_vec())
 }
 
-pub(crate) async fn fetch_key_set(
-    provider: &ProviderClient,
-    jwks_uri: &EndpointUrl,
-    algorithms: &[JwtAlgorithm],
-    deadline: Option<tokio::time::Instant>,
-) -> Result<Arc<KeySet>, KeySetFailure> {
-    let bytes = provider
-        .get_document(jwks_uri.url(), Document::Jwks, deadline)
-        .await
-        .map_err(KeySetFailure::Fetch)?;
-    Ok(Arc::new(parse_key_set(&bytes, algorithms)?))
+pub(crate) enum JwksSource {
+    Configured(EndpointUrl),
+    Discovery(IssuerUrl),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl JwksSource {
+    pub(crate) async fn fetch(
+        &self,
+        provider: &ProviderClient,
+        algorithms: &[JwtAlgorithm],
+        deadline: Instant,
+    ) -> Result<Arc<KeySet>, KeySetFailure> {
+        let started = Instant::now();
+        let discovered;
+        let uri = match self {
+            Self::Configured(uri) => uri,
+            Self::Discovery(issuer) => {
+                discovered = discover_jwks_uri(provider, issuer, deadline)
+                    .await
+                    .map_err(KeySetFailure::Discovery)?;
+                if Instant::now() >= deadline {
+                    return Err(KeySetFailure::Discovery(PreparationError::new(
+                        PreparationPhase::Discovery,
+                        PreparationReason::Timeout,
+                    )));
+                }
+                &discovered
+            }
+        };
+        let bytes = provider
+            .get_document(uri.url(), Document::Jwks, Some(deadline))
+            .await
+            .map_err(KeySetFailure::Fetch)?;
+        let mut keys = parse_key_set(&bytes, algorithms)?;
+        if matches!(self, Self::Discovery(_)) {
+            keys.acquired_at = started;
+        }
+        Ok(Arc::new(keys))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum KeySetFailure {
+    Discovery(PreparationError),
     Fetch(ProviderFailure),
     Parse,
     NoUsableKeys,
 }
 
-impl From<KeySetFailure> for PreparationReason {
+impl From<KeySetFailure> for PreparationError {
     fn from(failure: KeySetFailure) -> Self {
-        match failure {
-            KeySetFailure::Fetch(failure) => Self::Fetch(failure),
-            KeySetFailure::Parse => Self::Parse,
-            KeySetFailure::NoUsableKeys => Self::NoUsableKeys,
-        }
+        let reason = match failure {
+            KeySetFailure::Discovery(error) => return error,
+            KeySetFailure::Fetch(failure) => PreparationReason::Fetch(failure),
+            KeySetFailure::Parse => PreparationReason::Parse,
+            KeySetFailure::NoUsableKeys => PreparationReason::NoUsableKeys,
+        };
+        Self::new(PreparationPhase::Jwks, reason)
     }
 }
 
 impl KeySetFailure {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
+            Self::Discovery(_) => "discovery",
             Self::Fetch(_) => "fetch",
             Self::Parse => "parse",
             Self::NoUsableKeys => "no_usable_keys",

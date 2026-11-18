@@ -17,6 +17,7 @@ use crate::{
 
 mod prepare;
 
+pub(crate) use prepare::discover_jwks_uri;
 pub use prepare::{JwtOptions, RefreshTask, prepare_jwt};
 
 #[cfg(feature = "test-support")]

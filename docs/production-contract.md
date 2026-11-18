@@ -114,6 +114,9 @@ Choose `authn.jwks_max_age` from the maximum acceptable delay in observing a
 withdrawn key and the provider outage the service must survive. Allow for the
 normal refresh interval and acquisition time. Exercise an outage across the
 chosen limit, then restore the endpoint and confirm authentication recovers.
+For a discovered JWKS endpoint, rehearse moving `jwks_uri` while the previous
+endpoint still serves its old keys. Verify the replica accepts the new signing
+key and rejects the withdrawn key without restarting.
 <!-- template:end oidc-jwt:production-jwt-issuer-contract -->
 
 <!-- template:begin oidc-introspection:production-introspection-issuer-contract -->
