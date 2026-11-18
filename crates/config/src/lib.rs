@@ -51,7 +51,7 @@ mod validate;
 
 use serde::Deserialize;
 
-use validate::Violations;
+use validate::admit_with;
 
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
@@ -153,63 +153,57 @@ impl ConfigInput {
         self,
         shutdown_tail: Option<ShutdownTail>,
     ) -> Result<Config, ValidationErrors> {
-        let mut violations = Violations::default();
-        let v = &mut violations;
-        self.app.validate(v);
-        #[allow(
-            unused_variables,
-            reason = "only the gRPC profile consumes the HTTP drain budget"
-        )]
-        let (http, drain_budget) = self.http.admit(shutdown_tail, v);
-        // template:begin grpc:config-admit
-        let grpc = self.grpc.admit(drain_budget, v);
-        // template:end grpc:config-admit
-        // template:begin inbound-webhooks:config-inbound-webhooks-validate
-        let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
-        // template:end inbound-webhooks:config-inbound-webhooks-validate
-        // template:begin webhooks:config-outbound-webhooks-validate
-        let outbound_webhook_endpoints = self.webhooks.endpoint_ids(v);
-        // template:end webhooks:config-outbound-webhooks-validate
-        self.health.validate(v);
-        self.log.validate(v);
-        self.runtime.validate(v);
-        self.observability.validate(v);
-        // template:begin cache:config-admit
-        let cache = self.cache.admit(self.app.is_local_development(), v);
-        // template:end cache:config-admit
-        // template:begin object-storage:config-admit
-        let object_storage = self
-            .object_storage
-            .admit(self.app.is_local_development(), v);
-        // template:end object-storage:config-admit
-        // template:begin authn:config-admit
-        let authn = self.authn.admit(v);
-        // template:end authn:config-admit
-        // template:begin service-auth:config-service-auth-admit
-        let grpc_enabled = !matches!(grpc, Ok(None));
-        let service_auth =
-            self.service_auth
-                .admit(self.app.is_local_development(), grpc_enabled, v);
-        if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
-            && matches!(listener.security, GrpcListenerSecurity::Plaintext)
-        {
-            v.check(Err(ValidationError::new(
-                "grpc.security",
-                "must be tls when the listener verifies service JWTs",
-            )));
-        }
-        // template:end service-auth:config-service-auth-admit
-        // template:begin postgres:config-admit
-        let postgres = self.postgres.admit(v);
-        // template:end postgres:config-admit
-        // template:begin http-idempotency:config-http-idempotency-validate
-        self.http_idempotency.validate(v);
-        // template:end http-idempotency:config-http-idempotency-validate
-        #[allow(
-            clippy::redundant_closure_call,
-            reason = "the closure scopes `?` on admitted sections; without those profiles it has none"
-        )]
-        let admitted: Result<Config, validate::Rejected> = (|| {
+        admit_with(|v| {
+            self.app.validate(v);
+            #[allow(
+                unused_variables,
+                reason = "only the gRPC profile consumes the HTTP drain budget"
+            )]
+            let (http, drain_budget) = self.http.admit(shutdown_tail, v);
+            // template:begin grpc:config-admit
+            let grpc = self.grpc.admit(drain_budget, v);
+            // template:end grpc:config-admit
+            // template:begin inbound-webhooks:config-inbound-webhooks-validate
+            let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
+            // template:end inbound-webhooks:config-inbound-webhooks-validate
+            // template:begin webhooks:config-outbound-webhooks-validate
+            let outbound_webhook_endpoints = self.webhooks.endpoint_ids(v);
+            // template:end webhooks:config-outbound-webhooks-validate
+            self.health.validate(v);
+            self.log.validate(v);
+            self.runtime.validate(v);
+            self.observability.validate(v);
+            // template:begin cache:config-admit
+            let cache = self.cache.admit(self.app.is_local_development(), v);
+            // template:end cache:config-admit
+            // template:begin object-storage:config-admit
+            let object_storage = self
+                .object_storage
+                .admit(self.app.is_local_development(), v);
+            // template:end object-storage:config-admit
+            // template:begin authn:config-admit
+            let authn = self.authn.admit(v);
+            // template:end authn:config-admit
+            // template:begin service-auth:config-service-auth-admit
+            let grpc_enabled = !matches!(grpc, Ok(None));
+            let service_auth =
+                self.service_auth
+                    .admit(self.app.is_local_development(), grpc_enabled, v);
+            if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
+                && matches!(listener.security, GrpcListenerSecurity::Plaintext)
+            {
+                v.check(Err(ValidationError::new(
+                    "grpc.security",
+                    "must be tls when the listener verifies service JWTs",
+                )));
+            }
+            // template:end service-auth:config-service-auth-admit
+            // template:begin postgres:config-admit
+            let postgres = self.postgres.admit(v);
+            // template:end postgres:config-admit
+            // template:begin http-idempotency:config-http-idempotency-validate
+            self.http_idempotency.validate(v);
+            // template:end http-idempotency:config-http-idempotency-validate
             Ok(Config(ServiceSections {
                 app: self.app,
                 http,
@@ -245,8 +239,7 @@ impl ConfigInput {
                 http_idempotency: self.http_idempotency,
                 // template:end http-idempotency:config-http-idempotency-admitted-field
             }))
-        })();
-        violations.finish(admitted)
+        })
     }
 }
 

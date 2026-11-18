@@ -51,14 +51,7 @@ where
     D: serde::Deserializer<'de>,
 {
     blank_as_none::<_, String>(deserializer)?
-        .map(|text| {
-            crate::de::parse_duration(&text).ok_or_else(|| {
-                serde::de::Error::invalid_value(
-                    serde::de::Unexpected::Str(&text),
-                    &"a duration such as 24h",
-                )
-            })
-        })
+        .map(|text| crate::de::decoded_duration(&text, "a duration such as 24h"))
         .transpose()
 }
 

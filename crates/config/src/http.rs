@@ -177,46 +177,36 @@ fn check_grace_budget_pair(
     Ok(())
 }
 
-struct DrainCheck {
-    in_range: bool,
-    fits_grace: bool,
-}
-
 fn validate_grace_and_drain(
     grace_period: Duration,
     drain_timeout: Duration,
     tail: Option<ShutdownTail>,
     v: &mut Violations,
-) -> DrainCheck {
+) -> bool {
     let range = Duration::from_secs(1)..=Duration::from_mins(10);
     let grace_ok = duration_range("http.grace_period", grace_period, range.clone());
     let drain_ok = duration_range("http.drain_timeout", drain_timeout, range);
     let ranges_ok = grace_ok.is_ok() && drain_ok.is_ok();
-    let in_range = drain_ok.is_ok();
     v.check(grace_ok);
     v.check(drain_ok);
-    let mut fits_grace = false;
-    if ranges_ok {
-        if drain_timeout > grace_period {
-            v.check(Err(ValidationError::new(
-                "http.drain_timeout",
-                format!(
-                    "must be <= http.grace_period ({}), got {}",
-                    crate::de::display_duration(grace_period),
-                    crate::de::display_duration(drain_timeout)
-                ),
-            )));
-        } else {
-            fits_grace = true;
-            if let Some(tail) = tail {
-                v.check(check_grace_budget_pair(grace_period, drain_timeout, tail));
-            }
-        }
+    if !ranges_ok {
+        return false;
     }
-    DrainCheck {
-        in_range,
-        fits_grace,
+    if drain_timeout > grace_period {
+        v.check(Err(ValidationError::new(
+            "http.drain_timeout",
+            format!(
+                "must be <= http.grace_period ({}), got {}",
+                crate::de::display_duration(grace_period),
+                crate::de::display_duration(drain_timeout)
+            ),
+        )));
+        return false;
     }
+    if let Some(tail) = tail {
+        v.check(check_grace_budget_pair(grace_period, drain_timeout, tail));
+    }
+    true
 }
 
 impl<Propagation> HttpFields<Propagation> {
@@ -289,10 +279,11 @@ impl HttpInput {
         tail: Option<ShutdownTail>,
         v: &mut Violations,
     ) -> (HttpConfig, Option<Duration>) {
-        let drain = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
+        let drain_fits_grace =
+            validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let readiness_propagation_delay = self.readiness_propagation_delay.0;
         let mut propagation_fits_drain = false;
-        if drain.in_range && drain.fits_grace {
+        if drain_fits_grace {
             if readiness_propagation_delay >= self.drain_timeout {
                 v.check(Err(ValidationError::new(
                     "http.readiness_propagation_delay",

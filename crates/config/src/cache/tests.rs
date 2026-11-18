@@ -64,7 +64,7 @@ fn a_local_environment_name_alone_refuses_each_cache_exception() {
         let result = load_from(
             &LoadOptions::default(),
             BUILD,
-            [("APP__APP__ENV", "local"), (variable, "true")],
+            env(&[("APP__APP__ENV", "local"), (variable, "true")]),
         );
         std::assert_matches!(result, Err(Error::Validate(errors)) if errors.names(key));
     }
