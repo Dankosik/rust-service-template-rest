@@ -17,6 +17,8 @@ use crate::{
     request_admission::{AdmissionRefusal, take_request_subject},
 };
 
+type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
+
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
@@ -63,50 +65,32 @@ impl AuthenticatedClient {
             context: Some(context.clone()),
         }
     }
-}
 
-impl Service<Request<Body>> for AuthenticatedClient {
-    type Response = Response<Body>;
-    type Error = Status;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+    fn begin_call(&self, mut request: Request<Body>) -> Result<RpcFuture, Status> {
         if let Some(context) = &self.context {
             if request.extensions().get::<OperationContext>().is_some() {
-                let status = self.resource.refuse_call(
+                return Err(self.resource.refuse_call(
                     &request,
                     Status::internal("request operation context conflicts with client context"),
-                );
-                return Box::pin(std::future::ready(Err(status)));
+                ));
             }
             request.extensions_mut().insert(context.clone());
         }
         let subject = take_request_subject(&mut request);
-        let mut prepared = match self.resource.prepare_call(request) {
-            Ok(prepared) => prepared,
-            Err(status) => {
-                let status = match status.code() {
+        let mut prepared =
+            self.resource
+                .prepare_call(request)
+                .map_err(|status| match status.code() {
                     Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
                     Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
                     _ => status,
-                };
-                return Box::pin(std::future::ready(Err(status)));
-            }
-        };
+                })?;
         let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
         let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
             Ok(grant) => grant,
-            Err(refusal) => {
-                return Box::pin(std::future::ready(Err(
-                    prepared.refuse(admission_status(refusal))
-                )));
-            }
+            Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
         };
-        Box::pin(async move {
+        Ok(Box::pin(async move {
             let token = match grant
                 .acquire_for_request(acquisition_deadline(&context))
                 .await
@@ -134,7 +118,22 @@ impl Service<Request<Body>> for AuthenticatedClient {
                     },
                 )
                 .await
-        })
+        }))
+    }
+}
+
+impl Service<Request<Body>> for AuthenticatedClient {
+    type Response = Response<Body>;
+    type Error = Status;
+    type Future = RpcFuture;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request<Body>) -> Self::Future {
+        self.begin_call(request)
+            .unwrap_or_else(|status| Box::pin(std::future::ready(Err(status))))
     }
 }
 

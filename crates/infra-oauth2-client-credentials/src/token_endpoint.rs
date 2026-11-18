@@ -13,7 +13,7 @@ use url::{Url, form_urlencoded::Serializer};
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Rejection, ServiceTokenTarget,
-    assertion::Signer, credentials::acquisition_stopped, token::Token,
+    assertion::Signer, token::Token,
 };
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -86,7 +86,7 @@ impl TokenEndpoint {
         context: &RequestContext,
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let check = || context.check().map_err(acquisition_stopped);
+        let check = || context.check().map_err(AcquisitionError::from);
         let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
             record_acquisition(grant, error.label());

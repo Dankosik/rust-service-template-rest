@@ -4,7 +4,7 @@ use std::{
 };
 
 use infra_outbound_http::{Client, RequestContext};
-use operation_context::{Deadline, OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
@@ -308,7 +308,7 @@ impl TokenSource<OnBehalfOf> {
         };
         let acquired = tokio::select! {
             biased;
-            stopped = deadline.context.wait_stopped() => return Err(acquisition_stopped(stopped)),
+            stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
             _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
             result = acquisition => result,
         };
@@ -526,7 +526,7 @@ impl AcquisitionDeadline<'_> {
 
     fn stopped_error(self) -> Option<AcquisitionError> {
         self.expired_error()
-            .or_else(|| self.context.stopped().map(acquisition_stopped))
+            .or_else(|| self.context.stopped().map(AcquisitionError::from))
     }
 }
 
@@ -549,13 +549,6 @@ fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     match error {
         AcquisitionError::Timeout => AcquisitionError::Unavailable,
         other => other,
-    }
-}
-
-pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
-    match stopped {
-        Stopped::Deadline => AcquisitionError::Timeout,
-        Stopped::Cancelled => AcquisitionError::Cancelled,
     }
 }
 

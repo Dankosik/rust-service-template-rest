@@ -447,7 +447,9 @@ async fn start(
     }
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
-    cache::open(config, &mut dependencies.cache).await?;
+    if let Some(settings) = &config.cache {
+        dependencies.cache = Some(cache::open(settings).await?);
+    }
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = object_storage::open(config)?;

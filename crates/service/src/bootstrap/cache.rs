@@ -1,15 +1,7 @@
-use infra_cache::{Cache, CacheOptions, ClientCertificate};
-use service_config::Config;
+use infra_cache::{Cache, CacheError, CacheOptions, ClientCertificate};
+use service_config::CacheConfig;
 
-use super::BootstrapError;
-
-pub(super) async fn open(
-    config: &Config,
-    retained: &mut Option<Cache>,
-) -> Result<(), BootstrapError> {
-    let Some(cache) = &config.cache else {
-        return Ok(());
-    };
+pub(super) async fn open(cache: &CacheConfig) -> Result<Cache, CacheError> {
     let options = CacheOptions {
         dsn: cache.dsn.clone(),
         password_file: cache.password_file.clone(),
@@ -27,8 +19,7 @@ pub(super) async fn open(
         max_key_bytes: usize::try_from(cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
         max_value_bytes: usize::try_from(cache.max_value_bytes.as_u64()).unwrap_or(usize::MAX),
     };
-    *retained = Some(Cache::start(options).await?);
-    Ok(())
+    Cache::start(options).await
 }
 
 #[cfg(test)]

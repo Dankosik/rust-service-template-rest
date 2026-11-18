@@ -84,14 +84,13 @@ impl Call {
     }
 
     fn record(&self, code: tonic::Code) {
-        let names = status_code_names(code as usize);
-        self.span.set_attribute("rpc.status_code", names.span);
+        let span_code = status_code_names(code as usize).span;
+        self.span.set_attribute("rpc.status_code", span_code);
         if otel_http::grpc::status_is_error(code as u16, false) {
-            self.span.set_attribute("error.type", names.span);
+            self.span.set_attribute("error.type", span_code);
             self.span.set_status(SpanStatus::error(""));
         }
-        self.metrics
-            .handled(code, names.metric, self.started.elapsed());
+        self.metrics.handled(code, self.started.elapsed());
     }
 }
 
@@ -244,7 +243,7 @@ impl MethodMetrics {
         self.rpc_method.as_deref().unwrap_or("grpc")
     }
 
-    fn handled(&self, code: tonic::Code, metric_code: &'static str, elapsed: Duration) {
+    fn handled(&self, code: tonic::Code, elapsed: Duration) {
         self.handling_seconds.record(elapsed.as_secs_f64());
         self.handled[code as usize]
             .get_or_init(|| {
@@ -252,7 +251,7 @@ impl MethodMetrics {
                     CLIENT_HANDLED_METRIC,
                     "grpc_service" => self.service.clone(),
                     "grpc_method" => self.method.clone(),
-                    "grpc_code" => metric_code,
+                    "grpc_code" => status_code_names(code as usize).metric,
                 )
             })
             .increment(1);
