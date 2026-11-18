@@ -189,10 +189,7 @@ struct Delivery {
     version: u8,
     endpoint_id: String,
     content_type: String,
-    #[serde_as(
-        serialize_as = "StreamingBase64",
-        deserialize_as = "serde_with::base64::Base64"
-    )]
+    #[serde_as(as = "StreamingBase64")]
     body: Bytes,
 }
 

@@ -14,7 +14,6 @@ use infra_postgres::{
     Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize};
-use serde_with::base64::Base64;
 use serde_with::serde_as;
 use sqlx::postgres::PgPool;
 use tokio::time::Instant;
@@ -70,13 +69,15 @@ impl From<ProtocolError> for Rejection {
     }
 }
 
+pub type MessageId = Bytes;
+
 pub trait Verifier: Send + Sync + 'static {
     fn authenticate(
         &self,
         headers: &HeaderMap,
         body: &[u8],
         now: SystemTime,
-    ) -> Result<Bytes, Rejection>;
+    ) -> Result<MessageId, Rejection>;
 }
 
 impl Verifier for KeyRing {
@@ -85,7 +86,7 @@ impl Verifier for KeyRing {
         headers: &HeaderMap,
         body: &[u8],
         now: SystemTime,
-    ) -> Result<Bytes, Rejection> {
+    ) -> Result<MessageId, Rejection> {
         let verified = self.verify(headers, body, now)?;
         Ok(verified.message_id().clone())
     }
@@ -230,34 +231,6 @@ enum ReceiptFailure {
     UnexpectedDuplicate,
 }
 
-impl ReceiptFailure {
-    const fn stage(&self) -> &'static str {
-        match self {
-            Self::Query(_) => "insert_receipt",
-            Self::Enqueue(_) | Self::UnexpectedDuplicate => "enqueue",
-            Self::Transaction(_) | Self::Deadline(_) => "transaction",
-        }
-    }
-
-    const fn reason(&self) -> &'static str {
-        match self {
-            Self::UnexpectedDuplicate => "integrity",
-            Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
-            Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) | Self::Deadline(_) => {
-                "unavailable"
-            }
-        }
-    }
-
-    fn driver(&self) -> Option<&sqlx::Error> {
-        match self {
-            Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
-            Self::Transaction(err) => Some(err.driver()),
-            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::Deadline(_) => None,
-        }
-    }
-}
-
 fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
     tracing::info!(
         webhook.endpoint = endpoint_id,
@@ -268,11 +241,23 @@ fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
 }
 
 fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveError {
-    let driver = error.driver();
+    let (stage, reason, driver) = match error {
+        ReceiptFailure::Query(err) => ("insert_receipt", "unavailable", Some(err)),
+        ReceiptFailure::Enqueue(EnqueueError::Database(err)) => {
+            ("enqueue", "unavailable", Some(err))
+        }
+        ReceiptFailure::Enqueue(_) => ("enqueue", "unavailable", None),
+        ReceiptFailure::UnexpectedDuplicate => ("enqueue", "integrity", None),
+        ReceiptFailure::Transaction(err @ TxError::CommitUnknown(_)) => {
+            ("transaction", "commit_unknown", Some(err.driver()))
+        }
+        ReceiptFailure::Transaction(err) => ("transaction", "unavailable", Some(err.driver())),
+        ReceiptFailure::Deadline(_) => ("transaction", "unavailable", None),
+    };
     tracing::warn!(
         webhook.endpoint = endpoint_id,
-        webhook.reason = error.reason(),
-        webhook.stage = error.stage(),
+        webhook.reason = reason,
+        webhook.stage = stage,
         sqlstate = driver.and_then(sqlstate).as_deref(),
         cause = driver.map(failure_cause),
         "webhook_receipt_unavailable"
@@ -281,7 +266,7 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
 }
 
 struct AdmittedBody<'a> {
-    message_id: Bytes,
+    message_id: MessageId,
     body: ReceiveBody<'a>,
 }
 
@@ -327,16 +312,13 @@ pub struct Incoming {
     version: u8,
     endpoint_id: String,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
-    message_id: Bytes,
+    #[serde_as(as = "StreamingBase64")]
+    message_id: MessageId,
     #[debug("{:?}", content_type.is_some())]
-    #[serde_as(
-        serialize_as = "Option<StreamingBase64>",
-        deserialize_as = "Option<Base64>"
-    )]
+    #[serde_as(as = "Option<StreamingBase64>")]
     content_type: Option<Vec<u8>>,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
+    #[serde_as(as = "StreamingBase64")]
     body: Bytes,
 }
 
