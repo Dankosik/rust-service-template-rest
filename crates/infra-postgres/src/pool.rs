@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
@@ -167,38 +168,39 @@ pub fn prepare_pool_with_notifications(
     let pool = pool_options.connect_lazy_with(connect_options);
     let address = std::ptr::from_ref(pool.options()).addr();
     let mut known = POOL_POLICIES.lock();
-    known.retain(|entry| entry.alive.strong_count() > 0 && entry.options_addr != address);
+    known.retain(|key, entry| *key != address && entry.alive.strong_count() > 0);
     let slots = match options.wait_order {
         WaitOrder::Arrival => None,
         WaitOrder::NewestOnceStanding => Some(Slots::new(options.max_connections.get() as usize)),
     };
     if slots.is_some() || !notifications {
-        known.push(PoolPolicy {
-            options_addr: address,
-            alive: Arc::downgrade(&alive),
-            slots,
-            notifications,
-        });
+        known.insert(
+            address,
+            PoolPolicy {
+                alive: Arc::downgrade(&alive),
+                slots,
+                notifications,
+            },
+        );
     }
     drop(known);
     pool
 }
 
 struct PoolPolicy {
-    options_addr: usize,
     alive: Weak<()>,
     slots: Option<Arc<Slots>>,
     notifications: bool,
 }
 
-static POOL_POLICIES: Mutex<Vec<PoolPolicy>> = Mutex::new(Vec::new());
+static POOL_POLICIES: Mutex<BTreeMap<usize, PoolPolicy>> = Mutex::new(BTreeMap::new());
 
 fn pool_policy<T>(pool: &PgPool, select: impl FnOnce(&PoolPolicy) -> T) -> Option<T> {
     let options_addr = std::ptr::from_ref(pool.options()).addr();
     POOL_POLICIES
         .lock()
-        .iter()
-        .find(|entry| entry.options_addr == options_addr && entry.alive.strong_count() > 0)
+        .get(&options_addr)
+        .filter(|entry| entry.alive.strong_count() > 0)
         .map(select)
 }
 
@@ -607,7 +609,7 @@ mod tests {
     async fn pool_slots_outlive_a_rotated_password_and_end_with_the_pool() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let options_addr = std::ptr::from_ref(pool.options()).addr();
+        let alive = pool_policy(&pool, |policy| Weak::clone(&policy.alive)).unwrap();
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
         assert!(
             take_slot(&pool, deadline, Queue::Regular)
@@ -617,11 +619,6 @@ mod tests {
         );
 
         drop(pool);
-        let known = POOL_POLICIES.lock();
-        assert!(
-            known
-                .iter()
-                .all(|entry| entry.options_addr != options_addr || entry.alive.strong_count() == 0)
-        );
+        assert!(alive.upgrade().is_none());
     }
 }
