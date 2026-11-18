@@ -650,13 +650,11 @@ mod tests {
                     .post
                     .as_mut()
                     .unwrap(),
-                "infraHttpTestCreateWidget",
                 BTreeMap::new(),
                 &BTreeMap::new(),
             )
-            .unwrap_err()
-            .rule(),
-            &Rule::NoSuccess
+            .unwrap_err(),
+            Rule::NoSuccess
         );
 
         for (status, content) in [
@@ -758,7 +756,7 @@ mod tests {
         let successes = BTreeMap::from([("201".to_owned(), response)]);
         let mut operation = Operation::default();
         operation.responses.responses.clone_from(&successes);
-        prepare_success_responses(&mut operation, "create", successes, &BTreeMap::new()).unwrap();
+        prepare_success_responses(&mut operation, successes, &BTreeMap::new()).unwrap();
         let documented = serde_json::to_value(operation.responses.responses).unwrap();
         assert_eq!(
             documented["201"]["content"]["application/json"]["schema"]["$ref"],
