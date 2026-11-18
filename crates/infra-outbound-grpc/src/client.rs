@@ -191,19 +191,18 @@ impl Client {
             call.finish(status.code());
             return Err(status);
         }
-        let permit = match &self.openings {
-            Some(openings) => match Arc::clone(openings).try_acquire_owned() {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    let status = opening.stopped().map_or_else(
-                        || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
-                        client_stopped,
-                    );
-                    call.finish(status.code());
-                    return Err(status);
-                }
-            },
-            None => None,
+        let permit = if let Some(openings) = &self.openings {
+            let Ok(permit) = Arc::clone(openings).try_acquire_owned() else {
+                let status = opening.stopped().map_or_else(
+                    || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
+                    client_stopped,
+                );
+                call.finish(status.code());
+                return Err(status);
+            };
+            Some(permit)
+        } else {
+            None
         };
         Ok(PreparedCall {
             channel: self.channel.clone(),
@@ -493,7 +492,6 @@ fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::sync::Arc;
 
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,

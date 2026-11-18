@@ -1315,19 +1315,13 @@ fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
     let mut services = described();
     services.add(EchoServiceServer::new(Echo::new())).unwrap();
 
-    assert_eq!(
+    assert_matches!(
         services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
-        Err(Error::InvalidScopeToken {
-            path: UNARY_PATH.to_owned(),
-            index: 1,
-        })
+        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
     );
-    assert_eq!(
+    assert_matches!(
         services.require_scopes_for_delegation(UNARY_PATH, &[""]),
-        Err(Error::InvalidScopeToken {
-            path: UNARY_PATH.to_owned(),
-            index: 0,
-        })
+        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
     );
     services
         .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])

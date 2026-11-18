@@ -29,7 +29,7 @@ use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, Tls
 use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
-    test_support::{TestKey, now_secs, registry},
+    test_support::{TestKey, has_cached_authorization, now_secs, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
 use parking_lot::Mutex;
@@ -398,7 +398,13 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         let tokens = source.receiver(receiver, origin.clone()).unwrap();
         EchoServiceClient::new(resource.with_service_tokens(tokens).unwrap())
     };
-    let mut catalog = bound(&source, "catalog");
+    let catalog_tokens = source.receiver("catalog", origin.clone()).unwrap();
+    let mut catalog = EchoServiceClient::new(
+        resource
+            .with_service_tokens(catalog_tokens.clone())
+            .unwrap(),
+    );
+    assert!(!has_cached_authorization(&catalog_tokens));
     let held = resource
         .prepare_call(http::Request::new(tonic::body::Body::empty()))
         .unwrap();
@@ -416,6 +422,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         .unwrap_err();
     assert_eq!(status.code(), Code::ResourceExhausted);
     assert!(echo.seen().is_empty());
+    assert!(!has_cached_authorization(&catalog_tokens));
     drop(held);
 
     for _ in 0..2 {
@@ -427,6 +434,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
             .unwrap();
         assert_eq!(response.into_inner().message, "signed");
     }
+    assert!(has_cached_authorization(&catalog_tokens));
     assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
     let mut elsewhere = bound(&source, "billing");
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();

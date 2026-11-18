@@ -1,4 +1,4 @@
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum TlsMaterialError {
     #[error("gRPC TLS certificate chain is invalid")]
     InvalidCertificate(#[source] Option<rustls::Error>),
@@ -8,7 +8,7 @@ pub enum TlsMaterialError {
     InvalidCaCertificate(#[source] Option<rustls::Error>),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum ClientError {
     #[error("gRPC client destination is not a valid URI")]
     InvalidDestination,
