@@ -6,19 +6,23 @@ use foldhash::HashSet;
 use indexmap::IndexMap;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
+    ThumbprintHash,
 };
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{InvalidKeyId, InvalidServiceName, KeyId, ServiceName};
 
+type CallerKeys = IndexMap<ServiceName, Vec<TrustedKey>, foldhash::quality::RandomState>;
+
 /// RFC 7517 §5
 pub struct TrustRegistry {
-    callers: IndexMap<ServiceName, Vec<TrustedKey>, foldhash::quality::RandomState>,
+    callers: CallerKeys,
 }
 
 pub(crate) struct TrustedKey {
     pub(crate) kid: KeyId,
     pub(crate) key: ParsedPublicKey,
+    thumbprint: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -52,6 +56,23 @@ impl TrustError {
 
 impl TrustRegistry {
     pub fn parse(document: &str) -> Result<Self, TrustError> {
+        let mut callers = Self::parse_caller_keys(document)?;
+        let mut seen = HashSet::default();
+        for (caller, keys) in &callers {
+            for (index, key) in keys.iter().enumerate() {
+                if !seen.insert(key.thumbprint.as_str()) {
+                    return Err(TrustError::new(
+                        Place::Key(caller.clone(), index + 1),
+                        "repeats public key material in the trust registry",
+                    ));
+                }
+            }
+        }
+        callers.sort_keys();
+        Ok(Self { callers })
+    }
+
+    fn parse_caller_keys(document: &str) -> Result<CallerKeys, TrustError> {
         let entries: Entries = serde_json::from_str(document).map_err(|error| {
             let line = error.line();
             let column = error.column();
@@ -83,8 +104,40 @@ impl TrustRegistry {
             let (caller, keys) = parse_caller(&name, set)?;
             callers.insert(caller, keys);
         }
-        callers.sort_keys();
-        Ok(Self { callers })
+        Ok(callers)
+    }
+
+    pub fn check_key_withdrawal(
+        &self,
+        previous_document: &str,
+        old_caller: &str,
+        old_kid: Option<&str>,
+    ) -> Result<(), TrustError> {
+        let previous = Self::parse_caller_keys(previous_document)?;
+        let caller_keys = previous.get(old_caller).ok_or_else(|| {
+            TrustError::document("selected caller is absent from the previous registry")
+        })?;
+        let withdrawn: HashSet<&str> = caller_keys
+            .iter()
+            .filter(|key| old_kid.is_none_or(|kid| key.kid.as_str() == kid))
+            .map(|key| key.thumbprint.as_str())
+            .collect();
+        if withdrawn.is_empty() {
+            return Err(TrustError::document(
+                "selected kid is absent from the previous caller",
+            ));
+        }
+        if self
+            .callers
+            .values()
+            .flatten()
+            .any(|key| withdrawn.contains(key.thumbprint.as_str()))
+        {
+            return Err(TrustError::document(
+                "selected public key material remains in the candidate registry",
+            ));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -271,7 +324,14 @@ fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     let point = shared_rules::rfc7518::p256_point(&x, &y).ok_or("has malformed coordinates")?;
     let key = ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point)
         .map_err(|_| "is not a point on P-256")?;
-    Ok(TrustedKey { kid, key })
+    let thumbprint = jwk
+        .thumbprint(ThumbprintHash::SHA256)
+        .map_err(|_| "cannot compute the public key thumbprint")?;
+    Ok(TrustedKey {
+        kid,
+        key,
+        thumbprint,
+    })
 }
 
 #[cfg(test)]
@@ -302,7 +362,7 @@ mod tests {
     fn admits_each_callers_keys_under_its_own_name() {
         let orders = TestKey::new("orders/production/2026-10");
         let rotated = TestKey::new("orders/production/2027-01");
-        let billing = TestKey::new("billing/production/2026-10");
+        let billing = TestKey::new(orders.kid());
         let document = serde_json::json!({
             "orders": {"keys": [orders.jwk(), rotated.jwk()], "note": "ignored"},
             "billing": {"keys": [billing.jwk()]},
@@ -328,6 +388,67 @@ mod tests {
             let caller = verifier.verify(token.as_bytes(), || Ok(1_000)).unwrap();
             assert_eq!(caller.name().as_str(), issuer, "{}", key.kid());
         }
+    }
+
+    #[test]
+    fn withdrawal_checks_historical_material_across_the_entire_candidate() {
+        let retired = TestKey::new("old").jwk();
+        let retained = TestKey::new("standby").jwk();
+        let mut alias = retired.clone();
+        alias["kid"] = "renamed".into();
+        alias.as_object_mut().unwrap().remove("use");
+        let previous = serde_json::json!({
+            "orders": {"keys": [retired, retained]},
+            "legacy": {"keys": [alias]}
+        })
+        .to_string();
+        assert_eq!(
+            TrustRegistry::parse(&previous).unwrap_err().reason,
+            "repeats public key material in the trust registry"
+        );
+        let candidate = |key| {
+            TrustRegistry::parse(&serde_json::json!({"billing": {"keys": [key]}}).to_string())
+                .unwrap()
+        };
+        let remapped = candidate(alias);
+        assert!(
+            remapped
+                .check_key_withdrawal(&previous, "orders", Some("old"))
+                .is_err()
+        );
+        let standby = candidate(retained);
+        assert!(
+            standby
+                .check_key_withdrawal(&previous, "orders", Some("old"))
+                .is_ok()
+        );
+        assert!(
+            standby
+                .check_key_withdrawal(&previous, "orders", None)
+                .is_err()
+        );
+        let replaced = candidate(TestKey::new("old").jwk());
+        assert!(
+            replaced
+                .check_key_withdrawal(&previous, "orders", None)
+                .is_ok()
+        );
+        assert!(
+            replaced
+                .check_key_withdrawal(&previous, "unknown", None)
+                .is_err()
+        );
+        assert!(
+            replaced
+                .check_key_withdrawal(&previous, "orders", Some("unknown"))
+                .is_err()
+        );
+        let ambiguous = serde_json::json!({"orders": {"keys": [retired, retired]}}).to_string();
+        assert!(
+            replaced
+                .check_key_withdrawal(&ambiguous, "orders", Some("old"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -389,6 +510,7 @@ mod tests {
             (r#"{"orders": []}"#.to_owned(), "caller orders: is not a JWK Set with a keys array"),
             (r#"{"orders": {"keys": []}}"#.to_owned(), "caller orders: has no key"),
             (with(&|_| {}), "caller orders key 2: repeats a kid of this caller"),
+            (with(&|jwk| jwk["kid"] = "other".into()), "caller orders key 2: repeats public key material in the trust registry"),
             (with(&|jwk| jwk["d"] = "AAAA".into()), "caller orders key 2: contains private key material"),
             (with(&|jwk| jwk["crv"] = "P-384".into()), "caller orders key 2: is not an EC P-256 key"),
             (with(&|jwk| jwk["alg"] = "ES384".into()), "caller orders key 2: names an algorithm other than ES256"),

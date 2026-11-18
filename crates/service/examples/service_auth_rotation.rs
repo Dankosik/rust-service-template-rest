@@ -1,6 +1,8 @@
 #![expect(clippy::print_stdout, reason = "the drill prints its operator receipt")]
 
 use std::error::Error;
+use std::io::ErrorKind;
+use std::os::unix::process::ExitStatusExt as _;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -12,6 +14,8 @@ use infra_serviceauth::{
     test_support::{TestKey, registry},
 };
 use tls_test_support::TlsMaterial;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Code, Request};
 
@@ -38,29 +42,34 @@ struct Keys {
     control: Verifier,
 }
 
+fn source(key: &TestKey) -> Result<TokenSource> {
+    Ok(TokenSource::try_new(SigningOptions {
+        name: ServiceName::parse(CALLER)?,
+        jwt_type: JwtType::parse(JWT_TYPE)?,
+        key_id: KeyId::parse(key.kid())?,
+        private_key: key.pem().into(),
+    })?)
+}
+
+fn verifier(trust: &str) -> Result<Verifier> {
+    Ok(Verifier::new(
+        ServiceName::parse(RECEIVER)?,
+        JwtType::parse(JWT_TYPE)?,
+        TrustRegistry::parse(trust)?,
+    ))
+}
+
 impl Keys {
     fn generate() -> Result<Self> {
         let old = TestKey::new("old");
         let new = TestKey::new("new");
-        let source = |key: &TestKey| -> Result<TokenSource> {
-            Ok(TokenSource::try_new(SigningOptions {
-                name: ServiceName::parse(CALLER)?,
-                jwt_type: JwtType::parse(JWT_TYPE)?,
-                key_id: KeyId::parse(key.kid())?,
-                private_key: key.pem().into(),
-            })?)
-        };
         let overlap = registry(&[(CALLER, &[&old, &new])]);
         Ok(Self {
             old: source(&old)?,
             new: source(&new)?,
             old_trust: registry(&[(CALLER, &[&old])]),
             new_trust: registry(&[(CALLER, &[&new])]),
-            control: Verifier::new(
-                ServiceName::parse(RECEIVER)?,
-                JwtType::parse(JWT_TYPE)?,
-                TrustRegistry::parse(&overlap)?,
-            ),
+            control: verifier(&overlap)?,
             overlap,
         })
     }
@@ -178,7 +187,7 @@ impl Receiver {
         request
             .metadata_mut()
             .insert("authorization", authorization);
-        let observed = match self.client.unary(request).await {
+        let observed = match timeout(RPC, self.client.unary(request)).await? {
             Ok(reply) if reply.get_ref().message == "rotation" => Code::Ok,
             Ok(_) => return Err("unexpected authenticated Echo response".into()),
             Err(status) => status.code(),
@@ -188,6 +197,16 @@ impl Receiver {
             return Err(format!("{} returned {observed:?}, expected {want:?}", self.uri).into());
         }
         Ok(())
+    }
+
+    async fn verify_isolated(&mut self, token: &HeaderValue, control: &Verifier) -> Result<()> {
+        self.probe(token, control, Code::Unavailable).await?;
+        let addr = self.uri.authority().ok_or("missing receiver address")?;
+        match timeout(RPC, TcpStream::connect(addr.as_str())).await? {
+            Err(err) if err.kind() == ErrorKind::ConnectionRefused => Ok(()),
+            Err(err) => Err(err.into()),
+            Ok(_) => Err(format!("isolated endpoint {addr} still accepts connections").into()),
+        }
     }
 
     async fn retire(self) -> Result<()> {
@@ -317,16 +336,97 @@ async fn drill(emergency: bool) -> Result<()> {
     Ok(())
 }
 
+async fn cold_emergency() -> Result<()> {
+    let tls = TlsMaterial::new("127.0.0.1");
+    let old = TestKey::new("old");
+    let old_signer = source(&old)?;
+    let old_trust = registry(&[(CALLER, &[&old])]);
+    let old_control = verifier(&old_trust)?;
+    let mut old_receivers = Vec::new();
+    for _ in 0..3 {
+        let mut server = Receiver::start(&tls, &old_trust).await?;
+        let token = server.fresh(&old_signer)?;
+        server.probe(&token, &old_control, Code::Ok).await?;
+        old_receivers.push((server, token));
+    }
+    println!("cold baseline: 3/3 receivers admitted old, replacement key not yet generated");
+    let withdrawal = Instant::now();
+    for (server, _) in &mut old_receivers {
+        server.process.0.kill()?;
+    }
+    for (server, _) in &mut old_receivers {
+        loop {
+            if let Some(status) = server.process.0.try_wait()? {
+                if status.signal() != Some(nix::libc::SIGKILL) {
+                    return Err(format!("{} exited unexpectedly with {status}", server.uri).into());
+                }
+                break;
+            }
+            if withdrawal.elapsed() >= RPC {
+                return Err(
+                    format!("{} did not exit after emergency isolation", server.uri).into(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    for (server, token) in &mut old_receivers {
+        server.verify_isolated(token, &old_control).await?;
+    }
+    let containment_upper_us = withdrawal.elapsed().as_micros().saturating_add(1);
+    println!(
+        "cold containment: 3/3 old processes exited, old RPCs UNAVAILABLE on established channels and 3/3 direct endpoints refused connections, 0/3 serving; containment_upper_us={containment_upper_us}"
+    );
+    drop(old_receivers);
+
+    let new = TestKey::new("replacement");
+    let new_signer = source(&new)?;
+    let new_trust = registry(&[(CALLER, &[&new])]);
+    let new_control = verifier(&new_trust)?;
+    let mut replacements = Vec::new();
+    for _ in 0..3 {
+        replacements.push(Receiver::start(&tls, &new_trust).await?);
+    }
+    for server in &mut replacements {
+        let old = server.fresh(&old_signer)?;
+        server
+            .probe(&old, &old_control, Code::Unauthenticated)
+            .await?;
+        let new = server.fresh(&new_signer)?;
+        server.probe(&new, &new_control, Code::Ok).await?;
+    }
+    let restoration_upper_us = withdrawal.elapsed().as_micros().saturating_add(1);
+    println!(
+        "cold restoration: 3/3 healthy replacements rejected fresh old (UNAUTHENTICATED) and admitted replacement (OK); restoration_upper_us={restoration_upper_us}"
+    );
+    for server in replacements {
+        server.retire().await?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<ExitCode> {
     if std::env::var_os(CHILD).is_some() {
         return Ok(grpc::main());
     }
+    let mut args = std::env::args_os().skip(1);
+    let cold_only = match (args.next(), args.next()) {
+        (None, None) => false,
+        (Some(arg), None) if arg == "--cold" => true,
+        _ => return Err("usage: service_auth_rotation [--cold]".into()),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
         tokio::select! {
-            result = async { drill(false).await?; drill(true).await } => result,
+            result = async {
+                if !cold_only {
+                    drill(false).await?;
+                    drill(true).await?;
+                }
+                cold_emergency().await
+            } => result,
             signal = tokio::signal::ctrl_c() => { signal?; Err("drill interrupted".into()) }
         }
     })?;
