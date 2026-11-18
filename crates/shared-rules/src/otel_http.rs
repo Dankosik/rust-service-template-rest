@@ -20,19 +20,11 @@ pub fn request_method(method: &str) -> &'static str {
 static STATUS_CODE_DIGITS: [[u8; 3]; 900] = {
     let mut digits = [[0; 3]; 900];
     let mut index = 0;
-    let mut hundreds = b'1';
-    while hundreds <= b'9' {
-        let mut tens = b'0';
-        while tens <= b'9' {
-            let mut ones = b'0';
-            while ones <= b'9' {
-                digits[index] = [hundreds, tens, ones];
-                index += 1;
-                ones += 1;
-            }
-            tens += 1;
-        }
-        hundreds += 1;
+    let decimal = b"0123456789";
+    while index < digits.len() {
+        let code = 100 + index;
+        digits[index] = [decimal[code / 100], decimal[code / 10 % 10], decimal[code % 10]];
+        index += 1;
     }
     digits
 };

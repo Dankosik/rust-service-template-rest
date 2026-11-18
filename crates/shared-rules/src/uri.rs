@@ -25,7 +25,7 @@ pub fn authority_has_userinfo(url: &str) -> bool {
     let Some((scheme, after_scheme)) = url.split_once(':') else {
         return false;
     };
-    let authority = if ["ftp", "http", "https", "ws", "wss"]
+    let after_authority_prefix = if ["ftp", "http", "https", "ws", "wss"]
         .iter()
         .any(|special| scheme.eq_ignore_ascii_case(special))
     {
@@ -35,9 +35,9 @@ pub fn authority_has_userinfo(url: &str) -> bool {
     } else {
         return false;
     };
-    let (authority, _) = authority
+    let authority = after_authority_prefix
         .split_once(['/', '?', '#'])
-        .unwrap_or((authority, ""));
+        .map_or(after_authority_prefix, |(authority, _)| authority);
     authority.contains('@')
 }
 
