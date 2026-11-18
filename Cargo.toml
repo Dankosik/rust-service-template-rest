@@ -9,6 +9,7 @@ exclude = [
 # template:end grpc:workspace-grpc-generator
 # template:begin postgres:workspace-postgres-vendor-exclude
     "vendor/sqlx-core",
+    "vendor/sqlx-postgres",
 # template:end postgres:workspace-postgres-vendor-exclude
 # template:begin messaging:workspace-messaging-vendor-exclude
     "vendor/async-nats",
@@ -413,6 +414,7 @@ hotpath = { path = "vendor/hotpath" }
 # template:begin postgres:workspace-postgres-patch
 # Narrow published-source backport; provenance and retirement: vendor/sqlx-core/PATCHES.md.
 sqlx-core = { path = "vendor/sqlx-core" }
+sqlx-postgres = { path = "vendor/sqlx-postgres" }
 # template:end postgres:workspace-postgres-patch
 # template:begin messaging:workspace-messaging-patch
 # Narrow native lifetime repair; provenance and retirement: vendor/async-nats/PATCHES.md.

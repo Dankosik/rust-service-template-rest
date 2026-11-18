@@ -100,7 +100,6 @@ pub(super) fn log_startup_record(
         jobs.max_workers = config.jobs.max_workers.get(),
         jobs.kinds = %super::jobs::kind_names(registry),
         // template:end jobs:worker-bootstrap-log-jobs-fields
-        log.level = %config.log.level,
         tracing.exporter = exporter.as_str(),
         "jobs_worker_starting"
     );

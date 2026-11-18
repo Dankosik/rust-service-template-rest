@@ -1154,7 +1154,8 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     }
     url.set_username(&role).expect("a user name");
     url.set_password(Some("first")).expect("a password");
-    let dsn = Dsn::admit(url.as_str()).expect("the role's DSN is admitted");
+    let dsn =
+        Dsn::admit_for_environment(url.as_str(), None, true).expect("the role's DSN is admitted");
     let jobs = super::template_pool(&dsn, 3).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let first = until("the engine listens", super::WAIT, async || {

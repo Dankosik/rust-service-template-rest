@@ -253,7 +253,7 @@ fn service_uses_the_workers_endpoint_ids_without_delivery_urls_or_signing_keys()
     let shared = write(
         &dir,
         "shared.toml",
-        "[webhooks.endpoints.partner]\nurl = \"https://partner.example/events\"\n[webhooks.endpoints.orders]\n",
+        "[webhooks]\nmax_concurrent_deliveries = 4\n[webhooks.endpoints.partner]\nurl = \"https://partner.example/events\"\n[webhooks.endpoints.orders]\n",
     );
     let options = LoadOptions {
         config: Some(shared),
@@ -285,4 +285,21 @@ fn service_uses_the_workers_endpoint_ids_without_delivery_urls_or_signing_keys()
             .iter()
             .eq(worker.webhooks.endpoints.keys())
     );
+}
+
+#[test]
+fn service_rejects_a_misspelled_webhook_section_key() {
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[(
+            "APP__WEBHOOKS__ENDPONTS__PARTNER__URL",
+            "https://partner.example/fixture-private-path",
+        )]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    let message = err.to_string();
+    assert!(message.contains("unknown field `endponts`"), "{err}");
+    assert!(!message.contains("fixture-private-path"), "{err}");
 }

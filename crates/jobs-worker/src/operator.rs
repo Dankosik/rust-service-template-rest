@@ -421,8 +421,11 @@ async fn serve(config: &OperatorPostgresConfig, request: &Request) -> Report {
             return request.failed_before_start(Cause::Signals).into();
         }
     };
-    let Ok(dsn) = Dsn::admit_with(config.dsn.expose_secret(), config.password_file.as_deref())
-    else {
+    let Ok(dsn) = Dsn::admit_for_environment(
+        config.dsn.expose_secret(),
+        config.password_file.as_deref(),
+        config.local_development,
+    ) else {
         return request.failed_before_start(Cause::Dsn).into();
     };
     let options = crate::bootstrap::postgres::pool_options(

@@ -106,9 +106,9 @@ impl Worker {
             .env("APP__LOG__FORMAT", "json")
             .env("APP__POSTGRES__ENABLED", "true")
             .env("APP__POSTGRES__DSN", database_url)
+            .env("APP__APP__ENV", "local")
             // template:begin outbox:test-jobs-process-nats-environment
             .env("APP__POSTGRES__MAX_CONNECTIONS", "6")
-            .env("APP__APP__ENV", "local")
             .env("APP__MESSAGING__URLS", &nats.url)
             .env("APP__MESSAGING__SOURCE_STREAM", &nats.stream)
             .env("APP__MESSAGING__MAX_PAYLOAD_BYTES", "1 KiB")

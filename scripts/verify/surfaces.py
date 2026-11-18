@@ -293,7 +293,7 @@ def classify_report(
             mark("openapi", "runtime_image", "validation_system")
             if source_only:
                 mark("cargo_dependencies", "module_initializer")
-        elif _matches(file, "vendor/sqlx-core/*"):
+        elif _matches(file, "vendor/sqlx-core/*", "vendor/sqlx-postgres/*"):
             mark("rust_source", "cargo_dependencies", "runtime_image")
             if database == "postgres":
                 mark("db_integration")

@@ -84,14 +84,16 @@ pub struct OtelExporterConfig {
     /// to `/v1/traces`. Missing, empty, or whitespace-only (after trim) is
     /// vacant and falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` then
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
-    /// the exporter stays disabled.
+    /// the exporter stays disabled when no credential is configured. Userinfo,
+    /// query strings and fragments are rejected.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     #[debug(skip)]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`.
     /// Set `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` in the
     /// environment or via `--secrets-dir`.
-    /// Missing, empty, or whitespace-only is absent (`None`).
+    /// Requires an HTTPS endpoint in `otlp_endpoint`. Missing, empty, or
+    /// whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub otlp_headers: Option<SecretString>,
 }
@@ -142,6 +144,12 @@ fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
     // RFC 9110 §4.2.4
     if shared_rules::uri::authority_has_userinfo(endpoint) {
         return Err(ValidationError::new(key, "must not include userinfo"));
+    }
+    if endpoint.contains(['?', '#', '\\']) {
+        return Err(ValidationError::new(
+            key,
+            "must not include a query, fragment or backslash",
+        ));
     }
     Ok(())
 }
@@ -236,6 +244,8 @@ mod tests {
             "http://collector\u{a0}:4318",
             "http://user:secret@collector:4318",
             "https://@collector:4318",
+            "https://collector/v1?private-value",
+            "https://collector/v1#private-value",
         ] {
             let mut cfg = ObservabilityConfig::default();
             cfg.otel.exporter.otlp_endpoint = Some(endpoint.into());

@@ -89,6 +89,7 @@ COPY --from=planner /src/vendor/hotpath /src/vendor/hotpath
 # template:begin postgres:docker-postgres-vendor
 # Excluded from the chef skeleton: cook the actual patched dependency.
 COPY --from=planner /src/vendor/sqlx-core /src/vendor/sqlx-core
+COPY --from=planner /src/vendor/sqlx-postgres /src/vendor/sqlx-postgres
 # template:end postgres:docker-postgres-vendor
 # template:begin messaging:docker-messaging-vendor
 # Excluded from the chef skeleton: cook the actual patched dependency.

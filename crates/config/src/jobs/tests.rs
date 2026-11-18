@@ -126,6 +126,8 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         env(&[
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
             ("APP__POSTGRES__SESSION_BUDGETS", "server"),
+            ("APP__APP__ENV", "development"),
+            ("APP__APP__INSTANCE_ID", "worker-id"),
             // template:begin authn:jobs-operator-test-authn-env
             ("APP__AUTHN__MODE", "invalid"),
             // template:end authn:jobs-operator-test-authn-env
@@ -143,6 +145,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         ]),
     )
     .unwrap();
+    assert!(cfg.postgres().local_development);
     assert_eq!(
         cfg.postgres().session_budgets,
         crate::PostgresSessionBudgets::Server
@@ -165,6 +168,7 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     let secrets = tempfile::tempdir().unwrap();
     let mut options = LoadOptions::default();
     let defaults = load_jobs_operator_from(&options, env(&enabled)).unwrap();
+    assert!(!defaults.postgres().local_development);
     assert_eq!(password_file(&defaults), None);
 
     options.config = Some(write(

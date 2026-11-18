@@ -28,6 +28,11 @@ automatically during deploys):
   key variables out of band (`preserve()`).
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
+- Use a hostname covered by the database certificate and `sslmode=verify-full`
+  in `APP__POSTGRES__DSN` for the service, worker, migration and operator
+  processes. For a private CA, provide its public certificate at a readable
+  path in each process, including pre-deploy jobs, and set `sslrootcert` in the
+  DSN to that absolute path.
 - With PostgreSQL retained, `/migrate` runs as `preDeployCommand` in the new
   image before cutover while the old deployment keeps serving. Because Railway
   sets no default pre-deploy timeout, keep `preDeployTimeoutSeconds` in

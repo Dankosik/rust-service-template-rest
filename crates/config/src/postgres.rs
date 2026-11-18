@@ -132,6 +132,7 @@ impl PostgresInput {
 // template:begin jobs:postgres-operator-admission
 #[derive(Clone, Debug)]
 pub struct OperatorPostgresConfig {
+    pub local_development: bool,
     pub dsn: SecretString,
     pub password_file: Option<PathBuf>,
     pub session_budgets: PostgresSessionBudgets,
@@ -140,10 +141,12 @@ pub struct OperatorPostgresConfig {
 impl OperatorPostgresInput {
     pub(crate) fn admit(
         self,
+        local_development: bool,
         violations: &mut Violations,
     ) -> Result<Option<OperatorPostgresConfig>, Rejected> {
         Ok(
             admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| OperatorPostgresConfig {
+                local_development,
                 dsn,
                 password_file: self.password_file,
                 session_budgets: self.session_budgets.0,

@@ -518,7 +518,7 @@ fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
         ("APP__POSTGRES__ENABLED", "true"),
         (
             "APP__POSTGRES__DSN",
-            "postgres://service@127.0.0.1:1/service?sslmode=disable",
+            "postgres://service@127.0.0.1:1/service?sslmode=verify-full",
         ),
     ]);
     let (code, stdout, stderr) = service.wait_output();
@@ -528,6 +528,29 @@ fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
         "{stdout}"
     );
     assert!(!stdout.contains("http listener bound"), "{stdout}");
+}
+
+#[test]
+fn production_refuses_unverified_postgres_and_keeps_the_dsn_private() {
+    for (query, reason) in [
+        ("sslmode=require", "requires sslmode=verify-full"),
+        (
+            "sslmode=verify-full&private-marker=x",
+            "unsupported parameter",
+        ),
+    ] {
+        let dsn = format!("postgres://service:private-marker@127.0.0.1:1/service?{query}");
+        let (code, stdout, stderr) = Service::spawn(&[
+            ("APP__APP__ENV", "production"),
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", &dsn),
+        ])
+        .wait_output();
+        assert_eq!(code, Some(1));
+        assert!(stdout.contains(reason), "{stdout}");
+        assert!(!stdout.contains("http listener bound"));
+        assert!(!stdout.contains("private-marker") && !stderr.contains("private-marker"));
+    }
 }
 // template:end postgres:service-postgres-lifecycle-admission
 

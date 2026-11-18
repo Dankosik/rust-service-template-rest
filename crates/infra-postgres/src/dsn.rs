@@ -28,14 +28,16 @@ pub enum DsnError {
     MultipleHosts,
     #[error("postgres dsn sslmode must be one of disable, require, verify-ca, verify-full")]
     SslMode,
+    #[error("postgres dsn requires sslmode=verify-full outside local development")]
+    ServerVerification,
     #[error("postgres dsn sslrootcert must be an absolute file path")]
     RootCertPath,
     #[error("postgres dsn sslrootcert requires sslmode verify-ca or verify-full")]
     RootCertWithoutVerification,
     #[error(
-        "postgres dsn parameter {0:?} is not supported; only sslmode and sslrootcert are accepted"
+        "postgres dsn contains an unsupported parameter; only sslmode and sslrootcert are accepted"
     )]
-    Parameter(String),
+    Parameter,
     #[error("postgres dsn parameter {0} must appear only once")]
     Repeated(&'static str),
     #[error("postgres dsn must be the only connection source; unset {0} in the environment")]
@@ -71,7 +73,15 @@ impl Dsn {
     }
 
     pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
-        Self::admit_from(raw, password_file, |name| {
+        Self::admit_for_environment(raw, password_file, false)
+    }
+
+    pub fn admit_for_environment(
+        raw: &str,
+        password_file: Option<&Path>,
+        local_development: bool,
+    ) -> Result<Self, DsnError> {
+        Self::admit_from(raw, password_file, local_development, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
@@ -81,10 +91,15 @@ impl Dsn {
     where
         F: Fn(&str) -> bool,
     {
-        Self::admit_from(raw, None, occupied)
+        Self::admit_from(raw, None, true, occupied)
     }
 
-    fn admit_from<F>(raw: &str, password_file: Option<&Path>, occupied: F) -> Result<Self, DsnError>
+    fn admit_from<F>(
+        raw: &str,
+        password_file: Option<&Path>,
+        local_development: bool,
+        occupied: F,
+    ) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
@@ -106,6 +121,9 @@ impl Dsn {
         check_parameters(&url)?;
 
         let options = PgConnectOptions::from_url(&url).map_err(|_| DsnError::Unusable)?;
+        if !local_development && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
+            return Err(DsnError::ServerVerification);
+        }
         if options.get_socket().is_some() {
             return Err(DsnError::Socket);
         }
@@ -207,7 +225,7 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
             }
             "sslmode" => return Err(DsnError::Repeated("sslmode")),
             "sslrootcert" => return Err(DsnError::Repeated("sslrootcert")),
-            _ => return Err(DsnError::Parameter(bounded(&key))),
+            _ => return Err(DsnError::Parameter),
         }
     }
     let verifies_certificate = verifies_certificate.ok_or(DsnError::Missing("sslmode"))?;
@@ -215,14 +233,6 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
         return Err(DsnError::RootCertWithoutVerification);
     }
     Ok(())
-}
-
-fn bounded(key: &str) -> String {
-    const MAX: usize = 32;
-    match key.char_indices().nth(MAX) {
-        Some((end, _)) => format!("{}…", key.get(..end).unwrap_or(key)),
-        None => key.to_owned(),
-    }
 }
 
 #[cfg(test)]
@@ -378,8 +388,15 @@ mod tests {
     #[test]
     fn only_deterministic_ssl_modes_are_admitted() {
         for mode in ["disable", "require", "verify-ca", "verify-full"] {
-            let dsn = parse(&format!("postgres://app:pw@h:5432/app?sslmode={mode}")).unwrap();
+            let raw = format!("postgres://app:pw@h:5432/app?sslmode={mode}");
+            let dsn = parse(&raw).unwrap();
             assert_eq!(dsn.ssl_mode_name(), mode);
+            let production = Dsn::admit_from(&raw, None, false, |_| false);
+            if mode == "verify-full" {
+                assert!(production.is_ok());
+            } else {
+                assert_eq!(production.unwrap_err(), DsnError::ServerVerification);
+            }
         }
         for mode in ["allow", "prefer", "", "REQUIRE", "bogus"] {
             assert_eq!(
@@ -415,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn every_other_parameter_is_refused_by_name() {
+    fn every_other_parameter_is_refused() {
         let base = "postgres://app:pw@h:5432/app?sslmode=verify-full&sslrootcert=/ca.pem";
         for key in ["sslmode", "sslrootcert"] {
             assert_eq!(
@@ -445,22 +462,10 @@ mod tests {
         ] {
             assert_eq!(
                 parse(&format!("{base}&{key}=x")).err(),
-                Some(DsnError::Parameter(key.to_owned())),
+                Some(DsnError::Parameter),
                 "{key}"
             );
         }
-    }
-
-    #[test]
-    fn a_long_parameter_key_is_cut_in_the_diagnostic() {
-        let key = "k".repeat(80);
-        let Err(DsnError::Parameter(reported)) = parse(&format!(
-            "postgres://app:pw@h:5432/app?sslmode=require&{key}=x"
-        )) else {
-            panic!("expected a parameter error");
-        };
-        assert_eq!(reported.chars().count(), 33);
-        assert!(reported.ends_with('…'));
     }
 
     #[test]
@@ -484,7 +489,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
         let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
-        let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), |_| false);
+        let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), true, |_| false);
 
         assert_eq!(
             admit(without_password).err(),
@@ -534,9 +539,11 @@ mod tests {
         for raw in [
             "postgres://app:s3cret@h:5432/app?sslmode=prefer",
             "postgres://app:s3cret@h:5432/app?sslmode=require&sslkey=s3cret",
+            "postgres://app:pw@h:5432/app?sslmode=require&s3cret=x",
             "postgres://app:s3cret@h/app",
         ] {
-            let message = parse(raw).unwrap_err().to_string();
+            let error = parse(raw).unwrap_err();
+            let message = format!("{error} {error:?}");
             assert!(!message.contains("s3cret"), "{message}");
         }
     }

@@ -5,11 +5,27 @@
 OpenTelemetry defines OTLP compression as an enum and requires implementations
 to warn and ignore unrecognized values. [OTLP exporter configuration](https://opentelemetry.io/docs/specs/otel/protocol/exporter/#configuration-options) · [OpenTelemetry enum requirements](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#enum)
 
-The template deliberately degrades trace export when the selected compression
-setting is invalid. The SDK warning was lost during startup while the exporter
-reported `initialized`, so operators could miss that a compression setting
-had been ignored. A typo can therefore disable OTLP trace export for the
-process. [Accepted change in PR #416](https://github.com/Dankosik/rust-service-template-rest/pull/416)
+The SDK reads compression settings before the service installs its logging
+subscriber. Startup retains the names of ignored variables so operators can
+correct them without recording their values. A supported common setting still
+applies when the signal-specific setting is unrecognized.
 
-Reopen this deviation when startup can warn operators that the compression
-setting was ignored while withholding its value.
+## Collector credentials
+
+A typed header requires a typed HTTPS destination. Standard header variables
+are accepted with a standard HTTPS destination. A general credential bound to
+a configured general collector cannot follow a trace endpoint override to a
+different destination. Use trace-specific credentials for that destination.
+Carry credentials in headers because collector URLs can appear in proxy logs.
+
+The HTTP exporter reads standard headers again when it builds the client.
+Startup applies the SDK's signal precedence, rejects duplicate names before
+their spelling is lost, and supplies the validated headers explicitly so an
+empty signal variable cannot hide the general credentials.
+
+For mutual TLS, configure the collector endpoint, client certificate and key
+through the standard OTLP variables. When a typed endpoint also selects the
+collector, the effective standard trace destination must match it, including
+the path. Both the certificate and key must be bound to that destination.
+A private CA used solely to verify a typed HTTPS collector needs no additional
+endpoint setting.

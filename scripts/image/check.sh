@@ -25,6 +25,9 @@ if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 		-e APP__POSTGRES__ENABLED=true
 		-e "APP__POSTGRES__DSN=${RUNTIME_IMAGE_POSTGRES_DSN}"
 	)
+	if [[ -n ${RUNTIME_IMAGE_APP_ENV:-} ]]; then
+		docker_args+=(-e "APP__APP__ENV=${RUNTIME_IMAGE_APP_ENV}")
+	fi
 fi
 
 run_args=()

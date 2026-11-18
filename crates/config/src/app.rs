@@ -115,6 +115,11 @@ where
 // template:end postgres:migration-app-input
 
 impl AppConfig {
+    #[must_use]
+    pub fn is_local_development(&self) -> bool {
+        is_local_development(&self.env)
+    }
+
     pub(crate) fn apply_build_info(&mut self, build: BuildInfo) {
         if self.version.trim().is_empty() {
             build.version.clone_into(&mut self.version);

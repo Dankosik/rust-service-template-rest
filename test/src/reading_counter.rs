@@ -523,9 +523,10 @@ pub fn register(
         let options = service_config::LoadOptions::try_parse_from(std::env::args_os().skip(1))?;
         let config = service_config::load_jobs_operator(&options)?;
         let postgres = config.postgres();
-        let dsn = Dsn::admit_with(
+        let dsn = Dsn::admit_for_environment(
             postgres.dsn.expose_secret(),
             postgres.password_file.as_deref(),
+            postgres.local_development,
         )?;
         let holder = Arc::clone(&controls);
         registration
