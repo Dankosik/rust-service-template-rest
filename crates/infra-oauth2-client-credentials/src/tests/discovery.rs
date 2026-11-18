@@ -48,6 +48,7 @@ async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
     provider.finish().await;
 }
 
+#[derive(Clone, Copy)]
 enum Expected {
     Discovery(&'static str),
     Status(StatusCode),
