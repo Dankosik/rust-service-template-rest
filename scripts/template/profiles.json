@@ -391,9 +391,6 @@
   "test-metrics": {
     "remove_when_unselected": []
   },
-  "test-metrics-util": {
-    "remove_when_unselected": []
-  },
   "jobs-reference": {
     "remove_when_unselected": [
       "test/src/reading_counter.rs",

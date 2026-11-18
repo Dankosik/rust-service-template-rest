@@ -28,12 +28,12 @@ impl Background {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let cancel = self.cancel.child_token();
-        let task = start(cancel.clone());
+        let owner_cancel = self.cancel.clone();
+        let task = start(owner_cancel.child_token());
         let guard = std::mem::DropGuard::new(
-            (name, cancel, self.first_failure.clone()),
-            |(name, cancel, first_failure)| {
-                if cancel.is_cancelled() && !std::thread::panicking() {
+            (name, owner_cancel, self.first_failure.clone()),
+            |(name, owner_cancel, first_failure)| {
+                if owner_cancel.is_cancelled() && !std::thread::panicking() {
                     return;
                 }
                 tracing::error!(

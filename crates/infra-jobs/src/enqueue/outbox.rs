@@ -1,4 +1,4 @@
-use infra_postgres::{Tx, observed};
+use infra_postgres::{Tx, TxMode, observed};
 
 use super::{EnqueueError, encode_payload, is_valid_unique_key, notify_workers_after_commit};
 use crate::{Handler, JobId, JobKind, KindError, Kinds, KindsBuilder, Policy, trace_context};
@@ -26,7 +26,7 @@ pub fn publisher_kinds<T: JobKind>(
 }
 
 pub async fn enqueue<T: JobKind>(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     intent: &T,
     order: Option<(&str, i64)>,
 ) -> Result<Admission, EnqueueError> {
@@ -34,7 +34,7 @@ pub async fn enqueue<T: JobKind>(
 }
 
 pub async fn reconcile<T: JobKind>(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     intent: &T,
     order: Option<(&str, i64)>,
 ) -> Result<Admission, EnqueueError> {
@@ -42,7 +42,7 @@ pub async fn reconcile<T: JobKind>(
 }
 
 async fn admit<T: JobKind>(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     intent: &T,
     order: Option<(&str, i64)>,
     allow_insert: bool,
@@ -128,7 +128,7 @@ fn contains_decoded_nul(payload: &str) -> bool {
 }
 
 async fn compare_receipt(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     payload: &str,
     aggregate_key: Option<&str>,
     version: Option<i64>,

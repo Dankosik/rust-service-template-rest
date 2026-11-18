@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    Tx, TxError, failure_cause, in_tx_with, in_tx_with_acquire_deadline, is_transient, observed,
-    sqlstate,
+    BudgetedTx, Tx, TxError, TxMode, failure_cause, in_tx_with, in_tx_with_acquire_deadline,
+    in_tx_with_deadline, is_transient, observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -48,6 +48,17 @@ impl ScopeKey {
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.digest;
         i64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
     }
+
+    fn validate_caller(&self) -> Result<(), AttemptError> {
+        if self.caller.issuer.contains('\0') || self.caller.value.contains('\0') {
+            return Err(refused(
+                "caller_identity",
+                AttemptError::Internal,
+                "unstorable_caller",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +96,8 @@ pub enum Attempted<R> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AttemptError {
+    #[error("attempt deadline elapsed")]
+    Deadline,
     #[error("unavailable")]
     Unavailable,
     #[error("internal")]
@@ -114,7 +127,13 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
     {
-        self.attempt_in_tx(scope, fingerprint, None, work).await
+        scope.validate_caller()?;
+        attempted(
+            in_tx_with(&self.pool, READ_COMMITTED, async |tx| {
+                self.work_in_tx(tx, scope, fingerprint, work).await
+            })
+            .await,
+        )
     }
 
     pub async fn attempt_with_acquire_deadline<W, R>(
@@ -127,62 +146,74 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
     {
-        self.attempt_in_tx(scope, fingerprint, Some(deadline), work)
-            .await
+        scope.validate_caller()?;
+        attempted(
+            in_tx_with_acquire_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
+                self.work_in_tx(tx, scope, fingerprint, work).await
+            })
+            .await,
+        )
     }
 
-    async fn attempt_in_tx<W, R>(
+    pub async fn attempt_with_deadline<W, R>(
         &self,
         scope: &ScopeKey,
         fingerprint: &Digest,
-        deadline: Option<tokio::time::Instant>,
+        deadline: tokio::time::Instant,
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
+        W: AsyncFnOnce(&mut BudgetedTx<'_>) -> Result<Record, R>,
     {
-        if scope.caller.issuer.contains('\0') || scope.caller.value.contains('\0') {
-            return Err(refused(
-                "caller_identity",
-                AttemptError::Internal,
-                "unstorable_caller",
-            ));
+        scope.validate_caller()?;
+        attempted(
+            in_tx_with_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
+                self.work_in_tx(tx, scope, fingerprint, work).await
+            })
+            .await,
+        )
+    }
+
+    async fn work_in_tx<M: TxMode, W, R>(
+        &self,
+        tx: &mut Tx<'_, M>,
+        scope: &ScopeKey,
+        fingerprint: &Digest,
+        work: W,
+    ) -> Result<Record, Stop<R>>
+    where
+        W: AsyncFnOnce(&mut Tx<'_, M>) -> Result<Record, R>,
+    {
+        if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
+            return Err(Stop::Decided(decision));
         }
-        let work_in_tx = async |tx: &mut Tx<'_>| -> Result<Record, Stop<R>> {
-            if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
-                return Err(Stop::Decided(decision));
-            }
-            let record = work(tx).await.map_err(Stop::RolledBack)?;
-            write(tx, scope, fingerprint, &record, self.retention).await?;
-            Ok(record)
-        };
-        let outcome = match deadline {
-            Some(deadline) => {
-                in_tx_with_acquire_deadline(&self.pool, deadline, READ_COMMITTED, work_in_tx).await
-            }
-            None => in_tx_with(&self.pool, READ_COMMITTED, work_in_tx).await,
-        };
-        match outcome {
-            Ok(value) => Ok(Attempted::Committed(value)),
-            Err(Stop::Decided(decision)) => Ok(match decision {
-                Decision::Replay(record) => Attempted::Replay(record),
-                Decision::Mismatch => Attempted::Mismatch,
-                Decision::InProgress => Attempted::InProgress,
-            }),
-            Err(Stop::RolledBack(rollback)) => Ok(Attempted::RolledBack(rollback)),
-            Err(Stop::Failed(err)) => Err(err),
-        }
+        let record = work(tx).await.map_err(Stop::RolledBack)?;
+        write(tx, scope, fingerprint, &record, self.retention).await?;
+        Ok(record)
+    }
+}
+
+fn attempted<R>(outcome: Result<Record, Stop<R>>) -> Result<Attempted<R>, AttemptError> {
+    match outcome {
+        Ok(value) => Ok(Attempted::Committed(value)),
+        Err(Stop::Decided(decision)) => Ok(match decision {
+            Decision::Replay(record) => Attempted::Replay(*record),
+            Decision::Mismatch => Attempted::Mismatch,
+            Decision::InProgress => Attempted::InProgress,
+        }),
+        Err(Stop::RolledBack(rollback)) => Ok(Attempted::RolledBack(rollback)),
+        Err(Stop::Failed(err)) => Err(err),
     }
 }
 
 enum Decision {
-    Replay(Record),
+    Replay(Box<Record>),
     Mismatch,
     InProgress,
 }
 
 async fn arbitrate(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Decision>, AttemptError> {
@@ -269,7 +300,7 @@ fn decide_live(
     }
     let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
     Record::decode(status, headers, Bytes::from(body))
-        .map(Decision::Replay)
+        .map(|record| Decision::Replay(Box::new(record)))
         .map_err(|err| refused("decode_record", AttemptError::Integrity, err.class()))
 }
 
@@ -283,7 +314,7 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
 }
 
 async fn write(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     scope: &ScopeKey,
     fingerprint: &Digest,
     record: &Record,
@@ -346,6 +377,12 @@ impl<R> From<AttemptError> for Stop<R> {
 impl<R> From<TxError> for Stop<R> {
     fn from(err: TxError) -> Self {
         Self::Failed(classify_tx(&err))
+    }
+}
+
+impl<R> From<infra_postgres::OperationDeadlineElapsed> for Stop<R> {
+    fn from(_: infra_postgres::OperationDeadlineElapsed) -> Self {
+        Self::Failed(AttemptError::Deadline)
     }
 }
 

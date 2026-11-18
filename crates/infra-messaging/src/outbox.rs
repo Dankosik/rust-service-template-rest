@@ -5,7 +5,7 @@ use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
 use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
-use infra_postgres::Tx;
+use infra_postgres::{Tx, TxMode};
 use operation_context::{Deadline, OperationContext};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -110,13 +110,16 @@ impl<'a> OutboxText<'a> {
 }
 
 impl PreparedEvent {
-    pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+    pub async fn enqueue(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+    ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         self.enqueue_with_order(tx, None).await
     }
 
     pub async fn enqueue_ordered(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut Tx<'_, impl TxMode>,
         aggregate_key: &str,
         version: i64,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
@@ -126,7 +129,7 @@ impl PreparedEvent {
 
     async fn enqueue_with_order(
         &self,
-        tx: &mut Tx<'_>,
+        tx: &mut Tx<'_, impl TxMode>,
         order: Option<(&str, i64)>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;

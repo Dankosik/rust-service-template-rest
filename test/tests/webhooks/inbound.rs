@@ -396,24 +396,69 @@ async fn admission_waits_for_a_connection_until_the_callers_deadline(pool: PgPoo
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
-    sqlx::query("DROP TABLE background_jobs")
-        .execute(&pool)
+async fn a_blocked_enqueue_expires_and_the_same_delivery_commits_once(pool: PgPool) {
+    use sqlx::Connection as _;
+    use tokio::time::Instant;
+
+    let mut connection = infra_postgres::acquire(&pool, "hold webhook enqueue")
         .await
-        .expect("remove jobs table to force the production enqueue failure");
+        .unwrap();
+    let mut holder = connection.begin().await.unwrap();
+    sqlx::query("LOCK TABLE background_jobs IN SHARE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let body = b"{\"rollback\":true}";
-    let outcome = receiver(pool.clone())
-        .receive_bytes(
+    let headers = signed_headers(&keys, "message-rollback", body);
+    let receiver = receiver(pool.clone());
+    let receive = |deadline| {
+        receiver.receive_bytes(
             ENDPOINT,
-            &signed_headers(&keys, "message-rollback", body),
+            &headers,
             Bytes::from_static(body),
             SystemTime::now(),
-            admission_deadline(),
+            deadline,
         )
-        .await;
+    };
+    let cutoff = Instant::now() + Duration::from_secs(2);
+    let observe_waiter =
+        poll_until(
+            "the receipt reached its blocked enqueue",
+            Duration::from_secs(2),
+            POLL,
+            async || {
+                let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) \
+             AND query LIKE 'INSERT INTO background_jobs%')"
+        ).bind(holder_pid).fetch_one(&pool).await.unwrap();
+                waiting.then_some(())
+            },
+        );
+    let ((), outcome) = tokio::join!(
+        observe_waiter,
+        tokio::time::timeout_at(cutoff + Duration::from_secs(1), receive(cutoff))
+    );
+    let outcome = outcome.expect("the enqueue's server deadline fires while the lock is held");
     assert_eq!(outcome, Err(ReceiveError::Unavailable));
     assert_eq!(receipt_count(&pool).await, 0);
+    assert_eq!(job_count(&pool).await, 0);
+    holder.rollback().await.unwrap();
+    drop(connection);
+    assert_eq!(
+        receive(admission_deadline()).await,
+        Ok(ReceiptOutcome::Accepted)
+    );
+    assert_eq!(
+        receive(admission_deadline()).await,
+        Ok(ReceiptOutcome::Duplicate)
+    );
+    assert_eq!(receipt_count(&pool).await, 1);
+    assert_eq!(job_count(&pool).await, 1);
     super::close_pools(&[&pool]).await;
 }
 
@@ -1368,7 +1413,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
             .expect("jobs after");
     for job in &mut jobs_after {
         let row = job.as_object_mut().expect("job row is a JSON object");
-        for column in ["payload_text", "claim_token"] {
+        for column in ["payload_text", "claim_token", "predecessor_job_id"] {
             assert_eq!(
                 row.remove(column),
                 Some(serde_json::Value::Null),

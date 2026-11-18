@@ -80,6 +80,10 @@ pub(crate) enum WorkerError {
     EngineStopped,
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
+    #[error("postgres credential preparation timed out")]
+    PostgresPreparationTimeout,
+    #[error("postgres credential preparation task failed")]
+    PostgresPreparationJoin,
     #[error(transparent)]
     Postgres(#[from] infra_postgres::ConnectError),
     #[error("postgres migration history: {0}")]
@@ -315,7 +319,8 @@ async fn prepare(
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
-    let (metrics, exporter_state) = telemetry::install_observability(config, &identity, resources)?;
+    let (metrics, exporter_state) =
+        telemetry::install_observability(config, &identity, resources).await?;
     let connection_caps = config.finite_listener_connection_caps();
     match rlimit::increase_nofile_limit(u64::MAX) {
         Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),

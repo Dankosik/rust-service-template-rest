@@ -156,11 +156,9 @@ migrate = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 # template:end test-metrics:test-metrics-dependency
-# template:begin test-metrics-util:test-metrics-util-dependency
-metrics-util = { workspace = true, features = ["debugging"] }
-# template:end test-metrics-util:test-metrics-util-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
 # template:end http-idempotency:test-http-idempotency-dependencies
 # template:begin postgres-grpc-consumers:test-postgres-grpc-consumer-dependencies
 infra-grpc = { workspace = true }

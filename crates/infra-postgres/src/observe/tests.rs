@@ -168,11 +168,19 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
         .connect_lazy_with(dsn.connect_options());
     let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
     std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
+    let expired: Result<(), Box<dyn std::error::Error>> = crate::in_tx_with_deadline(
+        &pool,
+        tokio::time::Instant::now(),
+        crate::TxOptions::default(),
+        async |_tx| Ok(()),
+    )
+    .await;
+    assert!(expired.unwrap_err().is::<crate::OperationDeadlineElapsed>());
     drop(TransactionObservation::start(Span::none()));
     let scrape = recorder.handle().render();
     for line in [
-        "db_client_connection_wait_time_seconds_count{db_client_connection_pool_name=\"postgres\"} 1",
-        "postgres_transaction_duration_seconds_count{outcome=\"acquire_failed\"} 1",
+        "db_client_connection_wait_time_seconds_count{db_client_connection_pool_name=\"postgres\"} 2",
+        "postgres_transaction_duration_seconds_count{outcome=\"acquire_failed\"} 2",
         "postgres_transaction_duration_seconds_count{outcome=\"cancelled\"} 1",
     ] {
         assert!(scrape.contains(line), "{line} is missing from:\n{scrape}");

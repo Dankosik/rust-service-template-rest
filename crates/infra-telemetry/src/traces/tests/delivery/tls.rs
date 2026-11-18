@@ -201,7 +201,7 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
             opts.otlp_endpoint = Some(std::env::var(ENDPOINT).unwrap());
             opts.otlp_headers = Some(SecretString::from(HEADERS));
         }
-        let provider = install_tracer_provider(&opts).unwrap();
+        let provider = runtime().block_on(install_tracer_provider(&opts)).unwrap();
         provider.tracer().start("admitted span").end();
         assert_eq!(shutdown(provider), ProviderShutdown::Completed);
         return;
