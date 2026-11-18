@@ -34,7 +34,11 @@ pub(super) async fn open(
         },
         wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
     };
-    let pool = retained.insert(infra_postgres::prepare_pool(&dsn, &options));
+    let pool = retained.insert(infra_postgres::prepare_pool_with_notifications(
+        &dsn,
+        &options,
+        postgres.notifications,
+    ));
     infra_postgres::admit_pool(pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),

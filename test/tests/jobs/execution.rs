@@ -773,8 +773,18 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x2_idle_engine_claims_within_poll_interval(pool: PgPool) {
-    let jobs = open(&pool, 1).await;
+async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool) {
+    let jobs = infra_postgres::prepare_pool_with_notifications(
+        &dsn_for(&pool).await,
+        &infra_postgres::PoolOptions {
+            max_connections: NonZeroU32::new(3).unwrap(),
+            application_name: super::APP,
+            default_isolation: infra_postgres::Isolation::ReadCommitted,
+            session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
+        },
+        false,
+    );
     prepare(&jobs).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -796,6 +806,7 @@ async fn x2_idle_engine_claims_within_poll_interval(pool: PgPool) {
     );
     let view = completed(&jobs, &id).await;
     assert_eq!(view.attempts, 1);
+    assert_eq!(listening_sessions(&jobs).await, 0);
     finish(run, &[&jobs]).await;
 }
 
@@ -1513,7 +1524,16 @@ async fn x4_expired_claim_is_recovered_and_a_live_claim_is_not(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x5_superseded_attempt_does_not_change_the_row(pool: PgPool) {
-    let jobs = open(&pool, 1).await;
+    assert_stale_completion_ignored(&pool, true).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn x5_reused_generation_cannot_complete_a_replacement_claim(pool: PgPool) {
+    assert_stale_completion_ignored(&pool, false).await;
+}
+
+async fn assert_stale_completion_ignored(pool: &PgPool, advance_generation: bool) {
+    let jobs = open(pool, 1).await;
     let gate = Arc::new(GateState {
         entered: Notify::new(),
         open: Notify::new(),
@@ -1531,21 +1551,27 @@ async fn x5_superseded_attempt_does_not_change_the_row(pool: PgPool) {
     );
     let run = start(&jobs, registry, 1);
     super::bounded("the handler is waiting", gate.entered.notified()).await;
-
+    let original = load(&jobs, &id).await;
     let updated = sqlx::query(
         "UPDATE background_jobs \
          SET attempts = attempts + 1, \
-             claim_generation = nextval('background_jobs_claim_generation'), \
+             claim_generation = CASE WHEN $2 THEN nextval('background_jobs_claim_generation') ELSE claim_generation END, \
+             claim_token = CASE WHEN $2 THEN claim_token ELSE gen_random_uuid() END, \
              claim_expires_at = statement_timestamp() + interval '30 seconds' \
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
+    .bind(advance_generation)
     .execute(&jobs)
     .await
     .expect("the newer claim");
     assert_eq!(updated.rows_affected(), 1);
     let newer = load(&jobs, &id).await;
     assert_eq!(newer.state, "running");
+    assert_eq!(
+        newer.claim_generation != original.claim_generation,
+        advance_generation
+    );
     assert!(newer.claim_expires_us.is_some());
     gate.open.notify_one();
 
@@ -1575,6 +1601,7 @@ struct GraceState {
     entered: Notify,
 }
 
+#[derive(Default)]
 struct TransactionGateState {
     business_written: Notify,
     complete: Notify,
@@ -1720,17 +1747,14 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool: PgPool) {
+async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     let (proxy, replacement) = proxied_pool(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
         .execute(&jobs)
         .await
         .expect("the business-effects table");
-    let gate = Arc::new(TransactionGateState {
-        business_written: Notify::new(),
-        complete: Notify::new(),
-    });
+    let gate = Arc::new(TransactionGateState::default());
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(created(
@@ -1749,37 +1773,39 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     .await;
     run.started.stop_claiming();
     let original = load(&jobs, &id).await;
-    let expired = sqlx::query(
+    assert_eq!(original.state, "running");
+    assert_eq!(original.attempts, 1);
+    let restored = sqlx::query(
         "UPDATE background_jobs \
-         SET claim_expires_at = statement_timestamp() - interval '1 second' \
+         SET state = 'pending', attempts = 0, claim_generation = 0, \
+             claim_expires_at = NULL, attempted_by = NULL \
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
     .execute(&jobs)
     .await
-    .expect("the original lease expires");
-    assert_eq!(expired.rows_affected(), 1);
-    let replacement_gate = Arc::new(TransactionGateState {
-        business_written: Notify::new(),
-        complete: Notify::new(),
-    });
+    .expect("restore pending work before reclaiming with the lost generation");
+    assert_eq!(restored.rows_affected(), 1);
+    sqlx::query("SELECT setval('background_jobs_claim_generation', $1, false)")
+        .bind(original.claim_generation)
+        .execute(&jobs)
+        .await
+        .expect("the next claim repeats the lost generation");
+    let replacement_gate = Arc::new(TransactionGateState::default());
     let replacement_run = start(
         &replacement,
         transactional_gate_registry(Arc::clone(&replacement_gate)),
         1,
     );
     super::bounded(
-        "a real reclaim starts the replacement transaction",
+        "the new claim starts the replacement transaction",
         replacement_gate.business_written.notified(),
     )
     .await;
     let reclaimed = load(&jobs, &id).await;
-    assert!(reclaimed.claim_generation > original.claim_generation);
-    assert_eq!(reclaimed.attempts, 2);
-    assert_eq!(
-        reclaimed.error_summary.as_deref(),
-        Some("lease expired; rescued")
-    );
+    assert_eq!(reclaimed.state, "running");
+    assert_eq!(reclaimed.claim_generation, original.claim_generation);
+    assert_eq!(reclaimed.attempts, 1);
     gate.complete.notify_one();
 
     super::bounded("the old executor drains", run.started.drained()).await;
@@ -1794,9 +1820,9 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     let view = load(&jobs, &id).await;
     assert_eq!(view.state, "running");
     assert_eq!(view.claim_generation, reclaimed.claim_generation);
-    assert_eq!(view.attempts, 2);
+    assert_eq!(view.attempts, 1);
     assert_eq!(view.claim_expires_us, reclaimed.claim_expires_us);
-    assert_eq!(view.error_summary, reclaimed.error_summary);
+    assert!(view.error_summary.is_none());
     assert!(!view.claim_cleared);
 
     proxy.arm_autocommit(
@@ -1805,7 +1831,7 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
     );
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;
-    assert_eq!(done.attempts, 2);
+    assert_eq!(done.attempts, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_effects")
             .fetch_one(&jobs)
@@ -2158,9 +2184,9 @@ async fn x8_retry_after_at_least_uses_the_floor(pool: PgPool) {
     .await;
     let observed = db_now_us(&jobs).await;
     assert!(
-        scheduled.not_before_us >= started + 1_800_000
-            && scheduled.not_before_us <= observed + 2_100_000,
-        "retry-after scheduled {} outside the requested two-second window from {started} to {observed}",
+        scheduled.not_before_us >= started + 2_000_000
+            && scheduled.not_before_us <= observed + 2_200_000,
+        "retry-after scheduled {} outside the two-second floor and its jitter window from {started} to {observed}",
         scheduled.not_before_us,
     );
     assert_eq!(

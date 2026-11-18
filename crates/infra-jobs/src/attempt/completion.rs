@@ -173,9 +173,10 @@ pub(crate) fn complete_query(
     sqlx::query!(
         "UPDATE background_jobs \
          SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-         WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+         WHERE id = $1 AND claim_generation = $2 AND claim_token = $3 AND claim_expires_at IS NOT NULL",
         fence.job_id.0,
         fence.generation,
+        fence.token,
     )
 }
 
@@ -206,11 +207,15 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
         return;
     }
     let result = {
-        let (ids, generations): (SmallVec<[uuid::Uuid; 16]>, SmallVec<[i64; 16]>) = batch
+        type BatchColumn<T> = SmallVec<[T; 16]>;
+        let (ids, generations, tokens): (BatchColumn<_>, BatchColumn<_>, BatchColumn<_>) = batch
             .queued
             .iter()
-            .map(|queued| (queued.fence.job_id.0, queued.fence.generation))
-            .unzip();
+            .map(|queued| {
+                let fence = queued.fence;
+                (fence.job_id.0, fence.generation, fence.token)
+            })
+            .collect();
         within(
             &shared.lifecycle.cleanup,
             deadline,
@@ -226,12 +231,13 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
                     sqlx::query_scalar!(
                         "UPDATE background_jobs AS job \
                          SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-                         FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
-                         WHERE job.id = done.id AND job.claim_generation = done.generation \
+                         FROM unnest($1::uuid[], $2::bigint[], $3::uuid[]) WITH ORDINALITY AS done (id, generation, token, position) \
+                         WHERE job.id = done.id AND job.claim_generation = done.generation AND job.claim_token = done.token \
                            AND job.claim_expires_at IS NOT NULL \
                          RETURNING done.position AS \"position!\"",
                         &ids[..],
                         &generations[..],
+                        &tokens[..],
                     )
                     .fetch_all(&mut *connection),
                 )
@@ -294,6 +300,7 @@ mod tests {
         ClaimFence {
             job_id: JobId(uuid::Uuid::nil()),
             generation,
+            token: uuid::Uuid::nil(),
         }
     }
 

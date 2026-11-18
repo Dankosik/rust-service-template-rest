@@ -22,9 +22,10 @@ pub use observe::{HISTOGRAMS, observed, record_metrics, record_metrics_periodica
 pub use pool::{
     ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, PoolOptions, SessionOptions,
     SessionSettingsSource, WaitOrder, acquire, acquire_until, admit_pool, close, connect,
-    connect_session, format_pg_duration, prepare_pool,
+    connect_session, format_pg_duration, notifications_enabled, prepare_pool,
+    prepare_pool_with_notifications,
 };
-pub use probe::PostgresProbe;
+pub use probe::{PostgresProbe, SessionProperties, session_properties};
 pub use sqlx::Error as SqlError;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{

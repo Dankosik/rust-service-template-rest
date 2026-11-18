@@ -179,4 +179,30 @@ recover the original encoding and changes how live duplicates are compared.
 For an incompatible handler payload, register the new kind under a new name
 before switching producers. Keep the old handler available until pending,
 running and recoverable failed jobs of the old kind have a disposition.
+
+Before accepting a payload containing an escaped U+0000 in a key or value,
+upgrade every producer that may compare a live duplicate, including rollback
+images. Older producers can refuse that comparison even with a compatible
+text reader.
+
+### Promoting a PostgreSQL replica with active jobs
+
+Apply the additive claim migration before upgrading workers. While an older
+worker can still finish an attempt, stop those processes and prevent their
+connections to the promoted primary before resuming processing. Apply the
+same rule when rolling back to an older worker. Once every active attempt
+uses the new claim identity, a previous owner cannot acknowledge a replacement
+claim even when the promoted replica reuses a sequence value.
+
+Choose a writable endpoint and confirm that the worker loses readiness when
+that endpoint is read-only and regains it after promotion. Record the RPO of
+the promotion target. An asynchronous replica may lack a committed enqueue
+or completion. Reconcile effects at external recipients by their stable IDs
+before replaying ambiguous work, including webhooks and outbox publications.
+
+For a PgBouncer endpoint using transaction pooling, set
+`APP__POSTGRES__NOTIFICATIONS=false` on workers and producers that use that
+endpoint. Allow for the polling interval when setting a pickup latency target.
+Use a direct or session-pooled connection when the target requires prompt
+notification after commit.
 <!-- template:end jobs:production-contract-jobs-rollout -->

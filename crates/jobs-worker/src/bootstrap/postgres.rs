@@ -64,7 +64,8 @@ async fn open_pool(
         postgres.max_connections,
         &application_name,
     );
-    let pool = infra_postgres::prepare_pool(&dsn, &options);
+    let pool =
+        infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
     resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
@@ -124,7 +125,7 @@ pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError
 
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
     let pool = admitted_pool(resources).ok()?;
-    Some(Box::new(PostgresProbe::new(pool)))
+    Some(Box::new(PostgresProbe::writable_primary(pool)))
 }
 
 #[cfg(test)]
