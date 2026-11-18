@@ -2313,7 +2313,7 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
 }
 
 #[tokio::test]
-async fn caller_timeout_after_setup_wait_keeps_the_healthy_connection() {
+async fn command_timeout_after_setup_wait_keeps_the_healthy_connection() {
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
     *server
@@ -2341,7 +2341,7 @@ async fn caller_timeout_after_setup_wait_keeps_the_healthy_connection() {
     assert_eq!(
         server.command_count("GETRANGE", Some("setup_wait:slow")),
         1,
-        "command must dispatch after setup before exhausting the caller deadline"
+        "command must dispatch after setup before exhausting the command timeout"
     );
     assert_work_metrics(&metrics, 0, 0, 0);
     assert_eq!(namespace.get(&caller, "ready").await, Ok(None));

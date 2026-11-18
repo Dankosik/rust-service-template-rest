@@ -345,13 +345,21 @@ mod tests {
 
     #[test]
     fn finite_stream_results_survive_budget_yields_and_source_pending() {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Ending {
+            Eof,
+            Overflow,
+            Trailers,
+            SourceError,
+        }
+
         for (len, payload, ending) in [
-            (0, b"".as_slice(), "eof"),
-            (4, b"abcd".as_slice(), "eof"),
-            (5, b"abcd".as_slice(), "eof"),
-            (4, b"abcd".as_slice(), "overflow"),
-            (4, b"abcd".as_slice(), "trailers"),
-            (4, b"abcd".as_slice(), "error"),
+            (0, b"".as_slice(), Ending::Eof),
+            (4, b"abcd".as_slice(), Ending::Eof),
+            (5, b"abcd".as_slice(), Ending::Eof),
+            (4, b"abcd".as_slice(), Ending::Overflow),
+            (4, b"abcd".as_slice(), Ending::Trailers),
+            (4, b"abcd".as_slice(), Ending::SourceError),
         ] {
             let mut steps = VecDeque::new();
             for _ in 0..65 {
@@ -365,14 +373,14 @@ mod tests {
             let mut trailers = axum::http::HeaderMap::new();
             trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
             match ending {
-                "overflow" => steps.push_back(data_step(b"!")),
-                "trailers" => {
+                Ending::Overflow => steps.push_back(data_step(b"!")),
+                Ending::Trailers => {
                     steps.push_back(Poll::Ready(Some(Ok(Frame::trailers(trailers.clone())))));
                 }
-                "error" => steps.push_back(Poll::Ready(Some(Err(std::io::Error::other(
+                Ending::SourceError => steps.push_back(Poll::Ready(Some(Err(std::io::Error::other(
                     "source failed",
                 ))))),
-                _ => {}
+                Ending::Eof => {}
             }
             let polls = Arc::new(AtomicUsize::new(0));
             let source = PolledFrames {
@@ -411,12 +419,12 @@ mod tests {
                     },
                     Poll::Ready(Some(Err(error))) => {
                         assert_eq!(received, if len == 5 { payload } else { b"" });
-                        if ending == "error" {
+                        if ending == Ending::SourceError {
                             let source_error = error.downcast_ref::<std::io::Error>().unwrap();
                             assert_eq!(source_error.to_string(), "source failed");
                             assert!(!mismatch.load(Ordering::Acquire));
                         } else {
-                            assert!(len == 5 || ending == "overflow");
+                            assert!(len == 5 || ending == Ending::Overflow);
                             assert!(error.is::<LengthMismatch>());
                             assert!(mismatch.load(Ordering::Acquire));
                             assert!(body.is_end_stream());
@@ -425,12 +433,12 @@ mod tests {
                         break;
                     }
                     Poll::Ready(None) => {
-                        assert!(ending == "eof" || ending == "trailers");
+                        assert!(matches!(ending, Ending::Eof | Ending::Trailers));
                         assert_eq!(received, payload);
                         assert_eq!(received.len() as u64, len);
                         assert_eq!(
                             received_trailers,
-                            (ending == "trailers").then_some(trailers)
+                            (ending == Ending::Trailers).then_some(trailers)
                         );
                         assert_eq!(body.size_hint().exact(), Some(0));
                         assert!(body.is_end_stream());

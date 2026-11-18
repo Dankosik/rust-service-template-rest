@@ -265,10 +265,17 @@ async fn query_read(
     mut connection: MultiplexedConnection,
     limit: usize,
 ) -> redis::RedisResult<Option<Vec<u8>>> {
-    use redis::Value;
-
     let replies =
         tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
+    decode_read_transaction(replies, limit)
+}
+
+fn decode_read_transaction(
+    replies: Vec<redis::Value>,
+    limit: usize,
+) -> redis::RedisResult<Option<Vec<u8>>> {
+    use redis::Value;
+
     let unexpected =
         || redis::RedisError::from((redis::ErrorKind::Parse, "unexpected cache read reply"));
     let [multi, exists_queued, range_queued, exec] =

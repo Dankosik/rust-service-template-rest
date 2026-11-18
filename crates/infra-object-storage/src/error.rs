@@ -321,26 +321,26 @@ fn is_identifier(code: &str) -> bool {
 
 fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
-    match kind.reply(Call::Read) {
-        Reply::NotFound => E::NotFound,
-        Reply::Unavailable | Reply::Conflict | Reply::Lost => E::Unavailable,
-        Reply::Rejected | Reply::PreconditionFailed => E::Rejected,
+    match kind.classify(Call::Read) {
+        FailureClass::NotFound => E::NotFound,
+        FailureClass::Unavailable | FailureClass::Conflict | FailureClass::Lost => E::Unavailable,
+        FailureClass::Rejected | FailureClass::PreconditionFailed => E::Rejected,
     }
 }
 
 fn classify_mutation(kind: FailureKind<'_>, call: Call) -> MutationError {
     use MutationFailure as F;
-    let reason = match kind.reply(call) {
-        Reply::PreconditionFailed => F::AlreadyExists,
-        Reply::Conflict => F::Conflict,
-        Reply::Unavailable => F::Unavailable,
-        Reply::Lost => return MutationError::OutcomeUnknown(F::Unavailable),
-        Reply::Rejected | Reply::NotFound => F::Rejected,
+    let reason = match kind.classify(call) {
+        FailureClass::PreconditionFailed => F::AlreadyExists,
+        FailureClass::Conflict => F::Conflict,
+        FailureClass::Unavailable => F::Unavailable,
+        FailureClass::Lost => return MutationError::OutcomeUnknown(F::Unavailable),
+        FailureClass::Rejected | FailureClass::NotFound => F::Rejected,
     };
     MutationError::NotApplied(reason)
 }
 
-enum Reply {
+enum FailureClass {
     NotFound,
     PreconditionFailed,
     Conflict,
@@ -350,20 +350,20 @@ enum Reply {
 }
 
 impl FailureKind<'_> {
-    fn reply(self, call: Call) -> Reply {
+    fn classify(self, call: Call) -> FailureClass {
         match self {
-            Self::NotSent => Reply::Rejected,
-            Self::NoCredentials => Reply::Unavailable,
-            Self::Lost | Self::Timeout => Reply::Lost,
+            Self::NotSent => FailureClass::Rejected,
+            Self::NoCredentials => FailureClass::Unavailable,
+            Self::Lost | Self::Timeout => FailureClass::Lost,
             Self::Status { status, code } => match (classification_status(status, code), code) {
-                (_, Some("NoSuchBucket")) => Reply::Rejected,
-                (404, _) if call == Call::Read => Reply::NotFound,
-                (412, _) if call == Call::CreateOnly => Reply::PreconditionFailed,
-                (409, _) if call == Call::CreateOnly => Reply::Conflict,
-                (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => Reply::Unavailable,
-                (501, _) => Reply::Rejected,
-                (500..=599, _) => Reply::Lost,
-                _ => Reply::Rejected,
+                (_, Some("NoSuchBucket")) => FailureClass::Rejected,
+                (404, _) if call == Call::Read => FailureClass::NotFound,
+                (412, _) if call == Call::CreateOnly => FailureClass::PreconditionFailed,
+                (409, _) if call == Call::CreateOnly => FailureClass::Conflict,
+                (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => FailureClass::Unavailable,
+                (501, _) => FailureClass::Rejected,
+                (500..=599, _) => FailureClass::Lost,
+                _ => FailureClass::Rejected,
             },
         }
     }

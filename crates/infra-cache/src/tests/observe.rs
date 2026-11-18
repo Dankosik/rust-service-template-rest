@@ -223,26 +223,28 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     assert_eq!(sets, expected);
 }
 
-#[tokio::test]
-async fn a_dropped_get_records_cancelled_without_the_key() {
-    let caller = OperationContext::unbounded();
-    let recorder = observation_recorder();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+async fn silent_server() -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("silent listener");
     let address = listener.local_addr().expect("listener address");
-    let _held = tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
             tokio::spawn(async move {
                 let _stream = stream;
                 std::future::pending::<()>().await;
             });
         }
     });
+    address
+}
+
+#[tokio::test]
+async fn a_dropped_get_records_cancelled_without_the_key() {
+    let caller = OperationContext::unbounded();
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let address = silent_server().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(30),
         ..options(&format!("redis://{address}"), true, true, None)
@@ -269,21 +271,7 @@ async fn a_silent_server_records_timeout() {
     let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("silent listener");
-    let address = listener.local_addr().expect("listener address");
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(async move {
-                let _stream = stream;
-                std::future::pending::<()>().await;
-            });
-        }
-    });
+    let address = silent_server().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_millis(200),
         ..options(&format!("redis://{address}"), true, true, None)
