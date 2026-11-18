@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use axum::http::HeaderValue;
+use iri_string::types::UriStr;
 use utoipa::openapi::header::{Header, HeaderBuilder};
 use utoipa::openapi::path::{Parameter, ParameterIn};
 use utoipa::openapi::response::Response;
@@ -13,7 +15,22 @@ use crate::authn::{AuthenticationMalformed, AuthenticationUnavailable};
 use crate::problem::{Code, Problem, http_status, responses};
 
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
-const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";
+const QUOTED_KEY_EXAMPLE: &str = "\"8e03978e-40d5-43e8-bc93-6894a57f9324\"";
+
+pub(super) fn key_rules_link(
+    docs: Option<&utoipa::openapi::external_docs::ExternalDocs>,
+) -> Option<HeaderValue> {
+    let uri = UriStr::new(&docs?.url).ok()?;
+    let authority = uri.authority_components()?;
+    if !(uri.scheme_str().eq_ignore_ascii_case("https")
+        || uri.scheme_str().eq_ignore_ascii_case("http"))
+        || authority.host().is_empty()
+        || authority.userinfo().is_some()
+    {
+        return None;
+    }
+    HeaderValue::from_str(&format!("<{uri}>; rel=\"describedby\"")).ok()
+}
 
 pub(super) fn key_parameter() -> Parameter {
     Parameter::builder()
@@ -27,9 +44,9 @@ pub(super) fn key_parameter() -> Parameter {
             ObjectBuilder::new()
                 .schema_type(Type::String)
                 .description(Some(format!(
-                    "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes; quoted values can have a longer wire representation because of quotes and escapes."
+                    "{KEY_GRAMMAR} The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes. Quotes and escapes can make the wire value longer."
                 )))
-                .examples([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE]),
+                .examples([QUOTED_KEY_EXAMPLE, UNQUOTED_KEY_EXAMPLE]),
         ))
         .build()
 }
@@ -106,7 +123,9 @@ fn component<'r, T: ToResponse<'r>>() -> RefOr<Response> {
     dead_code,
     reason = "The response body exists only for the OpenAPI derive"
 )]
-#[response(content_type = "application/problem+json")]
+#[response(content_type = "application/problem+json", headers((
+    "Link" = String, description = "Idempotency documentation when the key is missing or invalid"
+)))]
 pub(super) struct IdempotencyBadRequest(pub Problem);
 
 /// A request with this Idempotency-Key is still in progress, or the operation
@@ -122,6 +141,9 @@ pub(super) struct IdempotencyBadRequest(pub Problem);
     headers((
         "Retry-After" = u64,
         description = "seconds to wait before retrying an in-progress request with the same Idempotency-Key"
+    ), (
+        "Idempotent-Replayed" = String,
+        description = "present with the value true only for a replayed terminal business conflict"
     ))
 )]
 pub(super) struct IdempotencyRequestInProgress(pub Problem);
@@ -133,7 +155,12 @@ pub(super) struct IdempotencyRequestInProgress(pub Problem);
     dead_code,
     reason = "The response body exists only for the OpenAPI derive"
 )]
-#[response(content_type = "application/problem+json")]
+#[response(content_type = "application/problem+json", headers((
+    "Link" = String, description = "Idempotency documentation when the key is bound to a different request"
+), (
+    "Idempotent-Replayed" = String,
+    description = "present with the value true only for a replayed terminal business refusal"
+)))]
 pub(super) struct IdempotencyKeyMismatch(pub Problem);
 
 /// bearer authentication trust or idempotent request processing is unavailable,
@@ -178,7 +205,7 @@ mod tests {
         assert_eq!(parameter["schema"]["type"], "string");
         assert_eq!(
             parameter["schema"]["examples"],
-            json!([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE])
+            json!([QUOTED_KEY_EXAMPLE, UNQUOTED_KEY_EXAMPLE])
         );
         assert!(
             parameter["description"]
@@ -193,6 +220,24 @@ mod tests {
         assert!(parameter["schema"].get("minLength").is_none());
         assert!(parameter["schema"].get("maxLength").is_none());
         assert!(parameter["schema"].get("pattern").is_none());
+    }
+
+    #[test]
+    fn the_rules_link_uses_the_published_operation_document_when_available() {
+        let docs =
+            utoipa::openapi::external_docs::ExternalDocs::new("https://docs.example/orders#retry");
+        assert_eq!(
+            key_rules_link(Some(&docs)).unwrap(),
+            "<https://docs.example/orders#retry>; rel=\"describedby\""
+        );
+        for invalid in [
+            "../docs",
+            "https://docs.example/#two words",
+            "https://docs.example/#bad%escape",
+        ] {
+            let docs = utoipa::openapi::external_docs::ExternalDocs::new(invalid);
+            assert!(key_rules_link(Some(&docs)).is_none());
+        }
     }
 
     #[test]

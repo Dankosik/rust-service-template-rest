@@ -7,6 +7,7 @@ use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
 use serde::Serialize;
 
 use super::execute::Rollback;
+use crate::problem::{Code, Problem, http_status};
 
 pub(super) use infra_idempotency_store::is_replayable_header_name;
 
@@ -17,12 +18,7 @@ impl ReplayableResponse {
     pub fn bytes(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Result<Self, Rollback> {
         Record::capture(status, headers, body)
             .map(Self)
-            .map_err(|error| match error {
-                CaptureError::InvalidStatus => Rollback::InvalidStatus,
-                CaptureError::BodyForbidden => Rollback::BodyForbidden,
-                CaptureError::BodyLimit => Rollback::BodyLimit,
-                CaptureError::HeaderLimit => Rollback::HeaderLimit,
-            })
+            .map_err(Rollback::from)
     }
 
     pub fn json<T: Serialize + ?Sized>(
@@ -40,17 +36,8 @@ impl ReplayableResponse {
         }
         headers.remove(CONTENT_ENCODING);
 
-        let mut body = BytesMut::new();
-        let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
-        serde_json::to_writer(&mut writer, value).map_err(|error| {
-            if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
-                Rollback::BodyLimit
-            } else {
-                Rollback::Serialization
-            }
-        })?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        Self::bytes(status, &headers, body.freeze())
+        Self::bytes(status, &headers, json_body(value)?)
     }
 
     pub fn empty(status: StatusCode, headers: &HeaderMap) -> Result<Self, Rollback> {
@@ -65,12 +52,52 @@ impl ReplayableResponse {
         Self(record)
     }
 
+    pub(super) fn terminal_problem(problem: &Problem) -> Result<Record, Rollback> {
+        if !matches!(
+            problem.code(),
+            Code::Conflict | Code::AlreadyExists | Code::UnprocessableContent
+        ) {
+            return Err(Rollback::InvalidStatus);
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
+            .map_err(Rollback::from)
+    }
+
     pub(super) fn into_response(self) -> Response {
         let (status, headers, body) = self.0.into_parts();
         let mut response = Response::new(Body::from(body));
         *response.status_mut() = status;
         *response.headers_mut() = headers;
         response
+    }
+}
+
+fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, Rollback> {
+    let mut body = BytesMut::new();
+    let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
+    serde_json::to_writer(&mut writer, value).map_err(|error| {
+        if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
+            Rollback::BodyLimit
+        } else {
+            Rollback::Serialization
+        }
+    })?;
+    Ok(body.freeze())
+}
+
+impl From<CaptureError> for Rollback {
+    fn from(error: CaptureError) -> Self {
+        match error {
+            CaptureError::InvalidStatus => Self::InvalidStatus,
+            CaptureError::BodyForbidden => Self::BodyForbidden,
+            CaptureError::BodyLimit => Self::BodyLimit,
+            CaptureError::HeaderLimit => Self::HeaderLimit,
+        }
     }
 }
 

@@ -434,6 +434,98 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
+    create_effects(&pool).await;
+    let store = Store::new(pool.clone(), RETENTION)
+        .unwrap()
+        .with_terminal_refusals(true);
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let refusal = Record::capture_terminal_refusal(
+        StatusCode::CONFLICT,
+        &HeaderMap::new(),
+        Bytes::from_static(b"refused"),
+    )
+    .unwrap();
+    let result = store
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            if tx.begin_command_savepoint().await.is_ok() {
+                tx.rollback_command_savepoint().await.unwrap();
+            }
+            Ok(refusal.clone())
+        })
+        .await;
+    assert_eq!(committed(result), refusal);
+    assert_eq!(records(&pool, &scope).await, 1);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
+    const CHANNEL: &str = "idempotency_test_wakeup";
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    listener.listen(CHANNEL).await.unwrap();
+    let producer = template_pool(&dsn_for(&pool).await, 1).await;
+    let store = Store::new(producer.clone(), RETENTION)
+        .unwrap()
+        .with_terminal_refusals(true);
+    let refusal = Record::capture_terminal_refusal(
+        StatusCode::CONFLICT,
+        &HeaderMap::new(),
+        Bytes::from_static(b"declined"),
+    )
+    .unwrap();
+    for (payload, record) in [("rolled_back", refusal), ("committed", success("created"))] {
+        let scope = ScopeKey::new(caller(SUBJECT), payload.as_bytes());
+        let result = store
+            .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+                tx.notify_after_commit(CHANNEL, payload, Duration::ZERO);
+                Ok::<_, Refusal>(record)
+            })
+            .await;
+        committed(result);
+    }
+    let notification = bounded("committed command wakes the listener", listener.recv())
+        .await
+        .unwrap();
+    assert_eq!(notification.payload(), "committed");
+    close_pools(&[&producer]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
+    create_effects(&pool).await;
+    let reader = Store::new(pool.clone(), RETENTION).unwrap();
+    let writer = reader.clone().with_terminal_refusals(true);
+    let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let refusal = Record::capture_terminal_refusal(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &HeaderMap::new(),
+        Bytes::from_static(b"reserved"),
+    )
+    .unwrap();
+    let undeclared = execute(&reader, &scope, INPUT, &refusal, &work).await;
+    std::assert_matches!(undeclared, Err(AttemptError::Internal));
+    assert_eq!(records(&pool, &scope).await, 0);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+
+    assert_eq!(
+        committed(once_free(&writer, &scope, &refusal, &work).await),
+        refusal
+    );
+    let retry = execute(&reader, &scope, INPUT, &success("would execute"), &work).await;
+    assert_eq!(live(retry), Some(refusal));
+    assert_eq!(work.runs(), 2);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(pool: PgPool) {
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;

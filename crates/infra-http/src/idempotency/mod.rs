@@ -8,9 +8,9 @@ mod stored;
 
 #[macro_export]
 macro_rules! idempotent_route {
-    ($($handler:ident)::+) => {{
+    ($($handler:ident)::+, docs = $docs:literal $(,)?) => {{
         #[derive(utoipa::OpenApi)]
-        #[openapi(paths($($handler)::+))]
+        #[openapi(paths($($handler)::+), external_docs(url = $docs))]
         struct Document;
 
         $crate::idempotency::route(<Document as utoipa::OpenApi>::openapi(), $($handler)::+)

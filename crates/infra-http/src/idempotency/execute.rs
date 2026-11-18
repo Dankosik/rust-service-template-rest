@@ -36,6 +36,7 @@ pub(super) enum Outcome {
     Integrity,
     Internal,
     Executed,
+    TerminalRefusal,
     Unstorable,
     NotStored,
     Abandoned,
@@ -59,6 +60,7 @@ impl Outcome {
             Integrity => "integrity",
             Internal => "internal",
             Executed => "executed",
+            TerminalRefusal => "terminal_refusal",
             Unstorable => "unstorable",
             NotStored => "not_stored",
             Abandoned => "abandoned",
@@ -72,10 +74,13 @@ pub(super) struct Attempt {
     pub(super) scope: ScopeKey,
     pub(super) fingerprint: Digest,
     pub(super) operation_id: Arc<str>,
+    pub(super) rules_link: HeaderValue,
     pub(super) deadline: RequestDeadline,
 }
 
 pub trait FreshCommand: Send {
+    const ALLOW_TERMINAL_REFUSALS: bool = false;
+
     fn execute(
         self,
         tx: &mut Tx<'_>,
@@ -100,28 +105,31 @@ impl Attempt {
         }
     }
 
-    async fn execute(self, command: impl FreshCommand, command_end: Option<Instant>) -> Response {
+    async fn execute<C: FreshCommand>(self, command: C, command_end: Option<Instant>) -> Response {
         let Attempt {
             store,
             scope,
             fingerprint,
             operation_id,
+            rules_link,
             deadline,
         } = self;
         let guard = DropGuard::new((), |()| Outcome::Abandoned.record());
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
+                let store = store.with_terminal_refusals(C::ALLOW_TERMINAL_REFUSALS);
                 let command_cutoff = command_end.filter(|end| *end <= attempt_end);
                 let attempt = store.attempt_with_deadline(
                     &scope,
                     &fingerprint,
                     command_cutoff.unwrap_or(attempt_end),
-                    async |tx: &mut Tx<'_>| {
-                        command
-                            .execute(tx)
-                            .await
-                            .map(ReplayableResponse::into_record)
+                    async |tx: &mut Tx<'_>| match command.execute(tx).await {
+                        Ok(response) => Ok(response.into_record()),
+                        Err(Rollback::Terminal(problem)) => {
+                            ReplayableResponse::terminal_problem(&problem)
+                        }
+                        Err(rollback) => Err(rollback),
                     },
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
@@ -133,9 +141,14 @@ impl Attempt {
                 result
             }
         };
-        map_attempted(attempted, &scope, &operation_id)
-            .settle(deadline.at(), guard)
-            .await
+        let mut answer = map_attempted(attempted, &scope, &operation_id);
+        if answer.outcome == Outcome::KeyMismatch {
+            answer
+                .response
+                .headers_mut()
+                .insert(axum::http::header::LINK, rules_link);
+        }
+        answer.settle(deadline.at(), guard).await
     }
 }
 
@@ -149,6 +162,8 @@ fn command_timeout() -> Response {
 pub enum Rollback {
     #[error("operation refused")]
     Refused(Box<Response>),
+    #[error("terminal business refusal")]
+    Terminal(Box<Problem>),
     #[error("database")]
     Database(SqlError),
     #[error("status")]
@@ -178,6 +193,11 @@ impl From<SqlError> for Rollback {
 }
 
 impl Rollback {
+    #[must_use]
+    pub fn terminal(problem: Problem) -> Self {
+        Self::Terminal(Box::new(problem))
+    }
+
     #[must_use]
     pub fn refuse(response: impl IntoResponse) -> Self {
         Self::Refused(Box::new(response.into_response()))
@@ -257,10 +277,17 @@ fn map_attempted(
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
         }
-        Ok(Attempted::Committed(record)) => Answer::operation_response(
-            ReplayableResponse::from_record(record).into_response(),
-            Outcome::Executed,
-        ),
+        Ok(Attempted::Committed(record)) => {
+            let outcome = if record.is_terminal_refusal() {
+                Outcome::TerminalRefusal
+            } else {
+                Outcome::Executed
+            };
+            Answer::operation_response(
+                ReplayableResponse::from_record(record).into_response(),
+                outcome,
+            )
+        }
     }
 }
 
@@ -285,9 +312,9 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
 }
 
 fn refusal(mut response: Response) -> Response {
-    if response.status().is_success() {
+    if !(response.status().is_client_error() || response.status().is_server_error()) {
         tracing::error!(
-            failure = "successful_refusal",
+            failure = "invalid_refusal_status",
             "http_idempotency_wiring_failed"
         );
         return sanitized_internal_error();
@@ -373,6 +400,9 @@ mod tests {
                 scope: scope(),
                 fingerprint: [9; 32],
                 operation_id: "test".into(),
+                rules_link: HeaderValue::from_static(
+                    "<https://docs.example/retry>; rel=\"describedby\"",
+                ),
                 deadline: RequestDeadline::from_deadline(
                     operation_context::Deadline::new(origin, budget),
                     budget,
@@ -408,8 +438,18 @@ mod tests {
     #[test]
     fn a_rollback_cannot_claim_success_or_replay() {
         for (status, expected) in [
+            (StatusCode::CONTINUE, StatusCode::INTERNAL_SERVER_ERROR),
             (StatusCode::CREATED, StatusCode::INTERNAL_SERVER_ERROR),
+            (StatusCode::NOT_MODIFIED, StatusCode::INTERNAL_SERVER_ERROR),
             (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                StatusCode::from_u16(600).unwrap(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ] {
             let rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
             let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), "test");

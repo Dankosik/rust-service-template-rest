@@ -187,7 +187,29 @@ impl Store {
         if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
             return Err(Stop::Decided(decision));
         }
+        if self.terminal_refusals {
+            tx.begin_command_savepoint()
+                .await
+                .map_err(|err| failed(&err, "savepoint", AttemptError::classify_sql(&err), None))?;
+        }
         let record = work(tx).await.map_err(Stop::RolledBack)?;
+        if record.is_terminal_refusal() {
+            if !self.terminal_refusals {
+                return Err(Stop::Failed(refused(
+                    "command",
+                    AttemptError::Internal,
+                    "undeclared_terminal_refusal",
+                )));
+            }
+            tx.rollback_command_savepoint().await.map_err(|err| {
+                failed(
+                    &err,
+                    "rollback_command",
+                    AttemptError::classify_sql(&err),
+                    None,
+                )
+            })?;
+        }
         write(tx, scope, fingerprint, &record, self.retention).await?;
         Ok(record)
     }

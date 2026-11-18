@@ -1,6 +1,6 @@
 [package]
 name = "infra-idempotency-store"
-description = "PostgreSQL record store for HTTP idempotency: arbitration, atomic success records, startup check, cleanup."
+description = "PostgreSQL arbitration, atomic outcome storage and cleanup for HTTP idempotency."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 bytes = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
-http = { workspace = true }
+http = { workspace = true, features = ["std"] }
 infra-postgres = { workspace = true }
 metrics = { workspace = true }
 sha2 = { workspace = true }

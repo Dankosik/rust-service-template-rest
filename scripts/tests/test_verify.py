@@ -260,6 +260,12 @@ class SurfacesTests(unittest.TestCase):
             ("openapi", "runtime_image", "validation_system", "python", "cargo_dependencies", "module_initializer", "initializer_artifacts"),
             ("rust_source", "documentation"),
         )
+        self._assert_surfaces(
+            self.source_fixture,
+            "scripts/checks/openapi_idempotency.py",
+            ("openapi", "validation_system", "python"),
+            ("rust_source",),
+        )
         # template:begin runtime-progress:test-surfaces-runtime-progress
         for rp_file in (
             "crates/health/src/lib.rs",

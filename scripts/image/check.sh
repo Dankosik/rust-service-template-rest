@@ -168,8 +168,12 @@ assert_allocator_options() {
 	}
 }
 assert_allocator_options "${container}" /service
-[[ $(docker top "${container}" -eLo pid,comm | grep -Fc jemalloc_bg_thd) -ge 1 ]] || {
-	echo "the service runs no jemalloc background thread" >&2
+# shellcheck source=tools/versions.env
+. tools/versions.env
+docker run --rm --read-only --network none --cap-drop=ALL --security-opt=no-new-privileges \
+	--user 65532:65532 --pid="container:${container}" --entrypoint /bin/sh "${BUILDKIT_IMAGE}" \
+	-c 'grep -Fxq jemalloc_bg_thd /proc/[0-9]*/task/*/comm' || {
+	echo "could not verify a jemalloc background thread in the service container" >&2
 	exit 1
 }
 echo "runtime image allocator purges in the background: ${allocator_options}"

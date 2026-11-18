@@ -46,6 +46,7 @@ pub struct Tx<'c, Mode = ()> {
     proven_alive: bool,
     mode: Mode,
     notifications: Vec<Notification>,
+    command_savepoint_notifications: Option<usize>,
 }
 
 pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
@@ -207,6 +208,42 @@ impl Tx<'_> {
     pub fn connection(&mut self) -> &mut PgConnection {
         self.proven_alive = false;
         self.conn
+    }
+}
+
+impl<M: TxMode> Tx<'_, M> {
+    pub async fn begin_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
+        if self.command_savepoint_notifications.is_some() {
+            return Err(sqlx::Error::InvalidArgument(
+                "the transaction already owns a command savepoint".into(),
+            ));
+        }
+        self.command_savepoint_notifications = Some(self.notifications.len());
+        self.execute("SAVEPOINT command_work").await?;
+        Ok(())
+    }
+
+    pub async fn rollback_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
+        let notification_count = self.command_savepoint_notifications.ok_or_else(|| {
+            sqlx::Error::InvalidArgument("the transaction has no command savepoint".into())
+        })?;
+        self.proven_alive = false;
+        let rollback = self.conn.execute("ROLLBACK TO SAVEPOINT command_work");
+        if let Some(budget) = self.mode.operation_deadline() {
+            budget.remaining_ms().await.ok_or_else(elapsed)?;
+            let response = tokio::time::timeout_at(budget.at, rollback)
+                .await
+                .map_err(|_| {
+                    budget.expired = true;
+                    elapsed()
+                })?;
+            budget.finish(response).await?;
+        } else {
+            rollback.await?;
+        }
+        self.proven_alive = true;
+        self.notifications.truncate(notification_count);
+        Ok(())
     }
 }
 
@@ -556,6 +593,7 @@ where
             proven_alive: true,
             mode,
             notifications: Vec::new(),
+            command_savepoint_notifications: None,
         };
         let result = f(&mut handle).await;
         handle.mode.check_expiry(&mut observed)?;

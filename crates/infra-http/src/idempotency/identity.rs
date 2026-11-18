@@ -8,7 +8,7 @@ use sha2::{Digest as _, Sha256};
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
-pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string.";
+pub(super) const KEY_GRAMMAR: &str = "Send an IETF Structured Field string in double quotes. Parameters on the string do not change the key. Unquoted visible ASCII is also accepted for compatibility.";
 
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
@@ -41,9 +41,6 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
         let sfv::BareItem::String(value) = item.bare_item else {
             return None;
         };
-        if !item.params.is_empty() {
-            return None;
-        }
         Cow::Owned(String::from(value).into_bytes())
     } else if value.iter().all(u8::is_ascii_graphic) {
         Cow::Borrowed(value)
@@ -160,7 +157,7 @@ mod tests {
         for value in [
             b"".as_slice(),
             b"\"unterminated".as_slice(),
-            b"\"key\";a=1".as_slice(),
+            b"\"key\";a=".as_slice(),
             b"\"key\" trailing".as_slice(),
             b"\x7f".as_slice(),
             b"\rkey".as_slice(),

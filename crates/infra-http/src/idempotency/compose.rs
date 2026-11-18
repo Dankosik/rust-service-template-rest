@@ -40,7 +40,7 @@ where
     F: Future<Output = Result<C, Box<Problem>>> + Send + 'static,
 {
     let mut paths = std::mem::take(&mut document.paths);
-    let operation = declaration::prepare(&mut paths)?;
+    let operation = declaration::prepare(&mut paths, document.external_docs.take())?;
     metrics::describe_counter!(
         HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
         metrics::Unit::Count,
@@ -49,26 +49,31 @@ where
     let method = operation.method;
     let operation_id: Arc<str> = Arc::from(operation.id.as_str());
     let fingerprint_headers: Arc<[HeaderName]> = operation.fingerprint_headers.into();
-    let handler = move |State(state): State<S>, mut request: Request| {
-        let operation_id = operation_id.clone();
-        let fingerprint_headers = fingerprint_headers.clone();
-        let prepare = prepare.clone();
-        async move {
-            let delegation = request.extensions_mut().remove::<DelegationCredential>();
-            let (input, principal, attempt) =
-                match capture_attempt(operation_id, &fingerprint_headers, request).await {
-                    ControlFlow::Continue(captured) => captured,
-                    ControlFlow::Break(response) => return response,
-                };
-            match prepare(input, principal, delegation, state).await {
-                Ok(command) => attempt.run(command).await,
-                Err(problem) => {
-                    Outcome::NotStored.record();
-                    problem.into_response()
+    let rules_link = operation.rules_link;
+    let handler =
+        move |State(state): State<S>, mut request: Request| {
+            let operation_id = operation_id.clone();
+            let fingerprint_headers = fingerprint_headers.clone();
+            let rules_link = rules_link.clone();
+            let prepare = prepare.clone();
+            async move {
+                let delegation = request.extensions_mut().remove::<DelegationCredential>();
+                let (input, principal, attempt) =
+                    match capture_attempt(operation_id, &fingerprint_headers, rules_link, request)
+                        .await
+                    {
+                        ControlFlow::Continue(captured) => captured,
+                        ControlFlow::Break(response) => return response,
+                    };
+                match prepare(input, principal, delegation, state).await {
+                    Ok(command) => attempt.run(command).await,
+                    Err(problem) => {
+                        Outcome::NotStored.record();
+                        problem.into_response()
+                    }
                 }
             }
-        }
-    };
+        };
     let route = (Vec::new(), paths, on(method, handler));
     HttpContract::from_idempotent(document, route)
         .and_then(|contract| {
@@ -84,6 +89,7 @@ where
 async fn capture_attempt(
     operation_id: Arc<str>,
     fingerprint_headers: &[HeaderName],
+    rules_link: HeaderValue,
     request: Request,
 ) -> ControlFlow<Response, (CommandInput, VerifiedPrincipal, Attempt)> {
     let Some(store) = request.extensions().get::<Store>().cloned() else {
@@ -113,7 +119,7 @@ async fn capture_attempt(
     )
     .map(|key| ScopeKey::new(caller, &key)) else {
         Outcome::InvalidKey.record();
-        return ControlFlow::Break(invalid_key());
+        return ControlFlow::Break(invalid_key(rules_link));
     };
     let context = parts.extensions.get::<RequestContext>();
     let collected = match buffer_body(context, body).await {
@@ -129,6 +135,7 @@ async fn capture_attempt(
         scope,
         fingerprint,
         operation_id,
+        rules_link,
         deadline,
     };
     ControlFlow::Continue((input, principal, attempt))
@@ -152,16 +159,16 @@ async fn buffer_body(
     })
 }
 
-fn invalid_key() -> Response {
-    Problem::new(Code::BadRequest)
+fn invalid_key(rules_link: HeaderValue) -> Response {
+    let problem = Problem::new(Code::BadRequest)
         .detail(INVALID_KEY_DETAIL)
         .invalid_param(
             format!("header.{KEY_HEADER}"),
             format!(
-                "must be one Idempotency-Key field; {KEY_GRAMMAR} The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes"
+                "Supply exactly one Idempotency-Key field. {KEY_GRAMMAR} The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes."
             ),
-        )
-        .into_response()
+        );
+    ([(axum::http::header::LINK, rules_link)], problem).into_response()
 }
 
 fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {

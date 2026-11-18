@@ -445,6 +445,12 @@ openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking 
 	@test -n "$(BASE_OPENAPI)" || { echo "openapi-breaking requires BASE_OPENAPI=<path to the base document>" >&2; exit 2; }
 	$(call REQUIRE_GO,oasdiff@v$(OASDIFF_VERSION))
 	$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE)
+	@set -eu; \
+		work=$$(mktemp -d); \
+		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
+		$(OASDIFF) upgrade --allow-external-refs=false --format json -- "$(BASE_OPENAPI)" >"$$work/base.json"; \
+		$(OASDIFF) upgrade --allow-external-refs=false --format json -- "$(OPENAPI_FILE)" >"$$work/candidate.json"; \
+		python3 scripts/checks/openapi_idempotency.py "$$work/base.json" "$$work/candidate.json"
 
 openapi-breaking-since: ## Compare the document with its committed version at BASE_REF for breaking changes
 	@git cat-file -e "$(BASE_REF):$(OPENAPI_FILE)" 2>/dev/null || { echo "$@: $(OPENAPI_FILE) is unavailable at $(BASE_REF)" >&2; exit 2; }

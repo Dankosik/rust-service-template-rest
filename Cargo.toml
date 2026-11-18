@@ -91,6 +91,7 @@ infra-webhooks = { path = "crates/infra-webhooks" }
 sqlx = { version = "0.9.0", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
+iri-string = { version = "0.7", default-features = false }
 sfv = { version = "0.16.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
