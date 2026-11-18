@@ -6,6 +6,25 @@ use serde::Deserialize;
 
 use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct ServiceWebhooksInput {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "the service consumes only the names of worker endpoints"
+    )]
+    endpoints: BTreeMap<String, serde::de::IgnoredAny>,
+}
+
+impl ServiceWebhooksInput {
+    pub(crate) fn endpoint_ids(self, violations: &mut Violations) -> Vec<String> {
+        for id in self.endpoints.keys() {
+            violations.check(validate_endpoint_id("webhooks.endpoints", id));
+        }
+        self.endpoints.into_keys().collect()
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebhooksConfig {

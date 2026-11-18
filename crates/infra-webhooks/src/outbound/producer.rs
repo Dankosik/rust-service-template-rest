@@ -1,4 +1,4 @@
-use std::{future::poll_fn, task::Poll};
+use std::{future::poll_fn, sync::Arc, task::Poll};
 
 use bytes::Bytes;
 use foldhash::HashSet;
@@ -15,14 +15,14 @@ pub const JSON_CONTENT_TYPE: &str = "application/json";
 
 #[derive(Clone, Debug)]
 pub struct Producer {
-    endpoint_ids: HashSet<String>,
+    endpoint_ids: Arc<HashSet<String>>,
 }
 
 impl Producer {
     #[must_use]
     pub fn new(endpoint_ids: impl IntoIterator<Item = String>) -> Self {
         Self {
-            endpoint_ids: endpoint_ids.into_iter().collect(),
+            endpoint_ids: Arc::new(endpoint_ids.into_iter().collect()),
         }
     }
 

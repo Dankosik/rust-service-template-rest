@@ -239,20 +239,20 @@ pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> 
         Ended::Error(error) => match error.disposition {
             Disposition::Snooze { delay_micros } => Transition::Snooze {
                 delay_micros,
-                summary: sanitize_summary(error.summary),
+                summary: sanitize_summary(&error.summary),
             },
             Disposition::Permanent => Transition::Fail {
                 reason: FailureReason::Permanent,
-                summary: sanitize_summary(error.summary),
+                summary: sanitize_summary(&error.summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
                 number,
                 policy,
-                error.summary,
+                &error.summary,
                 RetryCause::Failure { floor_micros },
             ),
             Disposition::Retry => {
-                retry_or_exhaust(number, policy, error.summary, RetryCause::FAILURE)
+                retry_or_exhaust(number, policy, &error.summary, RetryCause::FAILURE)
             }
         },
         Ended::Panic => retry_or_exhaust(number, policy, "handler panicked", RetryCause::FAILURE),
@@ -348,6 +348,15 @@ mod tests {
             number,
         };
         map_outcome(&attempt, Policy::default(), ended)
+    }
+
+    #[test]
+    fn unhandled_driver_error_retries_with_only_its_category() {
+        let error = sqlx::Error::Protocol("private driver detail".to_owned());
+        std::assert_matches!(
+            outcome(Ended::Error(error.into()), 1),
+            Transition::Retry { ref summary, .. } if summary == "postgres protocol"
+        );
     }
 
     #[test]

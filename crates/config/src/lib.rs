@@ -121,6 +121,9 @@ pub(crate) struct ConfigInput {
     // template:begin inbound-webhooks:config-inbound-webhooks-input-field
     inbound_webhooks: inbound_webhooks::InboundWebhooksInput,
     // template:end inbound-webhooks:config-inbound-webhooks-input-field
+    // template:begin webhooks:config-outbound-webhooks-input-field
+    webhooks: webhooks::ServiceWebhooksInput,
+    // template:end webhooks:config-outbound-webhooks-input-field
     health: HealthConfig,
     log: LogConfig,
     runtime: RuntimeConfig,
@@ -164,6 +167,9 @@ impl ConfigInput {
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
         // template:end inbound-webhooks:config-inbound-webhooks-validate
+        // template:begin webhooks:config-outbound-webhooks-validate
+        let outbound_webhook_endpoints = self.webhooks.endpoint_ids(v);
+        // template:end webhooks:config-outbound-webhooks-validate
         self.health.validate(v);
         self.log.validate(v);
         self.runtime.validate(v);
@@ -201,6 +207,9 @@ impl ConfigInput {
                 // template:begin inbound-webhooks:config-inbound-webhooks-admitted-field
                 inbound_webhooks,
                 // template:end inbound-webhooks:config-inbound-webhooks-admitted-field
+                // template:begin webhooks:config-outbound-webhooks-admitted-field
+                outbound_webhook_endpoints,
+                // template:end webhooks:config-outbound-webhooks-admitted-field
                 health: self.health,
                 log: self.log,
                 runtime: self.runtime,
@@ -270,6 +279,9 @@ pub struct ServiceSections {
     // template:begin inbound-webhooks:config-inbound-webhooks-field
     pub inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
     // template:end inbound-webhooks:config-inbound-webhooks-field
+    // template:begin webhooks:config-outbound-webhooks-field
+    pub outbound_webhook_endpoints: Vec<String>,
+    // template:end webhooks:config-outbound-webhooks-field
     pub health: HealthConfig,
     pub log: LogConfig,
     pub runtime: RuntimeConfig,

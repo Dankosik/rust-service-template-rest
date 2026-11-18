@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -138,11 +139,11 @@ pub(crate) enum Disposition {
     Snooze { delay_micros: i64 },
 }
 
-#[derive(Debug, derive_more::Display)]
-#[display("{summary}")]
+#[derive(Debug, thiserror::Error)]
+#[error("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
-    pub(crate) summary: &'static str,
+    pub(crate) summary: Cow<'static, str>,
 }
 
 impl JobError {
@@ -150,7 +151,7 @@ impl JobError {
     pub const fn retryable(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Retry,
-            summary: reason,
+            summary: Cow::Borrowed(reason),
         }
     }
 
@@ -158,7 +159,7 @@ impl JobError {
     pub const fn permanent(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Permanent,
-            summary: reason,
+            summary: Cow::Borrowed(reason),
         }
     }
 
@@ -171,7 +172,7 @@ impl JobError {
         let floor_micros = whole_micros + i64::from(has_fraction);
         Ok(Self {
             disposition: Disposition::RetryAfterAtLeast { floor_micros },
-            summary: reason,
+            summary: Cow::Borrowed(reason),
         })
     }
 
@@ -180,7 +181,7 @@ impl JobError {
             disposition: Disposition::Snooze {
                 delay_micros: checked_delay_micros(delay)?,
             },
-            summary: "",
+            summary: Cow::Borrowed(""),
         })
     }
 
@@ -190,13 +191,24 @@ impl JobError {
             disposition: Disposition::Snooze {
                 delay_micros: UNAVAILABLE_DELAY_MICROS,
             },
-            summary: reason,
+            summary: Cow::Borrowed(reason),
         }
     }
 
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
         matches!(self.disposition, Disposition::Permanent)
+    }
+}
+
+impl From<sqlx::Error> for JobError {
+    fn from(error: sqlx::Error) -> Self {
+        let diagnostic = infra_postgres::sqlstate(&error)
+            .unwrap_or_else(|| Cow::Borrowed(infra_postgres::failure_cause(&error)));
+        Self {
+            disposition: Disposition::Retry,
+            summary: Cow::Owned(format!("postgres {diagnostic}")),
+        }
     }
 }
 

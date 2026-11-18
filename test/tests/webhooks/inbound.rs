@@ -488,8 +488,7 @@ impl Consumer for EffectConsumer {
             .bind(incoming.message_id())
             .bind(incoming.content_type())
             .execute(&mut *tx)
-            .await
-            .map_err(|_| JobError::retryable("webhook_effect_write_failed"))?;
+            .await?;
         self.entered.notify_one();
         self.release.notified().await;
         Ok(())
@@ -553,6 +552,74 @@ async fn accept_for_processing(pool: &PgPool, message_id: &str) {
             .await,
         Ok(ReceiptOutcome::Accepted)
     );
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(pool: PgPool) {
+    sqlx::raw_sql(
+        "CREATE TABLE webhook_effects (message_id bytea PRIMARY KEY, content_type bytea);
+         INSERT INTO webhook_effects (message_id) VALUES ('private-message-id');
+         CREATE FUNCTION inject_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE deadlock_detected USING MESSAGE = 'private deadlock detail'; END $$;
+         CREATE TRIGGER inject_deadlock BEFORE INSERT ON webhook_effects
+             FOR EACH ROW EXECUTE FUNCTION inject_deadlock();",
+    )
+    .execute(&pool)
+    .await
+    .expect("consumer effect with a duplicate key and an injected deadlock");
+    accept_for_processing(&pool, "private-message-id").await;
+    sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = 'webhooks.process'")
+        .execute(&pool)
+        .await
+        .expect("two attempts remain");
+    let running = RunningProcessor::with_consumer(&pool, Arc::new(EffectConsumer::default()));
+    let summary = poll_until(
+        "the deadlock schedules a retry",
+        super::WAIT,
+        POLL,
+        async || {
+            sqlx::query_scalar::<_, String>(
+                "SELECT error_summary FROM background_jobs
+                 WHERE kind = 'webhooks.process' AND state = 'pending' AND attempts = 24",
+            )
+            .fetch_optional(&pool)
+            .await
+            .expect("attempt summary")
+        },
+    )
+    .await;
+    assert_eq!(summary, "postgres 40P01");
+
+    sqlx::raw_sql(
+        "DROP TRIGGER inject_deadlock ON webhook_effects;
+         UPDATE background_jobs SET not_before = now() WHERE kind = 'webhooks.process';",
+    )
+    .execute(&pool)
+    .await
+    .expect("the last attempt can reach the duplicate key");
+    let (attempts, reason, summary, errors) = poll_until(
+        "the attempt budget is exhausted",
+        super::WAIT,
+        POLL,
+        async || {
+            sqlx::query_as::<_, (i16, String, String, Vec<String>)>(
+                "SELECT attempts, failure_reason, error_summary,
+                        ARRAY(SELECT entry->>'error'
+                              FROM jsonb_array_elements(errors) WITH ORDINALITY AS history(entry, position)
+                              ORDER BY position)
+                 FROM background_jobs WHERE kind = 'webhooks.process' AND state = 'failed'",
+            )
+            .fetch_optional(&pool)
+            .await
+            .expect("terminal attempt and history")
+        },
+    )
+    .await;
+    assert_eq!(attempts, 25);
+    assert_eq!(reason, "exhausted");
+    assert_eq!(summary, "postgres 23505");
+    assert_eq!(errors, ["postgres 40P01", "postgres 23505"]);
+    running.close(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

@@ -469,6 +469,11 @@ async fn start(
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
+        // template:begin webhooks:bootstrap-outbound-webhooks-state
+        outbound_webhooks: infra_webhooks::outbound::Producer::new(
+            config.outbound_webhook_endpoints.iter().cloned(),
+        ),
+        // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
         service_tokens: service_auth.tokens.clone(),
         // template:end service-auth:bootstrap-service-auth-route-state

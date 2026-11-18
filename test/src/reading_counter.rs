@@ -492,6 +492,7 @@ impl TransactionalHandler<Operation> for Arc<Controls> {
             .map_err(|error| match error {
                 Error::InvalidOperation => JobError::permanent("reading operation is invalid"),
                 Error::Conflict => JobError::permanent("reading identity conflicts"),
+                Error::Database(error) => error.into(),
                 _ => JobError::retryable("reading effect failed"),
             })?;
         self.before_completion()
