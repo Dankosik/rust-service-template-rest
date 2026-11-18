@@ -347,7 +347,7 @@ impl PreparedRequest<'_> {
         }
         .and_then(|response| stops.check().map_err(Error::from).map(|()| response));
         let status = attempt.status();
-        std::mem::DropGuard::dismiss(attempt).finish(&result);
+        std::mem::DropGuard::dismiss(attempt).finish(result.as_ref().err());
         result.map_err(|source| match status {
             Some(status) => ExchangeError::AfterResponse { status, source },
             None => ExchangeError::BeforeResponse(source),

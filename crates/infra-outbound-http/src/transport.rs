@@ -36,23 +36,21 @@ pub async fn prepare_tls() -> Result<(), BuildError> {
 }
 
 pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
+    TLS_CONFIG.get_or_try_init(|| {
+        platform_tls_config().map_err(|source| BuildError::Tls {
+            source: Box::new(source),
+        })
+    })
+}
+
+fn platform_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
-    TLS_CONFIG.get_or_try_init(|| {
-        let build_error = |source: rustls::Error| BuildError::Tls {
-            source: Box::new(source),
-        };
-        Ok(
-            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .map_err(build_error)?
-            .with_platform_verifier()
-            .map_err(build_error)?
-            .with_no_client_auth(),
-        )
-    })
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_platform_verifier()?
+        .with_no_client_auth())
 }
 
 pub(crate) fn build_transport(
