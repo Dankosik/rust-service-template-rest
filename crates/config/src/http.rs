@@ -197,14 +197,14 @@ fn validate_grace_and_drain(
         return false;
     }
     if drain_timeout > grace_period {
-        v.check(Err(ValidationError::new(
+        v.reject(ValidationError::new(
             "http.drain_timeout",
             format!(
                 "must be <= http.grace_period ({}), got {}",
                 crate::de::display_duration(grace_period),
                 crate::de::display_duration(drain_timeout)
             ),
-        )));
+        ));
         return false;
     }
     if let Some(tail) = tail {
@@ -290,14 +290,14 @@ impl HttpInput {
         let mut propagation_fits_drain = false;
         if drain_fits_grace {
             if readiness_propagation_delay >= self.drain_timeout {
-                v.check(Err(ValidationError::new(
+                v.reject(ValidationError::new(
                     "http.readiness_propagation_delay",
                     format!(
                         "must be less than http.drain_timeout ({}), got {}",
                         crate::de::display_duration(self.drain_timeout),
                         crate::de::display_duration(readiness_propagation_delay)
                     ),
-                )));
+                ));
             } else {
                 propagation_fits_drain = true;
             }

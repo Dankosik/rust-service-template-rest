@@ -160,6 +160,9 @@ impl ConfigInput {
                 reason = "only the gRPC profile consumes the HTTP drain budget"
             )]
             let (http, drain_budget) = self.http.admit(shutdown_tail, v);
+            // template:begin service-auth:config-grpc-enabled
+            let grpc_enabled = self.grpc.enabled;
+            // template:end service-auth:config-grpc-enabled
             // template:begin grpc:config-admit
             let grpc = self.grpc.admit(drain_budget, v);
             // template:end grpc:config-admit
@@ -185,17 +188,16 @@ impl ConfigInput {
             let authn = self.authn.admit(v);
             // template:end authn:config-admit
             // template:begin service-auth:config-service-auth-admit
-            let grpc_enabled = !matches!(grpc, Ok(None));
             let service_auth =
                 self.service_auth
                     .admit(self.app.is_local_development(), grpc_enabled, v);
             if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
                 && matches!(listener.security, GrpcListenerSecurity::Plaintext)
             {
-                v.check(Err(ValidationError::new(
+                v.reject(ValidationError::new(
                     "grpc.security",
                     "must be tls when the listener verifies service JWTs",
-                )));
+                ));
             }
             // template:end service-auth:config-service-auth-admit
             // template:begin postgres:config-admit

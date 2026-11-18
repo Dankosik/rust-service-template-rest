@@ -324,22 +324,23 @@ impl AuthnConfig {
     }
 }
 
-impl AuthnInput {
-    fn take_audience(
-        &mut self,
-        condition: &str,
-        v: &mut Violations,
-    ) -> Result<Audiences, Rejected> {
-        match (self.audience.take(), self.audiences.take()) {
-            (Some(_), Some(_)) => Err(v.reject(ValidationError::new(
-                "authn.audiences",
-                "cannot be set together with authn.audience",
-            ))),
-            (Some(audience), None) | (None, Some(audience)) => Ok(audience),
-            (None, None) => v.take(required("authn.audience", None, condition)),
-        }
+fn admit_audience(
+    audience: Option<Audiences>,
+    audiences: Option<Audiences>,
+    condition: &str,
+    v: &mut Violations,
+) -> Result<Audiences, Rejected> {
+    match (audience, audiences) {
+        (Some(_), Some(_)) => Err(v.reject(ValidationError::new(
+            "authn.audiences",
+            "cannot be set together with authn.audience",
+        ))),
+        (Some(audience), None) | (None, Some(audience)) => Ok(audience),
+        (None, None) => v.take(required("authn.audience", None, condition)),
     }
+}
 
+impl AuthnInput {
     #[allow(
         clippy::unused_self,
         unused_variables,
@@ -354,10 +355,10 @@ impl AuthnInput {
             ("authn.jwks_max_age", self.jwks_max_age.is_some()),
         ] {
             if present {
-                v.check(Err(ValidationError::new(
+                v.reject(ValidationError::new(
                     key,
                     "is only valid when authn.mode = oidc-jwt",
-                )));
+                ));
             }
         }
         // template:end oidc-jwt:authn-reject-jwt-fields
@@ -392,21 +393,21 @@ impl AuthnInput {
             ("authn.cache_ttl", self.cache_ttl.is_some()),
         ] {
             if present {
-                v.check(Err(ValidationError::new(
+                v.reject(ValidationError::new(
                     key,
                     "is only valid when authn.mode = oidc-introspection",
-                )));
+                ));
             }
         }
         // template:end oidc-introspection:authn-reject-introspection-fields
     }
 
     // template:begin oidc-jwt:authn-admit-jwt
-    fn admit_jwt(mut self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
+    fn admit_jwt(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
         self.reject_introspection_fields(v);
         let condition = "authn.mode = oidc-jwt";
-        let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
-        let audience = self.take_audience(condition, v);
+        let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+        let audience = admit_audience(self.audience, self.audiences, condition, v);
         let token_profile = v.take(required(
             "authn.token_profile",
             self.token_profile,
@@ -419,16 +420,16 @@ impl AuthnInput {
             .as_deref()
             .is_some_and(|uri| uri.trim().is_empty())
         {
-            v.check(Err(ValidationError::new(
+            v.reject(ValidationError::new(
                 "authn.jwks_uri",
                 "must not be blank when set",
-            )));
+            ));
         }
         if algorithms.is_empty() {
-            v.check(Err(ValidationError::new(
+            v.reject(ValidationError::new(
                 "authn.algorithms",
                 "must contain at least one supported algorithm",
-            )));
+            ));
         }
         Ok(AuthnConfig::OidcJwt {
             issuer: issuer?,
@@ -442,13 +443,13 @@ impl AuthnInput {
     // template:end oidc-jwt:authn-admit-jwt
 
     // template:begin oidc-introspection:authn-admit-introspection
-    fn admit_introspection(mut self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
+    fn admit_introspection(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
         use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 
         self.reject_jwt_fields(v);
         let condition = "authn.mode = oidc-introspection";
-        let issuer = v.take(required_when("authn.issuer", self.issuer.take(), condition));
-        let audience = self.take_audience(condition, v);
+        let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+        let audience = admit_audience(self.audience, self.audiences, condition, v);
         let introspection_endpoint = v.take(required_when(
             "authn.introspection_endpoint",
             self.introspection_endpoint,
@@ -509,10 +510,10 @@ impl AuthnInput {
                     ("authn.audiences", self.audiences.is_some()),
                 ] {
                     if present {
-                        v.check(Err(ValidationError::new(
+                        v.reject(ValidationError::new(
                             key,
                             "is only valid when authn.mode is not none",
-                        )));
+                        ));
                     }
                 }
                 self.reject_jwt_fields(v);

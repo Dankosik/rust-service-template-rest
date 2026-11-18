@@ -144,10 +144,10 @@ fn validate_endpoints<T>(
     violations: &mut Violations,
 ) {
     if !endpoints.is_empty() && !postgres_enabled {
-        violations.check(Err(ValidationError::new(
+        violations.reject(ValidationError::new(
             "postgres.enabled",
             "must be true when inbound webhook endpoints are configured",
-        )));
+        ));
     }
     for endpoint_id in endpoints.keys() {
         violations.check(validate_endpoint_id(
