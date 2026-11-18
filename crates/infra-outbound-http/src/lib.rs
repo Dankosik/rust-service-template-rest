@@ -163,6 +163,20 @@ impl Client {
             .await
     }
 
+    pub async fn execute_for_headers(
+        &self,
+        request: Request<Bytes>,
+        context: &OperationContext,
+    ) -> Result<http::response::Parts, Error> {
+        self.prepare(request, context)?
+            .send_with_response(
+                || true,
+                |_| {},
+                async |response, _, _| Ok(response.into_parts().0),
+            )
+            .await
+    }
+
     pub fn prepare(
         &self,
         mut request: Request<Bytes>,
@@ -187,41 +201,6 @@ impl Client {
             request,
             stops,
         })
-    }
-
-    async fn exchange(
-        &self,
-        request: Request<Bytes>,
-        stops: &StopScopes,
-        attempt: &mut observe::Attempt,
-        check: impl FnOnce() -> bool + Send,
-        on_status: impl FnOnce(StatusCode) + Send,
-    ) -> Result<Response<Bytes>, Error> {
-        let span = attempt.span();
-        let exchange = async {
-            stops.check()?;
-            let admitted = check();
-            stops.check()?;
-            if !admitted {
-                return Err(Error::DispatchRefused);
-            }
-            let response = self
-                .transport
-                .request(request.map(Full::new))
-                .await
-                .map_err(|source| Error::Transport {
-                    source: Box::new(source),
-                })?;
-            attempt.record_status(response.status());
-            on_status(response.status());
-            stops.check()?;
-            buffer_response(response, self.limits.response_body_bytes, stops).await
-        };
-        tokio::select! {
-            biased;
-            reason = stops.wait_stopped() => Err(stopped_error(reason)),
-            result = exchange.instrument(span) => result,
-        }
     }
 }
 
@@ -273,6 +252,20 @@ impl PreparedRequest<'_> {
         check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
+        self.send_with_response(check, on_status, buffer_response)
+            .await
+    }
+
+    async fn send_with_response<T>(
+        self,
+        check: impl FnOnce() -> bool + Send,
+        on_status: impl FnOnce(StatusCode) + Send,
+        consume: impl AsyncFnOnce(
+            Response<hyper::body::Incoming>,
+            usize,
+            &StopScopes,
+        ) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let Self {
             client,
             mut request,
@@ -290,10 +283,32 @@ impl PreparedRequest<'_> {
         if client.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
-        let result = client
-            .exchange(request, &stops, &mut attempt, check, on_status)
-            .await
-            .and_then(|response| stops.check().map(|()| response));
+        let span = attempt.span();
+        let exchange = async {
+            stops.check()?;
+            let admitted = check();
+            stops.check()?;
+            if !admitted {
+                return Err(Error::DispatchRefused);
+            }
+            let response = client
+                .transport
+                .request(request.map(Full::new))
+                .await
+                .map_err(|source| Error::Transport {
+                    source: Box::new(source),
+                })?;
+            attempt.record_status(response.status());
+            on_status(response.status());
+            stops.check()?;
+            consume(response, client.limits.response_body_bytes, &stops).await
+        };
+        let result = tokio::select! {
+            biased;
+            reason = stops.wait_stopped() => Err(stopped_error(reason)),
+            result = exchange.instrument(span) => result,
+        }
+        .and_then(|response| stops.check().map(|()| response));
         std::mem::DropGuard::dismiss(attempt).finish(&result);
         result
     }

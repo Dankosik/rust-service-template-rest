@@ -354,6 +354,9 @@ For `webhooks.deliver`, start with the job ID and error in the worker's
 `job_failed` log. A payload decoding failure can exhaust the job before the
 dispatcher runs. When the dispatcher reports `webhook_delivery_finished` for
 that attempt, its endpoint and reason can help identify a retired receiver.
+Contact the partner outside the webhook channel on `endpoint_gone`, repeated
+5xx responses or `retry_after_exceeds_max_delay`. Reconcile the delivery ID
+with the receiver before redrive.
 See [Outbound webhook delivery](decisions/outbound-http-decisions.md#outbound-webhook-delivery).
 <!-- template:end webhooks:docs-alerting-webhook-delivery -->
 

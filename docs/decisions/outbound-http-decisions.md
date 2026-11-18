@@ -27,15 +27,12 @@ A receiver can accept a message even when the sender loses its acknowledgement.
 The worker therefore retries with the same `webhook-id`. When a receiver reports
 repeated deliveries, correlate that ID before replaying or applying its effect again.
 
-- **Successful acknowledgement.** The worker completes a delivery after a
-  complete `2xx` response within the 64 KiB body limit and the attempt deadline.
-  A receiver can log `200` and still see a retry if its reply exceeds that
-  limit or its body fails to arrive. An empty `204` is sufficient. This keeps
-  a receiver's response within the bounded HTTP client's resource budget.
-- **Retiring an endpoint.** A complete `410 Gone` permanently fails this job
-  with `endpoint_gone`. The same applies when the worker saw `410` and reading
-  its body then exceeded the size limit or failed in transport. A deadline or
-  cancellation can still end the attempt. Endpoint bindings come from startup
+- **Successful acknowledgement.** The final HTTP headers carry the receiver's
+  acknowledgement. A `2xx` completes the exchange without waiting for reply
+  content, which could stall or cause a duplicate delivery. A lost final
+  response or a lost local completion can still cause a repeat.
+- **Retiring an endpoint.** A final `410 Gone` permanently fails this job
+  with `endpoint_gone`. Endpoint bindings come from startup
   configuration, so later jobs can still send. Stop producers from enqueueing
   new deliveries for the endpoint, account for pending, running and failed
   jobs, then remove the binding and restart the affected processes. Removing
@@ -43,15 +40,22 @@ repeated deliveries, correlate that ID before replaying or applying its effect a
   Revisit automatic disabling if endpoints gain a durable owner for changes at
   runtime.
 - **Spacing retries.** Delivery uses the queue's jittered fourth-power backoff
-  so one scheduler owns all attempts. A positive `Retry-After` on a complete
-  retryable HTTP response sets a delay floor, capped at 24 hours. The worker
-  accepts delta-seconds or a future HTTP date. Zero, an elapsed date, a missing
-  field or an invalid value leaves the queue schedule in effect. The 24-hour
-  cap applies to the receiver's hint, and the queue delay can be longer.
+  so one scheduler owns all attempts. A positive `Retry-After` on a retryable
+  response sets a minimum delay for that delivery, even if the receiver never
+  sends the body. Zero, an elapsed date, a missing field or an invalid value
+  leaves the queue schedule in effect. A valid delay beyond the queue's
+  supported range leaves a failed job for the operator to reconcile with the
+  partner before redrive.
+- **Partner quotas.** A `429` can describe a limit on one resource, one
+  credential, or a whole server. Pausing unrelated recipients could delay
+  healthy deliveries. When a partner specifies a shared quota, apply its
+  cooldown to that quota's scope across worker replicas. Reopen the
+  per-delivery policy when such a contract is adopted.
+  [RFC 6585 §4](https://www.rfc-editor.org/rfc/rfc6585.html#section-4).
 
 Standard Webhooks treats a `2xx` as success and recommends disabling an endpoint
 on `410`. It recommends exponential backoff for retries.
-[Standard Webhooks delivery guidance](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md#delivery-success-and-failure).
+[Standard Webhooks delivery guidance](https://github.com/standard-webhooks/standard-webhooks/blob/3d65b1824b6697f05a5a4584e7062bd23512fc8e/spec/standard-webhooks.md#delivery-success-and-failure).
 The delay field follows
 [RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3).
 <!-- template:end webhooks:docs-outbound-http-webhook-delivery -->
