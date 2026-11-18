@@ -59,6 +59,7 @@ impl EventPayload for UnhandledEvent {
     const SCHEMA_VERSION: u16 = 1;
 }
 
+#[derive(Clone, Copy)]
 enum Topology {
     StreamsOnly,
     WithDurable,
