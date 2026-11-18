@@ -46,6 +46,7 @@ mod grpc;
 mod keycloak;
 
 mod admission;
+mod discovery;
 mod exchange;
 mod http_client;
 mod refresh;
@@ -61,6 +62,7 @@ const EXCHANGE_CAPACITY: u32 = 1024;
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
+    method: String,
     target: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
@@ -412,13 +414,9 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
     };
     let head = std::str::from_utf8(&request[..header_end]).unwrap();
     let mut lines = head.split("\r\n");
-    let target = lines
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .to_owned();
+    let mut request_line = lines.next().unwrap().split_whitespace();
+    let method = request_line.next().unwrap().to_owned();
+    let target = request_line.next().unwrap().to_owned();
     let headers = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
@@ -432,6 +430,7 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
         request.extend_from_slice(&chunk[..read]);
     }
     CapturedRequest {
+        method,
         target,
         headers,
         body: request[header_end..header_end + body_bytes].to_vec(),

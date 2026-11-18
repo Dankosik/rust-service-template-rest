@@ -22,6 +22,6 @@ fn register(
     Ok(())
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     service::run_with_grpc(std::env::args_os(), register)
 }
