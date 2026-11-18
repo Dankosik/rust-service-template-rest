@@ -214,6 +214,22 @@ impl Tx<'_> {
 }
 
 impl<M: TxMode> Tx<'_, M> {
+    fn query_metadata<'a, T: Send + 'a>(
+        &'a mut self,
+        call: impl FnOnce(&'a mut PgConnection) -> DriverFuture<'a, T> + Send + 'a,
+    ) -> DriverFuture<'a, T> {
+        self.proven_alive = false;
+        let conn = &mut *self.conn;
+        let Some(budget) = self.mode.operation_deadline() else {
+            return call(conn);
+        };
+        Box::pin(async move {
+            budget.arm(conn).await?;
+            let result = call(conn).await;
+            budget.finish(result).await
+        })
+    }
+
     pub async fn begin_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
         if self.command_savepoint_notifications.is_some() {
             return Err(sqlx::Error::InvalidArgument(
@@ -396,32 +412,14 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     where
         'c: 'e,
     {
-        self.proven_alive = false;
-        let Some(budget) = self.mode.operation_deadline() else {
-            return self.conn.prepare_with(sql, parameters);
-        };
-        let conn = &mut *self.conn;
-        Box::pin(async move {
-            budget.arm(conn).await?;
-            budget
-                .finish(conn.prepare_with(sql, parameters).await)
-                .await
-        })
+        self.query_metadata(move |conn| conn.prepare_with(sql, parameters))
     }
 
     fn describe<'e>(self, sql: SqlStr) -> DriverFuture<'e, sqlx::Describe<Postgres>>
     where
         'c: 'e,
     {
-        self.proven_alive = false;
-        let Some(budget) = self.mode.operation_deadline() else {
-            return self.conn.describe(sql);
-        };
-        let conn = &mut *self.conn;
-        Box::pin(async move {
-            budget.arm(conn).await?;
-            budget.finish(conn.describe(sql).await).await
-        })
+        self.query_metadata(move |conn| conn.describe(sql))
     }
 }
 

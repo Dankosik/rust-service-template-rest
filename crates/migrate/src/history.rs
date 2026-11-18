@@ -105,7 +105,7 @@ async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRea
 async fn history_table_exists_elsewhere(
     conn: &mut PgConnection,
     table: &str,
-) -> Result<bool, MigrateError> {
+) -> Result<bool, sqlx::Error> {
     let relation = table
         .rsplit_once('.')
         .map_or(table, |(_, name)| name)
@@ -119,7 +119,6 @@ async fn history_table_exists_elsewhere(
         .fetch_one(conn),
     )
     .await
-    .map_err(MigrateError::Execute)
 }
 
 pub(crate) async fn applied_history(

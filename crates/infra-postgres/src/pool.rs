@@ -166,24 +166,7 @@ pub fn prepare_pool_with_notifications(
             }
         });
     let pool = pool_options.connect_lazy_with(connect_options);
-    let address = std::ptr::from_ref(pool.options()).addr();
-    let mut known = POOL_POLICIES.lock();
-    known.retain(|key, entry| *key != address && entry.alive.strong_count() > 0);
-    let slots = match options.wait_order {
-        WaitOrder::Arrival => None,
-        WaitOrder::NewestOnceStanding => Some(Slots::new(options.max_connections.get() as usize)),
-    };
-    if slots.is_some() || !notifications {
-        known.insert(
-            address,
-            PoolPolicy {
-                alive: Arc::downgrade(&alive),
-                slots,
-                notifications,
-            },
-        );
-    }
-    drop(known);
+    PoolPolicy::register(&pool, &alive, options, notifications);
     pool
 }
 
@@ -195,18 +178,49 @@ struct PoolPolicy {
 
 static POOL_POLICIES: Mutex<BTreeMap<usize, PoolPolicy>> = Mutex::new(BTreeMap::new());
 
-fn pool_policy<T>(pool: &PgPool, select: impl FnOnce(&PoolPolicy) -> T) -> Option<T> {
-    let options_addr = std::ptr::from_ref(pool.options()).addr();
-    POOL_POLICIES
-        .lock()
-        .get(&options_addr)
-        .filter(|entry| entry.alive.strong_count() > 0)
-        .map(select)
+impl PoolPolicy {
+    fn key(pool: &PgPool) -> usize {
+        std::ptr::from_ref(pool.options()).addr()
+    }
+
+    fn is_live(&self) -> bool {
+        self.alive.strong_count() > 0
+    }
+
+    fn register(pool: &PgPool, alive: &Arc<()>, options: &PoolOptions<'_>, notifications: bool) {
+        let key = Self::key(pool);
+        let mut policies = POOL_POLICIES.lock();
+        policies.retain(|address, policy| *address != key && policy.is_live());
+        let slots = match options.wait_order {
+            WaitOrder::Arrival => None,
+            WaitOrder::NewestOnceStanding => {
+                Some(Slots::new(options.max_connections.get() as usize))
+            }
+        };
+        if slots.is_some() || !notifications {
+            policies.insert(
+                key,
+                Self {
+                    alive: Arc::downgrade(alive),
+                    slots,
+                    notifications,
+                },
+            );
+        }
+    }
+
+    fn lookup<T>(pool: &PgPool, select: impl FnOnce(&Self) -> T) -> Option<T> {
+        POOL_POLICIES
+            .lock()
+            .get(&Self::key(pool))
+            .filter(|policy| policy.is_live())
+            .map(select)
+    }
 }
 
 #[must_use]
 pub fn notifications_enabled(pool: &PgPool) -> bool {
-    pool_policy(pool, |entry| entry.notifications).unwrap_or(true)
+    PoolPolicy::lookup(pool, |entry| entry.notifications).unwrap_or(true)
 }
 
 async fn take_slot(
@@ -214,7 +228,7 @@ async fn take_slot(
     deadline: tokio::time::Instant,
     queue: Queue,
 ) -> Result<Option<Slot>, sqlx::Error> {
-    let Some(slots) = pool_policy(pool, |entry| entry.slots.clone()).flatten() else {
+    let Some(slots) = PoolPolicy::lookup(pool, |entry| entry.slots.clone()).flatten() else {
         return Ok(None);
     };
     if let Some(slot) = slots.try_take() {
@@ -609,7 +623,7 @@ mod tests {
     async fn pool_slots_outlive_a_rotated_password_and_end_with_the_pool() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let alive = pool_policy(&pool, |policy| Weak::clone(&policy.alive)).unwrap();
+        let alive = PoolPolicy::lookup(&pool, |policy| Weak::clone(&policy.alive)).unwrap();
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
         assert!(
             take_slot(&pool, deadline, Queue::Regular)
