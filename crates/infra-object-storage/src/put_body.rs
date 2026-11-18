@@ -377,9 +377,9 @@ mod tests {
                 Ending::Trailers => {
                     steps.push_back(Poll::Ready(Some(Ok(Frame::trailers(trailers.clone())))));
                 }
-                Ending::SourceError => steps.push_back(Poll::Ready(Some(Err(std::io::Error::other(
-                    "source failed",
-                ))))),
+                Ending::SourceError => steps.push_back(Poll::Ready(Some(Err(
+                    std::io::Error::other("source failed"),
+                )))),
                 Ending::Eof => {}
             }
             let polls = Arc::new(AtomicUsize::new(0));

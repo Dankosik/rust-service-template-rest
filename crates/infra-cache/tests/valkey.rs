@@ -458,13 +458,7 @@ async fn wait_for_recovered_value(
 ) {
     let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
-        if namespace
-            .get(caller, key)
-            .await
-            .unwrap_or(None)
-            .as_deref()
-            == Some(&b"kept"[..])
-        {
+        if namespace.get(caller, key).await.unwrap_or(None).as_deref() == Some(&b"kept"[..]) {
             break;
         }
         assert!(Instant::now() < deadline, "{failure}");
@@ -555,7 +549,13 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
         Some(tls_acceptor(&material)),
     );
 
-    wait_for_recovered_value(&namespace, &caller, &key, "TLS recovery did not reach the IPv6 replacement").await;
+    wait_for_recovered_value(
+        &namespace,
+        &caller,
+        &key,
+        "TLS recovery did not reach the IPv6 replacement",
+    )
+    .await;
     proxy.stop().await;
 }
 

@@ -416,7 +416,11 @@ impl Link {
             () = generation.retired.cancelled() => return Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io))),
         };
         let value = reply.map_err(|error| {
-            CommandError::from_reply(&error, operation, context.stopped().map(|_| classify_stop()))
+            CommandError::from_reply(
+                &error,
+                operation,
+                context.stopped().map(|_| classify_stop()),
+            )
         })?;
         if matches!(operation, Operation::Get) {
             check()?;
