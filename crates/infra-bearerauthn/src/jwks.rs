@@ -68,6 +68,10 @@ pub(crate) struct KeySet {
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     pub(crate) fn require_fresh(
         &self,
         max_age: std::time::Duration,
@@ -149,6 +153,7 @@ impl KeyRejection {
 fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
+    let published_empty = raw.keys.is_empty();
     let mut rejected = BTreeMap::<KeyRejection, u64>::new();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -174,7 +179,7 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
-    if keys.is_empty() {
+    if keys.is_empty() && !published_empty {
         return Err(KeySetFailure::NoUsableKeys);
     }
     Ok(KeySet {
@@ -594,14 +599,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_unreadable_or_empty_key_set_is_refused() {
+    fn an_unreadable_key_set_is_refused() {
         assert_eq!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]).err(),
             Some(KeySetFailure::Parse)
-        );
-        assert_eq!(
-            parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::NoUsableKeys)
         );
     }
 

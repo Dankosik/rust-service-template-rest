@@ -99,6 +99,11 @@ fn register(
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))?;
+    // template:begin grpc-authn:grpc-example-scope-requirements
+    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+        services.require_scopes(&format!("/example.v1.EchoService/{method}"), &[])?;
+    }
+    // template:end grpc-authn:grpc-example-scope-requirements
     // template:begin service-auth:grpc-example-caller-rules
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
         services.allow_callers(

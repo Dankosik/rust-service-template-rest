@@ -84,6 +84,8 @@ its bearer security requirement. The handler can then read
 authorized downstream audience for that exchange.
 <!-- template:end authn:production-bearer-delegation -->
 <!-- template:begin grpc-authn:production-rpc-delegation -->
+In bearer mode, declare a scope rule for every registered business RPC. Use
+`require_scopes(path, &[])` when any verified principal may call the method.
 Register an RPC that performs token exchange with
 `require_scopes_for_delegation` and its required scopes. Read
 `infra_grpc::DelegationCredential` from the Tonic request extensions after

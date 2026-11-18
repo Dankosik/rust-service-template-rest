@@ -131,7 +131,13 @@ pub fn router(
     if matches!(authentication, Authentication::None) {
         return Err(Error::UnauthenticatedBusinessCalls);
     }
-    if !services.scopes.is_empty() && !matches!(authentication, Authentication::Bearer(_)) {
+    if matches!(authentication, Authentication::Bearer(_)) {
+        services.prepare_scope_requirements()?;
+    } else if services
+        .scopes
+        .values()
+        .any(|rule| rule.delegate || !rule.scopes.is_empty())
+    {
         return Err(Error::ScopesWithServiceTokens);
     }
     // template:end authn:grpc-router-authenticate
