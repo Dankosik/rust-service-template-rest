@@ -346,15 +346,14 @@ impl Consumer {
             if stop.is_cancelled() {
                 break 'pulls;
             }
-            let (slots, max_bytes) =
-                self.pull_budget(deliveries.len(), retry_large_retained_record, &limits);
+            let batch = self.pull_budget(deliveries.len(), retry_large_retained_record, limits);
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
                     .batch()
-                    .max_messages(slots)
-                    .max_bytes(max_bytes)
-                    .expires(limits.expires)
+                    .max_messages(batch.messages)
+                    .max_bytes(batch.bytes)
+                    .expires(batch.expires)
                     .messages(),
             );
             tokio::pin!(request);
@@ -389,14 +388,7 @@ impl Consumer {
                 }
             };
             match self
-                .fill(
-                    &mut messages,
-                    deliveries,
-                    stop,
-                    force,
-                    slots,
-                    limits.expires,
-                )
+                .fill(&mut messages, deliveries, stop, force, &batch)
                 .await
             {
                 Ok(BatchEnd::Filled) => {
@@ -411,7 +403,7 @@ impl Consumer {
                     | BatchEnd::MaxBytesExceededBeforeFirstDelivery
                     | BatchEnd::Failed { .. }),
                 ) => {
-                    release(messages, slots, stop, &self.handler.filter_subject).await;
+                    release(messages, batch.messages, stop, &self.handler.filter_subject).await;
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
@@ -444,7 +436,7 @@ impl Consumer {
                 Err(error) if error.requires_delivery_drain() => {
                     let _ = tokio::time::timeout(
                         BROKER_OPERATION_BUDGET,
-                        release(messages, slots, stop, &self.handler.filter_subject),
+                        release(messages, batch.messages, stop, &self.handler.filter_subject),
                     )
                     .await;
                     return Err(error);
@@ -500,14 +492,16 @@ impl Consumer {
         &self,
         active_deliveries: usize,
         retry_large_retained_record: bool,
-        limits: &PullLimits,
-    ) -> (usize, usize) {
+        mut limits: PullLimits,
+    ) -> PullLimits {
         if retry_large_retained_record {
-            (1, self.retained_pull_bytes.min(limits.bytes))
+            limits.messages = 1;
+            limits.bytes = self.retained_pull_bytes.min(limits.bytes);
         } else {
-            let slots = (self.concurrency.get() - active_deliveries).min(limits.messages);
-            (slots, slots * self.pull_delivery_bytes)
+            limits.messages = (self.concurrency.get() - active_deliveries).min(limits.messages);
+            limits.bytes = limits.messages * self.pull_delivery_bytes;
         }
+        limits
     }
 
     async fn fill(
@@ -516,11 +510,10 @@ impl Consumer {
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         stop: &CancellationToken,
         force: &CancellationToken,
-        slots: usize,
-        pull_expires: Duration,
+        batch: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
-        let expires = Instant::now() + pull_expires + PULL_EXPIRY_GRACE;
-        let mut remaining = slots;
+        let expires = Instant::now() + batch.expires + PULL_EXPIRY_GRACE;
+        let mut remaining = batch.messages;
         while remaining > 0 {
             tokio::select! {
                 biased;
@@ -528,7 +521,7 @@ impl Consumer {
                 joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => {
-                        if remaining == slots {
+                        if remaining == batch.messages {
                             let loss_check = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
@@ -561,7 +554,7 @@ impl Consumer {
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
                         let failure = classify_batch_receive_error(&error);
-                        if remaining == slots && matches!(failure, BatchReceiveError::MaxBytesExceeded) {
+                        if remaining == batch.messages && matches!(failure, BatchReceiveError::MaxBytesExceeded) {
                             return Ok(BatchEnd::MaxBytesExceededBeforeFirstDelivery);
                         }
                         return Ok(BatchEnd::Failed {

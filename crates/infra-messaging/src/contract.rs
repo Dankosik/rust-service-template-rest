@@ -12,13 +12,15 @@ use crate::wire::{
     NATS_MSG_ID, schema_label,
 };
 
-pub(crate) type PayloadSchema = fn(&mut Vec<(String, RefOr<Schema>)>) -> String;
+type Definitions = Vec<(String, RefOr<Schema>)>;
+pub(crate) type PayloadSchema = fn() -> (String, Definitions);
 
-pub(crate) fn payload_schema<T: ToSchema>(schemas: &mut Vec<(String, RefOr<Schema>)>) -> String {
+pub(crate) fn payload_schema<T: ToSchema>() -> (String, Definitions) {
     let name = T::name().into_owned();
-    T::schemas(schemas);
+    let mut schemas = Vec::new();
+    T::schemas(&mut schemas);
     schemas.push((name.clone(), T::schema()));
-    name
+    (name, schemas)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,8 +50,7 @@ impl Registry {
                 event_type,
                 schema_version,
             })?;
-            let mut rendered = Vec::new();
-            let payload = schema(&mut rendered);
+            let (payload, rendered) = schema();
             let mut definitions = BTreeMap::new();
             for (name, schema) in rendered {
                 let schema = serde_json::to_value(schema)?;

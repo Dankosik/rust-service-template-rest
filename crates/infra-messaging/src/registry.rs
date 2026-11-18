@@ -16,8 +16,11 @@ use crate::error::HandlerError;
 use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
-type ErasedHandler =
-    Arc<dyn Fn(Event<Bytes>, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
+type ErasedHandler = Arc<
+    dyn Fn(Event<Bytes>, OperationContext) -> Result<HandlerFuture, serde_json::Error>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
@@ -303,13 +306,13 @@ impl Registry {
             });
         }
         entry.handler = Some(Arc::new(move |encoded, context| {
-            let payload = serde_json::from_slice::<T>(&encoded.payload).ok()?;
+            let payload = serde_json::from_slice::<T>(&encoded.payload)?;
             let event = Event {
                 id: encoded.id,
                 occurred_at: encoded.occurred_at,
                 payload,
             };
-            Some(handler(event, context).boxed())
+            Ok(handler(event, context).boxed())
         }));
         Ok(())
     }
@@ -374,7 +377,7 @@ impl Registry {
             occurred_at: envelope.occurred_at.to_utc(),
             payload: envelope.payload,
         };
-        let run = handler(encoded, context).ok_or(DispatchError::Undecodable)?;
+        let run = handler(encoded, context).map_err(|_| DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
