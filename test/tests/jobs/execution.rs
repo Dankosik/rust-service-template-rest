@@ -1144,6 +1144,7 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[warn(clippy::let_underscore_must_use)]
 async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgPool) {
     let mut url = url_for(&pool, DATABASE_URL).await;
     let database = url.path().trim_start_matches('/').to_owned();
@@ -1198,7 +1199,10 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
         format!("DROP OWNED BY {role:?}"),
         format!("DROP ROLE {role:?}"),
     ] {
-        let _ = sqlx::query(AssertSqlSafe(statement)).execute(&pool).await;
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .expect("remove the listener rotation grants and role");
     }
 }
 

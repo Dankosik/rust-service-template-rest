@@ -15,3 +15,4 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor
 mod generated;
 
 pub use generated::*;
+pub use prost_types;

@@ -135,6 +135,7 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin service-auth:service-service-auth-test-dependency
 infra-serviceauth = { workspace = true, features = ["test-support"] }
+tonic-reflection = { workspace = true, features = ["server"] }
 # template:end service-auth:service-service-auth-test-dependency
 rstest = { workspace = true }
 nix = { workspace = true, features = ["signal", "fs"] }

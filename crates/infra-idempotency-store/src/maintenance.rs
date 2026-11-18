@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure, PopulationSample,
-    Tx, failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
+    Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure,
+    PopulationSample, Tx, failure_cause, in_observation_tx, observed, run_scheduled_cleanup,
+    sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -10,7 +11,12 @@ use crate::{READ_COMMITTED, Store};
 
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
-const CLEANUP_BATCH_ROWS: u32 = 500;
+const EXPIRED_RECORDS: CleanupBatchOptions = CleanupBatchOptions {
+    transaction: READ_COMMITTED,
+    limit: 500,
+    removed_metric: CLEANUP_REMOVED_METRIC,
+    failure_message: "http_idempotency_cleanup_failed",
+};
 
 pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
 
@@ -65,11 +71,8 @@ impl Store {
         CleanupPass::start(Cleanup::HttpIdempotency)
             .run_until_short_batch(
                 &self.pool,
-                READ_COMMITTED,
                 cancel,
-                CLEANUP_BATCH_ROWS,
-                CLEANUP_REMOVED_METRIC,
-                "http_idempotency_cleanup_failed",
+                &EXPIRED_RECORDS,
                 Self::delete_expired_batch,
             )
             .await

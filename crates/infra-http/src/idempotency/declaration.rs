@@ -1,12 +1,14 @@
+use std::collections::BTreeMap;
+
 use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
 use axum::routing::MethodFilter;
 use itertools::Itertools as _;
-use utoipa::openapi::RefOr;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
+use utoipa::openapi::{RefOr, Schema};
 
-use crate::contract::fixed_path_operations;
+use crate::contract::{fixed_path_operations, same_definition};
 
 use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
@@ -63,6 +65,8 @@ enum Rule {
     InformationalOrRedirectResponse { status: String },
     #[error("an idempotent operation must declare a 2xx response")]
     NoSuccess,
+    #[error("response {status} conflicts with the command's success contract")]
+    SuccessConflict { status: String },
     #[error("response {status} may declare only replayable headers: {name} cannot be replayed")]
     UnreplayableHeader { status: String, name: String },
     #[error("response {status} must be inline so its replay metadata can be checked")]
@@ -84,9 +88,12 @@ pub(super) struct PreparedOperation {
 }
 
 pub(super) fn prepare(
-    paths: &mut Paths,
-    route_docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
+    document: &mut utoipa::openapi::OpenApi,
+    successes: BTreeMap<String, RefOr<Response>>,
+    success_schemas: Vec<(String, RefOr<Schema>)>,
 ) -> Result<PreparedOperation, CompositionError> {
+    let paths = &mut document.paths;
+    let route_docs = document.external_docs.take();
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
@@ -124,7 +131,10 @@ pub(super) fn prepare(
     fingerprint_headers.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
     fingerprint_headers.dedup();
     prepare_problem_responses(operation, &operation_id)?;
-    prepare_success_responses(operation, &operation_id)?;
+    let schemas = &mut document.components.get_or_insert_default().schemas;
+    crate::contract::merge_map("schemas", schemas, success_schemas)
+        .map_err(|error| CompositionError::contract(&operation_id, error))?;
+    prepare_success_responses(operation, &operation_id, successes, schemas)?;
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
     }
@@ -217,9 +227,22 @@ fn prepare_problem_responses(
 fn prepare_success_responses(
     operation: &mut Operation,
     operation_id: &str,
+    successes: BTreeMap<String, RefOr<Response>>,
+    schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Result<(), CompositionError> {
-    let mut success = false;
-    for (status, response) in &mut operation.responses.responses {
+    let responses = &mut operation.responses.responses;
+    let conflict = |status: &str| {
+        CompositionError::new(
+            operation_id,
+            Rule::SuccessConflict {
+                status: status.to_owned(),
+            },
+        )
+    };
+    if successes.is_empty() {
+        return Err(CompositionError::new(operation_id, Rule::NoSuccess));
+    }
+    for status in responses.keys() {
         match status.as_bytes().first() {
             Some(b'1' | b'3') => {
                 return Err(CompositionError::new(
@@ -229,25 +252,111 @@ fn prepare_success_responses(
                     },
                 ));
             }
-            Some(b'2') => {
-                success = true;
-                let RefOr::T(response) = response else {
-                    return Err(CompositionError::new(
-                        operation_id,
-                        Rule::ReferencedSuccess {
-                            status: status.clone(),
-                        },
-                    ));
-                };
-                prepare_success_headers(response, operation_id, status)?;
-            }
+            Some(b'2') if !successes.contains_key(status) => return Err(conflict(status)),
             _ => {}
         }
     }
-    if !success {
-        return Err(CompositionError::new(operation_id, Rule::NoSuccess));
+    for (status, response) in successes {
+        if status != "2XX"
+            && !axum::http::StatusCode::from_bytes(status.as_bytes())
+                .is_ok_and(|code| code.is_success())
+        {
+            return Err(conflict(&status));
+        }
+        let referenced = || {
+            CompositionError::new(
+                operation_id,
+                Rule::ReferencedSuccess {
+                    status: status.clone(),
+                },
+            )
+        };
+        let RefOr::T(mut response) = response else {
+            return Err(referenced());
+        };
+        prepare_success_headers(&mut response, operation_id, &status)?;
+        if let Some(annotation) = responses.remove(&status) {
+            let RefOr::T(mut annotation) = annotation else {
+                return Err(referenced());
+            };
+            prepare_success_headers(&mut annotation, operation_id, &status)?;
+            supplement_success(&mut response, annotation, schemas)
+                .ok_or_else(|| conflict(&status))?;
+        }
+        responses.insert(status, response.into());
     }
     Ok(())
+}
+
+fn supplement_success(
+    response: &mut Response,
+    annotation: Response,
+    schemas: &BTreeMap<String, RefOr<Schema>>,
+) -> Option<()> {
+    for (media_type, content) in annotation.content {
+        let actual = response.content.get_mut(&media_type)?;
+        let (actual, mut supplement) = match (actual, content) {
+            (RefOr::T(actual), RefOr::T(supplement)) => (actual, supplement),
+            (RefOr::Ref(actual), RefOr::Ref(supplement)) if *actual == supplement => continue,
+            _ => return None,
+        };
+        if let Some(declared) = &supplement.schema {
+            let typed = actual.schema.as_ref()?;
+            if !same_definition(typed, declared)
+                && !same_definition(
+                    crate::contract::resolve_schema(typed, schemas)?,
+                    crate::contract::resolve_schema(declared, schemas)?,
+                )
+            {
+                return None;
+            }
+            actual.schema.clone_from(&supplement.schema);
+        } else {
+            supplement.schema.clone_from(&actual.schema);
+        }
+        if supplement.example.is_some() || !supplement.examples.is_empty() {
+            actual.example.clone_from(&supplement.example);
+            actual.examples.clone_from(&supplement.examples);
+        } else {
+            supplement.example.clone_from(&actual.example);
+            supplement.examples.clone_from(&actual.examples);
+        }
+        if supplement.description.is_some() {
+            actual.description.clone_from(&supplement.description);
+        } else {
+            supplement.description.clone_from(&actual.description);
+        }
+        if !same_definition(actual, &supplement) {
+            return None;
+        }
+    }
+    for (name, header) in annotation.headers {
+        if let Some((_, existing)) = response
+            .headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+        {
+            if !same_definition(existing, &header) {
+                return None;
+            }
+        } else {
+            response.headers.insert(name, header);
+        }
+    }
+    if !annotation.description.is_empty() {
+        response.description = annotation.description;
+    }
+    if annotation.summary.is_some() {
+        response.summary = annotation.summary;
+    }
+    response.links.extend(annotation.links);
+    if let Some(extensions) = annotation.extensions {
+        response
+            .extensions
+            .get_or_insert_default()
+            .merge(extensions);
+    }
+    Some(())
 }
 
 fn prepare_success_headers(
@@ -265,7 +374,7 @@ fn prepare_success_headers(
                 .headers
                 .insert(REPLAYED_HEADER.to_owned(), replay_header());
         }
-        Ok(Some((_, header))) if header == &replay_header() => {}
+        Ok(Some((_, header))) if same_definition(header, &replay_header()) => {}
         _ => {
             return Err(CompositionError::new(
                 operation_id,
@@ -313,13 +422,28 @@ fn route_subject(paths: &Paths) -> String {
 
 #[cfg(test)]
 mod tests {
+    use utoipa::IntoResponses as _;
     use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
     use utoipa_axum::routes;
 
     use super::*;
     use crate::authn::ProtectedOperationProblemResponses;
+    use crate::idempotency::{CreatedText, Rollback};
 
     const WIDGETS: &str = "/_test/widgets";
+
+    fn prepare(
+        paths: &mut Paths,
+        docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
+    ) -> Result<PreparedOperation, CompositionError> {
+        let mut document = utoipa::openapi::OpenApiBuilder::new()
+            .paths(std::mem::take(paths))
+            .external_docs(docs)
+            .build();
+        let result = super::prepare(&mut document, CreatedText::responses(), Vec::new());
+        *paths = document.paths;
+        result
+    }
 
     #[utoipa::path(
         post,
@@ -330,7 +454,11 @@ mod tests {
             "exposure": "protected",
             "rationale": "test-only operation through idempotent composition"
         }))),
-        responses((status = 201, description = "created", content_type = "text/plain", body = String), ProtectedOperationProblemResponses)
+        responses(
+            (status = 201, description = "widget created", content_type = "text/plain", body = String,
+             headers(("Location" = String, description = "widget URL")), example = json!("created")),
+            ProtectedOperationProblemResponses
+        )
     )]
     async fn create_widget() -> &'static str {
         "created"
@@ -370,11 +498,13 @@ mod tests {
     struct TestCommand;
 
     impl crate::idempotency::FreshCommand for TestCommand {
+        type Success = CreatedText;
+        type Terminal = std::convert::Infallible;
+
         fn execute(
             self,
             _: &mut super::super::Tx<'_>,
-        ) -> impl Future<Output = Result<super::super::ReplayableResponse, super::super::Rollback>> + Send
-        {
+        ) -> impl Future<Output = Result<Self::Success, Rollback>> + Send {
             std::future::poll_fn(|_| unreachable!("offline export"))
         }
     }
@@ -496,6 +626,13 @@ mod tests {
         let Some(RefOr::T(response)) = operation.responses.responses.get("201") else {
             panic!("inline success");
         };
+        let documented = serde_json::to_value(response).unwrap();
+        assert_eq!(documented["description"], "widget created");
+        assert_eq!(
+            documented["headers"]["Location"]["description"],
+            "widget URL"
+        );
+        assert_eq!(documented["content"]["text/plain"]["example"], "created");
         assert_eq!(
             serde_json::to_value(&response.headers[REPLAYED_HEADER]).expect("header"),
             serde_json::json!({
@@ -538,20 +675,50 @@ mod tests {
         );
 
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
-        missing_success
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .remove("201");
         assert_eq!(
-            prepare(&mut missing_success, None).unwrap_err().rule(),
+            prepare_success_responses(
+                missing_success
+                    .paths
+                    .get_mut(WIDGETS)
+                    .unwrap()
+                    .post
+                    .as_mut()
+                    .unwrap(),
+                "infraHttpTestCreateWidget",
+                BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .rule(),
             &Rule::NoSuccess
         );
+
+        for (status, content) in [
+            ("202", serde_json::json!({})),
+            (
+                "201",
+                serde_json::json!({"application/json": {"schema": {"type": "string"}}}),
+            ),
+            (
+                "201",
+                serde_json::json!({"text/plain": {"schema": {"type": "integer"}}}),
+            ),
+        ] {
+            let (_, mut paths, _): UtoipaMethodRouter = route();
+            let operation = paths.paths.get_mut(WIDGETS).unwrap().post.as_mut().unwrap();
+            let annotation =
+                serde_json::json!({"description": "conflicting success", "content": content});
+            operation.responses.responses.insert(
+                status.to_owned(),
+                serde_json::from_value(annotation).unwrap(),
+            );
+            assert_eq!(
+                prepare(&mut paths, None).unwrap_err().rule(),
+                &Rule::SuccessConflict {
+                    status: status.to_owned()
+                }
+            );
+        }
 
         let (_, mut referenced, _): UtoipaMethodRouter = route();
         referenced
@@ -616,29 +783,58 @@ mod tests {
     }
 
     #[test]
-    fn preparation_rejects_conflicting_or_unstorable_success_headers() {
-        let (_, mut conflicting, _): UtoipaMethodRouter = route();
-        let Some(RefOr::T(response)) = conflicting
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .get_mut("201")
-        else {
-            panic!("inline success");
-        };
-        response.headers.insert(
-            REPLAYED_HEADER.to_owned(),
-            RefOr::T(utoipa::openapi::header::Header::default()),
-        );
+    fn an_operation_can_describe_the_same_external_success_schema_as_its_command() {
+        let response: RefOr<Response> = serde_json::from_value(serde_json::json!({
+            "description": "created",
+            "content": {"application/json": {"schema": {"$ref": "urn:example:widget"}}}
+        }))
+        .unwrap();
+        let successes = BTreeMap::from([("201".to_owned(), response)]);
+        let mut operation = Operation::default();
+        operation.responses.responses.clone_from(&successes);
+        prepare_success_responses(&mut operation, "create", successes, &BTreeMap::new()).unwrap();
+        let documented = serde_json::to_value(operation.responses.responses).unwrap();
         assert_eq!(
-            prepare(&mut conflicting, None).unwrap_err().to_string(),
-            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201: Idempotent-Replayed is reserved for exact generated replay metadata"
+            documented["201"]["content"]["application/json"]["schema"]["$ref"],
+            "urn:example:widget"
         );
+    }
+
+    #[test]
+    fn preparation_rejects_conflicting_or_unstorable_success_headers() {
+        for headers in [
+            vec![(
+                REPLAYED_HEADER,
+                RefOr::T(utoipa::openapi::header::Header::default()),
+            )],
+            vec![
+                ("Idempotent-Replayed", replay_header()),
+                ("idempotent-replayed", replay_header()),
+            ],
+        ] {
+            let (_, mut conflicting, _): UtoipaMethodRouter = route();
+            let operation = conflicting
+                .paths
+                .get_mut(WIDGETS)
+                .unwrap()
+                .post
+                .as_mut()
+                .unwrap();
+            let Some(RefOr::T(response)) = operation.responses.responses.get_mut("201") else {
+                panic!("inline success");
+            };
+            response.headers.extend(
+                headers
+                    .into_iter()
+                    .map(|(name, header)| (name.to_owned(), header)),
+            );
+            assert_eq!(
+                prepare(&mut conflicting, None).unwrap_err().rule(),
+                &Rule::ReplayHeader {
+                    status: "201".to_owned()
+                }
+            );
+        }
 
         let (_, mut unsupported, _): UtoipaMethodRouter = route();
         let Some(RefOr::T(response)) = unsupported

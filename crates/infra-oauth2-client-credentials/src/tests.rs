@@ -470,8 +470,8 @@ fn deadline(after: Duration) -> Instant {
     Instant::now() + after
 }
 
-fn token_context() -> OperationContext {
-    OperationContext::with_timeout(Duration::from_secs(10))
+fn token_context() -> infra_outbound_http::RequestContext {
+    OperationContext::with_timeout(Duration::from_secs(10)).into()
 }
 
 async fn advance(duration: Duration) {

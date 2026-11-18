@@ -45,6 +45,14 @@ pub struct CleanupPassResult {
     pub end: PassEnd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CleanupBatchOptions {
+    pub transaction: TxOptions,
+    pub limit: u32,
+    pub removed_metric: &'static str,
+    pub failure_message: &'static str,
+}
+
 const CLEANUP_ACTIVE_METRIC: &str = "postgres_cleanup_active_passes";
 const CLEANUP_BATCHES_METRIC: &str = "postgres_cleanup_committed_batches_total";
 pub(super) const CLEANUP_REMOVED_ROWS_METRIC: &str = "postgres_cleanup_removed_rows_total";
@@ -168,18 +176,11 @@ impl CleanupPass {
         }
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each cleanup owner supplies its pool, transaction options, cancellation, batch cap, metric, log event, and delete query"
-    )]
     pub async fn run_until_short_batch<F>(
         mut self,
         pool: &PgPool,
-        options: TxOptions,
         cancel: Option<&CancellationToken>,
-        batch_limit: u32,
-        removed_metric: &'static str,
-        failure_message: &'static str,
+        options: &CleanupBatchOptions,
         delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
@@ -193,12 +194,10 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self
-                .run_batch(pool, options, batch_limit, failure_message, delete)
-                .await?;
-            metrics::counter!(removed_metric).increment(rows);
+            let rows = self.run_batch(pool, options, delete).await?;
+            metrics::counter!(options.removed_metric).increment(rows);
             removed_rows += rows;
-            if rows < u64::from(batch_limit) {
+            if rows < u64::from(options.limit) {
                 self.completed();
                 return Ok(CleanupPassResult {
                     removed_rows,
@@ -211,20 +210,22 @@ impl CleanupPass {
     async fn run_batch<F>(
         &mut self,
         pool: &PgPool,
-        options: TxOptions,
-        batch_limit: u32,
-        failure_message: &'static str,
+        options: &CleanupBatchOptions,
         delete: F,
     ) -> Result<u64, CleanupError>
     where
         F: AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
         self.await_batch(
-            failure_message,
-            in_tx_with(pool, options, async |tx| -> Result<u64, BatchError> {
-                set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
-                delete(tx, batch_limit).await.map_err(BatchError::from)
-            }),
+            options.failure_message,
+            in_tx_with(
+                pool,
+                options.transaction,
+                async |tx| -> Result<u64, BatchError> {
+                    set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
+                    delete(tx, options.limit).await.map_err(BatchError::from)
+                },
+            ),
         )
         .await
     }

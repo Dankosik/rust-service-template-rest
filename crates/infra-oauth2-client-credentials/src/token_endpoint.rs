@@ -5,8 +5,7 @@ use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use infra_outbound_http::{Client, Limits};
-use operation_context::OperationContext;
+use infra_outbound_http::{Client, ExchangeError, Limits, RequestContext};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
 use tokio::{sync::Semaphore, time::Instant};
@@ -65,10 +64,9 @@ impl TokenEndpoint {
     pub(crate) async fn fetch_service_token(
         &self,
         target: &ServiceTokenTarget,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        context: &RequestContext,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::ClientCredentials(target), context, request_context)
+        self.fetch_token(Grant::ClientCredentials(target), context)
             .await
     }
 
@@ -76,39 +74,25 @@ impl TokenEndpoint {
         &self,
         subject: &SecretString,
         target: &ExchangeTokenTarget,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        context: &RequestContext,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(
-            Grant::TokenExchange { subject, target },
-            context,
-            request_context,
-        )
-        .await
+        self.fetch_token(Grant::TokenExchange { subject, target }, context)
+            .await
     }
 
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        context: &RequestContext,
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let check = || {
-            context
-                .check()
-                .and_then(|()| request_context.map_or(Ok(()), OperationContext::check))
-                .map_err(acquisition_stopped)
-        };
+        let check = || context.check().map_err(acquisition_stopped);
         let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
             record_acquisition(grant, error.label());
         });
         let result = match check() {
-            Ok(()) => {
-                self.request_token(grant, started, context, request_context)
-                    .await
-            }
+            Ok(()) => self.request_token(grant, started, context).await,
             Err(error) => Err(error),
         };
         let result = check().and(result);
@@ -128,15 +112,14 @@ impl TokenEndpoint {
         &self,
         grant: Grant<'_>,
         started: Instant,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        context: &RequestContext,
     ) -> Result<Token, AcquisitionError> {
         let _permit = self
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
         let body = self.form_body(grant)?;
-        let response = self.post_form(body, context, request_context).await?;
+        let response = self.post_form(body, context).await?;
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
@@ -152,25 +135,14 @@ impl TokenEndpoint {
     async fn post_form(
         &self,
         body: String,
-        context: &OperationContext,
-        request_context: Option<&OperationContext>,
+        context: &RequestContext,
     ) -> Result<TokenResponse, AcquisitionError> {
-        let mut request = Request::post(self.uri.clone())
+        let request = Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if let Some(request_context) = request_context {
-            request.extensions_mut().insert(request_context.clone());
-        }
-        let mut observed_status = None;
-        let response = self
-            .http
-            .execute_with_response_status(request, context, |status| {
-                observed_status = Some(status);
-            })
-            .await;
-        classify_token_response(response, observed_status)
+        classify_token_response(self.http.execute_buffered(request, context.clone()).await)
     }
 }
 
@@ -235,25 +207,21 @@ fn deserialize_lifetime<'de, D: Deserializer<'de>>(
 }
 
 fn classify_token_response(
-    response: Result<Response<Bytes>, infra_outbound_http::Error>,
-    observed_status: Option<StatusCode>,
+    response: Result<Response<Bytes>, ExchangeError>,
 ) -> Result<TokenResponse, AcquisitionError> {
     use infra_outbound_http::Error::{ResponseBodyTooLarge, Transport};
 
-    match (response, observed_status) {
-        (Ok(response), _) if response.status() == StatusCode::OK => {
-            decode_token_response(&response)
-        }
-        (Ok(response), _) => Err(provider_failure(
+    match response {
+        Ok(response) if response.status() == StatusCode::OK => decode_token_response(&response),
+        Ok(response) => Err(provider_failure(
             response.status(),
             Some(response.body().as_ref()),
         )),
-        (Err(ResponseBodyTooLarge | Transport { .. }), Some(status))
-            if status != StatusCode::OK =>
-        {
-            Err(provider_failure(status, None))
-        }
-        (Err(error), _) => Err(map_transport_error(&error)),
+        Err(ExchangeError::AfterResponse {
+            status,
+            source: ResponseBodyTooLarge | Transport { .. },
+        }) if status != StatusCode::OK => Err(provider_failure(status, None)),
+        Err(error) => Err(crate::TransportFailure::from(error.into_error()).into()),
     }
 }
 
@@ -277,17 +245,6 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
         }
     }
     serde_json::from_slice(response.body().as_ref()).map_err(|_| AcquisitionError::InvalidResponse)
-}
-
-fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
-    match error {
-        infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
-        infra_outbound_http::Error::Cancelled => AcquisitionError::Cancelled,
-        infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-        infra_outbound_http::Error::InvalidTarget
-        | infra_outbound_http::Error::DispatchRefused
-        | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
-    }
 }
 
 /// RFC 8693 §2.2.1

@@ -90,7 +90,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     for (wire, succeeds) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let result = fixture_client_with_limits(address, &material, ceiling)
-            .execute(request(), deadline())
+            .execute_buffered(request(), &operation_context::OperationContext::unbounded())
             .await;
         if succeeds {
             assert_eq!(
@@ -98,7 +98,14 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
                 b"ok"
             );
         } else {
-            std::assert_matches!(result, Err(Error::ResponseBodyTooLarge));
+            let error = result.expect_err("response exceeds the ceiling after headers");
+            std::assert_matches!(
+                error,
+                crate::ExchangeError::AfterResponse {
+                    status: http::StatusCode::OK,
+                    source: Error::ResponseBodyTooLarge,
+                }
+            );
         }
         server.await.expect("body fixture server succeeds");
     }
@@ -140,11 +147,13 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
     )
     .await;
+    let error = fixture_client_with_limits(address, &material, parser_limit)
+        .execute_buffered(request(), &operation_context::OperationContext::unbounded())
+        .await
+        .expect_err("header overflow precedes an admitted response");
     std::assert_matches!(
-        fixture_client_with_limits(address, &material, parser_limit)
-            .execute(request(), deadline())
-            .await,
-        Err(Error::Transport { .. })
+        error,
+        crate::ExchangeError::BeforeResponse(Error::Transport { .. })
     );
     server.await.expect("parser header fixture joins");
 }
@@ -170,34 +179,46 @@ async fn largest_header_count_limit_admits_that_many_response_headers() {
 
 #[tokio::test]
 async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
-    const HEAD_BYTES: usize = 512 * 1024;
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("head fixture listener");
-    let address = listener.local_addr().expect("head fixture address");
-    let acceptor = fixture_acceptor(&material);
-    let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(3), async move {
-            let (socket, _) = listener.accept().await.expect("head fixture accepts");
-            let mut stream = acceptor.accept(socket).await.expect("head TLS handshake");
-            read_request_headers(&mut stream).await;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
-                "a".repeat(HEAD_BYTES)
-            );
-            let _ = stream.write_all(head.as_bytes()).await;
-        })
-        .await
-        .expect("head fixture completes within its budget");
-    });
-    std::assert_matches!(
-        fixture_client(address, &material)
+    for (length, admitted) in [(1024, true), (512 * 1024, false)] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("head fixture listener");
+        let address = listener.local_addr().expect("head fixture address");
+        let acceptor = fixture_acceptor(&material);
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), async move {
+                let (socket, _) = listener.accept().await.expect("head fixture accepts");
+                let mut stream = acceptor.accept(socket).await.expect("head TLS handshake");
+                read_request_headers(&mut stream).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
+                    "a".repeat(length)
+                );
+                stream.write_all(head.as_bytes()).await?;
+                stream.flush().await
+            })
+            .await
+            .expect("head fixture completes within its budget")
+        });
+        let result = fixture_client(address, &material)
             .execute(request(), deadline())
-            .await,
-        Err(Error::Transport { .. })
-    );
-    server.await.expect("head fixture joins");
+            .await;
+        let written = server.await.expect("head fixture joins");
+        if admitted {
+            written.expect("small response head was sent");
+            let response = result.expect("small response head is admitted");
+            assert_eq!(response.headers()["x-large"].as_bytes().len(), length);
+        } else {
+            std::assert_matches!(
+                result,
+                Err(Error::Transport { ref source }) if source.source()
+                    .and_then(|cause| cause.downcast_ref::<hyper::Error>())
+                    .is_some_and(hyper::Error::is_parse),
+                "expected the HTTP parser to reject the oversized head, write: {written:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -307,6 +328,37 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
+    use operation_context::OperationContext;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = fixture_client(listener.local_addr().unwrap(), &material);
+    for cancelled in 0..3 {
+        let scopes = [(); 3].map(|()| OperationContext::unbounded());
+        let mut outer = request();
+        outer.extensions_mut().insert(scopes[1].clone());
+        let parent = client.prepare(outer, &scopes[0]).unwrap();
+        let mut inner = request();
+        inner.extensions_mut().insert(scopes[2].clone());
+        let exchange = client.execute_buffered(inner, parent.context().clone());
+        let (result, _connection) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(exchange, async {
+                let (connection, _) = listener.accept().await.unwrap();
+                scopes[cancelled].cancel();
+                connection
+            })
+        })
+        .await
+        .expect("a cancelled exchange must finish during the TLS handshake");
+        std::assert_matches!(
+            result,
+            Err(crate::ExchangeError::BeforeResponse(Error::Cancelled))
+        );
+    }
 }
 
 #[tokio::test]

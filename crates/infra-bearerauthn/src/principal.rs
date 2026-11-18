@@ -26,7 +26,7 @@ impl Principal {
         }
     }
 
-    pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
+    pub fn claims<'a, T: serde::Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError> {
         serde_json::from_str(&self.identity.payload).map_err(|_| ClaimAccessError::InvalidShape)
     }
 

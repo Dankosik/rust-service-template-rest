@@ -10,7 +10,7 @@ use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyCom
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{
     Algorithm,
-    jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse},
+    jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse, RSAKeyParameters},
 };
 use serde::Deserialize;
 use tokio::time::Instant;
@@ -254,8 +254,8 @@ fn admit_key(
         }
         algorithm
     };
-    let public_key = key_material(&jwk.algorithm)
-        .and_then(|material| material.parse(algorithm))
+    let public_key = algorithm
+        .parse_public_key(&jwk.algorithm)
         .ok_or(KeyRejection::InvalidMaterial)?;
     Ok(JwtKey {
         kid: jwk.common.key_id,
@@ -295,8 +295,8 @@ fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
         return matches!(
             algorithm,
             None | Some("RSA1_5" | "RSA-OAEP" | "RSA-OAEP-256" | "RSA-OAEP-384" | "RSA-OAEP-512")
-        ) && key_material(&jwk.algorithm)
-            .and_then(|key| key.parse(JwtAlgorithm::Rs256))
+        ) && JwtAlgorithm::Rs256
+            .parse_public_key(&jwk.algorithm)
             .is_some();
     }
     matches!(
@@ -396,73 +396,49 @@ impl JwtAlgorithm {
         }
     }
 
-    fn verification(self) -> KeyVerification {
-        match self {
-            Self::Rs256 => KeyVerification::Rsa(&signature::RSA_PKCS1_2048_8192_SHA256),
-            Self::Ps256 => KeyVerification::Rsa(&signature::RSA_PSS_2048_8192_SHA256),
-            Self::Es256 => KeyVerification::Raw(&signature::ECDSA_P256_SHA256_FIXED),
-            Self::EdDsa => KeyVerification::Raw(&signature::ED25519),
-        }
-    }
-}
-
-enum KeyVerification {
-    Rsa(&'static RsaParameters),
-    Raw(&'static dyn signature::VerificationAlgorithm),
-}
-
-enum KeyMaterial {
-    Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
-    Raw(Vec<u8>),
-}
-
-impl KeyMaterial {
-    fn parse(&self, algorithm: JwtAlgorithm) -> Option<ParsedPublicKey> {
-        match (self, algorithm.verification()) {
-            (Self::Rsa { modulus, exponent }, KeyVerification::Rsa(parameters)) => {
-                RsaPublicKeyComponents {
-                    n: modulus.as_slice(),
-                    e: exponent.as_slice(),
-                }
-                .to_parsed_public_key(parameters)
-                .ok()
+    fn parse_public_key(self, parameters: &AlgorithmParameters) -> Option<ParsedPublicKey> {
+        match (self, parameters) {
+            (Self::Rs256, AlgorithmParameters::RSA(key)) => {
+                parse_rsa_key(key, &signature::RSA_PKCS1_2048_8192_SHA256)
             }
-            (Self::Raw(bytes), KeyVerification::Raw(verification)) => {
-                ParsedPublicKey::new(verification, bytes).ok()
+            (Self::Ps256, AlgorithmParameters::RSA(key)) => {
+                parse_rsa_key(key, &signature::RSA_PSS_2048_8192_SHA256)
             }
-            (Self::Rsa { .. }, KeyVerification::Raw(_))
-            | (Self::Raw(_), KeyVerification::Rsa(_)) => None,
+            (Self::Es256, AlgorithmParameters::EllipticCurve(key)) => {
+                let x = URL_SAFE_NO_PAD.decode(&key.x).ok()?;
+                let y = URL_SAFE_NO_PAD.decode(&key.y).ok()?;
+                let point = shared_rules::rfc7518::p256_point(&x, &y)?;
+                ParsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point).ok()
+            }
+            (Self::EdDsa, AlgorithmParameters::OctetKeyPair(key)) => {
+                let bytes = URL_SAFE_NO_PAD.decode(&key.x).ok()?;
+                ParsedPublicKey::new(&signature::ED25519, bytes).ok()
+            }
+            _ => None,
         }
     }
 }
 
-fn key_material(parameters: &AlgorithmParameters) -> Option<KeyMaterial> {
-    match parameters {
-        AlgorithmParameters::RSA(parameters) => {
-            let modulus = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
-            let exponent = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
-            let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
-            (MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS)
-                .contains(&bits)
-                .then_some(KeyMaterial::Rsa { modulus, exponent })
-        }
-        AlgorithmParameters::EllipticCurve(parameters) => {
-            let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
-            let y = URL_SAFE_NO_PAD.decode(&parameters.y).ok()?;
-            Some(KeyMaterial::Raw(
-                shared_rules::rfc7518::p256_point(&x, &y)?.to_vec(),
-            ))
-        }
-        AlgorithmParameters::OctetKeyPair(parameters) => Some(KeyMaterial::Raw(
-            URL_SAFE_NO_PAD.decode(&parameters.x).ok()?,
-        )),
-        _ => None,
+fn parse_rsa_key(
+    key: &RSAKeyParameters,
+    algorithm: &'static RsaParameters,
+) -> Option<ParsedPublicKey> {
+    let n = URL_SAFE_NO_PAD.decode(&key.n).ok()?;
+    let e = URL_SAFE_NO_PAD.decode(&key.e).ok()?;
+    let n = without_leading_zeros(&n)?;
+    let e = without_leading_zeros(&e)?;
+    let bits = n.len() * 8 - n[0].leading_zeros() as usize;
+    if !(MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS).contains(&bits) {
+        return None;
     }
+    RsaPublicKeyComponents { n, e }
+        .to_parsed_public_key(algorithm)
+        .ok()
 }
 
-fn without_leading_zeros(bytes: &[u8]) -> Option<Vec<u8>> {
+fn without_leading_zeros(bytes: &[u8]) -> Option<&[u8]> {
     let start = bytes.iter().position(|byte| *byte != 0)?;
-    Some(bytes[start..].to_vec())
+    Some(&bytes[start..])
 }
 
 pub(crate) enum JwksSource {

@@ -1,3 +1,4 @@
+mod context;
 mod observe;
 mod policy;
 mod transport;
@@ -15,8 +16,10 @@ use tokio::time::Instant;
 use tracing::Instrument as _;
 
 pub use bytes::Bytes;
+pub use context::RequestContext;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
 pub use observe::{HISTOGRAMS, REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC, UrlTemplate};
+pub use transport::prepare_tls;
 pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -73,6 +76,27 @@ pub enum Error {
         #[source]
         source: BoxError,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExchangeError {
+    #[error("outbound HTTP exchange failed before response headers")]
+    BeforeResponse(#[source] Error),
+    #[error("outbound HTTP exchange failed after HTTP {status}")]
+    AfterResponse {
+        status: StatusCode,
+        #[source]
+        source: Error,
+    },
+}
+
+impl ExchangeError {
+    #[must_use]
+    pub fn into_error(self) -> Error {
+        match self {
+            Self::BeforeResponse(source) | Self::AfterResponse { source, .. } => source,
+        }
+    }
 }
 
 #[derive(Clone, derive_more::Debug)]
@@ -156,7 +180,19 @@ impl Client {
         request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_response_status(request, context, |_| {})
+        self.execute_buffered(request, context)
+            .await
+            .map_err(ExchangeError::into_error)
+    }
+
+    pub async fn execute_buffered(
+        &self,
+        request: Request<Bytes>,
+        context: impl Into<RequestContext>,
+    ) -> Result<Response<Bytes>, ExchangeError> {
+        self.prepare_scoped(request, context.into())
+            .map_err(ExchangeError::BeforeResponse)?
+            .send_with_response(|| true, |_| {}, buffer_response)
             .await
     }
 
@@ -183,25 +219,26 @@ impl Client {
                 async |response, _, _| Ok(response.into_parts().0),
             )
             .await
+            .map_err(ExchangeError::into_error)
     }
 
     pub fn prepare(
         &self,
-        mut request: Request<Bytes>,
+        request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<PreparedRequest<'_>, Error> {
-        let request_context = request.extensions_mut().remove::<OperationContext>();
-        let mut ceiling = Deadline::new(Instant::now(), self.limits.operation_timeout);
-        if let Some(other) = request_context
-            .as_ref()
-            .and_then(OperationContext::deadline)
-        {
-            ceiling = ceiling.earlier(other);
-        }
-        let stops = StopScopes {
-            operation: context.child_until(ceiling),
-            request: request_context,
-        };
+        self.prepare_scoped(request, context.into())
+    }
+
+    fn prepare_scoped(
+        &self,
+        mut request: Request<Bytes>,
+        context: RequestContext,
+    ) -> Result<PreparedRequest<'_>, Error> {
+        let stops = context.for_request(
+            Deadline::new(Instant::now(), self.limits.operation_timeout),
+            request.extensions_mut().remove::<OperationContext>(),
+        );
         stops.check()?;
         let request = policy::admit_request(&self.origin, request)?;
         Ok(PreparedRequest {
@@ -217,13 +254,13 @@ impl Client {
 pub struct PreparedRequest<'a> {
     client: &'a Client,
     request: Request<Bytes>,
-    stops: StopScopes,
+    stops: RequestContext,
 }
 
 impl PreparedRequest<'_> {
     #[must_use]
     pub const fn deadline(&self) -> Option<Deadline> {
-        self.stops.operation.deadline()
+        self.stops.deadline()
     }
 
     #[must_use]
@@ -236,17 +273,8 @@ impl PreparedRequest<'_> {
     }
 
     #[must_use]
-    pub fn child_contexts(
-        &self,
-        ceiling: Deadline,
-    ) -> (OperationContext, Option<OperationContext>) {
-        (
-            self.stops.operation.child_until(ceiling),
-            self.stops
-                .request
-                .as_ref()
-                .map(OperationContext::child_context),
-        )
+    pub const fn context(&self) -> &RequestContext {
+        &self.stops
     }
 
     pub fn set_authorization(&mut self, value: http::HeaderValue) {
@@ -262,6 +290,7 @@ impl PreparedRequest<'_> {
     ) -> Result<Response<Bytes>, Error> {
         self.send_with_response(check, on_status, buffer_response)
             .await
+            .map_err(ExchangeError::into_error)
     }
 
     async fn send_with_response<T>(
@@ -271,15 +300,18 @@ impl PreparedRequest<'_> {
         consume: impl AsyncFnOnce(
             Response<hyper::body::Incoming>,
             usize,
-            &StopScopes,
+            &RequestContext,
         ) -> Result<T, Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<T, ExchangeError> {
         let Self {
             client,
             mut request,
             stops,
         } = self;
-        stops.check()?;
+        stops
+            .check()
+            .map_err(Error::from)
+            .map_err(ExchangeError::BeforeResponse)?;
         let template = request.extensions_mut().remove::<UrlTemplate>();
         let mut attempt = observe::Attempt::start(
             request.method(),
@@ -313,51 +345,23 @@ impl PreparedRequest<'_> {
         };
         let result = tokio::select! {
             biased;
-            reason = stops.wait_stopped() => Err(stopped_error(reason)),
+            reason = stops.wait_stopped() => Err(Error::from(reason)),
             result = exchange.instrument(span) => result,
         }
-        .and_then(|response| stops.check().map(|()| response));
+        .and_then(|response| stops.check().map_err(Error::from).map(|()| response));
+        let status = attempt.status();
         std::mem::DropGuard::dismiss(attempt).finish(&result);
-        result
-    }
-}
-
-struct StopScopes {
-    operation: OperationContext,
-    request: Option<OperationContext>,
-}
-
-impl StopScopes {
-    fn stopped(&self) -> Option<Stopped> {
-        self.operation
-            .stopped()
-            .or_else(|| self.request.as_ref().and_then(OperationContext::stopped))
-    }
-
-    fn check(&self) -> Result<(), Error> {
-        self.stopped()
-            .map_or(Ok(()), |reason| Err(stopped_error(reason)))
-    }
-
-    async fn wait_stopped(&self) -> Stopped {
-        let request = async {
-            match &self.request {
-                Some(request) => request.wait_stopped().await,
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            biased;
-            stopped = self.operation.wait_stopped() => stopped,
-            stopped = request => stopped,
-        }
+        result.map_err(|source| match status {
+            Some(status) => ExchangeError::AfterResponse { status, source },
+            None => ExchangeError::BeforeResponse(source),
+        })
     }
 }
 
 async fn buffer_response(
     response: Response<hyper::body::Incoming>,
     limit: usize,
-    stops: &StopScopes,
+    stops: &RequestContext,
 ) -> Result<Response<Bytes>, Error> {
     if hyper::body::Body::size_hint(response.body())
         .exact()
@@ -383,10 +387,12 @@ async fn buffer_response(
     Ok(Response::from_parts(parts, buffered))
 }
 
-fn stopped_error(stopped: Stopped) -> Error {
-    match stopped {
-        Stopped::Deadline => Error::Timeout,
-        Stopped::Cancelled => Error::Cancelled,
+impl From<Stopped> for Error {
+    fn from(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::Deadline => Self::Timeout,
+            Stopped::Cancelled => Self::Cancelled,
+        }
     }
 }
 

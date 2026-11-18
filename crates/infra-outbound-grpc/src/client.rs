@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ use operation_context::{Deadline, OperationContext};
 use secrecy::SecretString;
 use shared_rules::error_chain::{DisplayErrorChain, causes};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -17,7 +20,7 @@ use tokio_util::sync::DropGuard;
 use tonic::body::Body;
 use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
 use tonic::transport::{Channel, Endpoint};
-use tower::{Service, ServiceExt as _};
+use tower::{BoxError, Service, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
@@ -31,7 +34,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type TlsTarget = (TlsConnector, rustls::pki_types::ServerName<'static>);
 type TransportStream = Either<TcpStream, TlsStream<TcpStream>>;
 
@@ -41,15 +43,18 @@ pub enum ClientSecurity {
     Tls(ClientTlsMaterial),
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, derive_more::Debug, Default)]
 pub struct ClientTlsMaterial {
+    #[debug(skip)]
     pub ca_certificate_pem: Option<String>,
     pub identity: Option<ClientIdentity>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct ClientIdentity {
+    #[debug(skip)]
     pub certificate_pem: String,
+    #[debug(skip)]
     pub private_key_pem: SecretString,
 }
 
@@ -80,6 +85,7 @@ pub struct Client {
     #[debug(skip)]
     destination: crate::observe::Destination,
     timeout: ClientTimeout,
+    openings: Option<Arc<Semaphore>>,
     series: &'static crate::observe::Series,
 }
 
@@ -97,6 +103,18 @@ impl Client {
         security: ClientSecurity,
         timeout: ClientTimeout,
     ) -> Result<Self, ClientError> {
+        Self::with_opening_limit(destination, security, timeout, None)
+    }
+
+    pub fn with_opening_limit(
+        destination: &str,
+        security: ClientSecurity,
+        timeout: ClientTimeout,
+        opening_limit: Option<NonZeroUsize>,
+    ) -> Result<Self, ClientError> {
+        if opening_limit.is_some_and(|limit| limit.get() > Semaphore::MAX_PERMITS) {
+            return Err(ClientError::InvalidOpeningLimit);
+        }
         let (uri, tls) = parse_destination(destination, security)?;
         let endpoint = Endpoint::from(uri.clone())
             .connect_timeout(CONNECT_TIMEOUT)
@@ -120,6 +138,7 @@ impl Client {
             channel: Channel::new(GrpcConnector { http, tls }, endpoint),
             destination,
             timeout,
+            openings: opening_limit.map(|limit| Arc::new(Semaphore::new(limit.get()))),
             series: crate::observe::Series::client(),
         })
     }
@@ -139,8 +158,7 @@ impl Client {
         scheme == other_scheme && host.eq_ignore_ascii_case(other_host) && port == other_port
     }
 
-    #[must_use]
-    pub fn prepare_call(&self, mut request: Request<Body>) -> PreparedCall {
+    pub fn prepare_call(&self, mut request: Request<Body>) -> Result<PreparedCall, tonic::Status> {
         let origin = Instant::now();
         let caller = crate::grpc_timeout(request.headers());
         if caller.is_none() {
@@ -167,7 +185,25 @@ impl Client {
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        PreparedCall {
+        if let Err(reason) = opening.check() {
+            let status = client_stopped(reason);
+            call.finish(status.code());
+            return Err(status);
+        }
+        let permit = if let Some(openings) = &self.openings {
+            let Ok(permit) = Arc::clone(openings).try_acquire_owned() else {
+                let status = opening.stopped().map_or_else(
+                    || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
+                    client_stopped,
+                );
+                call.finish(status.code());
+                return Err(status);
+            };
+            Some(permit)
+        } else {
+            None
+        };
+        Ok(PreparedCall {
             channel: self.channel.clone(),
             request,
             opening,
@@ -175,7 +211,14 @@ impl Client {
             watch_stop,
             call,
             guard: cancellation.drop_guard(),
-        }
+            permit,
+        })
+    }
+
+    #[must_use]
+    pub fn refuse_call(&self, request: &Request<Body>, status: tonic::Status) -> tonic::Status {
+        crate::observe::Call::start(self.series, request, &self.destination).finish(status.code());
+        status
     }
 }
 
@@ -189,7 +232,10 @@ impl Service<Request<Body>> for Client {
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        Box::pin(self.prepare_call(request).send())
+        match self.prepare_call(request) {
+            Ok(prepared) => Box::pin(prepared.send()),
+            Err(status) => Box::pin(std::future::ready(Err(status))),
+        }
     }
 }
 
@@ -206,6 +252,8 @@ pub struct PreparedCall {
     call: crate::observe::Call,
     #[debug(skip)]
     guard: DropGuard,
+    #[debug(skip)]
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl PreparedCall {
@@ -250,6 +298,7 @@ impl PreparedCall {
             watch_stop,
             call,
             guard,
+            permit,
         } = self;
         let (mut parts, body) = request.into_parts();
         let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
@@ -273,6 +322,7 @@ impl PreparedCall {
         }
         .instrument(call.span().clone())
         .await;
+        drop(permit);
         match result {
             Ok(mut response) => {
                 let observation = if track_decoded_status {
@@ -318,9 +368,7 @@ impl Service<http::Uri> for GrpcConnector {
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.http
-            .poll_ready(context)
-            .map_err(|error| Box::new(error) as BoxError)
+        self.http.poll_ready(context).map_err(BoxError::from)
     }
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
@@ -328,23 +376,17 @@ impl Service<http::Uri> for GrpcConnector {
         let tls = self.tls.clone();
         Box::pin(async move {
             let dial = async move {
-                let tcp = http
-                    .call(uri)
-                    .await
-                    .map_err(|error| Box::new(error) as BoxError)?;
-                let tcp = tcp.into_inner();
+                let tcp = http.call(uri).await?.into_inner();
                 match tls {
-                    None => Ok(TokioIo::new(Either::Left(tcp))),
+                    None => Ok::<_, BoxError>(TokioIo::new(Either::Left(tcp))),
                     Some((connector, server_name)) => {
-                        let tls_stream = connector
-                            .connect(server_name, tcp)
-                            .await
-                            .map_err(|error| Box::new(error) as BoxError)?;
+                        let tls_stream = connector.connect(server_name, tcp).await?;
                         if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-                            return Err(Box::new(std::io::Error::new(
+                            return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 "TLS peer did not negotiate h2 ALPN",
-                            )) as BoxError);
+                            )
+                            .into());
                         }
                         Ok(TokioIo::new(Either::Right(tls_stream)))
                     }
@@ -440,7 +482,7 @@ fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::assert_matches;
 
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
@@ -477,7 +519,7 @@ mod tests {
                 ClientSecurity::Plaintext,
                 ClientSecurity::Tls(ClientTlsMaterial::default()),
             ] {
-                assert_eq!(
+                assert_matches!(
                     Client::try_new(invalid, security, Duration::from_secs(1)).unwrap_err(),
                     ClientError::InvalidDestination,
                     "{invalid:?}"
@@ -485,7 +527,7 @@ mod tests {
             }
         }
 
-        assert_eq!(
+        assert_matches!(
             Client::try_new(
                 "https://example.test",
                 ClientSecurity::Plaintext,
@@ -494,7 +536,7 @@ mod tests {
             .unwrap_err(),
             ClientError::DestinationSecurityMismatch
         );
-        assert_eq!(
+        assert_matches!(
             Client::try_new(
                 "http://example.test",
                 ClientSecurity::Tls(ClientTlsMaterial::default()),
@@ -502,6 +544,15 @@ mod tests {
             )
             .unwrap_err(),
             ClientError::DestinationSecurityMismatch
+        );
+        assert_matches!(
+            Client::with_opening_limit(
+                "http://example.test",
+                ClientSecurity::Plaintext,
+                ClientTimeout::FullRpc(Duration::from_secs(1)),
+                NonZeroUsize::new(Semaphore::MAX_PERMITS + 1),
+            ),
+            Err(ClientError::InvalidOpeningLimit)
         );
 
         let bad_ca = ClientSecurity::Tls(ClientTlsMaterial {
@@ -511,9 +562,9 @@ mod tests {
             ),
             identity: None,
         });
-        assert_eq!(
+        assert_matches!(
             Client::try_new("https://example.test", bad_ca, Duration::from_secs(1)).unwrap_err(),
-            ClientError::Tls(crate::TlsMaterialError::InvalidCaCertificate)
+            ClientError::Tls(crate::TlsMaterialError::InvalidCaCertificate(Some(_)))
         );
 
         for valid_http in [
@@ -589,7 +640,7 @@ mod tests {
             crate::protocol::GRPC_TIMEOUT,
             http::HeaderValue::from_static("+5S"),
         );
-        let mut prepared = client.prepare_call(request);
+        let mut prepared = client.prepare_call(request).unwrap();
         assert!(!prepared.watch_stop);
         assert!(
             !prepared

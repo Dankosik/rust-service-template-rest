@@ -23,7 +23,7 @@ use infra_bearerauthn::{
 };
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::idempotency::{
-    CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, ReplayableResponse, Rollback, Tx,
+    CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalProblem, Tx,
 };
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
@@ -102,7 +102,20 @@ struct NewWidget {
 struct Widget {
     id: i64,
     name: String,
+    #[serde(serialize_with = "serialize_widget_color")]
     color: String,
+}
+
+fn serialize_widget_color<S: serde::Serializer>(
+    color: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if color == UNSERIALIZABLE_COLOR {
+        return Err(serde::ser::Error::custom(
+            "fixture color cannot be serialized",
+        ));
+    }
+    serializer.serialize_str(color)
 }
 
 impl Widget {
@@ -117,7 +130,7 @@ enum CreateError {
     Store(sqlx::Error),
 }
 
-impl From<CreateError> for Rollback {
+impl From<CreateError> for Rollback<TerminalProblem> {
     fn from(error: CreateError) -> Self {
         match error {
             CreateError::Reserved => Self::refuse(
@@ -128,7 +141,7 @@ impl From<CreateError> for Rollback {
                     db.is_unique_violation() && db.constraint() == Some("widgets_unique_name")
                 }) =>
             {
-                Self::terminal(Problem::new(Code::AlreadyExists).detail("the widget name is taken"))
+                Self::Terminal(TerminalProblem::already_exists().detail("the widget name is taken"))
             }
             CreateError::Store(error) => Self::from(error),
         }
@@ -181,10 +194,7 @@ impl CreateWidgets for SqlWidgets {
             "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
         }))
     ),
-    responses(
-        (status = 201, description = "created", body = Widget),
-        ProtectedOperationProblemResponses
-    )
+    responses((status = 201, description = "created", body = Widget), ProtectedOperationProblemResponses)
 )]
 async fn create_widget(
     request: CommandInput,
@@ -224,10 +234,7 @@ async fn create_widget(
             "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
         }))
     ),
-    responses(
-        (status = 201, description = "created", body = Widget),
-        ProtectedOperationProblemResponses
-    )
+    responses(ProtectedOperationProblemResponses)
 )]
 async fn replace_widget(
     mut request: CommandInput,
@@ -254,15 +261,18 @@ struct CreateWidget {
     handler_timeout: bool,
 }
 
-impl FreshCommand for CreateWidget {
-    const ALLOW_TERMINAL_REFUSALS: bool = true;
+infra_http::created_json_response!(CreatedWidget(Widget));
 
-    async fn execute(self, tx: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
+impl FreshCommand for CreateWidget {
+    type Success = CreatedWidget;
+    type Terminal = TerminalProblem;
+
+    async fn execute(self, tx: &mut Tx<'_>) -> Result<Self::Success, Rollback<Self::Terminal>> {
         let widget = self.widgets.create(tx, &self.input).await?;
         if widget.color == "invalid-refusal" {
             return Err(Rollback::refuse(StatusCode::NOT_MODIFIED));
         }
-        created_response(&widget)
+        Ok(created_response(widget))
     }
 
     fn attempt_timeout(&self) -> Option<Duration> {
@@ -270,7 +280,7 @@ impl FreshCommand for CreateWidget {
     }
 }
 
-fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
+fn created_response(widget: Widget) -> CreatedWidget {
     let location = widget.location();
     let id = widget.id;
     let mut headers = axum::http::HeaderMap::new();
@@ -293,14 +303,10 @@ fn created_response(widget: &Widget) -> Result<ReplayableResponse, Rollback> {
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
     headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
-    if widget.color == UNSERIALIZABLE_COLOR {
-        return ReplayableResponse::json(
-            StatusCode::CREATED,
-            headers,
-            &BTreeMap::from([((1, 2), 3)]),
-        );
+    CreatedWidget {
+        body: widget,
+        headers,
     }
-    ReplayableResponse::json(StatusCode::CREATED, headers, widget)
 }
 
 fn may_create(principal: &VerifiedPrincipal) -> bool {
@@ -577,6 +583,10 @@ fn widget_contract_declares_protected_json_operations() {
             .unwrap(),
     )
     .unwrap();
+    assert_eq!(
+        document["components"]["schemas"]["Widget"]["properties"]["id"]["type"],
+        "integer"
+    );
     for (path, method, operation_id, scopes) in [
         (WIDGETS, "post", "createWidget", json!(["widgets:write"])),
         ("/widgets/{id}", "put", "replaceWidget", json!([])),
@@ -588,6 +598,8 @@ fn widget_contract_declares_protected_json_operations() {
             operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/NewWidget"
         );
+        let success = &operation["responses"]["201"]["content"]["application/json"]["schema"];
+        assert_eq!(success["$ref"], "#/components/schemas/Widget");
         assert_eq!(
             operation["responses"]["415"]["content"]["application/problem+json"]["schema"]["$ref"],
             "#/components/schemas/Problem"

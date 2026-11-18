@@ -135,6 +135,8 @@ pub(crate) enum BootstrapError {
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
+    #[error("gRPC service registration: {0}")]
+    GrpcRegistration(#[source] Box<dyn std::error::Error + Send + Sync>),
     // template:end grpc:bootstrap-grpc-error
     #[error("background task {name} failed (panicked: {panicked})")]
     Background { name: &'static str, panicked: bool },
@@ -175,9 +177,66 @@ fn process_failure(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+struct StartupRegistration<C> {
+    http_resource: Option<crate::HttpResource<C>>,
+    // template:begin grpc:bootstrap-registration-callback
+    grpc: Option<grpc::ResourceRegistration>,
+    // template:end grpc:bootstrap-registration-callback
+}
+
+impl<C> From<crate::ServiceRegistration<C>> for StartupRegistration<C> {
+    fn from(registration: crate::ServiceRegistration<C>) -> Self {
+        Self {
+            http_resource: registration.http_resource,
+            // template:begin grpc:bootstrap-adapt-legacy-registration
+            grpc: registration
+                .grpc
+                .map(|register| -> grpc::ResourceRegistration {
+                    Box::new(move |services, state, background| {
+                        register(services, state, background).map_err(Into::into)
+                    })
+                }),
+            // template:end grpc:bootstrap-adapt-legacy-registration
+        }
+    }
+}
+
+// template:begin grpc:bootstrap-run-with-grpc-resource
+pub fn run_with_grpc_resource<I>(
+    args: I,
+    register: impl FnOnce(
+        &mut infra_grpc::Services,
+        &crate::AppState,
+        &mut BackgroundRegistration<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    + 'static,
+) -> ExitCode
+where
+    I: IntoIterator<Item = OsString>,
+{
+    run_registered(
+        args,
+        StartupRegistration::<()> {
+            http_resource: None,
+            grpc: Some(Box::new(register)),
+        },
+    )
+}
+// template:end grpc:bootstrap-run-with-grpc-resource
+
 pub fn run_with<I>(
     args: I,
     registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
+) -> ExitCode
+where
+    I: IntoIterator<Item = OsString>,
+{
+    run_registered(args, registration.into())
+}
+
+fn run_registered<I>(
+    args: I,
+    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
 ) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
@@ -244,11 +303,13 @@ where
 async fn serve(
     config: Config,
     logger_installed: &mut bool,
-    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
+    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
     retained_signals: &mut Option<Signals>,
     deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
     let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
+    let config = Box::new(config);
+    let http_config = config.http.clone();
     let mut background = Background::new(CancellationToken::new());
     let mut observer = background.observer();
     let mut dependencies = Dependencies::default();
@@ -304,6 +365,7 @@ async fn serve(
                 started = startup => started.map(Some),
             }
         };
+        drop(config);
         if let Err(error) = finish_startup(race, signals, &mut background, &mut serving) {
             return Some(error);
         }
@@ -321,7 +383,7 @@ async fn serve(
     .unwrap_or(Some(BootstrapError::Panicked));
     let failure = failure.or_else(|| pending_failure(&background, &serving));
     let deadline = *deadline.get_or_insert_with(|| {
-        signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
+        signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period
     });
     if let Some(error) = &failure
         && logger.is_some()
@@ -329,7 +391,7 @@ async fn serve(
         tracing::error!(error = %error, "service failed");
     }
     let outcome = shutdown::run(shutdown::Plan {
-        http_config: &config.http,
+        http_config: &http_config,
         signals,
         deadline,
         serving,
@@ -419,7 +481,7 @@ fn background_error(failure: BackgroundFailure) -> BootstrapError {
 )]
 async fn start(
     config: &Config,
-    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
+    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
     metrics: &Metrics,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
@@ -711,7 +773,7 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            crate::ServiceRegistration::<()>::default(),
+            crate::ServiceRegistration::<()>::default().into(),
             &shared_metrics(),
             &mut background,
             &mut Dependencies::default(),
@@ -779,7 +841,7 @@ mod tests {
         let mut serving = Serving::default();
         let result = start(
             &config,
-            crate::ServiceRegistration::<()>::default(),
+            crate::ServiceRegistration::<()>::default().into(),
             &metrics,
             &mut background,
             &mut dependencies,
@@ -820,19 +882,25 @@ mod tests {
     // template:begin service-auth:bootstrap-service-auth-test
     mod service_auth_registration {
         use std::pin::Pin;
+        use std::time::Duration;
 
         use grpc_contracts::example::v1::{
             BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
             ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
             echo_service_server::{EchoService, EchoServiceServer},
         };
+        use infra_outbound_grpc::{Client, ClientSecurity};
         use tonic::{Request, Response, Status};
+        use tonic_reflection::pb::v1::{
+            ServerReflectionRequest, server_reflection_client::ServerReflectionClient,
+            server_reflection_request::MessageRequest, server_reflection_response::MessageResponse,
+        };
 
         type Stream<T> =
             Pin<Box<dyn tonic::codegen::tokio_stream::Stream<Item = Result<T, Status>> + Send>>;
 
-        #[derive(Clone, Copy, Debug, Default)]
-        struct Echo;
+        #[derive(Clone, Debug)]
+        struct Echo(ServerReflectionClient<Client>);
 
         #[tonic::async_trait]
         impl EchoService for Echo {
@@ -844,8 +912,29 @@ mod tests {
                 request: Request<UnaryRequest>,
             ) -> Result<Response<UnaryResponse>, Status> {
                 let caller = infra_grpc::require_caller(&request)?;
+                let query = ServerReflectionRequest {
+                    message_request: Some(MessageRequest::ListServices(String::new())),
+                    ..Default::default()
+                };
+                let mut directory = self.0.clone();
+                let mut replies = directory
+                    .server_reflection_info(futures_util::stream::iter([query]))
+                    .await?
+                    .into_inner();
+                let Some(MessageResponse::ListServicesResponse(list)) = replies
+                    .message()
+                    .await?
+                    .and_then(|reply| reply.message_response)
+                else {
+                    return Err(Status::unavailable("directory did not list services"));
+                };
+                let service = list
+                    .service
+                    .into_iter()
+                    .find(|service| service.name == caller.name().as_str())
+                    .ok_or_else(|| Status::not_found("caller missing from directory"))?;
                 Ok(Response::new(UnaryResponse {
-                    message: caller.name().as_str().to_owned(),
+                    message: service.name,
                 }))
             }
 
@@ -871,35 +960,163 @@ mod tests {
             }
         }
 
-        pub(super) fn register(
-            services: &mut infra_grpc::Services,
-            _: &crate::AppState,
-            _: &mut crate::BackgroundRegistration<'_>,
-        ) -> Result<(), infra_grpc::Error> {
-            services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-            services.add(EchoServiceServer::new(Echo))?;
-            for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                services
-                    .allow_callers(&format!("/example.v1.EchoService/{method}"), &["orders"])?;
+        pub(super) fn directory() -> infra_http_transport::Server {
+            let directory = tonic_reflection::server::Builder::configure()
+                .with_service_name("orders")
+                .build_v1()
+                .unwrap();
+            super::BoundListener::bind("127.0.0.1:0".parse().unwrap())
+                .unwrap()
+                .serve_h2(
+                    tonic::service::Routes::new(directory).into_axum_router(),
+                    infra_grpc::server_options(super::ConnectionLimits {
+                        max_connections: None,
+                        max_connection_age: None,
+                    }),
+                    None,
+                )
+        }
+
+        pub(super) fn registration(origin: String) -> super::StartupRegistration<()> {
+            super::StartupRegistration {
+                http_resource: None,
+                grpc: Some(Box::new(move |services, _, _| {
+                    let directory = Client::try_new(
+                        &origin,
+                        ClientSecurity::Plaintext,
+                        Duration::from_secs(5),
+                    )?;
+                    services.set_listener_layer(tower::util::MapResponseLayer::new(
+                        |mut response: axum::response::Response| {
+                            response
+                                .headers_mut()
+                                .insert("x-listener", "grpc".parse().unwrap());
+                            response
+                        },
+                    ));
+                    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+                    services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
+                        directory,
+                    ))))?;
+                    services.add_reflection()?;
+                    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                        services.allow_callers(
+                            &format!("/example.v1.EchoService/{method}"),
+                            &["orders"],
+                        )?;
+                    }
+                    for path in infra_grpc::REFLECTION_PATHS {
+                        services.allow_callers(path, &["orders"])?;
+                    }
+                    Ok(())
+                })),
             }
-            Ok(())
+        }
+
+        pub(super) async fn exercise_listener(
+            resource: Client,
+            signed: infra_outbound_grpc::ServiceTokenClient,
+        ) {
+            use axum::http::{Request as HttpRequest, StatusCode};
+            use futures_util::StreamExt as _;
+            use grpc_contracts::example::v1::echo_service_client::EchoServiceClient;
+            use tonic_reflection::pb::v1alpha;
+            use tower::ServiceExt as _;
+
+            let rejected = HttpRequest::post("/grpc.health.v1.Health/Check")
+                .header("content-type", "text/plain")
+                .body(tonic::body::Body::empty())
+                .unwrap();
+            let response = resource.clone().oneshot(rejected).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert!(!response.headers().contains_key("x-listener"));
+            let unknown = HttpRequest::post("/unknown.Service/Call")
+                .header("content-type", "application/grpc")
+                .body(tonic::body::Body::empty())
+                .unwrap();
+            let forbidden = signed.clone().oneshot(unknown).await.unwrap();
+            assert_eq!(forbidden.headers()["grpc-status"], "7");
+            assert_eq!(forbidden.headers()["x-listener"], "grpc");
+            let empty_protobuf_frame = axum::body::Body::from(&[0_u8; 5][..]);
+            let check = HttpRequest::post("/grpc.health.v1.Health/Check")
+                .header("content-type", "application/grpc")
+                .body(tonic::body::Body::new(empty_protobuf_frame))
+                .unwrap();
+            let health = resource.oneshot(check).await.unwrap();
+            assert_eq!(health.headers()["x-listener"], "grpc");
+            assert_eq!(health.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(axum::body::Body::new(health.into_body()), 64)
+                .await
+                .unwrap();
+            assert!(!body.is_empty());
+            let alpha =
+                v1alpha::server_reflection_client::ServerReflectionClient::new(signed.clone())
+                    .server_reflection_info(futures_util::stream::empty::<
+                        v1alpha::ServerReflectionRequest,
+                    >())
+                    .await
+                    .unwrap();
+            assert_eq!(alpha.metadata().get("x-listener").unwrap(), "grpc");
+            assert!(alpha.into_inner().message().await.unwrap().is_none());
+            let queries = futures_util::stream::iter([ServerReflectionRequest {
+                message_request: Some(MessageRequest::ListServices(String::new())),
+                ..Default::default()
+            }])
+            .chain(futures_util::stream::pending());
+            let open = ServerReflectionClient::new(signed.clone())
+                .server_reflection_info(queries)
+                .await
+                .unwrap();
+            assert_eq!(open.metadata().get("x-listener").unwrap(), "grpc");
+            let mut stream = open.into_inner();
+            std::assert_matches!(
+                stream.message().await.unwrap().and_then(|reply| reply.message_response),
+                Some(MessageResponse::ListServicesResponse(list)) if list.service.iter().any(|s| s.name == "example.v1.EchoService"));
+            let status = EchoServiceClient::new(signed)
+                .unary(UnaryRequest::default())
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+            drop(stream);
+        }
+
+        pub(super) async fn assert_registration_failure(
+            config: &super::Config,
+            metrics: &super::Metrics,
+        ) {
+            let mut serving = super::Serving::default();
+            let failure = super::start(
+                config,
+                registration("https://directory.invalid".to_owned()),
+                metrics,
+                &mut super::Background::new(super::CancellationToken::new()),
+                &mut super::Dependencies::default(),
+                &mut serving,
+            )
+            .await
+            .unwrap_err();
+            let source = std::error::Error::source(&failure).unwrap();
+            std::assert_matches!(
+                source.downcast_ref::<infra_outbound_grpc::ClientError>(),
+                Some(infra_outbound_grpc::ClientError::DestinationSecurityMismatch)
+            );
+            assert!(serving.grpc_listener.is_none() && serving.app_listener.is_none());
         }
     }
 
-    #[tokio::test]
-    async fn a_process_verifying_service_tokens_refuses_a_tokenless_grpc_call() {
-        use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
-        use infra_serviceauth::test_support::{TestKey, registry};
-
-        let key = TestKey::new("orders/1");
-        let certificate = tls_test_support::TlsMaterial::new("127.0.0.1");
-        let config = test_config(&[
+    fn grpc_test_config(
+        certificate: &tls_test_support::TlsMaterial,
+        key: &infra_serviceauth::test_support::TestKey,
+    ) -> Config {
+        test_config(&[
             ("APP__APP__ENV", "local"),
             ("APP__HTTP__ADDR", "127.0.0.1:0"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
             ("APP__GRPC__ENABLED", "true"),
             ("APP__GRPC__ADDR", "127.0.0.1:0"),
             ("APP__GRPC__SECURITY", "tls"),
+            ("APP__GRPC__MAX_IN_FLIGHT", "1"),
+            ("APP__GRPC__ADMISSION_WAIT", "0s"),
             ("APP__GRPC__CERTIFICATE", &certificate.cert_pem),
             ("APP__GRPC__PRIVATE_KEY", &certificate.key_pem),
             ("APP__OBSERVABILITY__METRICS__ADDR", ""),
@@ -908,19 +1125,28 @@ mod tests {
             ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
             (
                 "APP__SERVICE_AUTH__TRUST",
-                &registry(&[("orders", &[&key])]),
+                &infra_serviceauth::test_support::registry(&[("orders", &[key])]),
             ),
-        ]);
+        ])
+    }
+
+    #[tokio::test]
+    async fn registered_grpc_middleware_forwards_native_calls_through_listener_policies() {
+        use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
+        use infra_serviceauth::test_support::TestKey;
+
+        let key = TestKey::new("orders/1");
+        let certificate = tls_test_support::TlsMaterial::new("127.0.0.1");
+        let config = grpc_test_config(&certificate, &key);
         let metrics = shared_metrics();
         let mut background = Background::new(CancellationToken::new());
         let mut dependencies = Dependencies::default();
         let mut serving = Serving::default();
+        service_auth_registration::assert_registration_failure(&config, &metrics).await;
+        let directory = service_auth_registration::directory();
         let prepared = start(
             &config,
-            crate::ServiceRegistration {
-                grpc: Some(service_auth_registration::register),
-                ..crate::ServiceRegistration::<()>::default()
-            },
+            service_auth_registration::registration(format!("http://{}", directory.local_addr())),
             &metrics,
             &mut background,
             &mut dependencies,
@@ -959,19 +1185,20 @@ mod tests {
             private_key: key.pem().into(),
         })
         .unwrap();
-        let admitted = EchoServiceClient::new(
-            resource
-                .with_service_tokens(
-                    signing
-                        .receiver("catalog", origin.parse().unwrap())
-                        .unwrap(),
-                )
-                .unwrap(),
-        )
-        .unary(UnaryRequest::default())
-        .await
-        .unwrap();
+        let signed = resource
+            .with_service_tokens(
+                signing
+                    .receiver("catalog", origin.parse().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        let admitted = EchoServiceClient::new(signed.clone())
+            .unary(UnaryRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(admitted.metadata().get("x-listener").unwrap(), "grpc");
         assert_eq!(admitted.into_inner().message, "orders");
+        service_auth_registration::exercise_listener(resource, signed).await;
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             shutdown::run(shutdown::Plan {
@@ -988,6 +1215,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Outcome::Graceful);
+        assert_eq!(
+            directory.drain(Duration::from_secs(5)).await.unwrap(),
+            infra_http_transport::Drained::Complete
+        );
     }
     // template:end service-auth:bootstrap-service-auth-test
 }

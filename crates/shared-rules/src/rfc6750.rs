@@ -35,7 +35,9 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
     std::str::from_utf8(token).map_err(|_| NoBearer::Malformed)
 }
 
-fn is_b64token(token: &[u8]) -> bool {
+/// RFC 6750 §2.1
+#[must_use]
+pub fn is_b64token(token: &[u8]) -> bool {
     let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
     let value = &token[..token.len() - padding];
     !value.is_empty()

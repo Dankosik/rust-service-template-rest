@@ -94,7 +94,10 @@ impl RunError {
 impl From<PendingError> for RunError {
     fn from(error: PendingError) -> Self {
         match error {
-            PendingError::Migrate(error) => Self::Migrate(error),
+            PendingError::ChecksumMismatch(version) => {
+                MigrateError::VersionMismatch(version).into()
+            }
+            PendingError::MissingVersion(version) => MigrateError::VersionMissing(version).into(),
             PendingError::DuplicateVersion(version) => Self::DuplicateVersion(version),
         }
     }
@@ -157,7 +160,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             });
         }
     }
-    let _ = conn.close().await;
+    drop(tokio::time::timeout_at(deadline_at, conn.close()).await);
     Ok(report)
 }
 

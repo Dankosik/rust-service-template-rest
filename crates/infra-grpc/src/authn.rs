@@ -7,7 +7,7 @@ use infra_bearerauthn::{
     Verifier,
 };
 use operation_context::OperationContext;
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
 
 use crate::Failure;
 use crate::call::server_stopped;
@@ -44,7 +44,7 @@ impl VerifiedPrincipal {
         extensions.get::<Self>()
     }
 
-    pub fn claims<T: DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
+    pub fn claims<'a, T: Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError> {
         self.0.claims()
     }
 

@@ -28,12 +28,16 @@ pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
     1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
 ];
 
-pub(crate) struct Claimed {
+pub(crate) struct RunningJob {
     pub(crate) registered: Arc<Registered>,
     pub(crate) attempt: AttemptId,
     pub(crate) fence: ClaimFence,
     pub(crate) payload: Result<Vec<u8>, crate::JobError>,
     pub(crate) trace: Carrier,
+}
+
+pub(crate) struct Claimed {
+    pub(crate) job: RunningJob,
     pub(crate) slot: OwnedSemaphorePermit,
     pub(crate) kind_slot: Option<KindSlot>,
 }
@@ -191,15 +195,16 @@ async fn statement_turn<'a>(
     }
 }
 
-enum ClaimRound {
-    Known {
-        claim_started_at: Instant,
-        rows: Vec<Drawn>,
-    },
-    Failed(OperationError),
+struct ClaimRound {
+    claim_started_at: Instant,
+    rows: Vec<Drawn>,
 }
 
-async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -> ClaimRound {
+async fn send_claim(
+    shared: &Shared,
+    policy: &PolicyBinds<'_>,
+    requested: i64,
+) -> Result<ClaimRound, OperationError> {
     let claim_started_at = Instant::now();
     let result = backstop(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
@@ -209,13 +214,10 @@ async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed().as_secs_f64());
-    match result {
-        Ok(rows) => ClaimRound::Known {
-            claim_started_at,
-            rows,
-        },
-        Err(error) => ClaimRound::Failed(error),
-    }
+    result.map(|rows| ClaimRound {
+        claim_started_at,
+        rows,
+    })
 }
 
 #[expect(
@@ -409,15 +411,15 @@ fn finish_round(
     shared: &Arc<Shared>,
     slots: &mut OwnedSemaphorePermit,
     requested: usize,
-    round: ClaimRound,
+    round: Result<ClaimRound, OperationError>,
     stop: &CancellationToken,
     failure: &CancellationToken,
 ) -> Next {
     match round {
-        ClaimRound::Known {
+        Ok(ClaimRound {
             claim_started_at,
             rows,
-        } => {
+        }) => {
             observe_recovery(shared, Operation::Claim);
             let next = if rows.len() == requested {
                 Next::Now
@@ -429,7 +431,7 @@ fn finish_round(
             dispatch_known(shared, slots, rows, claim_started_at, stop, failure);
             next
         }
-        ClaimRound::Failed(error) => {
+        Err(error) => {
             observe_failure(shared, Operation::Claim, &error);
             Next::Idle
         }
@@ -453,28 +455,25 @@ fn dispatch_known(
                 attempt::record_exhausted(&attempt, error_summary.as_deref());
             }
             Drawn::Running {
-                registered,
-                attempt,
-                fence,
-                payload,
-                trace,
+                job,
                 lease_offset,
                 queue_wait_seconds,
             } => {
                 let deadline = local_deadline(claim_started_at, lease_offset);
                 let Some(slot) = slots.split(1) else {
                     tracing::error!(
-                        job.id = %attempt.job_id,
-                        job.kind = attempt.kind,
+                        job.id = %job.attempt.job_id,
+                        job.kind = job.attempt.kind,
                         "job_claim_exceeded_slots"
                     );
                     break;
                 };
-                let kind_slot = registered
+                let kind_slot = job
+                    .registered
                     .running_slots
                     .as_ref()
                     .and_then(|slots| KindSlot::take(slots, &shared.claim_wake));
-                registered
+                job.registered
                     .metrics()
                     .queue_wait
                     .record(queue_wait_seconds.max(0.0));
@@ -482,15 +481,11 @@ fn dispatch_known(
                     Arc::clone(&shared.lifecycle.drain),
                     stop.clone(),
                     failure.clone(),
-                    attempt.job_id,
-                    attempt.kind,
+                    job.attempt.job_id,
+                    job.attempt.kind,
                 );
                 let claimed = Claimed {
-                    registered,
-                    attempt,
-                    fence,
-                    payload,
-                    trace,
+                    job,
                     slot,
                     kind_slot,
                 };
@@ -514,11 +509,7 @@ fn local_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant 
 
 enum Drawn {
     Running {
-        registered: Arc<Registered>,
-        attempt: AttemptId,
-        fence: ClaimFence,
-        payload: Result<Vec<u8>, crate::JobError>,
-        trace: Carrier,
+        job: RunningJob,
         lease_offset: Duration,
         queue_wait_seconds: f64,
     },
@@ -568,15 +559,17 @@ impl ClaimRow {
         };
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),
-            registered: Arc::clone(registered),
-            fence: ClaimFence {
-                job_id: attempt.job_id,
-                generation: self.claim_generation,
-                token: self.claim_token,
+            job: RunningJob {
+                registered: Arc::clone(registered),
+                fence: ClaimFence {
+                    job_id: attempt.job_id,
+                    generation: self.claim_generation,
+                    token: self.claim_token,
+                },
+                attempt,
+                payload,
+                trace: Carrier::from_stored(self.trace_parent, self.trace_state),
             },
-            attempt,
-            payload,
-            trace: Carrier::from_stored(self.trace_parent, self.trace_state),
             queue_wait_seconds: self.queue_wait_seconds,
         })
     }

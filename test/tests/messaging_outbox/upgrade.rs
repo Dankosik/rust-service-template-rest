@@ -454,6 +454,7 @@ async fn upgrade_requeues_only_verified_transient_exhaustion_without_displacing_
 }
 
 #[sqlx::test(migrations = false)]
+#[warn(unused_results)]
 async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidence(pool: PgPool) {
     MIGRATOR.run_to(HISTORICAL_SCHEMA, &pool).await.unwrap();
     let mut staged_jobs = Vec::new();
@@ -474,7 +475,7 @@ async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidenc
     ] {
         let intent = historical_intent(SUBJECT, scenario, BODY);
         let id = historical_job(&pool, &intent, Storage::Text, LegacyState::Pending, true).await;
-        sqlx::query(
+        let staged = sqlx::query(
             "UPDATE background_jobs SET
                 kind = CASE WHEN $5 = 'ordinary-job' THEN 'ordinary_job' ELSE kind END,
                 state = $2, attempts = $4, created_at = statement_timestamp() - interval '5 days',
@@ -509,17 +510,21 @@ async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidenc
         .execute(&pool)
         .await
         .unwrap();
+        assert_eq!(staged.rows_affected(), 1, "stage legacy job {scenario}");
         staged_jobs.push((scenario, id));
     }
     MIGRATOR.run_to(RECEIPT_BACKFILL, &pool).await.unwrap();
     let mut snapshots = Vec::new();
     for (scenario, id) in staged_jobs {
         if scenario == "conflicting-receipt" {
-            sqlx::query("UPDATE background_jobs SET payload_text = '{' WHERE id = $1::text::uuid")
-                .bind(&id)
-                .execute(&pool)
-                .await
-                .unwrap();
+            let staged = sqlx::query(
+                "UPDATE background_jobs SET payload_text = '{' WHERE id = $1::text::uuid",
+            )
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert_eq!(staged.rows_affected(), 1, "stage conflicting receipt");
         }
         let before = stored_job(&pool, &id).await;
         snapshots.push((scenario, id, before));
@@ -546,8 +551,15 @@ async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidenc
                 in_window,
                 "legacy retry {scenario} must be due within the cap"
             );
-            before.as_object_mut().unwrap().remove("not_before");
-            after.as_object_mut().unwrap().remove("not_before");
+            assert_ne!(
+                before
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("not_before")
+                    .unwrap(),
+                after.as_object_mut().unwrap().remove("not_before").unwrap(),
+                "reschedule legacy job {scenario}"
+            );
         }
         assert_eq!(after, before, "legacy job {scenario}");
     }

@@ -388,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[warn(clippy::assertions_on_result_states)]
     fn decode_rejects_a_missing_or_invalid_identity_header() {
         for missing in [
             MESSAGE_ID,
@@ -401,14 +402,17 @@ mod tests {
                 .filter(|(name, _)| AsRef::<str>::as_ref(*name) != missing)
                 .map(|(name, values)| (name.clone(), values[0].clone()))
                 .collect();
-            assert!(
-                decode_envelope("orders.created", &headers, Bytes::new()).is_err(),
-                "{missing}"
+            assert_eq!(
+                decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err(),
+                EnvelopeError::MissingHeader(missing)
             );
         }
         let mut headers = envelope_headers();
         headers.insert(header_name::EVENT_TYPE, "order\u{85}created");
-        assert!(decode_envelope("orders.created", &headers, Bytes::new()).is_err());
+        assert_eq!(
+            decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err(),
+            EnvelopeError::Identity
+        );
     }
 
     #[test]

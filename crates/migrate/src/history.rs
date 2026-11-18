@@ -70,14 +70,11 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     };
     let pending = pending(&MIGRATOR, &history).map_err(|error| {
         let (cause, version) = match error {
-            PendingError::Migrate(MigrateError::VersionMismatch(v)) => {
-                ("checksum_mismatch", Some(v))
-            }
-            PendingError::Migrate(MigrateError::VersionMissing(v)) => ("version_missing", Some(v)),
-            PendingError::DuplicateVersion(v) => ("duplicate_version", Some(v)),
-            PendingError::Migrate(_) => ("history", None),
+            PendingError::ChecksumMismatch(v) => ("checksum_mismatch", v),
+            PendingError::MissingVersion(v) => ("version_missing", v),
+            PendingError::DuplicateVersion(v) => ("duplicate_version", v),
         };
-        HistoryError::Mismatch.report("compare", cause, None, version)
+        HistoryError::Mismatch.report("compare", cause, None, Some(version))
     })?;
     match pending.first() {
         Some(next) => {
@@ -137,11 +134,10 @@ pub(crate) async fn applied_history(
     conn.list_applied_migrations(table).await
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub(crate) enum PendingError {
-    #[error(transparent)]
-    Migrate(#[from] MigrateError),
-    #[error("migration version {0} is embedded more than once")]
+    ChecksumMismatch(i64),
+    MissingVersion(i64),
     DuplicateVersion(i64),
 }
 
@@ -166,14 +162,10 @@ pub(crate) fn pending<'m>(
             .find(|migration| migration.version == applied.version)
         {
             Some(migration) if migration.checksum != applied.checksum => {
-                return Err(PendingError::Migrate(MigrateError::VersionMismatch(
-                    applied.version,
-                )));
+                return Err(PendingError::ChecksumMismatch(applied.version));
             }
             None if newest.is_some_and(|newest| applied.version < newest) => {
-                return Err(PendingError::Migrate(MigrateError::VersionMissing(
-                    applied.version,
-                )));
+                return Err(PendingError::MissingVersion(applied.version));
             }
             _ => {}
         }
@@ -239,9 +231,7 @@ mod tests {
                 &migrator,
                 &[applied(first), applied(20_260_926_125_000), applied(second)]
             ),
-            Err(PendingError::Migrate(MigrateError::VersionMissing(
-                20_260_926_125_000
-            )))
+            Err(PendingError::MissingVersion(20_260_926_125_000))
         );
         std::assert_matches!(
             pending(
@@ -251,7 +241,7 @@ mod tests {
                     checksum: Cow::Owned(vec![0]),
                 }]
             ),
-            Err(PendingError::Migrate(MigrateError::VersionMismatch(version))) if version == first
+            Err(PendingError::ChecksumMismatch(version)) if version == first
         );
 
         let empty = Migrator::with_migrations(Vec::new());

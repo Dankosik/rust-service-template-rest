@@ -19,13 +19,14 @@ use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
+use tower::Layer as _;
 use tracing::Instrument as _;
 
 use crate::call::{ServerCustody, attach_server, deadline_status, server_stopped};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
-use crate::services::{CallType, Methods, REFLECTION_PATHS};
+use crate::services::{CallType, ListenerLayer, Methods, REFLECTION_PATHS};
 use crate::status::internal_status;
 use crate::{Error, Failure, Services};
 
@@ -57,6 +58,10 @@ pub fn request_operation<T>(
 pub struct ResponseContext(OperationContext);
 
 impl ResponseContext {
+    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
+        request.extensions().get().ok_or_else(internal_status)
+    }
+
     #[must_use]
     pub const fn operation(&self) -> &OperationContext {
         &self.0
@@ -179,6 +184,7 @@ pub fn router(
     Ok(Application {
         router: native_router(
             business,
+            services.listener_layer,
             readiness,
             services.names,
             methods,
@@ -206,6 +212,7 @@ fn semaphore(limit: Option<NonZeroU32>) -> Option<Arc<Semaphore>> {
 
 fn native_router(
     router: axum::Router,
+    listener_layer: Option<ListenerLayer>,
     readiness: ::health::ReadinessReader,
     names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
@@ -219,15 +226,22 @@ fn native_router(
     )]
     let health =
         axum::Router::new().route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
-    router
-        .merge(health.layer(axum::middleware::from_fn_with_state(
-            (methods, request_timeout),
-            health_call,
-        )))
-        .layer(axum::middleware::from_fn_with_state(
-            trust_trace_context,
-            native_grpc,
-        ))
+    let router = router.merge(health.layer(axum::middleware::from_fn_with_state(
+        (methods, request_timeout),
+        health_call,
+    )));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the native gRPC listener delegates every route and its tonic fallback through this layer"
+    )]
+    let router = match listener_layer {
+        Some(layer) => axum::Router::new().fallback_service(layer.layer(router)),
+        None => router,
+    };
+    router.layer(axum::middleware::from_fn_with_state(
+        trust_trace_context,
+        native_grpc,
+    ))
 }
 
 async fn native_grpc(
@@ -251,12 +265,9 @@ async fn native_grpc(
     response
 }
 
-enum OpeningOutcome {
-    Admitted {
-        response: Response,
-        permit: Option<OwnedSemaphorePermit>,
-    },
-    Rejected(Response),
+struct Admitted {
+    response: Response,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 async fn business_call(
@@ -310,49 +321,50 @@ async fn business_call(
     request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context);
 
+    #[allow(clippy::result_large_err, reason = "the panic fallback returns the same refusal response")]
     let outcome = run_in_span(
         async {
             let outcome = tokio::select! {
                 biased;
                 reason = opening_context.wait_stopped() => {
-                    OpeningOutcome::Rejected(server_stopped(reason).into_http())
+                    Err(server_stopped(reason).into_http())
                 }
                 outcome = open_business(&state, &opening_context, call_type, request, next) => outcome,
             };
             if let Some(reason) = opening_context.stopped() {
-                return OpeningOutcome::Rejected(server_stopped(reason).into_http());
+                return Err(server_stopped(reason).into_http());
             }
             outcome
         },
         call.span(),
         fallback.as_ref(),
-        || OpeningOutcome::Rejected(internal_status().into_http()),
+        || Err(internal_status().into_http()),
     )
     .await;
 
     finish_call(outcome, call, fallback, custody)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the call returns"
+)]
 async fn open_business(
     state: &BusinessState,
     opening_context: &OperationContext,
     call_type: Option<CallType>,
     request: Request,
     next: Next,
-) -> OpeningOutcome {
+) -> Result<Admitted, Response> {
     let mut remaining_wait = state.limits.max_admission_wait;
-    let (_opening_permit, request) = match acquire_permit(
+    let (_opening_permit, request) = acquire_permit(
         state.opening_permits.as_ref(),
         &mut remaining_wait,
         opening_context,
         request,
     )
-    .await
-    {
-        Ok(acquired) => acquired,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
-    let admission = match &state.authentication {
+    .await?;
+    let admission: Result<_, Response> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
         Authentication::Bearer(verifier) => {
             crate::authn::authenticate(verifier, &state.scopes, opening_context, request).await
@@ -377,32 +389,23 @@ async fn open_business(
             Ok(request)
         }
     };
-    let request = match admission {
-        Ok(request) => request,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
+    let request = admission?;
     if call_type.is_none() {
         let status = tonic::Status::unimplemented("");
-        return OpeningOutcome::Rejected(
-            reject_with_budget(opening_context, request, status).await,
-        );
+        return Err(reject_with_budget(opening_context, request, status).await);
     }
-    let (call_permit, request) = match acquire_permit(
+    let (call_permit, request) = acquire_permit(
         state.call_permits.as_ref(),
         &mut remaining_wait,
         opening_context,
         request,
     )
-    .await
-    {
-        Ok(acquired) => acquired,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
+    .await?;
     let response = next.run(request.map(without_trailer_credentials)).await;
-    OpeningOutcome::Admitted {
+    Ok(Admitted {
         response,
         permit: call_permit,
-    }
+    })
 }
 
 #[expect(
@@ -545,17 +548,17 @@ async fn run_in_span<T>(
 }
 
 fn finish_call(
-    outcome: OpeningOutcome,
+    outcome: Result<Admitted, Response>,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
     mut custody: ServerCustody,
 ) -> Response {
     match outcome {
-        OpeningOutcome::Admitted { response, permit } => {
+        Ok(Admitted { response, permit }) => {
             custody.permit = permit;
             attach_server(response, call, fallback, custody).map(axum::body::Body::new)
         }
-        OpeningOutcome::Rejected(response) => {
+        Err(response) => {
             // template:begin authn:grpc-router-scope-refusal-span
             if response
                 .extensions()
@@ -587,14 +590,15 @@ pub(crate) async fn reject_with_budget(
     status.into_http()
 }
 
+#[warn(clippy::arithmetic_side_effects)]
 async fn drain_rejected(request: Request, drain: Duration) {
     let mut body = request.into_body();
     let _ = tokio::time::timeout(drain, async {
-        let mut read = 0;
+        let mut remaining = REJECT_DRAIN_BYTES;
         while let Some(Ok(frame)) = body.frame().await {
             tokio::task::consume_budget().await;
-            read += frame.data_ref().map_or(0, Bytes::len);
-            if read > REJECT_DRAIN_BYTES {
+            remaining = remaining.saturating_sub(frame.data_ref().map_or(0, Bytes::len));
+            if remaining == 0 {
                 break;
             }
         }
@@ -625,7 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_call_reads_at_most_one_frame_past_64_kib() {
+    async fn rejected_call_stops_reading_when_frames_reach_64_kib() {
         use futures_util::StreamExt as _;
         use std::convert::Infallible;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -641,6 +645,6 @@ mod tests {
         let response =
             reject_with_budget(&context, request, tonic::Status::unavailable("closed")).await;
         assert_eq!(response.headers()["grpc-status"], "14");
-        assert_eq!(frames.load(Ordering::SeqCst), 5);
+        assert_eq!(frames.load(Ordering::SeqCst), 4);
     }
 }

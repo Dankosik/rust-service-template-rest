@@ -9,13 +9,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::on;
 use http_body_util::Collected;
 use infra_idempotency_store::{ScopeKey, Store};
-use utoipa::OpenApi as _;
+use utoipa::{IntoResponses as _, OpenApi as _};
 
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome};
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::IdempotencyComponents;
-use super::{CommandInput, KEY_HEADER};
+use super::{CommandInput, KEY_HEADER, ReplaySuccess as _};
 use crate::authn::VerifiedPrincipal;
 use crate::context::{RequestContext, RequestDeadline, collect_body};
 use crate::problem::{
@@ -39,8 +39,11 @@ where
     C: FreshCommand + 'static,
     F: Future<Output = Result<C, Box<Problem>>> + Send + 'static,
 {
-    let mut paths = std::mem::take(&mut document.paths);
-    let operation = declaration::prepare(&mut paths, document.external_docs.take())?;
+    let operation = declaration::prepare(
+        &mut document,
+        C::Success::responses(),
+        C::Success::schemas(),
+    )?;
     metrics::describe_counter!(
         HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
         metrics::Unit::Count,
@@ -74,7 +77,11 @@ where
                 }
             }
         };
-    let route = (Vec::new(), paths, on(method, handler));
+    let route = (
+        Vec::new(),
+        std::mem::take(&mut document.paths),
+        on(method, handler),
+    );
     HttpContract::from_idempotent(document, route)
         .and_then(|contract| {
             contract.with_components(

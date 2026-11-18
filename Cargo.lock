@@ -2032,6 +2032,7 @@ version = "0.1.0"
 dependencies = [
  "derive-where",
  "prost",
+ "prost-types",
  "tonic",
  "tonic-prost",
 ]
@@ -2948,6 +2949,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "derive_more",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -2955,12 +2957,14 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
+ "smallvec",
  "thiserror",
  "tls-test-support",
  "tokio",
@@ -5237,6 +5241,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-health",
+ "tonic-reflection",
  "tower",
  "tracing",
  "ureq",

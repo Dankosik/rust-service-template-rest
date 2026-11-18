@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use infra_postgres::{Tx, observed};
 use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
@@ -198,16 +198,20 @@ impl JobError {
     pub const fn is_permanent(&self) -> bool {
         matches!(self.disposition, Disposition::Permanent)
     }
+
+    fn postgres(context: &'static str, error: &sqlx::Error) -> Self {
+        let diagnostic = infra_postgres::sqlstate(error)
+            .unwrap_or_else(|| Cow::Borrowed(infra_postgres::failure_cause(error)));
+        Self {
+            disposition: Disposition::Retry,
+            summary: Cow::Owned(format!("{context} {diagnostic}")),
+        }
+    }
 }
 
 impl From<sqlx::Error> for JobError {
     fn from(error: sqlx::Error) -> Self {
-        let diagnostic = infra_postgres::sqlstate(&error)
-            .unwrap_or_else(|| Cow::Borrowed(infra_postgres::failure_cause(&error)));
-        Self {
-            disposition: Disposition::Retry,
-            summary: Cow::Owned(format!("postgres {diagnostic}")),
-        }
+        Self::postgres("postgres", &error)
     }
 }
 
@@ -220,6 +224,12 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
 }
 
 struct TransactionFailure(JobError);
+
+impl TransactionFailure {
+    fn completion(error: &sqlx::Error) -> Self {
+        Self(JobError::postgres("job completion failed: postgres", error))
+    }
+}
 
 impl From<infra_postgres::TxError> for TransactionFailure {
     fn from(error: infra_postgres::TxError) -> Self {
@@ -289,6 +299,7 @@ impl KindsBuilder {
         })
     }
 
+    #[warn(clippy::map_err_ignore)]
     pub fn register_transactional<K: JobKind>(
         &mut self,
         policy: Policy,
@@ -318,9 +329,7 @@ impl KindsBuilder {
                         let complete = crate::attempt::complete_query(fence);
                         let rows = observed("complete job", complete.execute(&mut *tx))
                             .await
-                            .map_err(|_| {
-                                TransactionFailure(JobError::retryable("job completion failed"))
-                            })?;
+                            .map_err(|error| TransactionFailure::completion(&error))?;
                         if rows.rows_affected() == 0 {
                             return Err(TransactionFailure(JobError::retryable(
                                 "job claim is stale",
@@ -523,8 +532,7 @@ pub(crate) enum Completion {
     Committed,
 }
 
-pub(crate) type HandlerFuture =
-    Pin<Box<dyn Future<Output = Result<Completion, JobError>> + Send + 'static>>;
+pub(crate) type HandlerFuture = BoxFuture<'static, Result<Completion, JobError>>;
 
 pub(crate) type Dispatch =
     dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
@@ -839,6 +847,13 @@ mod tests {
     #[test]
     fn transaction_diagnostics_preserve_the_stage_and_withhold_driver_text() {
         use infra_postgres::TxError;
+        let TransactionFailure(completion) =
+            TransactionFailure::completion(&sqlx::Error::Protocol("private-test-value".to_owned()));
+        assert_eq!(completion.disposition, Disposition::Retry);
+        assert_eq!(
+            completion.to_string(),
+            "job completion failed: postgres protocol"
+        );
         let TransactionFailure(overload) = TxError::Acquire(sqlx::Error::PoolTimedOut).into();
         assert_eq!(
             overload.disposition,

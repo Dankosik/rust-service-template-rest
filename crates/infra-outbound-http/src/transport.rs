@@ -1,12 +1,14 @@
-use std::{sync::OnceLock, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::client::legacy::connect::HttpConnector;
+use once_cell::sync::OnceCell;
 
 use crate::{BuildError, Limits, policy::Origin};
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
+static TLS_CONFIG: OnceCell<rustls::ClientConfig> = OnceCell::new();
 
 pub(crate) type Transport = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<HttpConnector<Resolver>>,
@@ -22,25 +24,35 @@ pub(crate) type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver
 #[cfg(test)]
 pub(crate) type Resolver = crate::test_support::FixtureResolver;
 
+pub async fn prepare_tls() -> Result<(), BuildError> {
+    if TLS_CONFIG.get().is_none() {
+        tokio::task::spawn_blocking(tls_config)
+            .await
+            .map_err(|source| BuildError::Tls {
+                source: Box::new(source),
+            })??;
+    }
+    Ok(())
+}
+
 pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
-    static CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
-    if let Some(config) = CONFIG.get() {
-        return Ok(config);
-    }
-    let build_error = |source: rustls::Error| BuildError::Tls {
-        source: Box::new(source),
-    };
-    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(build_error)?
-    .with_platform_verifier()
-    .map_err(build_error)?
-    .with_no_client_auth();
-    Ok(CONFIG.get_or_init(|| config))
+    TLS_CONFIG.get_or_try_init(|| {
+        let build_error = |source: rustls::Error| BuildError::Tls {
+            source: Box::new(source),
+        };
+        Ok(
+            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(build_error)?
+            .with_platform_verifier()
+            .map_err(build_error)?
+            .with_no_client_auth(),
+        )
+    })
 }
 
 pub(crate) fn build_transport(

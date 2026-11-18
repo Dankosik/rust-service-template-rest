@@ -117,6 +117,17 @@ async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Re
 }
 
 // template:begin http-idempotency:http-mounted-operations
+pub(crate) use components::{merge_map, same_definition};
+
+pub(crate) fn resolve_schema<'a>(
+    schema: &'a RefOr<utoipa::openapi::Schema>,
+    schemas: &'a BTreeMap<String, RefOr<utoipa::openapi::Schema>>,
+) -> Option<&'a utoipa::openapi::Schema> {
+    outcomes::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
+        *reference == utoipa::openapi::Ref::new(&reference.ref_location)
+    })
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
 
@@ -938,6 +949,7 @@ const BEARER_SCHEME: &str = "bearerAuth";
 #[derive(Clone, Copy, Debug)]
 enum PolicyFault {
     InvalidDelegation,
+    InvalidScopeToken,
     PublicDelegation,
     MissingBearerScheme,
     UnsupportedRequirement,
@@ -948,6 +960,7 @@ impl PolicyFault {
     const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidDelegation => "invalid_bearer_delegation",
+            Self::InvalidScopeToken => "invalid_scope_token",
             Self::PublicDelegation => "delegation_requires_authentication",
             Self::MissingBearerScheme => "missing_bearer_scheme",
             Self::UnsupportedRequirement => "unsupported_requirement",
@@ -984,6 +997,14 @@ impl Access {
             .any(|requirement| requirement.len() != 1 || !requirement.contains_key(BEARER_SCHEME))
         {
             return Err(PolicyFault::UnsupportedRequirement);
+        }
+        if requirements
+            .iter()
+            .flat_map(BTreeMap::values)
+            .flatten()
+            .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+        {
+            return Err(PolicyFault::InvalidScopeToken);
         }
         Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value
@@ -1522,6 +1543,26 @@ mod tests {
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
                 None,
                 Err(protected()),
+            ),
+            (
+                None,
+                Some(serde_json::json!([{"bearerAuth": ["read", "write"]}, {"bearerAuth": []}])),
+                None,
+                Err(protected()),
+            ),
+            (
+                None,
+                Some(
+                    serde_json::json!([{"bearerAuth": ["read"]}, {"bearerAuth": ["admin", "read write"]}]),
+                ),
+                None,
+                Err(invalid("invalid_scope_token")),
+            ),
+            (
+                Some(serde_json::json!([{"bearerAuth": [""]}])),
+                None,
+                None,
+                Err(invalid("invalid_scope_token")),
             ),
             (
                 None,

@@ -9,7 +9,7 @@ use shared_rules::{
     otel_http::{OTHER_METHOD, request_method, response_status_code},
 };
 
-use crate::{Error, StopScopes, policy::Origin};
+use crate::{Error, RequestContext, policy::Origin};
 
 pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
@@ -18,6 +18,20 @@ pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
 ];
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
+
+impl Error {
+    #[must_use]
+    pub fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::InvalidTarget => "target is invalid",
+            Self::Timeout => "operation timed out",
+            Self::Cancelled => "operation was cancelled",
+            Self::DispatchRefused => "dispatch was refused",
+            Self::ResponseBodyTooLarge => "response body is too large",
+            Self::Transport { source } => describe_transport_error(&**source).diagnostic,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
@@ -53,7 +67,7 @@ impl Outcome {
             Error::DispatchRefused => Self::Failed("dispatch_refused"),
             Error::Timeout => Self::Failed("timeout"),
             Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
-            Error::Transport { source } => Self::Failed(transport_error_type(&**source)),
+            Error::Transport { source } => Self::Failed(describe_transport_error(&**source).label),
         }
     }
 
@@ -81,7 +95,7 @@ impl Attempt {
         template: Option<UrlTemplate>,
         server: &Server,
         port: u16,
-        stops: &'a StopScopes,
+        stops: &'a RequestContext,
     ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
@@ -110,7 +124,7 @@ impl Attempt {
             move |attempt| {
                 let outcome = match stops.check() {
                     Ok(()) => Outcome::Cancelled,
-                    Err(error) => Outcome::from_error(&error),
+                    Err(reason) => Outcome::from_error(&Error::from(reason)),
                 };
                 attempt.emit(outcome);
             },
@@ -130,6 +144,10 @@ impl Attempt {
 
     pub(crate) fn record_status(&mut self, status: StatusCode) {
         self.status = Some(status);
+    }
+
+    pub(crate) fn status(&self) -> Option<StatusCode> {
+        self.status
     }
 
     pub(crate) fn finish<T>(self, result: &Result<T, Error>) {
@@ -233,24 +251,41 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
+struct TransportErrorDescription {
+    label: &'static str,
+    diagnostic: &'static str,
+}
+
+fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorDescription {
     let causes = || shared_rules::error_chain::causes(source);
     if causes().any(<dyn StdError>::is::<rustls::Error>) {
-        "tls"
+        TransportErrorDescription {
+            label: "tls",
+            diagnostic: "HTTP transport failed during the TLS exchange",
+        }
     } else if causes().any(|cause| {
         cause
             .downcast_ref::<hyper_util::client::legacy::Error>()
             .is_some_and(hyper_util::client::legacy::Error::is_connect)
     }) {
-        "connect"
+        TransportErrorDescription {
+            label: "connect",
+            diagnostic: "HTTP transport failed during connection setup",
+        }
     } else if causes().any(|cause| {
         cause
             .downcast_ref::<hyper::Error>()
             .is_some_and(hyper::Error::is_parse)
     }) {
-        "protocol"
+        TransportErrorDescription {
+            label: "protocol",
+            diagnostic: "HTTP transport failed while parsing the response",
+        }
     } else {
-        "transport"
+        TransportErrorDescription {
+            label: "transport",
+            diagnostic: "HTTP transport failed",
+        }
     }
 }
 

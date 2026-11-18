@@ -7,7 +7,8 @@ use prost::Message as _;
 use tonic::server::NamedService as _;
 use tonic::service::LayerExt as _;
 use tonic_reflection::pb::{v1, v1alpha};
-use tower::util::MapRequestLayer;
+use tower::util::{BoxCloneSyncServiceLayer, MapRequestLayer};
+use tower::{Layer, Service};
 
 use crate::Error;
 use crate::health::HealthServer;
@@ -82,8 +83,16 @@ pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
 ];
 
+pub(crate) type ListenerLayer = BoxCloneSyncServiceLayer<
+    axum::Router,
+    axum::extract::Request,
+    axum::response::Response,
+    Infallible,
+>;
+
 #[derive(Debug, Default)]
 pub struct Services {
+    pub(crate) listener_layer: Option<ListenerLayer>,
     pub(crate) routes: tonic::service::RoutesBuilder,
     pub(crate) names: BTreeSet<&'static str>,
     described: HashMap<String, Vec<(String, CallType)>>,
@@ -103,6 +112,19 @@ impl Services {
         Self::default()
     }
 
+    pub fn set_listener_layer<L>(&mut self, layer: L)
+    where
+        L: Layer<axum::Router> + Send + Sync + 'static,
+        L::Service: Service<axum::extract::Request, Response = axum::response::Response, Error = Infallible>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as Service<axum::extract::Request>>::Future: Send + 'static,
+    {
+        self.listener_layer = Some(ListenerLayer::new(layer));
+    }
+
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
         self.learn(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
@@ -111,7 +133,7 @@ impl Services {
 
     pub(crate) fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+            .map_err(Error::DecodeDescriptorSet)?;
         let mut described: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
         for file in set.file {
             let package = file.package.as_deref().unwrap_or_default();
@@ -205,12 +227,10 @@ impl Services {
                     tonic_reflection::server::Builder::with_service_name,
                 )
         };
-        let v1 = builder()
-            .build_v1()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        let v1 = builder().build_v1().map_err(Error::BuildReflectionV1)?;
         let v1alpha = builder()
             .build_v1alpha()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+            .map_err(Error::BuildReflectionV1Alpha)?;
         let layer = MapRequestLayer::new(reflection::cancel_request_body);
         self.add(layer.named_layer(v1))?;
         self.add(layer.named_layer(v1alpha))
@@ -233,18 +253,24 @@ impl Services {
         })
     }
 
+    fn method_paths(
+        &self,
+        services: impl Iterator<Item = &'static str>,
+    ) -> impl Iterator<Item = (String, CallType)> {
+        services.flat_map(|service| {
+            self.described
+                .get(service)
+                .into_iter()
+                .flatten()
+                .map(move |(method, call_type)| (method_path(service, method), *call_type))
+        })
+    }
+
     pub(crate) fn methods(&self) -> Methods {
+        let services = self.names.iter().copied().chain([HealthServer::NAME]);
         Methods::new(
-            self.names
-                .iter()
-                .copied()
-                .chain([HealthServer::NAME])
-                .flat_map(|service| {
-                    let methods = self.described.get(service).into_iter().flatten();
-                    methods.map(move |(method, call_type)| {
-                        (method_path(service, method).into_boxed_str(), *call_type)
-                    })
-                }),
+            self.method_paths(services)
+                .map(|(path, kind)| (path.into_boxed_str(), kind)),
         )
     }
 
@@ -273,6 +299,15 @@ impl Services {
         if self.scopes.contains_key(path) {
             return Err(Error::DuplicateScopeRequirement(path.to_owned()));
         }
+        if let Some(index) = scopes
+            .iter()
+            .position(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+        {
+            return Err(Error::InvalidScopeToken {
+                path: path.to_owned(),
+                index,
+            });
+        }
         let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
         self.scopes.insert(
             path.to_owned(),
@@ -287,13 +322,11 @@ impl Services {
                 self.scopes.entry(path.to_owned()).or_default();
             }
         }
-        for service in &self.names {
-            for (method, _) in self.described.get(*service).into_iter().flatten() {
-                let path = method_path(service, method);
-                if !self.scopes.contains_key(&path) {
-                    return Err(Error::MissingScopeRequirement(path));
-                }
-            }
+        if let Some((path, _)) = self
+            .method_paths(self.names.iter().copied())
+            .find(|(path, _)| !self.scopes.contains_key(path))
+        {
+            return Err(Error::MissingScopeRequirement(path));
         }
         Ok(())
     }
@@ -326,13 +359,11 @@ impl Services {
     }
 
     pub(crate) fn validate_caller_rules(&self) -> Result<(), Error> {
-        for service in &self.names {
-            for (method, _) in self.described.get(*service).into_iter().flatten() {
-                let path = method_path(service, method);
-                if !self.caller_rules.contains_key(&path) {
-                    return Err(Error::MissingCallerRule(path));
-                }
-            }
+        if let Some((path, _)) = self
+            .method_paths(self.names.iter().copied())
+            .find(|(path, _)| !self.caller_rules.contains_key(path))
+        {
+            return Err(Error::MissingCallerRule(path));
         }
         Ok(())
     }
@@ -365,9 +396,9 @@ mod tests {
             "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
         ];
         for path in paths {
-            assert_eq!(
+            std::assert_matches!(
                 services.require_scopes(path, &["reflection.read"]),
-                Err(Error::UnregisteredMethodPath(path.to_owned()))
+                Err(Error::UnregisteredMethodPath(rejected)) if rejected == path
             );
         }
         services.add_reflection().unwrap();
@@ -375,9 +406,9 @@ mod tests {
             services.require_scopes(path, &["reflection.read"]).unwrap();
         }
         let unknown = "/grpc.reflection.v1.ServerReflection/Unknown";
-        assert_eq!(
+        std::assert_matches!(
             services.require_scopes(unknown, &["reflection.read"]),
-            Err(Error::UnregisteredMethodPath(unknown.to_owned()))
+            Err(Error::UnregisteredMethodPath(rejected)) if rejected == unknown
         );
     }
     // template:end authn:grpc-services-test-reflection-scopes
