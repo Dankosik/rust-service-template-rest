@@ -289,10 +289,10 @@ async fn arbitrate(
         "read idempotency record",
         sqlx::query!(
             "SELECT fingerprint AS \"fingerprint: Digest\", status, \
-                     headers AS \"headers: Vec<HeaderPair>\", \
-                     CASE WHEN fingerprint = $2 THEN body END AS body \
-                     FROM http_idempotency_records \
-                     WHERE scope_key = $1 AND expires_at > statement_timestamp()",
+             headers AS \"headers: Vec<HeaderPair>\", \
+             CASE WHEN fingerprint = $2 THEN body END AS body \
+             FROM http_idempotency_records \
+             WHERE scope_key = $1 AND expires_at > statement_timestamp()",
             scope.digest.as_slice(),
             fingerprint.as_bytes().as_slice(),
         )
