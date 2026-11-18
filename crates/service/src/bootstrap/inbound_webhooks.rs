@@ -3,7 +3,7 @@ use std::sync::Arc;
 use infra_postgres::PgPool;
 use infra_webhooks::inbound::route::WebhookState;
 use infra_webhooks::inbound::{Receiver, Verifier};
-use infra_webhooks::protocol::{KeyRing, SigningKey};
+use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhookKey};
 
@@ -19,6 +19,7 @@ pub(super) fn prepare(
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksWithoutPostgres)?;
     let mut bindings = Vec::with_capacity(webhooks.len());
+    let mut owners = EndpointKeyOwners::default();
     for (endpoint_id, endpoint) in webhooks {
         let active = signing_key(endpoint_id, &endpoint.active_key)?;
         let previous = endpoint
@@ -26,7 +27,9 @@ pub(super) fn prepare(
             .as_deref()
             .map(|key| signing_key(endpoint_id, key))
             .transpose()?;
-        let verifier: Arc<dyn Verifier> = Arc::new(KeyRing::new(active, previous));
+        let keys = KeyRing::new(active, previous);
+        owners.register(endpoint_id, &keys)?;
+        let verifier: Arc<dyn Verifier> = Arc::new(keys);
         bindings.push((endpoint_id.clone(), verifier));
     }
     Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
@@ -40,4 +43,40 @@ fn signing_key(endpoint: &str, key: &InboundWebhookKey) -> Result<SigningKey, Bo
             source,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn separate_inbound_endpoints_cannot_share_a_rotation_key() {
+        let config_for = |second_key| {
+            super::super::test_config(&[
+                ("APP__POSTGRES__ENABLED", "true"),
+                ("APP__POSTGRES__DSN", "postgres://app@localhost/app"),
+                ("APP__INBOUND_WEBHOOKS__ENDPOINTS__A__ACTIVE_KEY", "a_new"),
+                ("APP__INBOUND_WEBHOOKS__ENDPOINTS__A__PREVIOUS_KEY", "a_old"),
+                ("APP__INBOUND_WEBHOOKS__ENDPOINTS__B__ACTIVE_KEY", "b"),
+                (
+                    "APP__INBOUND_WEBHOOKS__SECRETS__A_NEW",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ),
+                (
+                    "APP__INBOUND_WEBHOOKS__SECRETS__A_OLD",
+                    "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+                ),
+                ("APP__INBOUND_WEBHOOKS__SECRETS__B", second_key),
+            ])
+        };
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/app").unwrap();
+        let independent = config_for("AgICAgICAgICAgICAgICAgICAgICAgIC");
+        assert!(prepare(&independent, Some(&pool)).is_ok());
+        let overlap = config_for("whsec_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB");
+        let error = prepare(&overlap, Some(&pool)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "webhook endpoints a and b share an HMAC signing key"
+        );
+    }
 }

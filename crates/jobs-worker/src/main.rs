@@ -10,7 +10,7 @@ use infra_webhooks::inbound::{Consumers, Processor};
 use std::collections::BTreeMap;
 
 use infra_webhooks::outbound::{Dispatcher, Endpoint};
-use infra_webhooks::protocol::KeyRing;
+use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing};
 use secrecy::ExposeSecret;
 // template:end webhooks:worker-webhooks-outbound-imports
 
@@ -36,6 +36,7 @@ fn register_outbound(
 ) -> Result<(), jobs_worker::BuildError> {
     let webhooks = registration.outbound_webhooks();
     let mut endpoints = BTreeMap::new();
+    let mut owners = EndpointKeyOwners::default();
     for (endpoint_id, endpoint) in &webhooks.endpoints {
         let keys = KeyRing::from_encoded(
             endpoint.secret.expose_secret(),
@@ -48,6 +49,7 @@ fn register_outbound(
             endpoint: endpoint_id.clone(),
             source,
         })?;
+        owners.register(endpoint_id, &keys)?;
         let built = Endpoint::try_new(&endpoint.url, keys).map_err(|source| {
             RegistrationError::OutboundEndpoint {
                 endpoint: endpoint_id.clone(),

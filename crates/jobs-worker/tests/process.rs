@@ -187,6 +187,45 @@ fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admiss
 }
 // template:end inbound-webhooks:worker-webhooks-inbound-process-tests
 
+// template:begin webhooks:worker-outbound-webhook-key-isolation
+#[test]
+fn outbound_destinations_cannot_share_a_rotation_key() {
+    let output = output_with_env(
+        &[],
+        &[
+            (
+                "APP__WEBHOOKS__ENDPOINTS__A__URL",
+                "https://a.example/events",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__B__URL",
+                "https://b.example/events",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__A__SECRET",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__B__SECRET",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__B__PREVIOUS_SECRET",
+                "whsec_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            ),
+        ],
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        diagnostics.contains("webhook endpoints a and b share an HMAC signing key"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("AQEBAQEB"));
+    assert!(output.stderr.is_empty());
+}
+// template:end webhooks:worker-outbound-webhook-key-isolation
+
 // template:begin jobs:worker-operator-process-tests
 const JOB_ID: &str = "00000000-0000-4000-8000-000000000001";
 

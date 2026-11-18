@@ -79,6 +79,17 @@ unable to serve, and budget every downstream deadline inside
 
 ## Edge and trust
 
+<!-- template:begin webhooks-common:production-webhook-key-custody -->
+Provision a separate HMAC key for each webhook endpoint, direction and
+environment. During rotation, keep an endpoint's predecessor exclusive to
+that endpoint. Before upgrading a deployment that shared secrets, coordinate
+new keys with the affected partners and retire shared predecessors before
+starting the new replicas. Reconcile deliveries missed during cutover by ID.
+The API and worker load separate secret sets, so cross-process ownership
+belongs to provisioning.
+[Standard Webhooks signing keys](https://github.com/standard-webhooks/standard-webhooks/blob/3d65b1824b6697f05a5a4584e7062bd23512fc8e/spec/standard-webhooks.md#signature-scheme).
+<!-- template:end webhooks-common:production-webhook-key-custody -->
+
 - TLS termination and trusted proxy topology: Unresolved.
 - Gateway retry and fleet rate-limit owners: Unresolved (the service sheds
   in-flight overload per replica rather than enforcing fleet rate limits).
@@ -93,6 +104,8 @@ worker, its owner, the partner destinations, and any private dependencies
 that the worker must reach. Restrict outgoing connections to those destinations
 on IPv4 and IPv6. A configured HTTPS origin authenticates the peer after the
 connection starts. It cannot restrict the IP selected by DNS.
+If the worker also needs internal HTTPS services outside the partner allowlist,
+isolate the webhook delivery path so it cannot use those permissions.
 
 Before promotion, verify the deployed policy from the worker's network
 identity. Confirm a signed delivery to a controlled, permitted HTTPS receiver

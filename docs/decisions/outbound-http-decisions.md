@@ -46,10 +46,16 @@ repeated deliveries, correlate that ID before replaying or applying its effect a
   leaves the queue schedule in effect. A valid delay beyond the queue's
   supported range leaves a failed job for the operator to reconcile with the
   partner before redrive.
+- **Partner quotas.** A `429` can describe a limit on one resource, one
+  credential, or a whole server. Pausing unrelated recipients could delay
+  healthy deliveries. When a partner specifies a shared quota, apply its
+  cooldown to that quota's scope across worker replicas. Reopen the
+  per-delivery policy when such a contract is adopted.
+  [RFC 6585 §4](https://www.rfc-editor.org/rfc/rfc6585.html#section-4).
 
 Standard Webhooks treats a `2xx` as success and recommends disabling an endpoint
 on `410`. It recommends exponential backoff for retries.
-[Standard Webhooks delivery guidance](https://github.com/standard-webhooks/standard-webhooks/blob/bece768d960f09e242f5cd5686d859e475d6b478/spec/standard-webhooks.md#delivery-success-and-failure).
+[Standard Webhooks delivery guidance](https://github.com/standard-webhooks/standard-webhooks/blob/3d65b1824b6697f05a5a4584e7062bd23512fc8e/spec/standard-webhooks.md#delivery-success-and-failure).
 The delay field follows
 [RFC 9110 §10.2.3](https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3).
 <!-- template:end webhooks:docs-outbound-http-webhook-delivery -->

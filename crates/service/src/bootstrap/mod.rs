@@ -120,6 +120,8 @@ pub(crate) enum BootstrapError {
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
     #[error("inbound webhook endpoints are configured but no PostgreSQL pool was opened")]
     InboundWebhooksWithoutPostgres,
+    #[error(transparent)]
+    InboundWebhookKeyReuse(#[from] infra_webhooks::protocol::SharedEndpointKey),
     #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
     InboundWebhookKey {
         endpoint: String,
