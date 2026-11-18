@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use super::background::Background;
 use infra_postgres::PgPool;
 use infra_webhooks::inbound::route::WebhookState;
 use infra_webhooks::inbound::{Receiver, Verifier};
@@ -13,7 +12,6 @@ use super::BootstrapError;
 pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
-    background: &mut Background,
 ) -> Result<WebhookState, BootstrapError> {
     let webhooks = &config.inbound_webhooks;
     if webhooks.is_empty() {
@@ -31,12 +29,7 @@ pub(super) fn prepare(
         let verifier: Arc<dyn Verifier> = Arc::new(KeyRing::new(active, previous));
         bindings.push((endpoint_id.clone(), verifier));
     }
-    let receiver = Receiver::new(pool.clone(), bindings);
-    background.spawn(
-        "webhook_cleanup",
-        receiver.clone().run_cleanup(background.child_token()),
-    );
-    Ok(WebhookState::active(receiver))
+    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
 }
 
 fn signing_key(endpoint: &str, key: &InboundWebhookKey) -> Result<SigningKey, BootstrapError> {

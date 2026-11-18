@@ -24,7 +24,6 @@ use crate::protocol::{KeyRing, WEBHOOK_ID, WEBHOOK_SIGNATURE, WEBHOOK_TIMESTAMP}
 pub use producer::{JSON_CONTENT_TYPE, OutboundError, Producer};
 
 const DELIVERY_KIND: &str = "webhooks.deliver";
-const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
@@ -178,21 +177,10 @@ impl Handler<Delivery> for Dispatcher {
         let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
             return Err(fail(endpoint_id, metrics, DeliveryFailure::InvalidPayload));
         };
-        let mut endpoint_gone = false;
         let response = endpoint
             .client
-            .execute_with_response_status(request, &job.context(), |status| {
-                endpoint_gone = status == StatusCode::GONE;
-            })
+            .execute_for_headers(request, &job.context())
             .await;
-        if endpoint_gone
-            && matches!(
-                &response,
-                Err(HttpError::ResponseBodyTooLarge | HttpError::Transport { .. })
-            )
-        {
-            return Err(fail(endpoint_id, metrics, DeliveryFailure::EndpointGone));
-        }
         classify_response(endpoint_id, metrics, response, SystemTime::now())
     }
 }
@@ -237,10 +225,10 @@ enum OutcomeSlot {
     InvalidPayload,
     ClockUnavailable,
     ResponseStatus,
+    RetryAfterExceedsMaxDelay,
     EndpointGone,
     Timeout,
     Cancelled,
-    ResponseTooLarge,
     Transport,
     Client,
 }
@@ -289,10 +277,10 @@ enum DeliveryFailure {
     InvalidPayload,
     ClockUnavailable,
     Status(StatusCode),
+    RetryAfterExceedsMaxDelay(StatusCode),
     EndpointGone,
     Timeout,
     Cancelled,
-    ResponseTooLarge,
     Transport,
     Client,
 }
@@ -302,9 +290,10 @@ impl DeliveryFailure {
         match error {
             HttpError::Timeout => Self::Timeout,
             HttpError::Cancelled => Self::Cancelled,
-            HttpError::ResponseBodyTooLarge => Self::ResponseTooLarge,
             HttpError::Transport { .. } => Self::Transport,
-            HttpError::InvalidTarget | HttpError::DispatchRefused => Self::Client,
+            HttpError::InvalidTarget
+            | HttpError::DispatchRefused
+            | HttpError::ResponseBodyTooLarge => Self::Client,
         }
     }
 
@@ -313,10 +302,10 @@ impl DeliveryFailure {
             Self::InvalidPayload => OutcomeSlot::InvalidPayload,
             Self::ClockUnavailable => OutcomeSlot::ClockUnavailable,
             Self::Status(_) => OutcomeSlot::ResponseStatus,
+            Self::RetryAfterExceedsMaxDelay(_) => OutcomeSlot::RetryAfterExceedsMaxDelay,
             Self::EndpointGone => OutcomeSlot::EndpointGone,
             Self::Timeout => OutcomeSlot::Timeout,
             Self::Cancelled => OutcomeSlot::Cancelled,
-            Self::ResponseTooLarge => OutcomeSlot::ResponseTooLarge,
             Self::Transport => OutcomeSlot::Transport,
             Self::Client => OutcomeSlot::Client,
         }
@@ -327,10 +316,10 @@ impl DeliveryFailure {
             Self::InvalidPayload => "invalid_payload",
             Self::ClockUnavailable => "clock_unavailable",
             Self::Status(_) => "response_status",
+            Self::RetryAfterExceedsMaxDelay(_) => "retry_after_exceeds_max_delay",
             Self::EndpointGone => "endpoint_gone",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
-            Self::ResponseTooLarge => "response_too_large",
             Self::Transport => "transport",
             Self::Client => "client",
         }
@@ -338,12 +327,11 @@ impl DeliveryFailure {
 
     const fn is_permanent(self) -> bool {
         match self {
-            Self::InvalidPayload | Self::EndpointGone => true,
+            Self::InvalidPayload | Self::EndpointGone | Self::RetryAfterExceedsMaxDelay(_) => true,
             Self::ClockUnavailable
             | Self::Status(_)
             | Self::Timeout
             | Self::Cancelled
-            | Self::ResponseTooLarge
             | Self::Transport
             | Self::Client => false,
         }
@@ -359,13 +347,12 @@ impl DeliveryFailure {
 
     const fn status(self) -> Option<StatusCode> {
         match self {
-            Self::Status(status) => Some(status),
+            Self::Status(status) | Self::RetryAfterExceedsMaxDelay(status) => Some(status),
             Self::EndpointGone => Some(StatusCode::GONE),
             Self::InvalidPayload
             | Self::ClockUnavailable
             | Self::Timeout
             | Self::Cancelled
-            | Self::ResponseTooLarge
             | Self::Transport
             | Self::Client => None,
         }
@@ -398,29 +385,37 @@ impl Endpoint {
 fn classify_response(
     endpoint_id: &str,
     metrics: &EndpointMetrics,
-    response: Result<http::Response<Bytes>, HttpError>,
+    response: Result<http::response::Parts, HttpError>,
     response_time: SystemTime,
 ) -> Result<(), JobError> {
     match response {
-        Ok(response) if response.status().is_success() => {
+        Ok(response) if response.status.is_success() => {
             tracing::debug!(
                 webhook.endpoint = endpoint_id,
                 webhook.outcome = "delivered",
-                http.status = response.status().as_u16(),
+                http.status = response.status.as_u16(),
                 "webhook_delivery_finished"
             );
             metrics.record_delivered();
             Ok(())
         }
-        Ok(response) if response.status() == StatusCode::GONE => {
+        Ok(response) if response.status == StatusCode::GONE => {
             Err(fail(endpoint_id, metrics, DeliveryFailure::EndpointGone))
         }
         Ok(response) => {
-            let failure = DeliveryFailure::Status(response.status());
+            let failure = DeliveryFailure::Status(response.status);
+            let Some(delay) = retry_after(&response.headers, response_time) else {
+                return Err(fail(endpoint_id, metrics, failure));
+            };
+            let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) else {
+                return Err(fail(
+                    endpoint_id,
+                    metrics,
+                    DeliveryFailure::RetryAfterExceedsMaxDelay(response.status),
+                ));
+            };
             record_failure(endpoint_id, metrics, failure);
-            Err(retry_after(response.headers(), response_time)
-                .and_then(|delay| JobError::retry_after_at_least(failure.reason(), delay).ok())
-                .unwrap_or_else(|| JobError::retryable(failure.reason())))
+            Err(retry)
         }
         Err(error) => Err(fail(
             endpoint_id,
@@ -473,7 +468,7 @@ fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
             .duration_since(now)
             .ok()?
     };
-    (!delay.is_zero()).then(|| delay.min(RETRY_AFTER_CAP))
+    (!delay.is_zero()).then_some(delay)
 }
 
 fn unix_timestamp(now: SystemTime) -> Option<i64> {
@@ -489,7 +484,7 @@ mod tests {
 
     use http::{HeaderMap, HeaderValue, header};
 
-    use super::{Endpoint, EndpointError, RETRY_AFTER_CAP, retry_after};
+    use super::{Endpoint, EndpointError, retry_after};
     use crate::protocol::KeyRing;
 
     fn ring() -> KeyRing {
@@ -586,16 +581,10 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_uses_a_capped_delta_or_future_http_date() {
-        for value in [
-            "90000",
-            "18446744073709551616",
-            "999999999999999999999999999999999",
-        ] {
-            let mut delta = HeaderMap::new();
-            delta.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
-            assert_eq!(retry_after(&delta, UNIX_EPOCH), Some(RETRY_AFTER_CAP));
-        }
+    fn retry_after_accepts_unsigned_seconds_or_a_future_http_date() {
+        let mut delta = HeaderMap::new();
+        delta.insert(header::RETRY_AFTER, HeaderValue::from_static("3153600000"));
+        assert_eq!(retry_after(&delta, UNIX_EPOCH), Some(infra_jobs::MAX_DELAY));
         for value in ["+3600", "-1", "1.5", "", " 3600", "0"] {
             let mut invalid = HeaderMap::new();
             invalid.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
@@ -632,8 +621,10 @@ mod tests {
         let response = |status: u16| {
             Ok(http::Response::builder()
                 .status(status)
-                .body(bytes::Bytes::new())
-                .unwrap())
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0)
         };
         let metrics = super::EndpointMetrics::new("partner".into());
         let dispatcher = super::Dispatcher::new(BTreeMap::new());

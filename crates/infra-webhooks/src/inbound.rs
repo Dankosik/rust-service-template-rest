@@ -1,4 +1,3 @@
-mod maintenance;
 mod processing;
 pub mod route;
 
@@ -23,8 +22,6 @@ use tokio::time::Instant;
 use crate::StreamingBase64;
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
-pub use infra_postgres::CleanupError;
-pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC};
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
 pub use async_trait::async_trait;

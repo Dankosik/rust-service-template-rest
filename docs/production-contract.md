@@ -61,6 +61,18 @@ unable to serve, and budget every downstream deadline inside
   their original window. When shortening retention or rolling back, honor
   requests first sent under the earlier promise until that window expires.
 <!-- template:end http-idempotency:production-contract-retry-window -->
+<!-- template:begin inbound-webhooks:production-contract-receipt-recovery -->
+- Before relying on a late webhook redelivery, retire every receiver running
+  the old 14-day receipt cleanup, including rollback replicas and scheduled
+  maintenance. Receipts that still exist protect their delivery IDs. Reconcile
+  older events against business records before replaying them: an ID pruned
+  before the cutover cannot be recovered from the receipts table. Restore
+  receipts alongside the processing jobs and their business effects.
+- Budget PostgreSQL storage and backup capacity for one retained receipt per
+  distinct delivery on each endpoint. Keep endpoint IDs stable across
+  deployments. An irreversible effect outside the processing transaction needs
+  its own idempotency key at the recipient.
+<!-- template:end inbound-webhooks:production-contract-receipt-recovery -->
 - RPO, RTO, backup/key custody, and restore-compatible versions: Unresolved.
 - Cache staleness, TTL, invalidation, and token/key revocation lag: N/A for the
   health-only scaffold; reopen when cached state or authentication is enabled.
@@ -74,6 +86,22 @@ unable to serve, and budget every downstream deadline inside
   diagnostics port unreachable from untrusted networks).
 - Egress, identity, and authorization authorities (trusted issuers, audiences,
   callers, and destination origins): Unresolved.
+
+<!-- template:begin webhooks:production-contract-worker-egress -->
+For outbound webhooks, record the network policy enforced on the delivery
+worker, its owner, the partner destinations, and any private dependencies
+that the worker must reach. Restrict outgoing connections to those destinations
+on IPv4 and IPv6. A configured HTTPS origin authenticates the peer after the
+connection starts. It cannot restrict the IP selected by DNS.
+
+Before promotion, verify the deployed policy from the worker's network
+identity. Confirm a signed delivery to a controlled, permitted HTTPS receiver
+and successful access to required dependencies. On fresh connections, confirm
+that the network denies access to controlled destinations in prohibited
+subnets, including after the test name changes address. Record the policy
+revision and the observed permits and denials. Repeat when worker networking
+or the destination policy changes.
+<!-- template:end webhooks:production-contract-worker-egress -->
 
 <!-- template:begin authn:production-bearer-delegation -->
 When migrating a handler that used `VerifiedPrincipal::access_token()`, keep
@@ -134,7 +162,7 @@ snapshot guarantee. Any multi-store recovery runbook must:
    consumer state.
 3. Reconcile business identities, applied effects, deduplication records, and
    object digests before lifting the fence.
-4. Invalidate pre-restore tokens, operator commands, and receipts, re-inspecting
+4. Invalidate pre-restore tokens, operator commands, and their receipts, re-inspecting
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
 

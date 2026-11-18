@@ -450,8 +450,7 @@ async fn start(
     dependencies.object_storage = object_storage::open(config)?;
     // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state =
-        inbound_webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
+    let webhook_state = inbound_webhooks::prepare(config, dependencies.postgres.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,
