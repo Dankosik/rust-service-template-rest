@@ -495,7 +495,7 @@ async fn health_call(
         deadline: response_deadline,
         ..ServerCustody::default()
     };
-    attach_server(response, call, fallback, custody).map(axum::body::Body::new)
+    attach_server(response, call, fallback, custody)
 }
 
 fn call_deadlines(
@@ -556,7 +556,7 @@ fn finish_call(
     match outcome {
         Ok(Admitted { response, permit }) => {
             custody.permit = permit;
-            attach_server(response, call, fallback, custody).map(axum::body::Body::new)
+            attach_server(response, call, fallback, custody)
         }
         Err(response) => {
             // template:begin authn:grpc-router-scope-refusal-span
@@ -570,7 +570,6 @@ fn finish_call(
             // template:end authn:grpc-router-scope-refusal-span
             drop(custody);
             attach_server(response, call, fallback, ServerCustody::default())
-                .map(axum::body::Body::new)
         }
     }
 }

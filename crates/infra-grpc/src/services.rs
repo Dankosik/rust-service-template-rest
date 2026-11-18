@@ -274,6 +274,16 @@ impl Services {
         )
     }
 
+    #[allow(
+        dead_code,
+        reason = "the initializer removes both policy checks without bearer or service authentication"
+    )]
+    fn first_method_without(&self, has_rule: impl Fn(&str) -> bool) -> Option<String> {
+        self.method_paths(self.names.iter().copied())
+            .map(|(path, _)| path)
+            .find(|path| !has_rule(path))
+    }
+
     // template:begin authn:grpc-services-require-scopes
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
         self.register_scopes(path, scopes, false)
@@ -322,10 +332,7 @@ impl Services {
                 self.scopes.entry(path.to_owned()).or_default();
             }
         }
-        if let Some((path, _)) = self
-            .method_paths(self.names.iter().copied())
-            .find(|(path, _)| !self.scopes.contains_key(path))
-        {
+        if let Some(path) = self.first_method_without(|path| self.scopes.contains_key(path)) {
             return Err(Error::MissingScopeRequirement(path));
         }
         Ok(())
@@ -359,10 +366,7 @@ impl Services {
     }
 
     pub(crate) fn validate_caller_rules(&self) -> Result<(), Error> {
-        if let Some((path, _)) = self
-            .method_paths(self.names.iter().copied())
-            .find(|(path, _)| !self.caller_rules.contains_key(path))
-        {
+        if let Some(path) = self.first_method_without(|path| self.caller_rules.contains_key(path)) {
             return Err(Error::MissingCallerRule(path));
         }
         Ok(())

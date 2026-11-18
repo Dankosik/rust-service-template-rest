@@ -340,8 +340,7 @@ impl PreparedCall {
                         },
                         on_status,
                     },
-                )
-                .map(Body::new))
+                ))
             }
             Err(status) => Err(call.refuse(status)),
         }

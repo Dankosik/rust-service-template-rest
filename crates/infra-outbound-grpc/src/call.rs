@@ -219,14 +219,11 @@ struct ClientResponseBody<B> {
     watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
-pub(crate) fn attach_client_response<B>(
-    mut response: http::Response<B>,
+pub(crate) fn attach_client_response(
+    mut response: http::Response<tonic::body::Body>,
     observation: ClientObservation,
     custody: ClientCustody,
-) -> http::Response<impl Body<Data = Bytes, Error = tonic::Status> + Send + 'static>
-where
-    B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
-{
+) -> http::Response<tonic::body::Body> {
     let initial = if let Some(reason) = custody.lifetime.stopped() {
         let status = client_stopped(reason);
         observation.record_local_stop(&status);
@@ -251,6 +248,7 @@ where
     );
     response
         .map(|body| ClientResponseBody::start(body, observation, custody, initial, missing_status))
+        .map(tonic::body::Body::new)
 }
 
 impl<B> ClientResponseBody<B>
