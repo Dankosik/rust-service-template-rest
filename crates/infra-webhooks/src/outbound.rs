@@ -60,7 +60,7 @@ impl Endpoint {
             .ok()
             .filter(|destination| destination.scheme() == "https" && is_admissible(destination))
             .ok_or(EndpointError::InvalidDestination)?;
-        let client = Client::try_new(&destination, LIMITS).map_err(EndpointError::Client)?;
+        let client = Client::try_new(&destination, LIMITS)?;
         Ok(Self::from_destination(destination, client, keys))
     }
 
@@ -213,7 +213,7 @@ pub enum EndpointError {
     #[error("outbound webhook destination is invalid")]
     InvalidDestination,
     #[error("outbound webhook client configuration is invalid")]
-    Client(#[source] BuildError),
+    Client(#[from] BuildError),
 }
 
 #[derive(Clone, Copy, Debug, Enum)]
@@ -302,7 +302,7 @@ impl EndpointOutcomes {
 
     fn record_failure(&self, failure: DeliveryFailure) {
         let outcome = failure.outcome();
-        let reason = failure.reason();
+        let (slot, reason) = failure.series();
         let status = failure.status().map(|status| status.as_u16());
         if failure.is_permanent() {
             tracing::warn!(
@@ -321,7 +321,7 @@ impl EndpointOutcomes {
                 "webhook_delivery_finished"
             );
         }
-        self.counters[failure.slot()]
+        self.counters[slot]
             .get_or_init(|| {
                 metrics::counter!(
                     WEBHOOK_DELIVERY_OUTCOMES_METRIC,
@@ -359,32 +359,25 @@ impl DeliveryFailure {
         }
     }
 
-    const fn slot(self) -> OutcomeSlot {
+    const fn series(self) -> (OutcomeSlot, &'static str) {
         match self {
-            Self::InvalidPayload => OutcomeSlot::InvalidPayload,
-            Self::ClockUnavailable => OutcomeSlot::ClockUnavailable,
-            Self::Status(_) => OutcomeSlot::ResponseStatus,
-            Self::RetryAfterExceedsMaxDelay(_) => OutcomeSlot::RetryAfterExceedsMaxDelay,
-            Self::EndpointGone => OutcomeSlot::EndpointGone,
-            Self::Timeout => OutcomeSlot::Timeout,
-            Self::Cancelled => OutcomeSlot::Cancelled,
-            Self::Transport => OutcomeSlot::Transport,
-            Self::Client => OutcomeSlot::Client,
+            Self::InvalidPayload => (OutcomeSlot::InvalidPayload, "invalid_payload"),
+            Self::ClockUnavailable => (OutcomeSlot::ClockUnavailable, "clock_unavailable"),
+            Self::Status(_) => (OutcomeSlot::ResponseStatus, "response_status"),
+            Self::RetryAfterExceedsMaxDelay(_) => (
+                OutcomeSlot::RetryAfterExceedsMaxDelay,
+                "retry_after_exceeds_max_delay",
+            ),
+            Self::EndpointGone => (OutcomeSlot::EndpointGone, "endpoint_gone"),
+            Self::Timeout => (OutcomeSlot::Timeout, "timeout"),
+            Self::Cancelled => (OutcomeSlot::Cancelled, "cancelled"),
+            Self::Transport => (OutcomeSlot::Transport, "transport"),
+            Self::Client => (OutcomeSlot::Client, "client"),
         }
     }
 
     const fn reason(self) -> &'static str {
-        match self {
-            Self::InvalidPayload => "invalid_payload",
-            Self::ClockUnavailable => "clock_unavailable",
-            Self::Status(_) => "response_status",
-            Self::RetryAfterExceedsMaxDelay(_) => "retry_after_exceeds_max_delay",
-            Self::EndpointGone => "endpoint_gone",
-            Self::Timeout => "timeout",
-            Self::Cancelled => "cancelled",
-            Self::Transport => "transport",
-            Self::Client => "client",
-        }
+        self.series().1
     }
 
     const fn is_permanent(self) -> bool {

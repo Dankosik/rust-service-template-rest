@@ -41,10 +41,7 @@ impl Producer {
             content_type: content_type.to_owned(),
             body: Bytes::from(body),
         };
-        match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default())
-            .await
-            .map_err(OutboundError::Enqueue)?
-        {
+        match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default()).await? {
             Enqueued::Created(id) => Ok(id),
             Enqueued::Duplicate => Err(OutboundError::UnexpectedDuplicate),
         }
@@ -132,7 +129,7 @@ pub enum OutboundError {
     #[error("outbound webhook content type is invalid")]
     InvalidContentType,
     #[error("outbound webhook enqueue failed")]
-    Enqueue(#[source] EnqueueError),
+    Enqueue(#[from] EnqueueError),
     #[error("outbound webhook enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
 }

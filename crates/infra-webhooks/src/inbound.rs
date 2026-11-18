@@ -167,7 +167,7 @@ impl Receiver {
         let Some(verifier) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
-        let message_id = admit(verifier.as_ref(), headers, body.as_ref(), now)
+        let admitted = admit(verifier.as_ref(), headers, body, now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
         in_tx_with_deadline(
@@ -182,7 +182,7 @@ impl Receiver {
                          VALUES ($1, $2) \
                          ON CONFLICT (endpoint_id, message_id) DO NOTHING",
                         endpoint_id,
-                        message_id.as_ref(),
+                        admitted.message_id.as_ref(),
                     )
                     .execute(&mut *tx),
                 )
@@ -190,21 +190,18 @@ impl Receiver {
                 if inserted.rows_affected() == 0 {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
-                let incoming =
-                    Incoming::new(endpoint_id, message_id, content_type, body.into_bytes());
-                match enqueue(tx, &incoming, EnqueueOptions::default()).await {
-                    Ok(Enqueued::Created(_)) => Ok(ReceiptOutcome::Accepted),
-                    Ok(Enqueued::Duplicate) => Err(ReceiptFailure::UnexpectedDuplicate),
-                    Err(EnqueueError::PayloadTooLarge { .. }) => {
-                        Err(ReceiptFailure::PayloadTooLarge)
-                    }
-                    Err(error) => Err(error.into()),
+                let incoming = Incoming::new(endpoint_id, admitted, content_type);
+                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
+                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
+                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
                 }
             },
         )
         .await
         .map_err(|error| match error {
-            ReceiptFailure::PayloadTooLarge => rejected(endpoint_id, PAYLOAD_TOO_LARGE),
+            ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
+                rejected(endpoint_id, PAYLOAD_TOO_LARGE)
+            }
             error => receipt_unavailable(endpoint_id, &error),
         })
     }
@@ -231,15 +228,13 @@ enum ReceiptFailure {
     Transaction(#[from] TxError),
     #[error("webhook receipt enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
-    #[error("webhook receipt payload exceeds the job payload bound")]
-    PayloadTooLarge,
 }
 
 impl ReceiptFailure {
     const fn stage(&self) -> &'static str {
         match self {
             Self::Query(_) => "insert_receipt",
-            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::PayloadTooLarge => "enqueue",
+            Self::Enqueue(_) | Self::UnexpectedDuplicate => "enqueue",
             Self::Transaction(_) | Self::Deadline(_) => "transaction",
         }
     }
@@ -248,7 +243,6 @@ impl ReceiptFailure {
         match self {
             Self::UnexpectedDuplicate => "integrity",
             Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
-            Self::PayloadTooLarge => PAYLOAD_TOO_LARGE.reason(),
             Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) | Self::Deadline(_) => {
                 "unavailable"
             }
@@ -259,10 +253,7 @@ impl ReceiptFailure {
         match self {
             Self::Query(err) | Self::Enqueue(EnqueueError::Database(err)) => Some(err),
             Self::Transaction(err) => Some(err.driver()),
-            Self::Enqueue(_)
-            | Self::UnexpectedDuplicate
-            | Self::PayloadTooLarge
-            | Self::Deadline(_) => None,
+            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::Deadline(_) => None,
         }
     }
 }
@@ -289,16 +280,21 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
     ReceiveError::Unavailable
 }
 
-fn admit(
+struct AdmittedBody<'a> {
+    message_id: Bytes,
+    body: ReceiveBody<'a>,
+}
+
+fn admit<'a>(
     verifier: &dyn Verifier,
     headers: &HeaderMap,
-    body: &[u8],
+    body: ReceiveBody<'a>,
     now: SystemTime,
-) -> Result<Bytes, Rejection> {
-    ensure_body_size(body)?;
-    let message_id = verifier.authenticate(headers, body, now)?;
+) -> Result<AdmittedBody<'a>, Rejection> {
+    ensure_body_size(body.as_ref())?;
+    let message_id = verifier.authenticate(headers, body.as_ref(), now)?;
     ensure_message_id_len(&message_id)?;
-    Ok(message_id)
+    Ok(AdmittedBody { message_id, body })
 }
 
 enum ReceiveBody<'a> {
@@ -350,13 +346,13 @@ const fn incoming_version() -> u8 {
 
 impl Incoming {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn new(endpoint_id: &str, message_id: Bytes, content_type: Option<&[u8]>, body: Bytes) -> Self {
+    fn new(endpoint_id: &str, admitted: AdmittedBody<'_>, content_type: Option<&[u8]>) -> Self {
         Self {
             version: incoming_version(),
             endpoint_id: endpoint_id.to_owned(),
-            message_id,
+            message_id: admitted.message_id,
             content_type: content_type.map(ToOwned::to_owned),
-            body,
+            body: admitted.body.into_bytes(),
         }
     }
 
@@ -391,20 +387,6 @@ const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 mod tests {
     use super::*;
     use crate::protocol::MAX_BODY_BYTES;
-
-    #[test]
-    fn incoming_debug_hides_message_id_and_body() {
-        let incoming = Incoming::new(
-            "partner",
-            Bytes::from_static(b"secret-id"),
-            Some(b"text/plain"),
-            Bytes::from_static(b"secret-body"),
-        );
-        assert_eq!(
-            format!("{incoming:?}"),
-            r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: true, body: "[REDACTED]" }"#
-        );
-    }
 
     #[tokio::test]
     async fn a_body_over_the_bound_is_rejected_before_any_verifier_or_write() {
@@ -441,12 +423,17 @@ mod tests {
 
     #[test]
     fn incoming_debug_redacts_message_id_content_type_and_body() {
-        let with_type = Incoming::new(
-            "partner",
-            Bytes::from_static(b"secret-id"),
-            Some(b"application/secret"),
-            Bytes::from_static(b"secret-body"),
-        );
+        let incoming = |content_type: Option<&[u8]>| {
+            Incoming::new(
+                "partner",
+                AdmittedBody {
+                    message_id: Bytes::from_static(b"secret-id"),
+                    body: ReceiveBody::Borrowed(b"secret-body"),
+                },
+                content_type,
+            )
+        };
+        let with_type = incoming(Some(b"application/secret"));
         assert_eq!(
             format!("{with_type:?}"),
             r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: true, body: "[REDACTED]" }"#
@@ -456,12 +443,7 @@ mod tests {
             "Incoming {\n    version: 1,\n    endpoint_id: \"partner\",\n    message_id: \"[REDACTED]\",\n    content_type: true,\n    body: \"[REDACTED]\",\n}"
         );
 
-        let without_type = Incoming::new(
-            "partner",
-            Bytes::from_static(b"secret-id"),
-            None,
-            Bytes::from_static(b"secret-body"),
-        );
+        let without_type = incoming(None);
         assert_eq!(
             format!("{without_type:?}"),
             r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: false, body: "[REDACTED]" }"#
