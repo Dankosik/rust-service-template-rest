@@ -938,6 +938,7 @@ const BEARER_SCHEME: &str = "bearerAuth";
 #[derive(Clone, Copy, Debug)]
 enum PolicyFault {
     InvalidDelegation,
+    InvalidScopeToken,
     PublicDelegation,
     MissingBearerScheme,
     UnsupportedRequirement,
@@ -948,6 +949,7 @@ impl PolicyFault {
     const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidDelegation => "invalid_bearer_delegation",
+            Self::InvalidScopeToken => "invalid_scope_token",
             Self::PublicDelegation => "delegation_requires_authentication",
             Self::MissingBearerScheme => "missing_bearer_scheme",
             Self::UnsupportedRequirement => "unsupported_requirement",
@@ -984,6 +986,14 @@ impl Access {
             .any(|requirement| requirement.len() != 1 || !requirement.contains_key(BEARER_SCHEME))
         {
             return Err(PolicyFault::UnsupportedRequirement);
+        }
+        if requirements
+            .iter()
+            .flat_map(BTreeMap::values)
+            .flatten()
+            .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+        {
+            return Err(PolicyFault::InvalidScopeToken);
         }
         Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value
@@ -1521,6 +1531,26 @@ mod tests {
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
                 None,
                 Err(protected()),
+            ),
+            (
+                None,
+                Some(serde_json::json!([{"bearerAuth": ["read", "write"]}, {"bearerAuth": []}])),
+                None,
+                Err(protected()),
+            ),
+            (
+                None,
+                Some(
+                    serde_json::json!([{"bearerAuth": ["read"]}, {"bearerAuth": ["admin", "read write"]}]),
+                ),
+                None,
+                Err(invalid("invalid_scope_token")),
+            ),
+            (
+                Some(serde_json::json!([{"bearerAuth": [""]}])),
+                None,
+                None,
+                Err(invalid("invalid_scope_token")),
             ),
             (
                 None,

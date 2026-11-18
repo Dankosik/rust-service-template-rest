@@ -249,6 +249,7 @@ async fn serve(
     deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
     let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
+    let http_config = config.http.clone();
     let mut background = Background::new(CancellationToken::new());
     let mut observer = background.observer();
     let mut dependencies = Dependencies::default();
@@ -304,6 +305,7 @@ async fn serve(
                 started = startup => started.map(Some),
             }
         };
+        drop(config);
         if let Err(error) = finish_startup(race, signals, &mut background, &mut serving) {
             return Some(error);
         }
@@ -321,7 +323,7 @@ async fn serve(
     .unwrap_or(Some(BootstrapError::Panicked));
     let failure = failure.or_else(|| pending_failure(&background, &serving));
     let deadline = *deadline.get_or_insert_with(|| {
-        signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
+        signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period
     });
     if let Some(error) = &failure
         && logger.is_some()
@@ -329,7 +331,7 @@ async fn serve(
         tracing::error!(error = %error, "service failed");
     }
     let outcome = shutdown::run(shutdown::Plan {
-        http_config: &config.http,
+        http_config: &http_config,
         signals,
         deadline,
         serving,

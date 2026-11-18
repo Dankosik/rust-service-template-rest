@@ -752,8 +752,8 @@ mod tests {
     #[tokio::test]
     async fn signed_payload_supplies_typed_custom_claims_without_changing_identity() {
         #[derive(serde::Deserialize)]
-        struct ApplicationClaims {
-            tenant: String,
+        struct ApplicationClaims<'a> {
+            tenant: &'a str,
             permissions: Vec<String>,
         }
         let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
@@ -764,7 +764,7 @@ mod tests {
             &serde_json::json!({"tenant": "verified-tenant", "permissions": ["read", "write"]}),
         );
         let principal = check(&verifier, &token).await.unwrap();
-        let claims = principal.claims::<ApplicationClaims>().unwrap();
+        let claims = principal.claims::<ApplicationClaims<'_>>().unwrap();
         assert_eq!(claims.tenant, "verified-tenant");
         assert_eq!(claims.permissions, ["read", "write"]);
         assert_eq!(principal.subject(), Some("subject"));
