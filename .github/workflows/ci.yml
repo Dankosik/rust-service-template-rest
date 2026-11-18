@@ -151,9 +151,18 @@ jobs:
           }
           PROTO
           make grpc-generate
-          grep -Fq 'include!("schema_probe.v1.rs");' crates/grpc-contracts/src/generated/_includes.rs
-          grep -Fq '::prost_types::Timestamp' crates/grpc-contracts/src/generated/schema_probe.v1.rs
-          cargo check --locked -p grpc-contracts
+          mkdir -p crates/grpc-contracts/examples
+          cat > crates/grpc-contracts/examples/timestamp_probe.rs <<'RUST'
+          use grpc_contracts::{prost_types::Timestamp, schema_probe::v1::TimestampProbe};
+
+          fn main() {
+              let probe = TimestampProbe {
+                  observed_at: Some(Timestamp { seconds: 1, nanos: 0 }),
+              };
+              assert_eq!(probe.observed_at.map(|timestamp| timestamp.seconds), Some(1));
+          }
+          RUST
+          cargo check --locked -p grpc-contracts --example timestamp_probe
   # template:end grpc:ci-grpc-job
 
   monitoring-rules:
