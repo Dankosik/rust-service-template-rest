@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::services::{CallType, Method};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
+use shared_rules::grpc::status_code_names;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
@@ -72,7 +73,7 @@ impl MethodMetrics {
     }
 
     fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
-        let (_, metric_code) = code_labels(code);
+        let metric_code = status_code_names(code as usize).metric;
         self.handling_seconds.record(elapsed.as_secs_f64());
         self.handled[code as usize]
             .get_or_init(|| {
@@ -141,7 +142,7 @@ impl Call {
     }
 
     fn emit(&self, code: tonic::Code) {
-        let (span_code, _) = code_labels(code);
+        let span_code = status_code_names(code as usize).span;
         self.span.set_attribute("rpc.status_code", span_code);
         if otel_http::grpc::status_is_error(code as u16, true) {
             self.span.set_attribute("error.type", span_code);
@@ -245,10 +246,6 @@ pub(crate) fn describe() {
     });
 }
 
-const fn code_labels(code: tonic::Code) -> (&'static str, &'static str) {
-    shared_rules::grpc::status_code_names(code as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,27 +256,6 @@ mod tests {
         assert_eq!(CallType::new(true, false).label(), "client_stream");
         assert_eq!(CallType::new(false, true).label(), "server_stream");
         assert_eq!(CallType::new(true, true).label(), "bidi_stream");
-    }
-
-    #[test]
-    fn code_labels_match_otel_and_grpc_go_names() {
-        assert_eq!(code_labels(tonic::Code::Ok), ("OK", "OK"));
-        assert_eq!(
-            code_labels(tonic::Code::Cancelled),
-            ("CANCELLED", "Canceled")
-        );
-        assert_eq!(
-            code_labels(tonic::Code::DeadlineExceeded),
-            ("DEADLINE_EXCEEDED", "DeadlineExceeded")
-        );
-        assert_eq!(
-            code_labels(tonic::Code::FailedPrecondition),
-            ("FAILED_PRECONDITION", "FailedPrecondition")
-        );
-        assert_eq!(
-            code_labels(tonic::Code::Unauthenticated),
-            ("UNAUTHENTICATED", "Unauthenticated")
-        );
     }
 
     #[test]

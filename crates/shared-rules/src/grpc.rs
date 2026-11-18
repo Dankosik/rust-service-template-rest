@@ -3,32 +3,91 @@ use std::time::Duration;
 pub const MAX_TIMEOUT_DIGITS: usize = 8;
 pub const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
-const STATUS_CODE_NAMES: [(&str, &str); 17] = [
-    ("OK", "OK"),
-    ("CANCELLED", "Canceled"),
-    ("UNKNOWN", "Unknown"),
-    ("INVALID_ARGUMENT", "InvalidArgument"),
-    ("DEADLINE_EXCEEDED", "DeadlineExceeded"),
-    ("NOT_FOUND", "NotFound"),
-    ("ALREADY_EXISTS", "AlreadyExists"),
-    ("PERMISSION_DENIED", "PermissionDenied"),
-    ("RESOURCE_EXHAUSTED", "ResourceExhausted"),
-    ("FAILED_PRECONDITION", "FailedPrecondition"),
-    ("ABORTED", "Aborted"),
-    ("OUT_OF_RANGE", "OutOfRange"),
-    ("UNIMPLEMENTED", "Unimplemented"),
-    ("INTERNAL", "Internal"),
-    ("UNAVAILABLE", "Unavailable"),
-    ("DATA_LOSS", "DataLoss"),
-    ("UNAUTHENTICATED", "Unauthenticated"),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusNames {
+    pub span: &'static str,
+    pub metric: &'static str,
+}
+
+const UNKNOWN_STATUS: StatusNames = StatusNames {
+    span: "UNKNOWN",
+    metric: "Unknown",
+};
+
+const STATUS_CODE_NAMES: [StatusNames; 17] = [
+    StatusNames {
+        span: "OK",
+        metric: "OK",
+    },
+    StatusNames {
+        span: "CANCELLED",
+        metric: "Canceled",
+    },
+    UNKNOWN_STATUS,
+    StatusNames {
+        span: "INVALID_ARGUMENT",
+        metric: "InvalidArgument",
+    },
+    StatusNames {
+        span: "DEADLINE_EXCEEDED",
+        metric: "DeadlineExceeded",
+    },
+    StatusNames {
+        span: "NOT_FOUND",
+        metric: "NotFound",
+    },
+    StatusNames {
+        span: "ALREADY_EXISTS",
+        metric: "AlreadyExists",
+    },
+    StatusNames {
+        span: "PERMISSION_DENIED",
+        metric: "PermissionDenied",
+    },
+    StatusNames {
+        span: "RESOURCE_EXHAUSTED",
+        metric: "ResourceExhausted",
+    },
+    StatusNames {
+        span: "FAILED_PRECONDITION",
+        metric: "FailedPrecondition",
+    },
+    StatusNames {
+        span: "ABORTED",
+        metric: "Aborted",
+    },
+    StatusNames {
+        span: "OUT_OF_RANGE",
+        metric: "OutOfRange",
+    },
+    StatusNames {
+        span: "UNIMPLEMENTED",
+        metric: "Unimplemented",
+    },
+    StatusNames {
+        span: "INTERNAL",
+        metric: "Internal",
+    },
+    StatusNames {
+        span: "UNAVAILABLE",
+        metric: "Unavailable",
+    },
+    StatusNames {
+        span: "DATA_LOSS",
+        metric: "DataLoss",
+    },
+    StatusNames {
+        span: "UNAUTHENTICATED",
+        metric: "Unauthenticated",
+    },
 ];
 
 #[must_use]
-pub const fn status_code_names(code: usize) -> (&'static str, &'static str) {
+pub const fn status_code_names(code: usize) -> StatusNames {
     if code < STATUS_CODE_NAMES.len() {
         STATUS_CODE_NAMES[code]
     } else {
-        ("UNKNOWN", "Unknown")
+        UNKNOWN_STATUS
     }
 }
 

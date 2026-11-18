@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fmt;
 
 use aws_sdk_s3::config::http::HttpResponse;
@@ -8,7 +7,7 @@ use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
 use compact_str::CompactString;
 use operation_context::Stopped;
-use shared_rules::error_chain::causes;
+use shared_rules::error_chain;
 
 use crate::call::{CallStop, Interrupted};
 
@@ -287,10 +286,8 @@ where
             (FailureKind::Status { status, code }, error_type)
         }
         SdkError::DispatchFailure(_)
-            if shared_rules::error_chain::causes(error).any(
-                <dyn std::error::Error>::is::<
-                    aws_credential_types::provider::error::CredentialsError,
-                >,
+            if error_chain::contains::<aws_credential_types::provider::error::CredentialsError>(
+                error,
             ) =>
         {
             (
@@ -374,9 +371,9 @@ fn classification_status(status: u16, code: Option<&str>) -> u16 {
 }
 
 pub(crate) fn from_download_body(error: &ByteStreamError) -> Failure {
-    if causes(error).any(<dyn Error>::is::<aws_smithy_checksums::body::validate::Error>) {
+    if error_chain::contains::<aws_smithy_checksums::body::validate::Error>(error) {
         LocalFailure::ChecksumMismatch.into()
-    } else if causes(error).any(<dyn Error>::is::<ContentLengthError>) {
+    } else if error_chain::contains::<ContentLengthError>(error) {
         LocalFailure::ContentLength.into()
     } else {
         LocalFailure::DownloadBody.into()

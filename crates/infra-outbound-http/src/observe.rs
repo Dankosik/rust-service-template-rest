@@ -5,7 +5,7 @@ use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 
 use shared_rules::{
-    error_chain::DisplayErrorChain,
+    error_chain::{self, DisplayErrorChain},
     otel_http::{OTHER_METHOD, request_method, response_status_code},
 };
 
@@ -257,8 +257,8 @@ struct TransportErrorDescription {
 }
 
 fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorDescription {
-    let causes = || shared_rules::error_chain::causes(source);
-    if causes().any(<dyn StdError>::is::<rustls::Error>) {
+    let causes = || error_chain::causes(source);
+    if error_chain::contains::<rustls::Error>(source) {
         TransportErrorDescription {
             label: "tls",
             diagnostic: "HTTP transport failed during the TLS exchange",
