@@ -88,8 +88,15 @@ impl CredentialsFile {
             .sign(nonce)
             .map_err(|_| CredentialsFileError::Malformed)
             .inspect_err(|error| error.observe_challenge_failure())?;
-        let previous = std::mem::replace(&mut *self.last_jwt.lock(), jwt.clone());
-        if previous != jwt {
+        let jwt_changed = {
+            let mut previous = self.last_jwt.lock();
+            let changed = *previous != jwt;
+            if changed {
+                previous.clone_from(&jwt);
+            }
+            changed
+        };
+        if jwt_changed {
             tracing::info!("messaging_credentials_reloaded");
         }
         let mut auth = async_nats::Auth::new();

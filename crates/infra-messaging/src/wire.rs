@@ -391,6 +391,14 @@ mod tests {
         assert_eq!(envelope.schema_version(), 2);
     }
 
+    pub(super) fn envelope_headers_without(header: &str) -> HeaderMap {
+        envelope_headers()
+            .iter()
+            .filter(|(name, _)| AsRef::<str>::as_ref(*name) != header)
+            .map(|(name, values)| (name.clone(), values[0].clone()))
+            .collect()
+    }
+
     #[test]
     #[warn(clippy::assertions_on_result_states)]
     fn decode_rejects_a_missing_or_invalid_identity_header() {
@@ -401,11 +409,7 @@ mod tests {
             CREATED_AT,
             NATS_MSG_ID,
         ] {
-            let headers: HeaderMap = envelope_headers()
-                .iter()
-                .filter(|(name, _)| AsRef::<str>::as_ref(*name) != missing)
-                .map(|(name, values)| (name.clone(), values[0].clone()))
-                .collect();
+            let headers = envelope_headers_without(missing);
             assert_eq!(
                 decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err(),
                 EnvelopeError::MissingHeader(missing)

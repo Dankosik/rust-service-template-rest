@@ -208,7 +208,7 @@ fn record_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::tests::envelope_headers;
+    use crate::wire::tests::{envelope_headers, envelope_headers_without};
     use crate::wire::{decode_envelope, encoded_header_bytes};
 
     #[test]
@@ -297,14 +297,6 @@ mod tests {
         }
     }
 
-    fn without(header: &str) -> HeaderMap {
-        envelope_headers()
-            .iter()
-            .filter(|(name, _)| AsRef::<str>::as_ref(*name) != header)
-            .map(|(name, values)| (name.clone(), values[0].clone()))
-            .collect()
-    }
-
     fn restore_failure(record: DeadLetterRecord) -> EnvelopeError {
         match restore_dead_letter(record) {
             Err(error) => error,
@@ -341,7 +333,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_the_message_id_transfer_filled_in() {
-        let record = transferred_record(&without(MESSAGE_ID));
+        let record = transferred_record(&envelope_headers_without(MESSAGE_ID));
         assert_eq!(
             record.headers.get(header_name::MESSAGE_ID),
             record.headers.get(header_name::NATS_MSG_ID),
@@ -356,7 +348,7 @@ mod tests {
     #[test]
     fn restore_reports_a_missing_creation_time_as_missing() {
         assert_eq!(
-            restore_failure(transferred_record(&without(CREATED_AT))),
+            restore_failure(transferred_record(&envelope_headers_without(CREATED_AT))),
             EnvelopeError::MissingHeader(CREATED_AT)
         );
     }

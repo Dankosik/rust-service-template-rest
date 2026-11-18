@@ -53,14 +53,16 @@ impl Registry {
             let (payload, rendered) = schema();
             let mut definitions = BTreeMap::new();
             for (name, schema) in rendered {
-                let schema = serde_json::to_value(schema)?;
-                if schemas
-                    .insert(name.clone(), schema.clone())
-                    .is_some_and(|earlier| earlier != schema)
-                {
-                    return Err(ContractError::SchemaName(name));
+                let mut schema = serde_json::to_value(schema)?;
+                match schemas.get(&name) {
+                    Some(original) if original != &schema => {
+                        return Err(ContractError::SchemaName(name));
+                    }
+                    Some(_) => {}
+                    None => {
+                        schemas.insert(name.clone(), schema.clone());
+                    }
                 }
-                let mut schema = schema;
                 relocate_schema_refs(&mut schema);
                 definitions.insert(name, schema);
             }
