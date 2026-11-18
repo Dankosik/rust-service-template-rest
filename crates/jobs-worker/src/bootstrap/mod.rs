@@ -304,12 +304,12 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         }
     }
     // template:begin jobs:worker-bootstrap-pending-jobs
-    if let Some(error) = jobs::engine_failure(resources) {
+    if let Some(error) = jobs::engine_failure(resources).now_or_never() {
         return Some(error);
     }
     // template:end jobs:worker-bootstrap-pending-jobs
     // template:begin messaging:worker-bootstrap-pending-consumer
-    if let Some(error) = messaging::consumer_failure(resources) {
+    if let Some(error) = messaging::consumer_failure(resources).now_or_never() {
         return Some(error);
     }
     // template:end messaging:worker-bootstrap-pending-consumer
@@ -442,7 +442,7 @@ fn register_capabilities(
     )]
     let has_messages = false;
     // template:begin jobs:worker-bootstrap-validate-jobs
-    let jobs = jobs::validate(std::mem::take(&mut registration.jobs))?;
+    let jobs = jobs::validate(registration.jobs)?;
     #[allow(
         unused_variables,
         reason = "retained outbox adds its own publication kind"
@@ -450,9 +450,17 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-retain-messaging
-    let messages = messaging::MessagingPlan::retain(config, registration)?;
+    let messages = messaging::RetainedMessages {
+        registry: registration.messages,
+        // template:end messaging:worker-bootstrap-retain-messaging
+        // template:begin outbox:worker-bootstrap-postgres-messages-value
+        postgres_messages: registration.postgres_messages,
+        // template:end outbox:worker-bootstrap-postgres-messages-value
+        // template:begin messaging:worker-bootstrap-plan-messaging
+    };
+    let messages = messaging::MessagingPlan::retain(config, messages)?;
     let has_messages = messages.is_some();
-    // template:end messaging:worker-bootstrap-retain-messaging
+    // template:end messaging:worker-bootstrap-plan-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
     let has_jobs = true;
     // template:end outbox:worker-bootstrap-outbox-registration
@@ -482,10 +490,10 @@ async fn wait_for_stop(
         },
         task = background.wait_for_failure() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
-        () = jobs::engine_stopped(resources) => Ended::Failure(WorkerError::EngineStopped),
+        error = jobs::engine_failure(resources) => Ended::Failure(error),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
         // template:begin messaging:worker-bootstrap-wait-messaging-failure
-        error = messaging::consumer_stopped(resources) => Ended::Failure(WorkerError::ConsumerStopped(error)),
+        error = messaging::consumer_failure(resources) => Ended::Failure(error),
         // template:end messaging:worker-bootstrap-wait-messaging-failure
     }
 }
