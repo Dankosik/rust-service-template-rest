@@ -192,7 +192,7 @@ impl JwtVerifier {
         keys.require_fresh(self.jwks_max_age)?;
         if let Some(remembered) = self.remembered.get(bytes) {
             if remembered.key_generation == keys.generation() {
-                let verified = remembered.verified.deliver(now()?.as_secs());
+                let verified = remembered.verified.deliver(now()?);
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -231,12 +231,7 @@ impl JwtVerifier {
                 .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
         };
         let admitted_claims = |payload: Vec<u8>, now: Duration| {
-            validate_jwt_claims(
-                payload,
-                &self.claim_policy,
-                self.token_profile,
-                now.as_secs(),
-            )
+            validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
         };
         let signing_keys = self
             .verify_signature(
@@ -259,7 +254,7 @@ impl JwtVerifier {
         signing_keys.require_fresh(self.jwks_max_age)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR
-                .min(Duration::from_secs(verified.identity.expires_at()).saturating_sub(now)),
+                .min(verified.identity.expiry_from_epoch().saturating_sub(now)),
             sampled_at,
             verified,
             key_generation: signing_keys.generation(),
@@ -719,6 +714,37 @@ mod tests {
                     "{typ}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_rfc9068_token_requires_a_string_scope() {
+        let verifier = JwtVerifier {
+            token_profile: TokenProfile::Rfc9068,
+            ..verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256])
+        };
+        let verify = async |scope: serde_json::Value| {
+            let claims = serde_json::json!({
+                "iss": CORPUS_ISSUER, "aud": "api", "sub": "subject", "client_id": "client",
+                "exp": 1_060, "iat": 1_000, "jti": "id", "scope": scope, "scp": ["admin"],
+            });
+            let token = sign_raw(
+                r#"{"alg":"RS256","kid":"fixture","typ":"at+jwt"}"#,
+                &serde_json::to_vec(&claims).unwrap(),
+            );
+            let header = format!("Bearer {token}");
+            let token = parse_bearer([header.as_bytes()]).unwrap();
+            verifier
+                .verify_with_now(&token, || Ok(Duration::from_secs(1_000)))
+                .await
+        };
+        let principal = verify(serde_json::json!("read write")).await.unwrap();
+        assert_eq!(principal.scopes(), ["read", "write"]);
+        for scope in [serde_json::json!(["read"]), serde_json::Value::Null] {
+            assert_eq!(
+                verify(scope).await.unwrap_err(),
+                crate::VerificationError::invalid(VerificationReason::MalformedClaims)
+            );
         }
     }
 
@@ -1590,10 +1616,18 @@ mod tests {
         token: &str,
         now: u64,
     ) -> Result<crate::Principal, VerificationReason> {
+        verify_at_duration(verifier, token, Duration::from_secs(now)).await
+    }
+
+    async fn verify_at_duration(
+        verifier: &JwtVerifier,
+        token: &str,
+        now: Duration,
+    ) -> Result<crate::Principal, VerificationReason> {
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()]).unwrap();
         verifier
-            .verify_with_now(&token, || Ok(Duration::from_secs(now)))
+            .verify_with_now(&token, || Ok(now))
             .await
             .map_err(|error| error.reason)
     }
@@ -1628,24 +1662,39 @@ mod tests {
     async fn a_remembered_token_is_refused_by_the_clock_as_a_full_verification_refuses_it() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        let token = ec_token(&signing, "k", &serde_json::json!({"nbf": 1_000}));
-        verify_at(&memo, &token, 1_000).await.unwrap();
+        let token = ec_token(
+            &signing,
+            "k",
+            &serde_json::json!({"nbf": 1_700_000_000.4, "exp": 1_700_000_060.6}),
+        );
+        let admitted_at = Duration::from_secs(1_700_000_000);
+        verify_at_duration(&memo, &token, admitted_at)
+            .await
+            .unwrap();
+        let earliest = Duration::new(1_699_999_970, 400_000_000);
+        let first_expired = Duration::new(1_700_000_090, 600_000_000);
+        let nanosecond = Duration::from_nanos(1);
         for (now, expected) in [
-            (970, Ok(())),
-            (969, Err(VerificationReason::NotYetValid)),
-            (EXP + 29, Ok(())),
-            (EXP + 30, Err(VerificationReason::Expired)),
-            (u64::MAX, Err(VerificationReason::Expired)),
+            (
+                earliest.checked_sub(nanosecond).unwrap(),
+                Err(VerificationReason::NotYetValid),
+            ),
+            (earliest, Ok(())),
+            (earliest + nanosecond, Ok(())),
+            (first_expired.checked_sub(nanosecond).unwrap(), Ok(())),
+            (first_expired, Err(VerificationReason::Expired)),
+            (first_expired + nanosecond, Err(VerificationReason::Expired)),
+            (Duration::MAX, Err(VerificationReason::Expired)),
         ] {
-            let hit = verify_at(&memo, &token, now).await.map(|_| ());
-            let full = verify_at(&ec_verifier(&signing, "k"), &token, now)
+            let hit = verify_at_duration(&memo, &token, now).await.map(|_| ());
+            let full = verify_at_duration(&ec_verifier(&signing, "k"), &token, now)
                 .await
                 .map(|_| ());
-            assert_eq!(hit, expected, "{now}");
-            assert_eq!(hit, full, "{now}");
+            assert_eq!(hit, expected, "{now:?}");
+            assert_eq!(hit, full, "{now:?}");
         }
         assert_eq!(remembered_count(&memo), 0);
-        assert!(verify_at(&memo, &token, 1_000).await.is_ok());
+        assert!(verify_at_duration(&memo, &token, admitted_at).await.is_ok());
     }
 
     #[tokio::test]
@@ -1861,7 +1910,7 @@ mod tests {
     async fn an_entry_is_held_no_longer_than_its_token_or_one_refresh_period() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        for (exp, ttl_millis) in [(1_060, 58_950), (1_000 + 10 * 86_400, 899_750)] {
+        for (exp, ttl_millis) in [(1_060.625, 59_575), (865_000.0, 899_750)] {
             let token = ec_token(&signing, "k", &serde_json::json!({ "exp": exp }));
             let header = format!("Bearer {token}");
             let bearer = parse_bearer([header.as_bytes()]).unwrap();

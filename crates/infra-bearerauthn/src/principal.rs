@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::claims::Scopes;
 
@@ -6,7 +6,7 @@ use crate::claims::Scopes;
 #[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
-    expiry_epoch_seconds: u64,
+    expiry_from_epoch: Duration,
 }
 
 pub(crate) struct Identity {
@@ -19,10 +19,10 @@ pub(crate) struct Identity {
 }
 
 impl Principal {
-    pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
+    pub(crate) fn new(identity: Identity, expiry_from_epoch: Duration) -> Self {
         Self {
             identity: Arc::new(identity),
-            expiry_epoch_seconds,
+            expiry_from_epoch,
         }
     }
 
@@ -57,8 +57,19 @@ impl Principal {
 
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
-        self.expiry_epoch_seconds
+        let seconds = self.expiry_from_epoch.as_secs();
+        if self.expiry_from_epoch.subsec_nanos() >= 500_000_000 {
+            seconds.saturating_add(1)
+        } else {
+            seconds
+        }
     }
+
+    // template:begin oidc-jwt:authn-precise-expiry
+    pub(crate) const fn expiry_from_epoch(&self) -> Duration {
+        self.expiry_from_epoch
+    }
+    // template:end oidc-jwt:authn-precise-expiry
 
     /// RFC 8693 §4.1
     #[must_use]
@@ -74,7 +85,7 @@ impl Principal {
         (
             (&identity.issuer, &identity.subject, &identity.client_id),
             (self.scopes(), &identity.payload),
-            (&identity.actor, self.expiry_epoch_seconds),
+            (&identity.actor, self.expiry_from_epoch),
         )
     }
 }

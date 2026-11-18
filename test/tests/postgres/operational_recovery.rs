@@ -564,6 +564,15 @@ mod grpc {
             services
                 .add(EchoServiceServer::new(DatabaseEcho(pool)))
                 .unwrap();
+            // template:end postgres-grpc-consumers:recovery-grpc-module-4
+            // template:begin postgres-grpc-auth:recovery-scope-requirements
+            for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                services
+                    .require_scopes(&format!("/example.v1.EchoService/{method}"), &[])
+                    .unwrap();
+            }
+            // template:end postgres-grpc-auth:recovery-scope-requirements
+            // template:begin postgres-grpc-consumers:recovery-grpc-module-bounds
             let limits = Limits {
                 request_timeout: Duration::from_secs(8),
                 max_in_flight: NonZeroU32::new(256),
@@ -600,7 +609,7 @@ mod grpc {
                 health,
                 watch,
                 observed: None,
-                // template:end postgres-grpc-consumers:recovery-grpc-module-4
+                // template:end postgres-grpc-consumers:recovery-grpc-module-bounds
                 // template:begin postgres-grpc-auth:recovery-provider-value
                 provider,
                 provider_cancel,

@@ -74,7 +74,7 @@ impl KeyStore {
         metrics::describe_gauge!(
             ACQUISITION_METRIC,
             metrics::Unit::Seconds,
-            "Unix timestamp of the last successfully acquired usable JWKS set"
+            "Unix timestamp of the last successfully acquired JWKS set"
         );
         let last_acquisition = metrics::gauge!(ACQUISITION_METRIC);
         last_acquisition.set(acquisition_timestamp(SystemTime::now()));

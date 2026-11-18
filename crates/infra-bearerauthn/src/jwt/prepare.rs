@@ -9,7 +9,7 @@ use crate::{
     EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError, PreparationPhase,
     PreparationReason, ProviderFailure, Verifier,
     claims::ClaimPolicy,
-    jwks::{KEY_REJECTIONS_METRIC, fetch_key_set},
+    jwks::{KEY_REJECTIONS_METRIC, KeySetFailure, fetch_key_set},
     provider::{Document, ProviderClient},
     refresh::{KeyStore, run_refresh_worker},
 };
@@ -72,6 +72,11 @@ async fn prepare_with_provider(
         Some(startup_deadline),
     )
     .await
+    .and_then(|keys| {
+        (!keys.is_empty())
+            .then_some(keys)
+            .ok_or(KeySetFailure::NoUsableKeys)
+    })
     .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()));
     let key_set = complete_startup_stage(startup_deadline, PreparationPhase::Jwks, key_set)?;
     let key_store = KeyStore::new(key_set);
@@ -263,11 +268,24 @@ mod tests {
                     .to_owned();
                 let body = request.into_body().collect().await?.to_bytes();
                 assert!(body.is_empty());
-                let (status, body) = routes.iter().find(|(route, ..)| *route == target).map_or(
+                let route = {
+                    let mut requested = requested.lock().unwrap();
+                    let seen = requested
+                        .iter()
+                        .filter(|path| path.as_str() == target)
+                        .count();
+                    let route = routes
+                        .iter()
+                        .filter(|(path, ..)| *path == target)
+                        .take(seen + 1)
+                        .last();
+                    requested.push(target);
+                    route
+                };
+                let (status, body) = route.map_or(
                     (StatusCode::NOT_FOUND, Bytes::new()),
                     |(_, status, body)| (*status, Bytes::from(body.replace("PORT", &port))),
                 );
-                requested.lock().unwrap().push(target);
                 Ok::<_, hyper::Error>(
                     Response::builder()
                         .status(status)
@@ -322,7 +340,7 @@ mod tests {
             issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
             audiences: vec!["api".to_owned()],
             token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
+            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
             jwks_max_age: Duration::from_hours(1),
             jwks_uri: jwks_uri
                 .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
@@ -403,6 +421,100 @@ mod tests {
             PreparationReason::Fetch(ProviderFailure::Status(404))
         );
         assert_eq!(requested.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_empty_jwks_cannot_start_a_verifier() {
+        use crate::{PreparationPhase, PreparationReason};
+
+        let (address, root, _) =
+            metadata_server(vec![("/keys", StatusCode::OK, r#"{"keys":[]}"#.to_owned())]).await;
+        let error = prepare(address, &root, Some("/keys")).await.err().unwrap();
+        assert_eq!(error.phase(), PreparationPhase::Jwks);
+        assert_eq!(error.reason(), PreparationReason::NoUsableKeys);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_all_signing_keys_revokes_cached_and_unseen_tokens_until_keys_return() {
+        use crate::Failure;
+        use crate::jwks::tests::ec_signing;
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        ensure_crypto_provider();
+        let signing = ec_signing();
+        let replacement_signing = ec_signing();
+        let mut encryption = jwk(&ec_signing(), Algorithm::ES256, Some("encryption"), false);
+        encryption["use"] = "enc".into();
+        let key_document = |kid, signer: &EncodingKey| {
+            let mut key = jwk(signer, Algorithm::ES256, Some(kid), true);
+            key["use"] = "sig".into();
+            serde_json::json!({ "keys": [key, &encryption] }).to_string()
+        };
+        for withdrawn in [
+            serde_json::json!({"keys": []}),
+            serde_json::json!({"keys": [&encryption]}),
+        ] {
+            let (address, root, requested) = metadata_server(
+                [
+                    key_document("old", &signing),
+                    r#"{"keys":false}"#.to_owned(),
+                    r#"{"keys":[{}]}"#.to_owned(),
+                    withdrawn.to_string(),
+                    key_document("new", &replacement_signing),
+                ]
+                .into_iter()
+                .map(|body| ("/keys", StatusCode::OK, body))
+                .collect(),
+            )
+            .await;
+            let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let worker = tokio::spawn(worker);
+            let authorization = |signer: &EncodingKey, kid: &str, subject: &str| {
+                let mut header = Header::new(Algorithm::ES256);
+                header.kid = Some(kid.to_owned());
+                let claims = serde_json::json!({
+                    "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
+                    "aud": "api", "sub": subject,
+                    "exp": jsonwebtoken::get_current_timestamp() + 600,
+                });
+                format!("Bearer {}", encode(&header, &claims, signer).unwrap())
+            };
+            let cached = authorization(&signing, "old", "cached");
+            let unseen = authorization(&signing, "old", "unseen");
+            let replacement = authorization(&replacement_signing, "new", "replacement");
+            let cached = crate::parse_bearer([cached.as_bytes()]).unwrap();
+            let unseen = crate::parse_bearer([unseen.as_bytes()]).unwrap();
+            let replacement = crate::parse_bearer([replacement.as_bytes()]).unwrap();
+            verifier.verify(&cached).await.unwrap();
+
+            let refresh = || async {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::resume();
+                verifier.verify(&replacement).await
+            };
+            for response in ["malformed JWKS", "nonempty JWKS without usable keys"] {
+                assert_eq!(refresh().await.unwrap_err(), Failure::Invalid, "{response}");
+                let retained = authorization(&signing, "old", response);
+                let retained = crate::parse_bearer([retained.as_bytes()]).unwrap();
+                assert_eq!(
+                    verifier.verify(&retained).await.unwrap().subject(),
+                    Some(response)
+                );
+            }
+
+            assert_eq!(refresh().await.unwrap_err(), Failure::Invalid);
+            for token in [&cached, &unseen] {
+                assert_eq!(verifier.verify(token).await.unwrap_err(), Failure::Invalid);
+            }
+            assert_eq!(refresh().await.unwrap().subject(), Some("replacement"));
+            assert_eq!(
+                verifier.verify(&cached).await.unwrap_err(),
+                Failure::Invalid
+            );
+            assert_eq!(*requested.lock().unwrap(), ["/keys"; 5]);
+            worker.abort();
+        }
     }
 
     #[tokio::test]
