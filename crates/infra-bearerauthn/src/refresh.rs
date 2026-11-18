@@ -210,11 +210,7 @@ pub(crate) fn run_refresh_worker(
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
-                result = state_changes.wait_for(|state| state.pending().is_some()) => {
-                    if result.is_err() {
-                        break;
-                    }
-                }
+                _ = state_changes.wait_for(|state| state.pending().is_some()) => {}
                 () = tokio::time::sleep_until(next_refresh) => {
                     store.request_periodic();
                     next_refresh = Instant::now() + next_period();

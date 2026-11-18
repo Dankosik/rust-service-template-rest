@@ -484,6 +484,13 @@ run_graph() {
 			"${runtime_environment[@]}" cargo test -p infra-grpc --test transport --locked --offline --manifest-path "${target}/Cargo.toml"
 		;;
 	esac
+	case "${graph}" in
+	58 | 59 | 68)
+		record_command "${receipt}" "${log_dir}/runtime-${graph}-grpc-verifier.log" "runtime-${graph}-grpc-verifier" \
+			"${runtime_environment[@]}" cargo test -p "${identity}" --test lifecycle \
+				missing_grpc_verifier_lists_only_the_supported_modes --locked --offline --manifest-path "${target}/Cargo.toml"
+		;;
+	esac
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${runtime_environment[@]}" make -C "${target}" test-package PKG=infra-webhooks

@@ -150,6 +150,15 @@ pub(crate) async fn observe(
 
     let status = response.status();
     let extensions = response.extensions();
+    // template:begin authn:http-observe-scope-refusal
+    if status == StatusCode::FORBIDDEN
+        && extensions
+            .get::<crate::authn::InsufficientScope>()
+            .is_some()
+    {
+        span.set_attribute("authz.reason", "insufficient_scope");
+    }
+    // template:end authn:http-observe-scope-refusal
     let problem_code = extensions
         .get::<Problem>()
         .map(|problem| problem.code().as_str());

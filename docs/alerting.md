@@ -346,12 +346,28 @@ recover retained jobs with the operator commands `jobs-worker --help` lists
 (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
+<!-- template:begin webhooks:docs-alerting-webhook-delivery -->
+For `webhooks.deliver`, start with the job ID and error in the worker's
+`job_failed` log. A payload decoding failure can exhaust the job before the
+dispatcher runs. When the dispatcher reports `webhook_delivery_finished` for
+that attempt, its endpoint and reason can help identify a retired receiver.
+See [Outbound webhook delivery](decisions/outbound-http-decisions.md#outbound-webhook-delivery).
+<!-- template:end webhooks:docs-alerting-webhook-delivery -->
+
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
 ### Changing a durable subscription
 
 All replicas sharing a stream and durable name must agree on the handled
 subjects, event types and schema versions, the DLQ stream and subject, and
 the broker's filter and delivery settings. Change these together.
+
+Before upgrading an existing installation, inspect both stream configurations
+and the effective consumer configuration. Provision writable source and DLQ
+streams using Limits or WorkQueue retention. Set the durable's inactivity
+threshold to zero, including any inherited stream consumer limit, so the broker
+keeps the cursor through a worker outage. A memory-backed consumer needs a
+planned migration to file-backed state: capture its pending work and ACK floor
+before replacing it, and reconcile replayed effects before restarting workers.
 
 1. Generate the target metadata offline with
    `registry.durable_metadata(dlq_stream, dlq_subject)` from the target
@@ -400,6 +416,10 @@ to read an exact DLQ record without changing the broker. Redrive and
 retirement are available through the recovery controller for its own
 isolated broker sessions. Use your deployment's recovery procedure for
 other brokers.
+
+If the DLQ was sealed during delivery, the worker stops with the source
+sequence still unacknowledged. Provision a writable DLQ and follow the
+durable subscription change procedure above to bind it before resuming.
 
 When independent durable subscriptions need separate incident histories,
 provision a separate DLQ stream for each. A transfer ID identifies the source

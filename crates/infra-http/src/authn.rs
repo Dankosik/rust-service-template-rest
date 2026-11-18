@@ -187,10 +187,14 @@ fn authorize(
     ))
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct InsufficientScope;
+
 fn insufficient_scope_response() -> Response {
     let mut response = Problem::new(Code::Forbidden)
         .detail(INSUFFICIENT_SCOPE_DETAIL)
         .into_response();
+    response.extensions_mut().insert(InsufficientScope);
     response.headers_mut().insert(
         WWW_AUTHENTICATE,
         axum::http::HeaderValue::from_static("Bearer error=\"insufficient_scope\""),
@@ -205,7 +209,7 @@ fn wiring_failure(failure: &'static str) -> Response {
 
 fn failure_response(failure: Failure) -> Response {
     let (code, challenge) = match failure {
-        Failure::Missing => (Code::AuthenticationRequired, Some("Bearer")),
+        Failure::Missing => (Code::AuthenticationRequired, Some("Bearer realm=\"api\"")),
         Failure::Malformed => (
             Code::AuthenticationMalformed,
             Some("Bearer error=\"invalid_request\""),

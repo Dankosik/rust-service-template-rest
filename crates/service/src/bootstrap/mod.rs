@@ -469,6 +469,11 @@ async fn start(
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
+        // template:begin webhooks:bootstrap-outbound-webhooks-state
+        outbound_webhooks: infra_webhooks::outbound::Producer::new(
+            config.outbound_webhook_endpoints.iter().cloned(),
+        ),
+        // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
         service_tokens: service_auth.tokens.clone(),
         // template:end service-auth:bootstrap-service-auth-route-state
@@ -837,12 +842,9 @@ mod tests {
                 &self,
                 request: Request<UnaryRequest>,
             ) -> Result<Response<UnaryResponse>, Status> {
-                let caller = request
-                    .extensions()
-                    .get::<infra_grpc::Caller>()
-                    .map(|caller| caller.name().as_str());
+                let caller = infra_grpc::require_caller(&request)?;
                 Ok(Response::new(UnaryResponse {
-                    message: caller.unwrap_or("none").to_owned(),
+                    message: caller.name().as_str().to_owned(),
                 }))
             }
 

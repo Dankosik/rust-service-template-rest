@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use crate::Failure;
 use crate::call::server_stopped;
 use crate::router::reject_with_budget;
+use crate::status::internal_status;
 
 pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:begin oidc-jwt:grpc-verifier-setting-jwt
@@ -29,6 +30,10 @@ pub(super) const VERIFIER_SETTINGS: &[&str] = &[
 pub struct VerifiedPrincipal(Principal);
 
 impl VerifiedPrincipal {
+    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
+        Self::from_request(request).ok_or_else(internal_status)
+    }
+
     #[must_use]
     pub fn from_request<T>(request: &tonic::Request<T>) -> Option<&Self> {
         Self::from_extensions(request.extensions())
@@ -88,6 +93,9 @@ pub(crate) struct ScopeRequirement {
 
 pub(crate) type Scopes = HashMap<String, ScopeRequirement>;
 
+#[derive(Clone)]
+pub(crate) struct InsufficientScope;
+
 #[expect(
     clippy::result_large_err,
     reason = "the error is the refusal response the call returns"
@@ -126,7 +134,9 @@ pub(crate) async fn authenticate(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
         );
-        return Err(reject_with_budget(context, request, status).await);
+        let mut response = reject_with_budget(context, request, status).await;
+        response.extensions_mut().insert(InsufficientScope);
+        return Err(response);
     }
     if let Some(reason) = context.stopped() {
         return Err(server_stopped(reason).into_http());

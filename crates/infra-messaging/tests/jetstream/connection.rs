@@ -825,3 +825,79 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     relay.finish().await;
     fixture.cleanup().await;
 }
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RestartCursor {
+    stream: String,
+    durable: String,
+    created: String,
+    ack_floor: u64,
+}
+
+#[tokio::test]
+#[ignore = "the messaging suite restarts its private broker between cursor checks"]
+async fn save_ack_floor_before_restart() {
+    let receipt = std::env::var("NATS_CURSOR_RECEIPT").unwrap();
+    let fixture = Fixture::create(false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .unwrap();
+    let mut registry = fixture.registry.clone();
+    registry
+        .register(&fixture.route, |_, _| async { Ok(()) })
+        .unwrap();
+    let mut handle = messaging
+        .consumer(registry, deadline(), &cancel)
+        .await
+        .unwrap()
+        .start(&cancel);
+    let record = fixture
+        .publication
+        .prepare(&event("restart-cursor"))
+        .unwrap();
+    let ack = messaging
+        .producer()
+        .publish(&record, &context(deadline(), &cancel))
+        .await
+        .unwrap();
+    wait_for_source_ack_at_least(&fixture, ack.sequence).await;
+    handle.finish(deadline()).await.unwrap();
+    close(messaging).await;
+    let consumer = durable(&fixture).await;
+    let info = consumer.cached_info();
+    let cursor = RestartCursor {
+        stream: fixture.stream,
+        durable: fixture.durable,
+        created: info.created.to_string(),
+        ack_floor: info.ack_floor.stream_sequence,
+    };
+    tokio::fs::write(receipt, serde_json::to_vec(&cursor).unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "the messaging suite restarts its private broker between cursor checks"]
+async fn read_ack_floor_after_restart() {
+    let receipt = std::env::var("NATS_CURSOR_RECEIPT").unwrap();
+    let cursor: RestartCursor =
+        serde_json::from_slice(&tokio::fs::read(receipt).await.unwrap()).unwrap();
+    let broker = jetstream::new(async_nats::connect(nats_url()).await.unwrap());
+    let stream = broker.get_stream(&cursor.stream).await.unwrap();
+    let consumer: consumer::PullConsumer = stream.get_consumer(&cursor.durable).await.unwrap();
+    let info = consumer.cached_info();
+    assert_eq!(info.created.to_string(), cursor.created);
+    assert_eq!(info.ack_floor.stream_sequence, cursor.ack_floor);
+    assert_eq!(info.num_ack_pending, 0);
+    assert_eq!(info.num_pending, 0);
+    let record = stream.get_raw_message(cursor.ack_floor).await.unwrap();
+    assert_eq!(
+        record.headers.get("Message-Id").unwrap().as_str(),
+        "restart-cursor"
+    );
+}

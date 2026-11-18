@@ -436,6 +436,94 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
 }
 
 #[tokio::test]
+async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking_the_source() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("unsealed streams satisfy admission");
+    let started = Arc::new(Notify::new());
+    let reject = Arc::new(Notify::new());
+    let mut registry = fixture.registry.clone();
+    registry
+        .register(&fixture.route, {
+            let started = Arc::clone(&started);
+            let reject = Arc::clone(&reject);
+            move |_, _| {
+                let started = Arc::clone(&started);
+                let reject = Arc::clone(&reject);
+                async move {
+                    started.notify_one();
+                    reject.notified().await;
+                    Err(HandlerError::Permanent)
+                }
+            }
+        })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(registry, deadline(), &cancel)
+        .await
+        .expect("consumer is admitted against an unsealed DLQ")
+        .start(&cancel);
+    let prepared = fixture
+        .publication
+        .prepare(&event("event-dlq-sealed"))
+        .expect("fixture event is prepared");
+    let ack = messaging
+        .producer()
+        .publish(&prepared, &context(deadline(), &cancel))
+        .await
+        .expect("fixture event publication is acknowledged");
+    timeout(Duration::from_secs(3), started.notified())
+        .await
+        .expect("consumer handles a source delivery before the stream is sealed");
+
+    let mut config = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .clone();
+    config.sealed = true;
+    let sealed = fixture.jetstream.update_stream(config).await.unwrap();
+    assert!(sealed.config.sealed);
+    reject.notify_one();
+
+    let failure = timeout(Duration::from_secs(5), handle.failed())
+        .await
+        .expect("JetStream's sealed response must stop the consumer");
+    std::assert_matches!(
+        failure,
+        ConsumerError::DeadLetterStreamSealed { sequence } if sequence == ack.sequence
+    );
+    std::assert_matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::DeadLetterStreamSealed { sequence }) if sequence == ack.sequence
+    );
+    let consumer = durable(&fixture).await;
+    assert_eq!(consumer.cached_info().ack_floor.stream_sequence, 0);
+    assert_eq!(consumer.cached_info().num_ack_pending, 1);
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let retained = source.get_raw_message(ack.sequence).await.unwrap();
+    assert_eq!(retained.payload.as_ref(), prepared.payload().as_ref());
+    let dlq = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .unwrap();
+    assert_eq!(dlq.cached_info().state.messages, 0);
+
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     let fixture = Fixture::create(true).await;
     let cancel = CancellationToken::new();

@@ -1,5 +1,6 @@
 use infra_bearerauthn::Verifier;
 // template:begin oidc-jwt:grpc-transport-test-jwt-import
+use super::ORDERS_READ;
 use infra_bearerauthn::test_support::JwtFixture;
 // template:end oidc-jwt:grpc-transport-test-jwt-import
 // template:begin oidc-introspection:grpc-transport-test-introspection-import
@@ -49,7 +50,7 @@ fn jwt_token(scoped: bool) -> &'static str {
     static SCOPED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static UNSCOPED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let (token, scope) = if scoped {
-        (&SCOPED, "echo.read")
+        (&SCOPED, ORDERS_READ)
     } else {
         (&UNSCOPED, "")
     };
