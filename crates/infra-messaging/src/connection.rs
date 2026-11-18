@@ -230,40 +230,41 @@ fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> Messag
 fn report_connection_event(event: &async_nats::Event) {
     use async_nats::{ClientError, Event, ServerError};
 
-    let (result, error_type) = match event {
-        Event::Connected => ("connected", None),
-        Event::Disconnected => ("disconnected", None),
-        Event::Draining => ("draining", None),
-        Event::Closed => ("closed", None),
-        Event::LameDuckMode => ("lame_duck", None),
-        Event::SlowConsumer(_) => ("slow_consumer", None),
+    enum Log {
+        Silent,
+        Info,
+        Warn(Option<&'static str>),
+    }
+
+    let (result, log) = match event {
+        Event::Connected => ("connected", Log::Info),
+        Event::Disconnected => ("disconnected", Log::Warn(None)),
+        Event::Draining => ("draining", Log::Info),
+        Event::Closed => ("closed", Log::Info),
+        Event::LameDuckMode => ("lame_duck", Log::Warn(None)),
+        Event::SlowConsumer(_) => ("slow_consumer", Log::Silent),
         Event::ServerError(error) => (
             "server_error",
-            Some(match error {
+            Log::Warn(Some(match error {
                 ServerError::AuthorizationViolation => "authorization_violation",
                 ServerError::SlowConsumer(_) => "slow_consumer",
                 ServerError::Other(_) => "other",
-            }),
+            })),
         ),
         Event::ClientError(error) => (
             "client_error",
-            Some(match error {
+            Log::Warn(Some(match error {
                 ClientError::MaxReconnects => "max_reconnects",
                 ClientError::ServerNotInPool => "server_not_in_pool",
                 ClientError::Other(_) => "other",
-            }),
+            })),
         ),
     };
     metrics::counter!("messaging_connection_events_total", "result" => result).increment(1);
-    match event {
-        Event::SlowConsumer(_) => {}
-        Event::Connected | Event::Draining | Event::Closed => {
-            tracing::info!(result, "messaging_connection");
-        }
-        Event::Disconnected
-        | Event::LameDuckMode
-        | Event::ServerError(_)
-        | Event::ClientError(_) => {
+    match log {
+        Log::Silent => {}
+        Log::Info => tracing::info!(result, "messaging_connection"),
+        Log::Warn(error_type) => {
             tracing::warn!(result, error.type = error_type, "messaging_connection");
         }
     }

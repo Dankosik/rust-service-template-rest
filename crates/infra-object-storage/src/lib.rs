@@ -306,9 +306,7 @@ impl ObjectStorage {
             Err(_) if body.source.mismatched() => {
                 Err(guard.fail_mutation(&UploadFailure::Length.into()))
             }
-            Err(interrupted) => {
-                Err(guard.fail_mutation(&Failure::mutation_interrupted(interrupted)))
-            }
+            Err(interrupted) => Err(guard.fail_mutation(&interrupted.into())),
         };
         if let Some(dispatched) = dispatched
             && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
@@ -417,12 +415,9 @@ impl ObjectStorage {
             .config_override(self.operation_config(&context, call))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let (result, stopped_on_reply) =
-            within_mutation(&context, request)
-                .await
-                .map_err(|interrupted| {
-                    guard.fail_mutation(&Failure::mutation_interrupted(interrupted))
-                })?;
+        let (result, stopped_on_reply) = within_mutation(&context, request)
+            .await
+            .map_err(|interrupted| guard.fail_mutation(&interrupted.into()))?;
         guard.answered_by(&result);
         error::interpret_delete_result(&result, stopped_on_reply)
             .map_err(|failure| guard.fail_mutation(&failure))?;

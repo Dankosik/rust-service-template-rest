@@ -452,7 +452,11 @@ async fn start(
     }
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
-    dependencies.object_storage = object_storage::open(config)?;
+    dependencies.object_storage = config
+        .object_storage
+        .as_ref()
+        .map(object_storage::open)
+        .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state = inbound_webhooks::prepare(config, dependencies.postgres.as_ref())?;
