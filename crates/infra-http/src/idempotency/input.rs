@@ -107,7 +107,8 @@ impl CommandInput {
 
     #[allow(
         clippy::unused_async,
-        reason = "existing callers await the lazy query decoder"
+        clippy::unused_async_trait_impl,
+        reason = "query decoding starts when callers poll the returned future"
     )]
     pub async fn query<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
         decode_query(self.raw_query().unwrap_or_default()).map_err(Box::new)

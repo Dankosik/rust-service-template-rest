@@ -224,6 +224,7 @@ struct ResponseHead {
     load_shed: bool,
 }
 
+#[derive(Clone, Copy)]
 enum RequestEnd {
     Body(BodyEnd),
     ClientClosed,
