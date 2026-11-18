@@ -324,6 +324,9 @@ of them. Raise the pool only within the database's connection budget.
 ### JobsQueueBacklog
 
 The oldest available job of a kind has waited over five minutes for a worker.
+For a pending job, the wait starts when the job becomes due. For an abandoned
+running job, it starts when the lease expires. Inspect the state and the last
+worker that claimed the job to distinguish new work from stalled recovery.
 Work for that kind is late. Check that workers run and claim
 (`jobs_attempts_total` rate, `jobs_worker_operation_failures_total`), then
 whether attempts of that kind got slower (`jobs_attempt_duration_seconds`).

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE background_jobs AS job SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL FROM unnest($1::uuid[], $2::bigint[], $3::uuid[]) WITH ORDINALITY AS done (id, generation, token, position) WHERE job.id = done.id AND job.claim_generation = done.generation AND job.claim_token = done.token AND job.claim_expires_at IS NOT NULL RETURNING done.position AS \"position!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8Array",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cf9e1ed7de485b213927a2fdf60e9e54342322e87788741b11bfff81f02f30c1"
+}

@@ -161,11 +161,11 @@ impl Engine {
                 failure.clone(),
             );
         }
-        let background_tasks = [
-            Run::Retention,
-            Run::Listener(Arc::clone(&engine)),
-            Run::Sampling(kinds),
-        ];
+        let listener = infra_postgres::notifications_enabled(&engine.shared.pool)
+            .then(|| Run::Listener(Arc::clone(&engine)));
+        let background_tasks = [Run::Retention, Run::Sampling(kinds)]
+            .into_iter()
+            .chain(listener);
         for run in background_tasks {
             spawn_guarded(
                 tracker,
@@ -692,7 +692,11 @@ mod tests {
                     kind: "ordinary",
                     number: 1,
                 },
-                generation: 1,
+                fence: crate::attempt::ClaimFence {
+                    job_id,
+                    generation: 1,
+                    token: uuid::Uuid::nil(),
+                },
                 payload: b"null".to_vec(),
                 trace: crate::trace_context::Carrier::default(),
                 slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
@@ -908,7 +912,11 @@ mod tests {
                         kind: "ordinary",
                         number: 1,
                     },
-                    generation: 1,
+                    fence: crate::attempt::ClaimFence {
+                        job_id: crate::JobId(uuid::Uuid::nil()),
+                        generation: 1,
+                        token: uuid::Uuid::nil(),
+                    },
                     payload: b"null".to_vec(),
                     trace: crate::trace_context::Carrier::default(),
                     slot: Arc::clone(&engine.shared.slots)
