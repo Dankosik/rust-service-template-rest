@@ -165,11 +165,7 @@ pub(crate) async fn send_publication(
 ) -> Result<PublishAck, PublishError> {
     let local = Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET);
     let context = OperationContext::new(
-        Some(
-            context
-                .deadline()
-                .map_or(local, |deadline| deadline.earlier(local)),
-        ),
+        Some(context.effective_deadline(local)),
         context.cancellation().clone(),
     );
     if context.stopped().is_some() {

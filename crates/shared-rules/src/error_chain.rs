@@ -3,6 +3,11 @@ use std::fmt;
 
 const MAX_CHAIN_ENTRIES: usize = 64;
 
+#[must_use]
+pub fn contains<T: Error + 'static>(error: &(dyn Error + 'static)) -> bool {
+    causes(error).any(<dyn Error>::is::<T>)
+}
+
 pub fn causes<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
@@ -45,7 +50,7 @@ impl fmt::Display for DisplayErrorChain<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayErrorChain, causes};
+    use super::{DisplayErrorChain, causes, contains};
     use std::cell::Cell;
     use std::error::Error;
     use std::fmt;
@@ -92,7 +97,7 @@ mod tests {
     #[test]
     fn lookup_and_display_stop_on_a_cyclic_source() {
         let error = CyclicError(Cell::new(0));
-        assert!(!causes(&error).any(<dyn Error>::is::<Layer>));
+        assert!(!contains::<Layer>(&error));
 
         let error = CyclicError(Cell::new(0));
         assert!(
@@ -162,6 +167,6 @@ mod tests {
             messages,
             ["certificate expired", "certificate expired", "clock"]
         );
-        assert!(causes(&io).any(<dyn Error>::is::<Layer>));
+        assert!(contains::<Layer>(&io));
     }
 }

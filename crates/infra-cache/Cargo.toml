@@ -58,4 +58,4 @@ pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tls-test-support = { workspace = true }
-tokio ={ workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "test-util"] }

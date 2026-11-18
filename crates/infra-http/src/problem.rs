@@ -221,8 +221,7 @@ pub fn body_too_large() -> Problem {
 
 #[must_use]
 pub fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
-    shared_rules::error_chain::causes(error)
-        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
+    shared_rules::error_chain::contains::<http_body_util::LengthLimitError>(error)
 }
 
 pub(crate) fn body_unreadable() -> Problem {

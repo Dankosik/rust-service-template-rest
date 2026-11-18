@@ -6,7 +6,7 @@ use foldhash::HashMap;
 use metrics::SharedString;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
-use shared_rules::grpc::split_method_path;
+use shared_rules::grpc::{split_method_path, status_code_names};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
@@ -26,10 +26,6 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SE
 
 static DESCRIBE: Once = Once::new();
 static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
-
-const fn code_names(code: tonic::Code) -> (&'static str, &'static str) {
-    shared_rules::grpc::status_code_names(code as usize)
-}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Destination {
@@ -88,14 +84,14 @@ impl Call {
     }
 
     fn record(&self, code: tonic::Code) {
-        let (otel_status, metric_code) = code_names(code);
-        self.span.set_attribute("rpc.status_code", otel_status);
+        let names = status_code_names(code as usize);
+        self.span.set_attribute("rpc.status_code", names.span);
         if otel_http::grpc::status_is_error(code as u16, false) {
-            self.span.set_attribute("error.type", otel_status);
+            self.span.set_attribute("error.type", names.span);
             self.span.set_status(SpanStatus::error(""));
         }
         self.metrics
-            .handled(code, metric_code, self.started.elapsed());
+            .handled(code, names.metric, self.started.elapsed());
     }
 }
 
@@ -386,27 +382,29 @@ mod tests {
 
     #[test]
     fn code_labels_match_otel_and_prometheus_conventions() {
-        assert_eq!(code_names(tonic::Code::Ok), ("OK", "OK"));
-        assert_eq!(
-            code_names(tonic::Code::Cancelled),
-            ("CANCELLED", "Canceled")
-        );
-        assert_eq!(
-            code_names(tonic::Code::DeadlineExceeded),
-            ("DEADLINE_EXCEEDED", "DeadlineExceeded")
-        );
-        assert_eq!(
-            code_names(tonic::Code::FailedPrecondition),
-            ("FAILED_PRECONDITION", "FailedPrecondition")
-        );
-        assert_eq!(
-            code_names(tonic::Code::Unauthenticated),
-            ("UNAUTHENTICATED", "Unauthenticated")
-        );
+        use tonic::Code;
+        for (code, span, metric) in [
+            (Code::Ok, "OK", "OK"),
+            (Code::Cancelled, "CANCELLED", "Canceled"),
+            (
+                Code::DeadlineExceeded,
+                "DEADLINE_EXCEEDED",
+                "DeadlineExceeded",
+            ),
+            (
+                Code::FailedPrecondition,
+                "FAILED_PRECONDITION",
+                "FailedPrecondition",
+            ),
+            (Code::Unauthenticated, "UNAUTHENTICATED", "Unauthenticated"),
+        ] {
+            let names = status_code_names(code as usize);
+            assert_eq!(names.span, span);
+            assert_eq!(names.metric, metric);
+        }
         for raw in 0..17 {
-            let code = tonic::Code::from_i32(raw);
-            let (otel, prom) = code_names(code);
-            assert!(!otel.is_empty() && !prom.is_empty());
+            let names = status_code_names(Code::from_i32(raw) as usize);
+            assert!(!names.span.is_empty() && !names.metric.is_empty());
         }
     }
 
