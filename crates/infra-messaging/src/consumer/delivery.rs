@@ -18,6 +18,7 @@ use crate::messaging::Shared;
 use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
 use crate::producer::send_publication;
 use crate::registry::{DispatchError, Registry};
+use crate::topology::ConsumerAdmission;
 use crate::wire;
 
 pub(super) const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -74,7 +75,7 @@ impl HandlerMetrics {
         Self {
             registered: registry
                 .handled_routes()
-                .map(|route| (route.key.event_type, event(route.key.event_type)))
+                .map(|(key, _)| (key.event_type, event(key.event_type)))
                 .collect(),
             unregistered: event(UNREGISTERED),
         }
@@ -154,18 +155,17 @@ impl DeliveryHandler {
     pub(super) fn new(
         shared: Arc<Shared>,
         registry: Registry,
-        filter_subject: String,
-        dead_letter_subject: String,
-        dead_letter_stream: String,
+        admission: ConsumerAdmission,
     ) -> Self {
+        let filter_subject = admission.options.filter_subject;
         Self {
             shared,
             metrics: HandlerMetrics::register(&registry),
             registry,
             span_name: format!("process {filter_subject}"),
             filter_subject,
-            dead_letter_subject,
-            dead_letter_stream,
+            dead_letter_subject: admission.options.dlq_subject,
+            dead_letter_stream: admission.dead_letter.stream,
         }
     }
 

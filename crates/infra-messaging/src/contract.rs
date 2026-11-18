@@ -40,11 +40,11 @@ impl Registry {
     pub fn asyncapi(&self, title: &str, version: &str) -> Result<Value, ContractError> {
         let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
         let mut schemas = BTreeMap::<String, Value>::new();
-        for route in self.routes() {
+        for (key, route) in self.routes() {
             let RouteKey {
                 event_type,
                 schema_version,
-            } = route.key;
+            } = *key;
             let subject = route.subject.as_str();
             let schema = route.schema.ok_or(ContractError::Undocumented {
                 event_type,

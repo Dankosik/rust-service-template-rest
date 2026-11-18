@@ -172,10 +172,10 @@ impl Consumer {
         let ConsumerAdmission {
             options,
             dead_letter,
-        } = admission;
+        } = &admission;
         if registry
             .handled_routes()
-            .any(|route| !wire::matches_filter(&options.filter_subject, &route.subject))
+            .any(|(_, route)| !wire::matches_filter(&options.filter_subject, &route.subject))
         {
             return Err(MessagingError::Configuration(
                 "handled subject is outside the consumer filter",
@@ -232,16 +232,14 @@ impl Consumer {
             return Err(MessagingError::Topology);
         }
         Ok(Self {
+            concurrency: options.concurrency,
             handler: Arc::new(DeliveryHandler::new(
                 Arc::clone(&shared),
                 registry,
-                options.filter_subject,
-                options.dlq_subject,
-                dead_letter.stream,
+                admission,
             )),
             shared,
             pull,
-            concurrency: options.concurrency,
             pull_delivery_bytes: delivery_bytes,
             retained_pull_bytes,
             durable_ready: Arc::new(AtomicBool::new(true)),
@@ -372,15 +370,9 @@ impl Consumer {
                             break 'pulls;
                         }
                         pull_failed("batch_create", error_kind);
-                        let lost = tokio::select! {
-                            biased;
-                            () = stop.cancelled() => break 'pulls,
-                            lost = self.durable_pull_limits() => matches!(lost, Ok(None)),
-                        };
-                        if lost {
-                            return Err(ConsumerError::ConsumerLost);
-                        }
-                        if retry_after_backoff(stop).await.is_break() {
+                        if self.recheck_subscription(stop).await?.is_break()
+                            || retry_after_backoff(stop).await.is_break()
+                        {
                             break 'pulls;
                         }
                         continue 'pulls;
@@ -407,15 +399,7 @@ impl Consumer {
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
-                    let lost = tokio::select! {
-                        biased;
-                        () = stop.cancelled() => break 'pulls,
-                        lost = self.durable_pull_limits() => matches!(lost, Ok(None)),
-                    };
-                    if lost {
-                        return Err(ConsumerError::ConsumerLost);
-                    }
-                    if stop.is_cancelled() {
+                    if self.recheck_subscription(stop).await?.is_break() || stop.is_cancelled() {
                         break 'pulls;
                     }
                     let was_retrying_large_retained_record = retry_large_retained_record;
@@ -448,6 +432,20 @@ impl Consumer {
             check_delivery_task_result(Some(joined))?;
         }
         Ok(())
+    }
+
+    async fn recheck_subscription(
+        &self,
+        stop: &CancellationToken,
+    ) -> Result<ControlFlow<()>, ConsumerError> {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => Ok(ControlFlow::Break(())),
+            limits = self.durable_pull_limits() => match limits {
+                Ok(None) => Err(ConsumerError::ConsumerLost),
+                Ok(Some(_)) | Err(_) => Ok(ControlFlow::Continue(())),
+            },
+        }
     }
 
     async fn durable_pull_limits(&self) -> Result<Option<PullLimits>, ConsumerInfoError> {
