@@ -195,7 +195,7 @@ impl Registration {
         token_http: Client,
     ) -> Result<Self, ConfigurationError> {
         let (options, endpoint, permits) = admitted.into_parts();
-        let signer = Signer::try_new(&options, SystemTime::now())?;
+        let signer = Signer::try_new(options, SystemTime::now())?;
         let endpoint = TokenEndpoint::new(endpoint, token_http, signer, permits)?;
         let (lifetime, closed) = watch::channel(());
         Ok(Self {
@@ -402,18 +402,14 @@ impl ServiceTokens {
             return;
         }
         cached.defer_refresh(now);
-        cached.refresh_pending = true;
-        if self
+        cached.refresh_pending = self
             .0
             .refresh_requests
             .try_send(RefreshRequest {
                 current: token.clone(),
                 deadline: now + FETCH_TIMEOUT,
             })
-            .is_err()
-        {
-            cached.refresh_pending = false;
-        }
+            .is_ok();
     }
 
     pub(crate) fn cached(&self) -> MutexGuard<'_, Cached> {

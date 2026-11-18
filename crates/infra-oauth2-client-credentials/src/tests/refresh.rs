@@ -63,7 +63,7 @@ async fn a_service_token_is_refreshed_within_its_sampled_lead_before_the_reuse_c
         advance((acquired + refreshed_by).saturating_duration_since(Instant::now())).await;
         execute().await;
         fixture.token_received().await;
-        assert_eq!(fixture.token_requests().len(), 2, "{lifetime} s");
+        assert_eq!(fixture.token_request_count(), 2, "{lifetime} s");
         let last = fixture.resource_requests().pop().unwrap();
         assert_eq!(
             last.header("authorization"),
@@ -92,7 +92,7 @@ async fn an_exchanged_token_is_never_refreshed_in_the_background() {
     advance(Duration::from_secs(3321)).await;
     execute().await;
     assert_no_token_request(&fixture).await;
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     let last = fixture.resource_requests().pop().unwrap();
     assert_eq!(last.header("authorization"), Some("Bearer first"));
     fixture.finish().await;
@@ -105,13 +105,13 @@ async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
     for _ in 0..2 {
         fixture.send(&client).await.unwrap();
     }
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(51)).await;
     tokio::time::resume();
     fixture.send(&client).await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 3);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 3);
     fixture.finish().await;
 }
 
@@ -136,7 +136,7 @@ async fn short_lived_background_replacements_get_their_own_early_refresh() {
         fixture.send(&client).await.unwrap();
     }
     fixture.token_received().await;
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     let second_requested = Instant::now();
     gate.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -151,7 +151,7 @@ async fn short_lived_background_replacements_get_their_own_early_refresh() {
     })
     .await
     .unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     let authorizations = fixture
         .resource_requests()
         .iter()
@@ -171,7 +171,7 @@ async fn short_lived_background_replacements_get_their_own_early_refresh() {
         .await;
     fixture.send(&client).await.unwrap();
     fixture.token_received().await;
-    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.token_request_count(), 3);
     let last = fixture.resource_requests().pop().unwrap();
     assert_eq!(last.header("authorization"), Some("Bearer second"));
     gate.add_permits(1);
@@ -207,8 +207,8 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
     fixture.send(&service).await.unwrap();
     fixture.token_received().await;
     fixture.send_request(&exchange, delegated()).await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 3);
-    assert_eq!(fixture.resource_requests().len(), 4);
+    assert_eq!(fixture.token_request_count(), 3);
+    assert_eq!(fixture.resource_request_count(), 4);
 
     let service_clone = service.clone();
     let exchange_clone = exchange.clone();
@@ -220,8 +220,8 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
 
     assert_closed_calls(&service_clone, || fixture.request()).await;
     assert_closed_calls(&exchange_clone, delegated).await;
-    assert_eq!(fixture.token_requests().len(), 3);
-    assert_eq!(fixture.resource_requests().len(), 4);
+    assert_eq!(fixture.token_request_count(), 3);
+    assert_eq!(fixture.resource_request_count(), 4);
     drop(gate);
     fixture.finish().await;
 }
@@ -247,8 +247,8 @@ async fn dropping_registration_stops_a_bound_http_call_during_token_acquisition(
         .unwrap()
         .unwrap_err();
     assert_matches!(error, Error::Acquisition(AcquisitionError::Unavailable));
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), 1);
+    assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
 }
 
@@ -353,8 +353,8 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
 
     drop(driver);
     assert_closed_calls(&service.clone(), || fixture.request()).await;
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 2);
 
     fixture.token_json(
         StatusCode::OK,
@@ -366,7 +366,7 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
             .await
             .unwrap();
     }
-    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.token_request_count(), 3);
     let resources = fixture.resource_requests();
     assert_eq!(
         resources[2].header("authorization"),
@@ -511,7 +511,7 @@ async fn refreshes_without_a_cacheable_replacement_keep_the_token_and_back_off()
         .await;
         fixture.send(&client).await.unwrap();
         fixture.token_received().await;
-        assert_eq!(fixture.token_requests().len(), 3);
+        assert_eq!(fixture.token_request_count(), 3);
         assert!(
             fixture
                 .resource_requests()
@@ -551,8 +551,8 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
         next.await,
         Err(Error::Acquisition(AcquisitionError::Unavailable))
     );
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 2);
     fixture.finish().await;
 }
 
@@ -663,12 +663,12 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
     })
     .await
     .unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     drop(exchange);
     drop(gate);
     *fixture.state.token_gate.lock().unwrap() = None;
     fixture.send(&client).await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     advance(Duration::from_secs(34)).await;
     fixture.send(&client).await.unwrap();
     fixture.token_received().await;
@@ -679,7 +679,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
     .await
     .unwrap();
     drop(refresh);
-    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.token_request_count(), 3);
     assert!(
         fixture
             .resource_requests()

@@ -74,8 +74,8 @@ impl AuthenticatedClient {
             .prepare(request, context)
             .map_err(Error::at_prepare)?;
         let deadline = acquisition_deadline(prepared.context());
-        let grant = self.tokens.admit(subject, deadline)?;
-        let acquired = grant.acquire_for_request(deadline).await?;
+        let admitted_tokens = self.tokens.admit(subject, deadline)?;
+        let acquired = admitted_tokens.acquire_for_request(deadline).await?;
         prepared.set_authorization(acquired.header.clone());
         prepared
             .send(

@@ -20,7 +20,7 @@ pub(crate) struct Signer {
 }
 
 impl Signer {
-    pub(crate) fn try_new(options: &Options, now: SystemTime) -> Result<Self, ConfigurationError> {
+    pub(crate) fn try_new(options: Options, now: SystemTime) -> Result<Self, ConfigurationError> {
         let invalid_key = ConfigurationError {
             key: "private_key",
             reason: "must be a PEM key matching its configured algorithm",
@@ -32,13 +32,13 @@ impl Signer {
         }
         .map_err(|_| invalid_key)?;
         let mut header = jsonwebtoken::Header::new(options.algorithm.into());
-        header.kid = Some(options.key_id.clone());
+        header.kid = Some(options.key_id);
         header.typ = Some(ASSERTION_TYP.to_owned());
         let signer = Self {
             key,
             header,
-            client_id: options.client_id.clone(),
-            assertion_audience: options.assertion_audience.clone(),
+            client_id: options.client_id,
+            assertion_audience: options.assertion_audience,
         };
         let elapsed = now
             .duration_since(UNIX_EPOCH)

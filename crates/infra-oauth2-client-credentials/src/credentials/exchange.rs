@@ -248,14 +248,15 @@ impl ExchangeTokens {
                     return result;
                 }
                 ExchangeFlight::Waiter(mut receiver) => {
-                    if let Ok(result) = receiver.wait_for(Option::is_some).await {
-                        match result.as_ref() {
-                            Some(Ok(token)) if token.is_reusable(Instant::now()) => {
-                                return Ok(token.clone());
-                            }
-                            Some(Err(error)) => return Err(*error),
-                            _ => {}
+                    let Ok(published) = receiver.wait_for(Option::is_some).await else {
+                        continue;
+                    };
+                    match published.as_ref() {
+                        Some(Ok(token)) if token.is_reusable(Instant::now()) => {
+                            return Ok(token.clone());
                         }
+                        Some(Err(error)) => return Err(*error),
+                        _ => {}
                     }
                 }
             }

@@ -196,7 +196,10 @@ impl<'de> Deserialize<'de> for Entries {
     }
 }
 
-struct DuplicateCheckedJson(Option<serde_json::Value>);
+enum DuplicateCheckedJson {
+    Value(serde_json::Value),
+    DuplicateMember,
+}
 
 impl<'de> Deserialize<'de> for DuplicateCheckedJson {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -207,45 +210,55 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                 formatter.write_str("a JSON value")
             }
             fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
+                Ok(DuplicateCheckedJson::Value(value.into()))
             }
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
+                Ok(DuplicateCheckedJson::Value(value.into()))
             }
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
+                Ok(DuplicateCheckedJson::Value(value.into()))
             }
             fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
+                Ok(DuplicateCheckedJson::Value(value.into()))
             }
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
+                Ok(DuplicateCheckedJson::Value(value.into()))
             }
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(serde_json::Value::Null)))
+                Ok(DuplicateCheckedJson::Value(serde_json::Value::Null))
             }
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut items = Some(Vec::new());
-                while let Some(DuplicateCheckedJson(item)) = seq.next_element()? {
-                    items = items.zip(item).map(|(mut items, item)| {
-                        items.push(item);
-                        items
-                    });
+                let mut unique_items = Some(Vec::new());
+                while let Some(child) = seq.next_element()? {
+                    match (&mut unique_items, child) {
+                        (Some(items), DuplicateCheckedJson::Value(value)) => items.push(value),
+                        (_, DuplicateCheckedJson::DuplicateMember) => unique_items = None,
+                        (None, _) => {}
+                    }
                 }
-                Ok(DuplicateCheckedJson(items.map(serde_json::Value::Array)))
+                Ok(match unique_items {
+                    Some(items) => DuplicateCheckedJson::Value(serde_json::Value::Array(items)),
+                    None => DuplicateCheckedJson::DuplicateMember,
+                })
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut members = Some(serde_json::Map::new());
-                while let Some((name, DuplicateCheckedJson(value))) = map.next_entry()? {
-                    members = members
-                        .filter(|members| !members.contains_key(&name))
-                        .zip(value)
-                        .map(|(mut members, value)| {
+                let mut unique_members = Some(serde_json::Map::new());
+                while let Some((name, child)) = map.next_entry()? {
+                    match (&mut unique_members, child) {
+                        (Some(members), DuplicateCheckedJson::Value(value))
+                            if !members.contains_key(&name) =>
+                        {
                             members.insert(name, value);
-                            members
-                        });
+                        }
+                        _ => unique_members = None,
+                    }
                 }
-                Ok(DuplicateCheckedJson(members.map(serde_json::Value::Object)))
+                Ok(match unique_members {
+                    Some(members) => {
+                        DuplicateCheckedJson::Value(serde_json::Value::Object(members))
+                    }
+                    None => DuplicateCheckedJson::DuplicateMember,
+                })
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -259,9 +272,9 @@ fn parse_caller(
     let caller =
         ServiceName::parse(name).map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
     let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
-    let mut set = set
-        .0
-        .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
+    let DuplicateCheckedJson::Value(mut set) = set else {
+        return Err(caller_error("repeats a member name within its JWK Set"));
+    };
     // RFC 7517 §5
     let Some(serde_json::Value::Array(entries)) =
         set.as_object_mut().and_then(|set| set.remove("keys"))

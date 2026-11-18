@@ -86,12 +86,12 @@ impl AuthenticatedClient {
                     _ => status,
                 })?;
         let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
-        let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
-            Ok(grant) => grant,
+        let admitted_tokens = match self.tokens.admit(subject, acquisition_deadline(&context)) {
+            Ok(admitted_tokens) => admitted_tokens,
             Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
         };
         Ok(Box::pin(async move {
-            let token = match grant
+            let token = match admitted_tokens
                 .acquire_for_request(acquisition_deadline(&context))
                 .await
             {

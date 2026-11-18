@@ -104,6 +104,10 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Keycl
             ));
         }
     };
+    decode_metadata(&response)
+}
+
+fn decode_metadata(response: &http::Response<Bytes>) -> Result<Metadata, KeycloakError> {
     if !response
         .headers()
         .get(header::CONTENT_TYPE)

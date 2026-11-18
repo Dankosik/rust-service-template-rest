@@ -66,11 +66,11 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let token = fixture.token_requests().pop().unwrap();
-    assert_eq!(token.target, TOKEN_PATH);
-    assert!(token.header("authorization").is_none());
+    let token_request = fixture.token_requests().pop().unwrap();
+    assert_eq!(token_request.target, TOKEN_PATH);
+    assert!(token_request.header("authorization").is_none());
     assert_token_form(
-        &token.body,
+        &token_request.body,
         "grant_type=client_credentials&scope=write+read%2Ball+write",
     );
     assert_eq!(
@@ -94,11 +94,11 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
         )
         .await
         .unwrap();
-    let token = fixture.token_requests().pop().unwrap();
-    assert_eq!(token.target, TOKEN_PATH);
-    assert!(token.header("authorization").is_none());
+    let token_request = fixture.token_requests().pop().unwrap();
+    assert_eq!(token_request.target, TOKEN_PATH);
+    assert!(token_request.header("authorization").is_none());
     assert_token_form(
-        &token.body,
+        &token_request.body,
         "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange\
          &subject_token=subject%2B%2F%3D\
          &subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
@@ -149,13 +149,13 @@ async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
             fixture.send_request(client, request).await.unwrap();
         }
     }
-    let tokens = fixture.token_requests();
-    assert_eq!(tokens.len(), 4);
+    let token_requests = fixture.token_requests();
+    assert_eq!(token_requests.len(), 4);
     for (request, key, value) in [
-        (&tokens[0], "scope", "catalog-scope"),
-        (&tokens[1], "audience", "catalog"),
-        (&tokens[2], "scope", "billing-scope"),
-        (&tokens[3], "audience", "billing"),
+        (&token_requests[0], "scope", "catalog-scope"),
+        (&token_requests[1], "audience", "catalog"),
+        (&token_requests[2], "scope", "billing-scope"),
+        (&token_requests[3], "audience", "billing"),
     ] {
         assert_eq!(form_value(&form_pairs(&request.body), key), value);
     }
@@ -270,8 +270,8 @@ async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
             Err(Error::Acquisition(AcquisitionError::InvalidResponse))
         );
     }
-    assert_eq!(fixture.token_requests().len(), malformed.len());
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), malformed.len());
+    assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
 }
 
@@ -290,12 +290,12 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
     ] {
         fixture.token_json(StatusCode::OK, &body);
         let client = fixture.service_client();
-        let before = fixture.token_requests().len();
+        let before = fixture.token_request_count();
         for _ in 0..2 {
             fixture.send(&client).await.unwrap();
         }
         assert_eq!(
-            fixture.token_requests().len(),
+            fixture.token_request_count(),
             before + fetches_for_two_calls
         );
     }
@@ -327,8 +327,8 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(AcquisitionError::InvalidResponse));
     }
-    assert_eq!(fixture.token_requests().len(), 3);
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), 3);
+    assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
 }
 
@@ -373,8 +373,8 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
         result,
         Err(Error::Acquisition(AcquisitionError::Unavailable))
     );
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), 1);
+    assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
 }
 
@@ -404,8 +404,8 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
         result,
         Err(Error::Acquisition(AcquisitionError::InvalidResponse))
     );
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), 1);
+    assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
 }
 
@@ -501,7 +501,7 @@ async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_s
                 Err(Error::Acquisition(AcquisitionError::Cancelled))
             );
             assert_eq!(*outcomes.lock().unwrap(), ["cancelled"]);
-            assert!(fixture.resource_requests().is_empty());
+            assert_eq!(fixture.resource_request_count(), 0);
             fixture.finish().await;
         }
     }
@@ -556,13 +556,13 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                 first.await,
                 Err(Error::Acquisition(AcquisitionError::Cancelled))
             );
-            assert!(fixture.resource_requests().is_empty());
+            assert_eq!(fixture.resource_request_count(), 0);
 
             fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
             gate.add_permits(1);
             assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
-            assert_eq!(fixture.token_requests().len(), 2);
-            assert_eq!(fixture.resource_requests().len(), 1);
+            assert_eq!(fixture.token_request_count(), 2);
+            assert_eq!(fixture.resource_request_count(), 1);
             fixture.finish().await;
         }
     }
@@ -644,7 +644,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         .extensions_mut()
         .insert(OperationContext::with_timeout(Duration::from_secs(1)));
     let mut timed = Box::pin(timed.execute(request, far()));
-    tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
+    fixture.drive_until_token_received(timed.as_mut()).await;
     advance(Duration::from_secs(1)).await;
     assert_matches!(
         timed.await,
@@ -668,7 +668,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         .http(fixture.resource_client())
         .unwrap();
     let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
-    tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
+    fixture.drive_until_token_received(dropped.as_mut()).await;
     captured.drain(&snapshotter);
     let before_capacity = captured.outbound_samples;
     assert!(before_capacity > 0);
