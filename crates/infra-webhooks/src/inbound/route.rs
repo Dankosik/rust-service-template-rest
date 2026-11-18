@@ -13,8 +13,8 @@ use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{OpenApi, ToResponse};
 
-use super::{ReceiptOutcome, ReceiveError, Receiver};
-use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
+use super::{PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveError, Receiver};
+use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
@@ -257,36 +257,26 @@ enum OutcomeSlot {
 }
 
 impl OutcomeSlot {
-    fn from_rejection(reason: &'static str) -> Option<Self> {
-        match reason {
-            "body_too_large" => Some(Self::BodyTooLarge),
-            "body_unreadable" => Some(Self::BodyUnreadable),
-            "missing_header" => Some(Self::MissingHeader),
-            "conflicting_header" => Some(Self::ConflictingHeader),
-            "invalid_message_id" => Some(Self::InvalidMessageId),
-            "invalid_timestamp" => Some(Self::InvalidTimestamp),
-            "timestamp_out_of_window" => Some(Self::TimestampOutOfWindow),
-            "invalid_signature" => Some(Self::InvalidSignature),
-            "payload_too_large" => Some(Self::PayloadTooLarge),
-            _ => None,
-        }
-    }
-
     const fn labels(self) -> (&'static str, Option<&'static str>) {
         match self {
             Self::Accepted => ("accepted", None),
             Self::Duplicate => ("duplicate", None),
             Self::Unavailable => ("unavailable", None),
             Self::DeadlineExceeded => ("deadline_exceeded", None),
-            Self::BodyTooLarge => ("rejected", Some("body_too_large")),
+            Self::BodyTooLarge => ("rejected", Some(ProtocolError::BodyTooLarge.reason())),
             Self::BodyUnreadable => ("rejected", Some("body_unreadable")),
-            Self::MissingHeader => ("rejected", Some("missing_header")),
-            Self::ConflictingHeader => ("rejected", Some("conflicting_header")),
-            Self::InvalidMessageId => ("rejected", Some("invalid_message_id")),
-            Self::InvalidTimestamp => ("rejected", Some("invalid_timestamp")),
-            Self::TimestampOutOfWindow => ("rejected", Some("timestamp_out_of_window")),
-            Self::InvalidSignature => ("rejected", Some("invalid_signature")),
-            Self::PayloadTooLarge => ("rejected", Some("payload_too_large")),
+            Self::MissingHeader => ("rejected", Some(ProtocolError::MissingHeader.reason())),
+            Self::ConflictingHeader => {
+                ("rejected", Some(ProtocolError::ConflictingHeader.reason()))
+            }
+            Self::InvalidMessageId => ("rejected", Some(ProtocolError::InvalidMessageId.reason())),
+            Self::InvalidTimestamp => ("rejected", Some(ProtocolError::InvalidTimestamp.reason())),
+            Self::TimestampOutOfWindow => (
+                "rejected",
+                Some(ProtocolError::TimestampOutOfWindow.reason()),
+            ),
+            Self::InvalidSignature => ("rejected", Some(ProtocolError::InvalidSignature.reason())),
+            Self::PayloadTooLarge => ("rejected", Some(PAYLOAD_TOO_LARGE.reason())),
         }
     }
 }
@@ -328,7 +318,11 @@ impl EndpointMetrics {
     }
 
     fn record_rejection(&self, reason: &'static str) {
-        if let Some(slot) = OutcomeSlot::from_rejection(reason) {
+        if let Some((slot, _)) = self
+            .outcomes
+            .iter()
+            .find(|(slot, _)| slot.labels().1 == Some(reason))
+        {
             self.record(slot);
             return;
         }

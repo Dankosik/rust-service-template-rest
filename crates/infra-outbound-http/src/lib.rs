@@ -292,7 +292,7 @@ impl PreparedRequest<'_> {
 
     async fn send_with_response<T>(
         self,
-        check: impl FnOnce() -> bool + Send,
+        admit_dispatch: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
         consume: impl AsyncFnOnce(
             Response<hyper::body::Incoming>,
@@ -318,7 +318,7 @@ impl PreparedRequest<'_> {
         let span = attempt.span();
         let exchange = async {
             stops.check()?;
-            let admitted = check();
+            let admitted = admit_dispatch();
             stops.check()?;
             if !admitted {
                 return Err(Error::DispatchRefused);

@@ -178,7 +178,7 @@ impl Handler<Delivery> for Dispatcher {
             .client
             .execute_for_headers(request, &job.context())
             .await;
-        outcomes.classify_response(response, SystemTime::now())
+        outcomes.finish_attempt(response, SystemTime::now())
     }
 }
 
@@ -240,7 +240,7 @@ impl EndpointOutcomes {
         }
     }
 
-    fn classify_response(
+    fn finish_attempt(
         &self,
         response: Result<http::response::Parts, HttpError>,
         response_time: SystemTime,
@@ -612,7 +612,7 @@ mod tests {
                 response(410),
                 Err(super::HttpError::Timeout),
             ] {
-                let _ = outcomes.classify_response(exchange, UNIX_EPOCH);
+                let _ = outcomes.finish_attempt(exchange, UNIX_EPOCH);
             }
             let _ = dispatcher.fail_missing_endpoint("removed");
             let _ = dispatcher.fail_missing_endpoint("removed");

@@ -371,8 +371,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_over_the_bound_is_rejected_before_any_verifier_or_write() {
-        struct AcceptAll;
-        impl Verifier for AcceptAll {
+        struct MustNotAuthenticate;
+        impl Verifier for MustNotAuthenticate {
             fn authenticate(
                 &self,
                 _headers: &HeaderMap,
@@ -385,7 +385,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
-        let verifier: Arc<dyn Verifier> = Arc::new(AcceptAll);
+        let verifier: Arc<dyn Verifier> = Arc::new(MustNotAuthenticate);
         let receiver = Receiver::new(pool, [("provider".to_owned(), verifier)]);
         let outcome = receiver
             .receive(
