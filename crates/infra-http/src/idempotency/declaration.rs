@@ -4,9 +4,9 @@ use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
 use axum::routing::MethodFilter;
 use itertools::Itertools as _;
-use utoipa::openapi::RefOr;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
+use utoipa::openapi::{RefOr, Schema};
 
 use crate::contract::fixed_path_operations;
 
@@ -88,10 +88,12 @@ pub(super) struct PreparedOperation {
 }
 
 pub(super) fn prepare(
-    paths: &mut Paths,
-    route_docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
+    document: &mut utoipa::openapi::OpenApi,
     successes: BTreeMap<String, RefOr<Response>>,
+    success_schemas: Vec<(String, RefOr<Schema>)>,
 ) -> Result<PreparedOperation, CompositionError> {
+    let paths = &mut document.paths;
+    let route_docs = document.external_docs.take();
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
@@ -129,7 +131,10 @@ pub(super) fn prepare(
     fingerprint_headers.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
     fingerprint_headers.dedup();
     prepare_problem_responses(operation, &operation_id)?;
-    prepare_success_responses(operation, &operation_id, successes)?;
+    let schemas = &mut document.components.get_or_insert_default().schemas;
+    crate::contract::merge_map("schemas", schemas, success_schemas)
+        .map_err(|error| CompositionError::contract(&operation_id, error))?;
+    prepare_success_responses(operation, &operation_id, successes, schemas)?;
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
     }
@@ -223,6 +228,7 @@ fn prepare_success_responses(
     operation: &mut Operation,
     operation_id: &str,
     successes: BTreeMap<String, RefOr<Response>>,
+    schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Result<(), CompositionError> {
     let responses = &mut operation.responses.responses;
     let conflict = |status: &str| {
@@ -268,28 +274,41 @@ fn prepare_success_responses(
         let RefOr::T(mut response) = response else {
             return Err(referenced());
         };
+        prepare_success_headers(&mut response, operation_id, &status)?;
         if let Some(annotation) = responses.remove(&status) {
-            let RefOr::T(annotation) = annotation else {
+            let RefOr::T(mut annotation) = annotation else {
                 return Err(referenced());
             };
-            supplement_success(&mut response, annotation).ok_or_else(|| conflict(&status))?;
+            prepare_success_headers(&mut annotation, operation_id, &status)?;
+            supplement_success(&mut response, annotation, schemas)
+                .ok_or_else(|| conflict(&status))?;
         }
-        prepare_success_headers(&mut response, operation_id, &status)?;
         responses.insert(status, response.into());
     }
     Ok(())
 }
 
-fn supplement_success(response: &mut Response, annotation: Response) -> Option<()> {
+fn supplement_success(
+    response: &mut Response,
+    annotation: Response,
+    schemas: &BTreeMap<String, RefOr<Schema>>,
+) -> Option<()> {
     for (media_type, content) in annotation.content {
         let actual = response.content.get_mut(&media_type)?;
-        if *actual == content {
-            continue;
-        }
-        let (RefOr::T(actual), RefOr::T(mut supplement)) = (actual, content) else {
-            return None;
+        let (actual, mut supplement) = match (actual, content) {
+            (RefOr::T(actual), RefOr::T(supplement)) => (actual, supplement),
+            (RefOr::Ref(actual), RefOr::Ref(supplement)) if *actual == supplement => continue,
+            _ => return None,
         };
-        if supplement.schema.is_none() {
+        if let Some(declared) = &supplement.schema {
+            let typed = actual.schema.as_ref()?;
+            if crate::contract::resolve_schema(typed, schemas)?
+                != crate::contract::resolve_schema(declared, schemas)?
+            {
+                return None;
+            }
+            actual.schema.clone_from(&supplement.schema);
+        } else {
             supplement.schema.clone_from(&actual.schema);
         }
         if supplement.example.is_some() || !supplement.examples.is_empty() {
@@ -414,7 +433,13 @@ mod tests {
         paths: &mut Paths,
         docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
     ) -> Result<PreparedOperation, CompositionError> {
-        super::prepare(paths, docs, CreatedText::responses())
+        let mut document = utoipa::openapi::OpenApiBuilder::new()
+            .paths(std::mem::take(paths))
+            .external_docs(docs)
+            .build();
+        let result = super::prepare(&mut document, CreatedText::responses(), Vec::new());
+        *paths = document.paths;
+        result
     }
 
     #[utoipa::path(
@@ -428,7 +453,7 @@ mod tests {
         }))),
         responses(
             (status = 201, description = "widget created", content_type = "text/plain", body = String,
-             example = json!("created"), headers(("Location" = String, description = "widget URL"))),
+             headers(("Location" = String, description = "widget URL")), example = json!("created")),
             ProtectedOperationProblemResponses
         )
     )]
@@ -648,9 +673,20 @@ mod tests {
 
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
         assert_eq!(
-            super::prepare(&mut missing_success, None, BTreeMap::new())
-                .unwrap_err()
-                .rule(),
+            prepare_success_responses(
+                missing_success
+                    .paths
+                    .get_mut(WIDGETS)
+                    .unwrap()
+                    .post
+                    .as_mut()
+                    .unwrap(),
+                "infraHttpTestCreateWidget",
+                BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap_err()
+            .rule(),
             &Rule::NoSuccess
         );
 
@@ -745,28 +781,39 @@ mod tests {
 
     #[test]
     fn preparation_rejects_conflicting_or_unstorable_success_headers() {
-        let (_, mut conflicting, _): UtoipaMethodRouter = route();
-        let Some(RefOr::T(response)) = conflicting
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .get_mut("201")
-        else {
-            panic!("inline success");
-        };
-        response.headers.insert(
-            REPLAYED_HEADER.to_owned(),
-            RefOr::T(utoipa::openapi::header::Header::default()),
-        );
-        assert_eq!(
-            prepare(&mut conflicting, None).unwrap_err().to_string(),
-            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201: Idempotent-Replayed is reserved for exact generated replay metadata"
-        );
+        for headers in [
+            vec![(
+                REPLAYED_HEADER,
+                RefOr::T(utoipa::openapi::header::Header::default()),
+            )],
+            vec![
+                ("Idempotent-Replayed", replay_header()),
+                ("idempotent-replayed", replay_header()),
+            ],
+        ] {
+            let (_, mut conflicting, _): UtoipaMethodRouter = route();
+            let operation = conflicting
+                .paths
+                .get_mut(WIDGETS)
+                .unwrap()
+                .post
+                .as_mut()
+                .unwrap();
+            let Some(RefOr::T(response)) = operation.responses.responses.get_mut("201") else {
+                panic!("inline success");
+            };
+            response.headers.extend(
+                headers
+                    .into_iter()
+                    .map(|(name, header)| (name.to_owned(), header)),
+            );
+            assert_eq!(
+                prepare(&mut conflicting, None).unwrap_err().rule(),
+                &Rule::ReplayHeader {
+                    status: "201".to_owned()
+                }
+            );
+        }
 
         let (_, mut unsupported, _): UtoipaMethodRouter = route();
         let Some(RefOr::T(response)) = unsupported

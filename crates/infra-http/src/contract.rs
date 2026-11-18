@@ -117,6 +117,17 @@ async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Re
 }
 
 // template:begin http-idempotency:http-mounted-operations
+pub(crate) use components::merge_map;
+
+pub(crate) fn resolve_schema<'a>(
+    schema: &'a RefOr<utoipa::openapi::Schema>,
+    schemas: &'a BTreeMap<String, RefOr<utoipa::openapi::Schema>>,
+) -> Option<&'a utoipa::openapi::Schema> {
+    outcomes::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
+        *reference == utoipa::openapi::Ref::new(&reference.ref_location)
+    })
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
 
@@ -337,14 +348,9 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     // template:begin http-idempotency:http-typed-registration
     pub(crate) fn from_idempotent(
-        mut metadata: OpenApi,
-        mut route: UtoipaMethodRouter<S>,
+        metadata: OpenApi,
+        route: UtoipaMethodRouter<S>,
     ) -> Result<Self, FinalizeError> {
-        components::merge_map(
-            "schemas",
-            &mut metadata.components.get_or_insert_default().schemas,
-            std::mem::take(&mut route.0),
-        )?;
         let mut contract = Self::feature_route(metadata, route)?;
         for (path, item) in &contract.routes.get_openapi().paths.paths {
             for (method, op) in self::fixed_path_operations!(item, as_ref) {

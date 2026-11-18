@@ -7,7 +7,7 @@ use axum::response::Response;
 use bytes::{BufMut as _, BytesMut};
 use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
 use serde::Serialize;
-use utoipa::openapi::{Content, Ref, RefOr, Response as ApiResponse, Schema};
+use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
 use utoipa::{IntoResponses, PartialSchema, ToSchema};
 
 use crate::problem::{Code, Problem, http_status};
@@ -18,6 +18,7 @@ const JSON: &str = "application/json";
 const TEXT: &str = "text/plain";
 
 pub trait ReplaySuccess: IntoResponses {
+    #[must_use]
     fn schemas() -> Vec<(String, RefOr<Schema>)> {
         Vec::new()
     }
@@ -33,23 +34,13 @@ pub struct CreatedJson<T> {
 
 impl<T: ToSchema> IntoResponses for CreatedJson<T> {
     fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
-        let schema = T::schema();
-        let body = if is_component_object(&schema) {
-            Ref::from_schema_name(T::name()).into()
-        } else {
-            schema
-        };
-        created_response(JSON, body)
+        created_response(JSON, T::schema())
     }
 }
 
 impl<T: ToSchema + Serialize> ReplaySuccess for CreatedJson<T> {
     fn schemas() -> Vec<(String, RefOr<Schema>)> {
         let mut schemas = Vec::new();
-        let schema = T::schema();
-        if is_component_object(&schema) {
-            schemas.push((T::name().into_owned(), schema));
-        }
         T::schemas(&mut schemas);
         schemas
     }
@@ -57,10 +48,6 @@ impl<T: ToSchema + Serialize> ReplaySuccess for CreatedJson<T> {
     fn capture(self) -> Result<ReplayableResponse, ReplayError> {
         ReplayableResponse::json(StatusCode::CREATED, self.headers, &self.body)
     }
-}
-
-fn is_component_object(schema: &RefOr<Schema>) -> bool {
-    matches!(schema, RefOr::T(Schema::Object(object)) if !object.properties.is_empty() || object.enum_values.is_some())
 }
 
 #[derive(Debug)]
@@ -263,10 +250,11 @@ mod tests {
             CreatedJson::<Vec<Customer>>::schemas(),
         );
         let schema = "/responses/201/content/application~1json/schema";
-        let customer_ref = customer.pointer(schema).unwrap()["$ref"].as_str().unwrap();
-        let customer_schema = customer
-            .pointer(customer_ref.strip_prefix('#').unwrap())
-            .unwrap();
+        let customer_schema = customer.pointer(schema).unwrap();
+        let boxed_address = CreatedJson::<Box<Address>>::responses();
+        let boxed_customer = CreatedJson::<Box<Customer>>::responses();
+        assert_eq!(boxed_address, CreatedJson::<Address>::responses());
+        assert_eq!(boxed_customer, CreatedJson::<Customer>::responses());
         let array_schema = &array.pointer(schema).unwrap()["items"];
         for (document, schema) in [(&customer, customer_schema), (&array, array_schema)] {
             let address_ref = schema["properties"]["address"]["$ref"].as_str().unwrap();

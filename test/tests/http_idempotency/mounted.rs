@@ -195,7 +195,7 @@ impl CreateWidgets for SqlWidgets {
             "rationale": "test-only idempotent operation composed as the adopter guide's feature path"
         }))
     ),
-    responses(ProtectedOperationProblemResponses)
+    responses((status = 201, description = "created", body = Widget), ProtectedOperationProblemResponses)
 )]
 async fn create_widget(
     request: CommandInput,
@@ -596,10 +596,12 @@ fn widget_contract_declares_protected_json_operations() {
             operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/NewWidget"
         );
-        assert_eq!(
-            operation["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/Widget"
-        );
+        let success = &operation["responses"]["201"]["content"]["application/json"]["schema"];
+        if method == "post" {
+            assert_eq!(success["$ref"], "#/components/schemas/Widget");
+        } else {
+            assert_eq!(success, &document["components"]["schemas"]["Widget"]);
+        }
         assert_eq!(
             operation["responses"]["415"]["content"]["application/problem+json"]["schema"]["$ref"],
             "#/components/schemas/Problem"

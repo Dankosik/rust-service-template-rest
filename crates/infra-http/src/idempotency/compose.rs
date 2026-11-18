@@ -39,11 +39,10 @@ where
     C: FreshCommand + 'static,
     F: Future<Output = Result<C, Box<Problem>>> + Send + 'static,
 {
-    let mut paths = std::mem::take(&mut document.paths);
     let operation = declaration::prepare(
-        &mut paths,
-        document.external_docs.take(),
+        &mut document,
         C::Success::responses(),
+        C::Success::schemas(),
     )?;
     metrics::describe_counter!(
         HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
@@ -78,7 +77,11 @@ where
                 }
             }
         };
-    let route = (C::Success::schemas(), paths, on(method, handler));
+    let route = (
+        Vec::new(),
+        std::mem::take(&mut document.paths),
+        on(method, handler),
+    );
     HttpContract::from_idempotent(document, route)
         .and_then(|contract| {
             contract.with_components(

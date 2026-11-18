@@ -40,7 +40,7 @@ pub(super) fn merge(target: &mut Components, incoming: Components) -> Result<(),
     Ok(())
 }
 
-pub(super) fn merge_map<T: PartialEq>(
+pub(crate) fn merge_map<T: PartialEq>(
     kind: &'static str,
     target: &mut BTreeMap<String, T>,
     incoming: impl IntoIterator<Item = (String, T)>,
