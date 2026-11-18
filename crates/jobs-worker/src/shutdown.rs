@@ -644,6 +644,8 @@ mod tests {
             cancel.cancelled().await;
             panic!("cleanup defect");
         });
+        let tracker = background.tracker.clone();
+        let failures = background.subscribe_failures();
         let config = worker_config(&[]).unwrap();
         let http = &config.http;
         let mut signals = Signals::install().unwrap();
@@ -652,7 +654,7 @@ mod tests {
             run(Plan {
                 http,
                 resources: Resources::default(),
-                background: background.clone(),
+                background,
                 signals: &mut signals,
                 deadline: Instant::now() + http.grace_period,
             }),
@@ -660,8 +662,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Outcome::Degraded);
-        assert!(background.tracker.is_empty());
-        assert_eq!(background.failure(), Some("cleanup_panics"));
+        assert!(tracker.is_empty());
+        assert_eq!(*failures.borrow(), Some("cleanup_panics"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -672,6 +674,8 @@ mod tests {
             let _held = ended;
             std::future::pending::<()>().await;
         });
+        let tracker = background.tracker.clone();
+        let failures = background.subscribe_failures();
         let config = worker_config(&[]).unwrap();
         let http = &config.http;
         let mut signals = Signals::install().unwrap();
@@ -681,7 +685,7 @@ mod tests {
             run(Plan {
                 http,
                 resources: Resources::default(),
-                background: background.clone(),
+                background,
                 signals: &mut signals,
                 deadline: started + http.grace_period,
             }),
@@ -693,10 +697,10 @@ mod tests {
             Instant::now().duration_since(started),
             Duration::from_secs(3)
         );
-        assert!(background.tracker.is_empty());
+        assert!(tracker.is_empty());
         std::assert_matches!(observed_end.now_or_never(), Some(Err(_)));
         assert!(
-            background.failure().is_none(),
+            failures.borrow().is_none(),
             "forced cancellation is not an unexpected return"
         );
     }

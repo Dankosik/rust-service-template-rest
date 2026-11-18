@@ -4,7 +4,8 @@ use infra_http_transport::Server;
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("background task {name} failed (panicked: {panicked})")]
 pub(crate) struct BackgroundFailure {
     pub(crate) name: &'static str,
     pub(crate) panicked: bool,

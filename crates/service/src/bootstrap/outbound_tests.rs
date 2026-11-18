@@ -167,25 +167,20 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let stop_peer = CancellationToken::new();
         let peer = tokio::spawn(serve_token_peer(token_peer, requests, stop_peer.clone()));
         let (installed, lifetime) = oneshot::channel();
-        let registration = crate::ServiceRegistration {
-            http_resource: Some(Box::new(move |_, background| {
-                let registration = Arc::new(Registration::prepare_for_test_http(token_options(
-                    peer_addr,
-                ))?);
-                let lifetime = Arc::downgrade(&registration);
-                let tokens = background.service_tokens(
-                    registration,
-                    ServiceTokenTarget::default(),
-                    "https://127.0.0.1:0".parse().unwrap(),
-                );
-                let resource = build(&tokens);
-                installed.send((lifetime, tokens)).unwrap();
-                Ok(resource)
-            })),
-            // template:begin grpc:service-test-outbound-registration-defaults
-            grpc: None,
-            // template:end grpc:service-test-outbound-registration-defaults
-        };
+        let registration = crate::ServiceRegistration::for_http_resource(move |_, background| {
+            let registration = Arc::new(Registration::prepare_for_test_http(token_options(
+                peer_addr,
+            ))?);
+            let lifetime = Arc::downgrade(&registration);
+            let tokens = background.service_tokens(
+                registration,
+                ServiceTokenTarget::default(),
+                "https://127.0.0.1:0".parse().unwrap(),
+            );
+            let resource = build(&tokens);
+            installed.send((lifetime, tokens)).unwrap();
+            Ok(resource)
+        });
 
         let config = test_config(&[
             ("APP__HTTP__ADDR", "127.0.0.1:0"),
