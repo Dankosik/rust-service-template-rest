@@ -89,6 +89,14 @@ pub async fn close_pools(pools: &[&PgPool]) {
     }
 }
 
+pub fn propagate_join_panic(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && let Ok(payload) = error.try_into_panic()
+    {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 pub async fn poll_until<T>(
     what: &str,
     bound: Duration,

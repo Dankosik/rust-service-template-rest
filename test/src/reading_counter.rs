@@ -178,8 +178,11 @@ pub enum Error {
     Transaction(TxError),
     #[from]
     Json(serde_json::Error),
+    #[from]
     Enqueue(infra_jobs::EnqueueError),
+    #[from]
     Outbox(infra_messaging::outbox::OutboxEnqueueError),
+    #[from]
     Webhook(infra_webhooks::outbound::OutboundError),
 }
 impl Error {
@@ -255,14 +258,11 @@ async fn enqueue_intents(
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
-    let local_job_id = match infra_jobs::enqueue(tx, operation, EnqueueOptions::default())
-        .await
-        .map_err(Error::Enqueue)?
-    {
+    let local_job_id = match infra_jobs::enqueue(tx, operation, EnqueueOptions::default()).await? {
         Enqueued::Created(id) => id.to_string(),
         Enqueued::Duplicate => return Err(Error::MissingIntent),
     };
-    prepared.event.enqueue(tx).await.map_err(Error::Outbox)?;
+    prepared.event.enqueue(tx).await?;
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND COALESCE(payload_text::jsonb, payload)->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
     let webhook_job_id = outbound
@@ -272,8 +272,7 @@ async fn enqueue_intents(
             prepared.event.payload().to_vec(),
             JSON_CONTENT_TYPE,
         )
-        .await
-        .map_err(Error::Webhook)?
+        .await?
         .to_string();
     Ok(Accepted {
         operation: operation.clone(),
@@ -594,9 +593,7 @@ async fn enqueue_pressure(dsn: &Dsn) -> Result<(), Error> {
     .await
     .map_err(|_| Error::Control)?;
     let result = in_tx(&pool, async |tx| -> Result<(), Error> {
-        let _ = infra_jobs::enqueue(tx, &HoldConnections, EnqueueOptions::default())
-            .await
-            .map_err(Error::Enqueue)?;
+        let _ = infra_jobs::enqueue(tx, &HoldConnections, EnqueueOptions::default()).await?;
         Ok(())
     })
     .await;

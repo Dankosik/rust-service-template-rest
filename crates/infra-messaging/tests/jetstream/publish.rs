@@ -3,7 +3,7 @@ use infra_messaging::{EnvelopeError, PublishRejection};
 
 #[tokio::test]
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
-    let fixture = Fixture::create_with_source_limit(false, 1).await;
+    let fixture = Fixture::create_with_source_limit(Topology::StreamsOnly, 1).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, None, 1024),
@@ -63,7 +63,7 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
 
 #[tokio::test]
 async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let prepared = fixture
         .publication
@@ -116,7 +116,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
 
 #[tokio::test]
 async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let client = async_nats::connect(nats_url()).await.unwrap();
     let max_payload_bytes = client.server_info().max_payload.min(64 * 1024 * 1024) - 8192;
     client.drain().await.unwrap();
@@ -195,7 +195,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
 
 #[tokio::test]
 async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplicate() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(

@@ -31,7 +31,7 @@ use infra_http::{
 };
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
-use integration_tests::dsn_for;
+use integration_tests::{dsn_for, propagate_join_panic};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 use sqlx::Executor as _;
 use tls_test_support::TlsMaterial;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
@@ -49,7 +49,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
 use utoipa::ToSchema;
 
-use crate::commit_proxy::{CommitProxy, Fault, ReadyBoundary};
+use crate::commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close_pools, count, make_read_only, template_pool,
 };
@@ -392,15 +392,7 @@ impl Provider {
             self.task.abort();
             let _ = (&mut self.task).await;
         }
-        propagate_provider_panic(result.expect("the provider's tasks to join"));
-    }
-}
-
-fn propagate_provider_panic(result: Result<(), JoinError>) {
-    if let Err(err) = result
-        && err.is_panic()
-    {
-        std::panic::resume_unwind(err.into_panic());
+        propagate_join_panic(result.expect("the provider's tasks to join"));
     }
 }
 
@@ -428,7 +420,7 @@ async fn serve(
         tokio::select! {
             () = cancel.cancelled() => break,
             Some(result) = connections.join_next(), if !connections.is_empty() => {
-                propagate_provider_panic(result);
+                propagate_join_panic(result);
             }
             accepted = listener.accept() => {
                 let Ok((socket, _)) = accepted else {
@@ -447,7 +439,7 @@ async fn serve(
         }
     }
     while let Some(result) = connections.join_next().await {
-        propagate_provider_panic(result);
+        propagate_join_panic(result);
     }
 }
 
@@ -1798,7 +1790,7 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
     let input = json!({"name": "taken", "color": "unique"});
     let key = "k-refused";
 
-    proxy.arm(Fault::ForwardThenDrop);
+    proxy.arm(Fault::ForwardThenDrop, Boundary::Commit(None));
     let first = mounted.create(ALICE, key, &input, "req-lost").await;
     assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
     problem(
@@ -2352,7 +2344,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
     let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    proxy.arm(fault);
+    proxy.arm(fault, Boundary::Commit(None));
     let first = bounded("the uncertain request answers", async {
         mounted
             .create(ALICE, "k-uncertain", &input, "req-uncertain")

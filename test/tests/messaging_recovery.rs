@@ -406,7 +406,7 @@ async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool
         let (proxy, proxied) = commit_proxy::CommitProxy::start_for(&pool).await;
         let business = pool_at(&proxied).await;
         let original = event(&format!("uncertain-{index}"), 5);
-        proxy.arm(fault);
+        proxy.arm(fault, commit_proxy::Boundary::Commit(None));
         let error = timeout(WAIT, effect::attempt(&business, &original))
             .await
             .unwrap()

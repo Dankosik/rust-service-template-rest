@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn a_fresh_probe_rejects_silent_stream_metadata_then_recovers() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let withhold_stream = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let withhold = Arc::clone(&withhold_stream);
     let source_stream = fixture.stream.clone();
@@ -43,7 +43,7 @@ async fn a_fresh_probe_rejects_silent_stream_metadata_then_recovers() {
 
 #[tokio::test]
 async fn a_completed_native_runner_refuses_the_retained_probe() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let messaging = Messaging::connect(
         options(&fixture, None, 1024),
         deadline(),

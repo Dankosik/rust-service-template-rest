@@ -42,7 +42,7 @@ fn operator_metadata_matches_the_deployment_contract_vector() {
 
 #[tokio::test]
 async fn concurrent_replicas_admit_the_same_new_durable() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -111,7 +111,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
 
 #[tokio::test]
 async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let other_subject = format!("{}.other", fixture.subject);
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -167,7 +167,7 @@ async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage
         (Duration::from_secs(60), false, "durable_inactive_threshold"),
         (Duration::ZERO, true, "durable_memory_storage"),
     ] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let mut registered = fixture.registry.clone();
         registered
             .register(&fixture.route, |_, _| async { Ok(()) })
@@ -238,7 +238,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         Change::DlqSubject,
         Change::IdleExpiry,
     ] {
-        let fixture = Fixture::create(true).await;
+        let fixture = Fixture::create(Topology::WithDurable).await;
         let cancel = CancellationToken::new();
         let messaging = Box::pin(Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -313,7 +313,7 @@ impl EventPayload for PublishedElsewhere {
 
 #[tokio::test]
 async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -357,7 +357,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
 
 #[tokio::test]
 async fn durable_deleted_between_pulls_stops_the_consumer() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -393,7 +393,7 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
 
 #[tokio::test]
 async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -438,7 +438,7 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
 
 #[tokio::test]
 async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let pull_subject = format!(
         "$JS.API.CONSUMER.MSG.NEXT.{}.{}",
         fixture.stream, fixture.durable
@@ -533,7 +533,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
 
 #[tokio::test]
 async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let refuse_info = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let drop_info = Arc::clone(&refuse_info);
     let stream = fixture.stream.clone();
@@ -617,7 +617,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
 #[tokio::test]
 async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
     for admit_delivery in [false, true] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let refuse_info = Arc::new(AtomicBool::new(false));
         let drop_info = Arc::clone(&refuse_info);
         let stream = fixture.stream.clone();

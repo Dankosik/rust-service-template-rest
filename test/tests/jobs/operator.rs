@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::commit_proxy::{CommitProxy, Fault};
+use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const KIND: &str = "test.operator";
 const SECRET: &str = "private-job-content";
@@ -623,7 +623,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         let target = failed(&pool, Uuid::new_v4(), "uncertain").await;
         let before = stored(&pool, &target).await;
         let (proxy, proxied) = proxied_pool(&pool).await;
-        proxy.arm(fault);
+        proxy.arm(fault, Boundary::Commit(None));
         let error = super::bounded(
             "the uncertain redrive",
             in_tx(&proxied, async |tx| operator::redrive(tx, &target).await),

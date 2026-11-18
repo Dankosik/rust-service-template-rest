@@ -21,14 +21,16 @@ use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use backon::{ConstantBuilder, Retryable};
-use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
+use commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
     PostgresProbe, SessionSettingsSource, TxError, TxOptions, in_tx, in_tx_with,
     in_tx_with_deadline, refresh_password_periodically, sqlstate,
 };
-use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, url_for};
+use integration_tests::{
+    DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, propagate_join_panic, url_for,
+};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{AssertSqlSafe, Connection, Executor};
@@ -315,7 +317,10 @@ async fn silent_session_readback_rejects_admission_before_the_relay_is_released(
         SessionSettingsSource::Server,
     ] {
         let (proxy, dsn) = CommitProxy::start_for(&pool).await;
-        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        proxy.arm(
+            Fault::ForwardThenSilence,
+            Boundary::Autocommit("pg_settings"),
+        );
         let options = PoolOptions {
             max_connections: NonZeroU32::MIN,
             application_name: APP,
@@ -368,7 +373,10 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
             wait_order: infra_postgres::WaitOrder::Arrival,
         };
         let ours = infra_postgres::prepare_pool(&proxied, &options);
-        proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
+        proxy.arm(
+            Fault::ForwardThenSilence,
+            Boundary::Autocommit("pg_settings"),
+        );
         let started = Instant::now();
         let mut admission = Box::pin(infra_postgres::admit_pool(&ours, &options));
         tokio::select! {
@@ -533,7 +541,10 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
             .unwrap();
         let mut pending = Box::pin(async {
             if boundary == "pooled statement" {
-                proxy.arm_autocommit(Fault::ForwardThenSilence, "pool_return_finality");
+                proxy.arm(
+                    Fault::ForwardThenSilence,
+                    Boundary::Autocommit("pool_return_finality"),
+                );
                 sqlx::query("INSERT INTO pool_return_finality VALUES ($1)")
                     .bind(boundary)
                     .execute(&ours)
@@ -541,9 +552,12 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
                 return Ok::<(), AppError>(());
             }
             if boundary == "transaction statement" {
-                proxy.arm_autocommit(Fault::ForwardThenSilence, "pool_return_finality");
+                proxy.arm(
+                    Fault::ForwardThenSilence,
+                    Boundary::Autocommit("pool_return_finality"),
+                );
             } else if boundary == "commit" {
-                proxy.arm(Fault::ForwardThenSilence);
+                proxy.arm(Fault::ForwardThenSilence, Boundary::Commit(None));
             }
             in_tx(&ours, async |tx| {
                 sqlx::query("INSERT INTO pool_return_finality VALUES ($1)")
@@ -552,7 +566,7 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
                     .await?;
                 if boundary == "pre-commit" {
                     let _ = tx.connection();
-                    proxy.arm_autocommit(Fault::ForwardThenSilence, "SELECT 1");
+                    proxy.arm(Fault::ForwardThenSilence, Boundary::Autocommit("SELECT 1"));
                 }
                 Ok::<(), AppError>(())
             })
@@ -2095,14 +2109,6 @@ impl PostgresTlsMaterial {
     }
 }
 
-fn propagate_tls_relay_panic(result: Result<(), tokio::task::JoinError>) {
-    if let Err(err) = result
-        && err.is_panic()
-    {
-        std::panic::resume_unwind(err.into_panic());
-    }
-}
-
 impl PostgresTlsRelay {
     fn start(
         listener: tokio::net::TcpListener,
@@ -2120,7 +2126,7 @@ impl PostgresTlsRelay {
                 tokio::select! {
                     () = run_cancel.cancelled() => break,
                     Some(result) = connections.join_next(), if !connections.is_empty() => {
-                        propagate_tls_relay_panic(result);
+                        propagate_join_panic(result);
                     }
                     accepted = listener.accept() => {
                         let (socket, _) = accepted.unwrap();
@@ -2136,7 +2142,7 @@ impl PostgresTlsRelay {
                 }
             }
             while let Some(result) = connections.join_next().await {
-                propagate_tls_relay_panic(result);
+                propagate_join_panic(result);
             }
         });
         Self {
@@ -2178,7 +2184,7 @@ impl PostgresTlsRelay {
             self.task.abort();
             let _ = (&mut self.task).await;
         }
-        propagate_tls_relay_panic(result.expect("all TLS relay tasks terminate"));
+        propagate_join_panic(result.expect("all TLS relay tasks terminate"));
         assert!(
             self.server_names
                 .lock()

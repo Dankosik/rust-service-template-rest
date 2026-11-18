@@ -443,7 +443,7 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
 
 #[tokio::test]
 async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localhost_address() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let roots = tempfile::tempdir().expect("temporary root directory");
     let root_path = roots.path().join("nats-ca.pem");
     let (ca_a, tls_a) = tls_identity("localhost");
@@ -538,7 +538,7 @@ async fn close_waits_for_the_terminal_connection_event() {
     use std::task::Poll;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let control_failed = Arc::new(AtomicBool::new(false));
@@ -606,7 +606,7 @@ async fn close_waits_for_the_terminal_connection_event() {
 
 #[tokio::test]
 async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let topology_reached = Arc::new(Notify::new());
     let reached = Arc::clone(&topology_reached);
     let relay = AckDroppingRelay::start_filtering(move |payload| {
@@ -650,7 +650,7 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
     use std::task::Poll;
 
     for cancel_at_entry in [false, true] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let (_capture, logged) = capture_logs();
         let messaging = Box::pin(Messaging::connect(
             options(&fixture, None, 1024),
@@ -712,7 +712,7 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
     reason = "one retained-client scenario owns outage, contending publication, recovery, and cleanup"
 )]
 async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let relay = OutageRelay::start().await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -838,7 +838,7 @@ struct RestartCursor {
 #[ignore = "the messaging suite restarts its private broker between cursor checks"]
 async fn save_ack_floor_before_restart() {
     let receipt = std::env::var("NATS_CURSOR_RECEIPT").unwrap();
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),

@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use infra_postgres::{Dsn, PgPool};
-use integration_tests::{DATABASE_URL, dsn_for, url_for};
+use integration_tests::{DATABASE_URL, dsn_for, propagate_join_panic, url_for};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinSet;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
@@ -29,39 +29,15 @@ pub(crate) enum Fault {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Armed {
-    fault: Fault,
-    boundary: Boundary,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Boundary {
+pub(crate) enum Boundary {
     Commit(Option<&'static str>),
     Autocommit(&'static str),
-}
-
-impl From<Fault> for Armed {
-    fn from(fault: Fault) -> Self {
-        Self {
-            fault,
-            boundary: Boundary::Commit(None),
-        }
-    }
-}
-
-impl From<(Fault, &'static str)> for Armed {
-    fn from((fault, statement): (Fault, &'static str)) -> Self {
-        Self {
-            fault,
-            boundary: Boundary::Commit(Some(statement)),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Arming {
     Idle,
-    Armed(Armed),
+    Armed { fault: Fault, boundary: Boundary },
     Fired(Fault),
 }
 
@@ -223,28 +199,18 @@ impl CommitProxy {
         self.address
     }
 
-    pub(crate) fn arm(&self, fault: impl Into<Armed>) {
+    pub(crate) fn arm(&self, fault: Fault, boundary: Boundary) {
         self.silence
             .fault_baseline
             .store(*self.silence.entered.borrow(), Ordering::Release);
-        *lock(&self.arming) = Arming::Armed(fault.into());
-    }
-
-    pub(crate) fn arm_autocommit(&self, fault: Fault, statement: &'static str) {
-        self.silence
-            .fault_baseline
-            .store(*self.silence.entered.borrow(), Ordering::Release);
-        *lock(&self.arming) = Arming::Armed(Armed {
-            fault,
-            boundary: Boundary::Autocommit(statement),
-        });
+        *lock(&self.arming) = Arming::Armed { fault, boundary };
     }
 
     pub(crate) fn fired(&self) -> Option<Fault> {
         let state = *lock(&self.arming);
         match state {
             Arming::Fired(fault) => Some(fault),
-            Arming::Idle | Arming::Armed(_) => None,
+            Arming::Idle | Arming::Armed { .. } => None,
         }
     }
 
@@ -293,14 +259,6 @@ impl CommitProxy {
         }
         let join = result.expect("the commit proxy's tasks join");
         propagate_join_panic(join);
-    }
-}
-
-fn propagate_join_panic(result: Result<(), JoinError>) {
-    if let Err(err) = result
-        && err.is_panic()
-    {
-        std::panic::resume_unwind(err.into_panic());
     }
 }
 
@@ -489,13 +447,13 @@ impl Frontend {
         }
         let commit = message.first() == Some(&b'Q') && sql == Some(COMMIT);
         let mut arming = lock(arming);
-        let Arming::Armed(armed) = *arming else {
+        let Arming::Armed { fault, boundary } = *arming else {
             if commit {
                 self.matched = false;
             }
             return None;
         };
-        let (statement, at_boundary) = match armed.boundary {
+        let (statement, at_boundary) = match boundary {
             Boundary::Commit(statement) => (statement, commit),
             Boundary::Autocommit(statement) => (
                 Some(statement),
@@ -513,11 +471,11 @@ impl Frontend {
         if !matches {
             return None;
         }
-        *arming = match armed.fault {
+        *arming = match fault {
             Fault::ForwardThenCorruptReady => Arming::Idle,
             fault => Arming::Fired(fault),
         };
-        Some(armed.fault)
+        Some(fault)
     }
 
     fn claim_ready(&mut self, message: &[u8], hold: &ReadyHold) -> bool {

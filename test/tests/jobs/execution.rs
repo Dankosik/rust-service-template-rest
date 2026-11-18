@@ -20,7 +20,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
 use super::AttemptError;
-use super::commit_proxy::{CommitProxy, Fault};
+use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const POLL: Duration = Duration::from_millis(50);
 const RELEASE_BUDGET: Duration = Duration::from_secs(2);
@@ -549,7 +549,10 @@ async fn x1_unknown_committed_claim_never_dispatches_a_handler(pool: PgPool) {
     let (proxy, worker) = proxied_pool(&pool, 1).await;
     prepare(&jobs).await;
     let id = enqueue_one(&jobs, ProbeAction::WaitForCancellation).await;
-    proxy.arm_autocommit(Fault::ForwardThenDrop, "WITH policy AS");
+    proxy.arm(
+        Fault::ForwardThenDrop,
+        Boundary::Autocommit("WITH policy AS"),
+    );
     let run = start(&worker, probe_registry(2, DEFAULT_TIMEOUT), 1);
 
     let claimed = until(
@@ -1128,7 +1131,10 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
     .await;
     run.started.stop_claiming();
     super::bounded("the engine drains", run.started.drained()).await;
-    proxy.arm_autocommit(Fault::ForwardThenSilence, "UNLISTEN *");
+    proxy.arm(
+        Fault::ForwardThenSilence,
+        Boundary::Autocommit("UNLISTEN *"),
+    );
 
     run.cancel.cancel();
     run.tracker.close();
@@ -1736,9 +1742,9 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
         gate.entered.notified(),
     )
     .await;
-    proxy.arm_autocommit(
+    proxy.arm(
         Fault::ForwardThenDrop,
-        "UPDATE background_jobs AS job SET state = 'completed'",
+        Boundary::Autocommit("UPDATE background_jobs AS job SET state = 'completed'"),
     );
     gate.complete.notify_one();
 
@@ -1829,9 +1835,9 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     assert!(view.error_summary.is_none());
     assert!(!view.claim_cleared);
 
-    proxy.arm_autocommit(
+    proxy.arm(
         Fault::ForwardThenDrop,
-        "UPDATE background_jobs AS job SET state = 'completed'",
+        Boundary::Autocommit("UPDATE background_jobs AS job SET state = 'completed'"),
     );
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;
@@ -1881,7 +1887,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
         gate.business_written.notified(),
     )
     .await;
-    proxy.arm((fault, "SET state = 'completed'"));
+    proxy.arm(fault, Boundary::Commit(Some("SET state = 'completed'")));
     gate.complete.notify_one();
     let first = until(
         "the uncertain transaction reaches a fenced outcome",

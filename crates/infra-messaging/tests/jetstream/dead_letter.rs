@@ -21,7 +21,7 @@ fn permanent_transfer_timestamp(scrape: &str) -> Option<f64> {
 async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_identity() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let _local_recorder = metrics::set_default_local_recorder(&recorder);
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -129,7 +129,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
 async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without_another_dlq_record()
  {
     for lose_dlq_ack in [true, false] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let relay = if lose_dlq_ack {
             AckDroppingRelay::start(&fixture.dlq_stream).await
         } else {
@@ -203,7 +203,7 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
 
 #[tokio::test]
 async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_to_dlq() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -285,7 +285,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
 #[tokio::test]
 async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_differ_in_the_span() {
     let exporter = install_tracing();
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -367,7 +367,7 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
 
 #[tokio::test]
 async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_running() {
-    let fixture = Fixture::create_with_limits(true, 10, 1).await;
+    let fixture = Fixture::create_with_limits(Topology::WithDurable, 10, 1).await;
     fixture
         .jetstream
         .publish(
@@ -437,7 +437,7 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
 
 #[tokio::test]
 async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking_the_source() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -525,7 +525,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
 
 #[tokio::test]
 async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -625,7 +625,7 @@ async fn retain_record_before_shrinking_source(
 
 #[tokio::test]
 async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -690,7 +690,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
 
 #[tokio::test]
 async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let retained = retain_record_before_shrinking_source(&fixture, &cancel).await;
     let messaging = Box::pin(Messaging::connect(
@@ -735,7 +735,7 @@ async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
 
 #[tokio::test]
 async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowledged() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let _oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
     let dlq = fixture

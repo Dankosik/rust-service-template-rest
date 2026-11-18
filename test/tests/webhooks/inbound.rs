@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
-use super::commit_proxy::{CommitProxy, Fault};
+use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const ENDPOINT: &str = "partner/a?#";
 const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
@@ -483,7 +483,10 @@ async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_conve
         let previous = receipt_count(&pool).await;
         let (proxy, proxied) = proxied_pool(&pool).await;
         let headers = signed_headers(&keys, message_id, body);
-        proxy.arm((fault, "INSERT INTO webhook_receipts"));
+        proxy.arm(
+            fault,
+            Boundary::Commit(Some("INSERT INTO webhook_receipts")),
+        );
         assert_eq!(
             receiver(proxied.clone())
                 .receive_bytes(
@@ -746,7 +749,10 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
         consumer.entered.notified(),
     )
     .await;
-    proxy.arm((Fault::ForwardThenDrop, "SET state = 'completed'"));
+    proxy.arm(
+        Fault::ForwardThenDrop,
+        Boundary::Commit(Some("SET state = 'completed'")),
+    );
     consumer.release.notify_one();
     poll_until(
         "the unknown processor attempt ends",

@@ -5,12 +5,12 @@ use health::{Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
-use integration_tests::poll_until;
+use integration_tests::{poll_until, propagate_join_panic};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::watch,
-    task::{JoinError, JoinHandle, JoinSet},
+    task::{JoinHandle, JoinSet},
     time::{Instant, timeout},
 };
 use tokio_util::{
@@ -282,14 +282,6 @@ impl Instance {
     }
 }
 
-fn propagate_link_panic(result: Result<(), JoinError>) {
-    if let Err(err) = result
-        && err.is_panic()
-    {
-        std::panic::resume_unwind(err.into_panic());
-    }
-}
-
 struct DependencyLink {
     address: SocketAddr,
     available: watch::Sender<bool>,
@@ -313,7 +305,7 @@ impl DependencyLink {
                     tokio::select! {
                         () = cancel.cancelled() => break,
                         Some(result) = connections.join_next(), if !connections.is_empty() => {
-                            propagate_link_panic(result);
+                            propagate_join_panic(result);
                         }
                         result = listener.accept() => {
                             let accepted = result.unwrap();
@@ -338,7 +330,7 @@ impl DependencyLink {
                     }
                 }
                 while let Some(result) = connections.join_next().await {
-                    propagate_link_panic(result);
+                    propagate_join_panic(result);
                 }
             }
         });
@@ -362,7 +354,7 @@ impl DependencyLink {
             self.task.abort();
             let _ = (&mut self.task).await;
         }
-        propagate_link_panic(result.unwrap());
+        propagate_join_panic(result.unwrap());
     }
 }
 
