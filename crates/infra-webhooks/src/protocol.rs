@@ -92,6 +92,10 @@ impl KeyRing {
         Ok(Self::new(active, previous))
     }
 
+    fn keys(&self) -> impl Iterator<Item = &SigningKey> {
+        std::iter::once(&self.active).chain(self.previous.iter())
+    }
+
     pub fn signatures(
         &self,
         message_id: &[u8],
@@ -102,15 +106,12 @@ impl KeyRing {
         ensure_message_id(message_id)?;
         let candidate_bytes = SIGNATURE_PREFIX.len() + ENCODED_TAG_BYTES;
         let mut signatures = String::with_capacity(2 * candidate_bytes + 1);
-        signatures.push_str(SIGNATURE_PREFIX);
-        STANDARD.encode_string(
-            tag(&self.active, message_id, timestamp, body),
-            &mut signatures,
-        );
-        if let Some(previous) = &self.previous {
-            signatures.push(' ');
+        for key in self.keys() {
+            if !signatures.is_empty() {
+                signatures.push(' ');
+            }
             signatures.push_str(SIGNATURE_PREFIX);
-            STANDARD.encode_string(tag(previous, message_id, timestamp, body), &mut signatures);
+            STANDARD.encode_string(tag(key, message_id, timestamp, body), &mut signatures);
         }
         Ok(signatures)
     }
@@ -134,7 +135,7 @@ impl KeyRing {
             let expected = tag(key, message_id.as_bytes(), timestamp, body);
             matches_v1_signature(headers, &expected)
         };
-        if matches(&self.active) || self.previous.as_ref().is_some_and(matches) {
+        if self.keys().any(matches) {
             return Ok(VerifiedMessage {
                 message_id: Bytes::copy_from_slice(message_id.as_bytes()),
                 timestamp,
