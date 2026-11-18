@@ -29,9 +29,11 @@ impl Deadline {
 
     #[must_use]
     pub fn remaining_at(self, now: Instant) -> Duration {
-        self.budget
-            .saturating_add(self.origin.saturating_duration_since(now))
-            .saturating_sub(now.saturating_duration_since(self.origin))
+        if now < self.origin {
+            self.budget.saturating_add(self.origin - now)
+        } else {
+            self.budget.saturating_sub(now - self.origin)
+        }
     }
 
     #[must_use]

@@ -38,10 +38,10 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
 /// RFC 6750 §2.1
 #[must_use]
 pub fn is_b64token(token: &[u8]) -> bool {
-    let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
-    let value = &token[..token.len() - padding];
-    !value.is_empty()
-        && value.iter().fold(true, |valid, byte| {
+    let padding_len = token.iter().rev().take_while(|byte| **byte == b'=').count();
+    let unpadded = &token[..token.len() - padding_len];
+    !unpadded.is_empty()
+        && unpadded.iter().fold(true, |valid, byte| {
             valid
                 & (byte.is_ascii_alphanumeric()
                     | matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/'))

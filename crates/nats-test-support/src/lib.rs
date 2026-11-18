@@ -215,7 +215,7 @@ impl AckDroppingRelay {
     pub async fn start_source_ack(stream: &str, durable: &str, dropped: DroppedAck) -> Self {
         let identity = format!(".{stream}.{durable}.");
         let reply_subject = Arc::new(Mutex::new(None::<String>));
-        let sent_reply = Arc::clone(&reply_subject);
+        let request_reply_subject = Arc::clone(&reply_subject);
         let mut seen_request = false;
         Self::start_with_filters(
             move |line, payload| {
@@ -230,7 +230,7 @@ impl AckDroppingRelay {
                     && payload == b"+ACK"
                 {
                     seen_request = true;
-                    *sent_reply.lock().expect("ACK reply lock") = Some(reply.to_owned());
+                    *request_reply_subject.lock().expect("ACK reply lock") = Some(reply.to_owned());
                     return dropped == DroppedAck::Request;
                 }
                 false
@@ -338,10 +338,7 @@ async fn relay_frames(
             writer.write_all(&line).await?;
             continue;
         };
-        let mut payload = vec![0; length];
-        reader.read_exact(&mut payload).await?;
-        let mut ending = [0; 2];
-        reader.read_exact(&mut ending).await?;
+        let (payload, ending) = read_payload_and_ending(&mut reader, length).await?;
         if withhold(&line, &payload) {
             dropped.cancel();
         } else {
@@ -350,6 +347,17 @@ async fn relay_frames(
             writer.write_all(&ending).await?;
         }
     }
+}
+
+async fn read_payload_and_ending(
+    reader: &mut (impl AsyncRead + Unpin),
+    length: usize,
+) -> std::io::Result<(Vec<u8>, [u8; 2])> {
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload).await?;
+    let mut ending = [0; 2];
+    reader.read_exact(&mut ending).await?;
+    Ok((payload, ending))
 }
 
 async fn relay_authenticated_connection(
@@ -389,22 +397,17 @@ async fn relay_authenticated_connection(
             }
             client_write.write_all(&line).await?;
             if let Some(length) = payload_length(&line) {
-                let mut payload = vec![0; length];
-                broker_read.read_exact(&mut payload).await?;
-                let mut ending = [0; 2];
-                broker_read.read_exact(&mut ending).await?;
+                let (payload, ending) = read_payload_and_ending(&mut broker_read, length).await?;
                 client_write.write_all(&payload).await?;
                 client_write.write_all(&ending).await?;
             }
         }
     };
-    tokio::pin!(requests);
-    tokio::pin!(replies);
     tokio::select! {
         () = stop.cancelled() => {},
         () = close.cancelled() => {},
-        _ = &mut requests => {},
-        _ = &mut replies => {},
+        _ = requests => {},
+        _ = replies => {},
     }
 }
 
