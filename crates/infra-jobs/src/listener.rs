@@ -35,28 +35,31 @@ async fn listen(shared: &Shared, engine: &Engine, pool: &PgPool) -> ! {
     loop {
         let next = Instant::now() + POLL_INTERVAL;
         follow_connect_options(&shared.pool, pool);
-        let ended = match subscribe(pool).await {
-            Ok(mut listener) => {
-                observe_recovery(shared, Operation::Listen);
-                for group in engine.groups() {
-                    group.claim_wake.notify_one();
-                }
-                loop {
-                    match listener.try_recv().await {
-                        Ok(Some(notification)) => {
-                            if let Some(group) = engine.group_for_kind(notification.payload()) {
-                                group.claim_wake.notify_one();
-                            }
-                        }
-                        Ok(None) => break connection_lost(),
-                        Err(error) => break error,
-                    }
-                }
-            }
-            Err(error) => error,
-        };
+        let ended = listen_once(shared, engine, pool).await;
         observe_failure(shared, Operation::Listen, &ended.into());
         tokio::time::sleep_until(next).await;
+    }
+}
+
+async fn listen_once(shared: &Shared, engine: &Engine, pool: &PgPool) -> sqlx::Error {
+    let mut listener = match subscribe(pool).await {
+        Ok(listener) => listener,
+        Err(error) => return error,
+    };
+    observe_recovery(shared, Operation::Listen);
+    for group in engine.groups() {
+        group.claim_wake.notify_one();
+    }
+    loop {
+        match listener.try_recv().await {
+            Ok(Some(notification)) => {
+                if let Some(group) = engine.group_for_kind(notification.payload()) {
+                    group.claim_wake.notify_one();
+                }
+            }
+            Ok(None) => return connection_lost(),
+            Err(error) => return error,
+        }
     }
 }
 

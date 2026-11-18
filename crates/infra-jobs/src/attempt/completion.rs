@@ -148,7 +148,7 @@ impl CompletionBatch {
             .collect()
     }
 
-    fn finish(mut self, results: Vec<CompletionReply>) {
+    fn finish(mut self, results: impl IntoIterator<Item = CompletionReply>) {
         let replies = self.retire();
         drop(self);
         for (reply, result) in replies.into_iter().zip(results) {
@@ -245,14 +245,13 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
         Some(Ok(positions)) => {
             let results = written_by_position(&positions, batch.queued.len())
                 .into_iter()
-                .map(Ok)
-                .collect();
+                .map(Ok);
             batch.finish(results);
         }
         Some(Err(error)) => {
             observe_failure(shared, Operation::Record, &error);
             drop(error);
-            let results = vec![Err(Unacknowledged); batch.queued.len()];
+            let results = std::iter::repeat_n(Err(Unacknowledged), batch.queued.len());
             batch.finish(results);
         }
         None => {}

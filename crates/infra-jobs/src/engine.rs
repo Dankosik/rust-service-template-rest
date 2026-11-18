@@ -127,8 +127,7 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    #[must_use]
-    pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
+    fn init_metrics(&self) -> Vec<&'static str> {
         crate::attempt::describe_metrics();
         for group in self.groups() {
             group.owned_attempts.bind();
@@ -148,6 +147,12 @@ impl Engine {
             metrics::Unit::Count,
             "Failed worker database operations"
         );
+        kinds
+    }
+
+    #[must_use]
+    pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
+        let kinds = self.init_metrics();
         let groups = 1 + self.additional.len();
         tracing::info!(worker.id = %self.shared.worker_id, groups, "jobs_engine_starting");
         let engine = Arc::new(self);

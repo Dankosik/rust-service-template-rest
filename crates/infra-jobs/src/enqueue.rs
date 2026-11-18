@@ -166,17 +166,20 @@ pub async fn compare_live_payload<K: JobKind>(
         payload_text == prepared.payload
     } else {
         let legacy = stored.legacy_payload.as_deref().unwrap_or_default();
-        let decoded =
-            serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;
-        let mut writer = PayloadWriter::default();
-        serde_json::to_writer(&mut writer, &decoded).map_err(EnqueueError::Serialize)?;
-        writer.total == prepared.payload.len() && writer.retained == prepared.payload.as_bytes()
+        legacy_payload_matches::<K>(legacy, &prepared.payload)?
     };
     Ok(if same {
         LivePayloadComparison::Same
     } else {
         LivePayloadComparison::Different
     })
+}
+
+fn legacy_payload_matches<K: JobKind>(legacy: &str, expected: &str) -> Result<bool, EnqueueError> {
+    let decoded = serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;
+    let mut writer = PayloadWriter::default();
+    serde_json::to_writer(&mut writer, &decoded).map_err(EnqueueError::Serialize)?;
+    Ok(writer.total == expected.len() && writer.retained == expected.as_bytes())
 }
 
 #[derive(Debug)]
