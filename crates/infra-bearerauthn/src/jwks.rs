@@ -219,14 +219,12 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
             *bound = None;
         }
     }
-    let mut rejected = 0;
+    let original_len = keys.len();
     keys.retain(|key| {
-        let conflict = key.algorithm.family() == KeyFamily::Rsa
-            && bindings.get(key.public_key.as_ref()) == Some(&None);
-        rejected += u64::from(conflict);
-        !conflict
+        key.algorithm.family() != KeyFamily::Rsa
+            || bindings.get(key.public_key.as_ref()) != Some(&None)
     });
-    rejected
+    (original_len - keys.len()) as u64
 }
 
 fn admit_key(
@@ -275,20 +273,7 @@ fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
         _ => return false,
     };
     let operations = jwk.common.key_operations.as_deref();
-    if let Some(ops) = operations
-        && (ops.is_empty()
-            || ops.iter().enumerate().any(|(i, op)| {
-                !matches!(
-                    op,
-                    KeyOperations::Encrypt
-                        | KeyOperations::Decrypt
-                        | KeyOperations::WrapKey
-                        | KeyOperations::UnwrapKey
-                        | KeyOperations::DeriveKey
-                        | KeyOperations::DeriveBits
-                ) || ops[..i].contains(op)
-            }))
-    {
+    if operations.is_some_and(|ops| !has_only_encryption_operations(ops)) {
         return false;
     }
     if !encryption_use && operations.is_none() && algorithm.is_none() {
@@ -307,6 +292,21 @@ fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
         algorithm,
         None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
     ) && has_key_agreement_material(&jwk.algorithm)
+}
+
+fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
+    !operations.is_empty()
+        && operations.iter().enumerate().all(|(index, operation)| {
+            matches!(
+                operation,
+                KeyOperations::Encrypt
+                    | KeyOperations::Decrypt
+                    | KeyOperations::WrapKey
+                    | KeyOperations::UnwrapKey
+                    | KeyOperations::DeriveKey
+                    | KeyOperations::DeriveBits
+            ) && !operations[..index].contains(operation)
+        })
 }
 
 fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {

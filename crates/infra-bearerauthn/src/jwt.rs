@@ -226,12 +226,12 @@ impl JwtVerifier {
             .decode_slice(signature, &mut signature_bytes)
             .map(|length| &signature_bytes[..length])
             .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
-        let decoded_payload = || {
+        let decode_payload = || {
             URL_SAFE_NO_PAD
                 .decode(payload)
                 .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
         };
-        let admitted_claims = |payload: Vec<u8>, now: Duration| {
+        let validate_claims = |payload: Vec<u8>, now: Duration| {
             validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
         };
         let input = SignatureInput {
@@ -242,15 +242,15 @@ impl JwtVerifier {
         };
         let signing_keys = self
             .verify_signature(keys, &input, || {
-                decoded_payload()
-                    .and_then(|payload| admitted_claims(payload, now()?))
+                decode_payload()
+                    .and_then(|payload| validate_claims(payload, now()?))
                     .is_ok()
             })
             .await?;
-        let payload = decoded_payload()?;
+        let payload = decode_payload()?;
         let sampled_at = MonotonicInstant::now();
         let now = now()?;
-        let verified = admitted_claims(payload, now)?;
+        let verified = validate_claims(payload, now)?;
         signing_keys.require_fresh(self.jwks_max_age)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR

@@ -203,9 +203,9 @@ pub(crate) struct VerifiedClaims {
 }
 
 impl VerifiedClaims {
-    pub(crate) fn deliver(&self, now: Duration) -> Result<Principal, VerificationError> {
+    pub(crate) fn deliver(self, now: Duration) -> Result<Principal, VerificationError> {
         check_lifetime(self.identity.expiry_from_epoch(), self.not_before, now)?;
-        Ok(self.identity.clone())
+        Ok(self.identity)
     }
 }
 
@@ -241,26 +241,20 @@ pub(crate) fn validate_jwt_claims(
     let subject = non_empty(claims.sub);
     // RFC 9068 §2.2
     let standard_client_id = non_empty(claims.client_id);
-    let has_standard_client_id = standard_client_id.is_some();
+    if token_profile == TokenProfile::Rfc9068
+        && (subject.is_none()
+            || standard_client_id.is_none()
+            || claims.iat.is_none()
+            || claims.jti.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(invalid(VerificationReason::MissingClaim));
+    }
     let client_id = standard_client_id.or_else(|| {
         [claims.azp, claims.appid, claims.cid]
             .into_iter()
             .find_map(non_empty)
     });
     let identifiers = Identifiers::from_claims(subject, client_id)?;
-    let missing_profile_claims = match token_profile {
-        TokenProfile::ResourceServer => false,
-        TokenProfile::Rfc9068 => {
-            let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
-            claims.iat.is_none()
-                || matches!(identifiers, Identifiers::ClientOnly(_))
-                || !has_standard_client_id
-                || !has_jti
-        }
-    };
-    if missing_profile_claims {
-        return Err(invalid(VerificationReason::MissingClaim));
-    }
     let scopes = Scopes::from_claim(scope).map_err(|()| invalid(VerificationReason::Scope))?;
     let actor =
         optional_actor(claims.act).map_err(|()| invalid(VerificationReason::MalformedClaims))?;
