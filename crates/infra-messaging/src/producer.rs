@@ -210,6 +210,7 @@ fn classify_publish(
                     ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM
                     | ErrorCode::STREAM_HEADER_EXCEEDS_MAXIMUM,
                 ) => PublishRejection::BrokerSizeLimit.into(),
+                Some(ErrorCode::STREAM_SEALED) => PublishRejection::BrokerStreamSealed.into(),
                 Some(
                     ErrorCode::BAD_REQUEST
                     | ErrorCode::ACCOUNT_RESOURCES_EXCEEDED
@@ -221,7 +222,6 @@ fn classify_publish(
                     | ErrorCode::STREAM_MISMATCH
                     | ErrorCode::STREAM_LIMITS
                     | ErrorCode::STREAM_STORE_FAILED
-                    | ErrorCode::STREAM_SEALED
                     | ErrorCode::STREAM_WRONG_LAST_MESSAGE_ID
                     | ErrorCode::STREAM_WRONG_LAST_SEQUENCE,
                 ) => PublishRejection::BrokerRefused.into(),

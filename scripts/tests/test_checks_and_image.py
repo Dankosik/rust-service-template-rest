@@ -385,6 +385,105 @@ class ToolsCheckTests(unittest.TestCase):
         self.assertEqual(self.run_tools().returncode, 0)
 
 
+class DependencyDriftTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="dependency-drift-")))
+        script = self.root / "scripts/checks/dependency_drift.sh"
+        script.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "scripts/checks/dependency_drift.sh", script)
+        (self.root / "Cargo.toml").write_text(
+            '[patch.crates-io]\ntransport = { package = "example", path = "vendor/example" }\n', encoding="utf-8"
+        )
+        self.lock = self.root / "Cargo.lock"
+        self.lock.write_text('[[package]]\nname = "example"\nversion = "1.2.3"\n', encoding="utf-8")
+        fork = self.root / "vendor/example"
+        fork.mkdir(parents=True)
+        (fork / "Cargo.toml").write_text('[package]\nname = "example"\nversion = "1.2.3"\n', encoding="utf-8")
+        self.card = fork / "PATCHES.md"
+        self.card.write_text("Upstream reviewed: 1.2.3\n", encoding="utf-8")
+        self.pins = self.root / "tools/versions.env"
+        self.pins.parent.mkdir()
+        self.pins.write_text("RUFF_VERSION=0.17.4\n", encoding="utf-8")
+        self.env = {
+            **os.environ,
+            "PATH": f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "OSV_RESPONSE": "{}",
+            "CRATE_RESPONSE": json.dumps({
+                "crate": {"name": "example"},
+                "versions": [{"num": "1.2.3", "yanked": False, "created_at": "2024-01-01T00:00:00Z"}],
+            }),
+            "PYPI_RESPONSE": json.dumps({
+                "info": {"version": "0.17.4"},
+                "urls": [{"upload_time_iso_8601": "2024-01-01T00:00:00.000000Z"}],
+            }),
+        }
+        _write_executable(
+            self.root / "bin/curl",
+            'case "$*" in\n'
+            '  *api.osv.dev/v1/query*) response="$OSV_RESPONSE" ;;\n'
+            '  *crates.io/api/v1/crates/example*) response="$CRATE_RESPONSE" ;;\n'
+            '  *pypi.org/pypi/ruff/json*) response="$PYPI_RESPONSE" ;;\n'
+            '  *) exit 22 ;;\n'
+            'esac\n'
+            '[ "$response" != unavailable ] || exit 1\n'
+            'printf "%s" "$response"',
+        )
+
+    def run_drift(self, *args: str, **responses: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "scripts/checks/dependency_drift.sh", *args],
+            cwd=self.root,
+            env={**self.env, **responses},
+            capture_output=True,
+            text=True,
+        )
+
+    def test_patch_requires_card(self) -> None:
+        self.card.unlink()
+        result = self.run_drift()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("vendor/example/PATCHES.md", result.stderr)
+
+    def test_patch_requires_exact_locked_version(self) -> None:
+        self.lock.write_text('[[package]]\nname = "example"\nversion = "1.2.2"\n', encoding="utf-8")
+        result = self.run_drift()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Cargo.lock does not resolve the vendored version", result.stdout)
+
+    def test_incomplete_fork_queries_fail(self) -> None:
+        for source, overrides in (
+            ("OSV", {"OSV_RESPONSE": "unavailable"}),
+            ("OSV", {"OSV_RESPONSE": '{"error":"temporary"}'}),
+            ("OSV", {"OSV_RESPONSE": '{"next_page_token":"incomplete"}'}),
+            ("crates.io", {"CRATE_RESPONSE": '{"crate":{"name":"example"},"versions":[{"num":"1.2.3"}]}'}),
+        ):
+            with self.subTest(overrides=overrides):
+                result = self.run_drift(**overrides)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(source.lower(), result.stderr.lower())
+
+    def test_incomplete_weekly_poll_has_no_report_even_after_a_finding(self) -> None:
+        advisory = '{"vulns":[{"id":"RUSTSEC-2024-0001"}]}'
+        complete = self.run_drift("--upstream", OSV_RESPONSE=advisory)
+        self.assertEqual(complete.returncode, 1, complete.stderr)
+        self.assertIn("RUSTSEC-2024-0001", complete.stdout)
+
+        invalid_time = self.env["PYPI_RESPONSE"].replace("2024-01-01", "2024-02-30")
+        for response in ("unavailable", "", "{}", invalid_time):
+            with self.subTest(response=response):
+                result = self.run_drift("--upstream", OSV_RESPONSE=advisory, PYPI_RESPONSE=response)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("ruff", result.stderr)
+
+    def test_profile_without_forks_or_tool_pins_needs_no_network(self) -> None:
+        (self.root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+        self.pins.write_text("", encoding="utf-8")
+        result = self.run_drift("--upstream", OSV_RESPONSE="unavailable", CRATE_RESPONSE="unavailable")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no finding", result.stdout)
+
+
 class CargoArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="cargo-artifact-")))
@@ -542,7 +641,9 @@ else:
         self.state_file.write_text(json.dumps(base), encoding="utf-8")
 
     def test_prepare_and_metadata_modes_and_refusals(self) -> None:
-        main_res = self.run_publish("prepare", "main", self.SHA, "Owner/Service", "main", "", "", "42", "3", "0.1.0")
+        main_res = self.run_publish(
+            "prepare", "main", self.SHA, "Owner/Service", "main", "main", "refs/heads/main", "42", "3", "0.1.0"
+        )
         self.assertEqual(main_res.returncode, 0, main_res.stderr)
         expected_main = (
             "image_repo=ghcr.io/owner/service\n"
@@ -586,6 +687,7 @@ else:
         self.assertEqual(self.github_output.read_text(encoding="utf-8"), expected_release)
 
         for bad_args in (
+            ("prepare", "main", self.SHA, "Owner/Service", "main", "main", "refs/tags/main", "42", "1", "0.1.0"),
             ("prepare", "main", "invalid", "Owner/Service", "main", "", "", "42", "1", "0.1.0"),
             ("prepare", "release", self.SHA, "Owner/Service", "main", "v1/bad", "refs/tags/v1/bad", "42", "1", "1.0.0"),
             ("prepare", "release", self.SHA, "Owner/Service", "main", "v1.2.4", "refs/tags/v1.2.4", "42", "1", "1.2.3"),
@@ -745,6 +847,61 @@ else:
             str(self.summary),
         )
         self.assertNotEqual(wrong_digest.returncode, 0)
+
+
+class PublishedImageScanTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("jq") and shutil.which("openssl"), "published image scan requires jq and openssl")
+    def test_scans_each_deployable_digest_across_pages_despite_findings(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="published-image-scan-")))
+        first, other, cache = ("sha256:" + digit * 64 for digit in ("1", "2", "3"))
+
+        def version(digest: str, *tags: str) -> dict[str, object]:
+            return {"name": digest, "metadata": {"container": {"tags": tags}}}
+
+        pages = [[version(first, "main")], [version(first, "latest"), version(other, "v1.2.0"), version(cache, "buildcache")]]
+        (root / "versions.json").write_text(json.dumps(pages), encoding="utf-8")
+        _write_executable(
+            root / "gh",
+            '''case "$*" in
+  "api repos/owner/service "*) echo Organization ;;
+  "api --paginate --slurp orgs/owner/packages/container/service/versions"*) cat "$FIXTURE/versions.json" ;;
+  *) exit 1 ;;
+esac''',
+        )
+        _write_executable(
+            root / "docker",
+            '''for arg do image=$arg; done
+case "$image" in
+  ghcr.io) cat >/dev/null ;;
+  --download-db-only) exit 0 ;;
+  ghcr.io/owner/service@*)
+    printf '%s\\n' "$image" >>"$FIXTURE/scans"
+    [ "$image" != "$FINDING_IMAGE" ] || exit 42 ;;
+  *) exit 1 ;;
+esac''',
+        )
+        finding_image = f"ghcr.io/owner/service@{first}"
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/image/rescan.sh")],
+            env={
+                **os.environ,
+                "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                "FIXTURE": str(root),
+                "FINDING_IMAGE": finding_image,
+                "GH_TOKEN": "registry-fixture",
+                "GITHUB_ACTOR": "owner",
+                "GITHUB_REPOSITORY": "owner/service",
+                "GITHUB_STEP_SUMMARY": str(root / "summary"),
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        scans = (root / "scans").read_text(encoding="utf-8").splitlines()
+        self.assertCountEqual(scans, [finding_image, f"ghcr.io/owner/service@{other}"])
+        summary = (root / "summary").read_text(encoding="utf-8")
+        self.assertIn(f"{first}` | latest, main | HIGH or CRITICAL findings require attention", summary)
+        self.assertIn(f"{other}` | v1.2.0 | No HIGH or CRITICAL findings", summary)
 
 
 class HarnessSyncTests(unittest.TestCase):

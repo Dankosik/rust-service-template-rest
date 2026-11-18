@@ -18,9 +18,14 @@ impl BuildInfo {
     }
 }
 
-#[must_use]
-pub(crate) fn is_local_development(env: &str) -> bool {
-    matches!(env, "local" | "development")
+pub(crate) fn insecure_development(env: &str, requested: bool) -> Result<bool, ValidationError> {
+    if requested && !matches!(env, "local" | "development") {
+        return Err(ValidationError::new(
+            "app.allow_insecure_development",
+            "requires app.env to be local or development",
+        ));
+    }
+    Ok(requested)
 }
 
 #[allow(
@@ -30,12 +35,12 @@ pub(crate) fn is_local_development(env: &str) -> bool {
 pub(crate) fn local_development_only(
     key: &str,
     enabled: bool,
-    app_env: &str,
+    insecure_development: bool,
 ) -> Result<(), ValidationError> {
-    if enabled && !is_local_development(app_env) {
+    if enabled && !insecure_development {
         return Err(ValidationError::new(
             key,
-            "requires app.env to be local or development",
+            "requires app.allow_insecure_development = true",
         ));
     }
     Ok(())
@@ -46,6 +51,9 @@ pub(crate) fn local_development_only(
 pub struct AppConfig {
     #[serde(deserialize_with = "crate::de::string")]
     pub env: String,
+    /// Permit development-only settings when `env` is `local` or `development`.
+    #[serde(deserialize_with = "crate::de::boolean")]
+    pub allow_insecure_development: bool,
     /// Service version published as `service.version`. Empty means "use the
     /// build's own version".
     #[serde(deserialize_with = "crate::de::string")]
@@ -70,6 +78,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             env: default_env(),
+            allow_insecure_development: false,
             version: String::new(),
             commit: String::new(),
             instance_id: None,
@@ -91,6 +100,8 @@ where
     struct MigrationAppInput {
         #[serde(default = "default_env", deserialize_with = "crate::de::string")]
         env: String,
+        #[serde(default, deserialize_with = "crate::de::boolean")]
+        allow_insecure_development: bool,
         #[serde(default, deserialize_with = "crate::de::string")]
         version: String,
         #[serde(default, deserialize_with = "crate::de::string")]
@@ -101,12 +112,14 @@ where
 
     let MigrationAppInput {
         env,
+        allow_insecure_development,
         version,
         commit,
         ..
     } = MigrationAppInput::deserialize(deserializer)?;
     Ok(AppConfig {
         env,
+        allow_insecure_development,
         version,
         commit,
         instance_id: None,
@@ -115,6 +128,11 @@ where
 // template:end postgres:migration-app-input
 
 impl AppConfig {
+    #[must_use]
+    pub fn is_local_development(&self) -> bool {
+        insecure_development(&self.env, self.allow_insecure_development).unwrap_or(false)
+    }
+
     pub(crate) fn apply_build_info(&mut self, build: BuildInfo) {
         if self.version.trim().is_empty() {
             build.version.clone_into(&mut self.version);
@@ -126,6 +144,7 @@ impl AppConfig {
 
     pub(crate) fn validate(&self, v: &mut Violations) {
         v.check(non_blank("app.env", &self.env));
+        v.check(insecure_development(&self.env, self.allow_insecure_development).map(|_| ()));
         v.check(non_blank("app.version", &self.version));
         v.check(non_blank("app.commit", &self.commit));
     }

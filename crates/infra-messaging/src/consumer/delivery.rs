@@ -358,6 +358,11 @@ impl DeliveryHandler {
                     sequence: info.stream_sequence,
                 })
             }
+            PublishError::Rejected(PublishRejection::BrokerStreamSealed) => {
+                Err(ConsumerError::DeadLetterStreamSealed {
+                    sequence: info.stream_sequence,
+                })
+            }
             PublishError::Rejected(_) | PublishError::Ambiguous => {
                 redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
                 Ok(())
@@ -400,45 +405,88 @@ async fn run_handler(
 }
 
 async fn acknowledge(client: &async_nats::Client, source: &Message) {
+    let span = settlement_span(source, "ack");
     let error_type = if let Some(reply) = source.reply.clone() {
         match tokio::time::timeout(
             BROKER_OPERATION_BUDGET,
             client.request(reply, AckKind::Ack.into()),
         )
+        .instrument(span.clone())
         .await
         {
-            Ok(Ok(_)) => return,
+            Ok(Ok(_)) => {
+                record_span_outcome(&span, "confirmed", false);
+                return;
+            }
+            Ok(Err(error)) if error.kind() == async_nats::RequestErrorKind::TimedOut => "timeout",
             Ok(Err(_)) => "client_error",
             Err(_) => "timeout",
         }
     } else {
         "missing_reply"
     };
-    tracing::warn!(
-        subject = source.subject.as_str(),
-        error.type = error_type,
-        "messaging_source_ack_unconfirmed"
-    );
+    record_settlement_failure(&span, "unconfirmed", error_type);
+    span.in_scope(|| {
+        tracing::warn!(
+            subject = source.subject.as_str(),
+            error.type = error_type,
+            "messaging_source_ack_unconfirmed"
+        );
+    });
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "ack").increment(1);
 }
 
 pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
+    let span = settlement_span(source, "nak");
     let error_type = match tokio::time::timeout(
         BROKER_OPERATION_BUDGET,
         source.ack_with(AckKind::Nak(Some(delay))),
     )
+    .instrument(span.clone())
     .await
     {
-        Ok(Ok(())) => return,
+        Ok(Ok(())) => {
+            record_span_outcome(&span, "submitted", false);
+            return;
+        }
         Ok(Err(_)) => "client_error",
         Err(_) => "timeout",
     };
-    tracing::warn!(
-        subject = source.subject.as_str(),
-        error.type = error_type,
-        "messaging_redelivery_request_failed"
-    );
+    record_settlement_failure(&span, "failed", error_type);
+    span.in_scope(|| {
+        tracing::warn!(
+            subject = source.subject.as_str(),
+            error.type = error_type,
+            "messaging_redelivery_request_failed"
+        );
+    });
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "nak").increment(1);
+}
+
+fn settlement_span(source: &Message, operation: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        "messaging_settle",
+        otel.name = operation,
+        otel.kind = "client",
+        messaging.system = "nats",
+        messaging.system.name = "nats",
+        messaging.operation.type = "settle",
+        messaging.operation.name = operation,
+        messaging.destination.name = source.subject.as_str(),
+        outcome = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    )
+}
+
+fn record_settlement_failure(
+    span: &tracing::Span,
+    outcome: &'static str,
+    error_type: &'static str,
+) {
+    span.record("outcome", outcome);
+    span.record("error.type", error_type);
+    span.record("otel.status_code", "ERROR");
 }
 
 pub(super) fn describe_metrics() {

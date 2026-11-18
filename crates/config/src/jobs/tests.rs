@@ -126,6 +126,9 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         env(&[
             ("APP__POSTGRES__DSN", "postgres://localhost/app"),
             ("APP__POSTGRES__SESSION_BUDGETS", "server"),
+            ("APP__APP__ENV", "development"),
+            ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+            ("APP__APP__INSTANCE_ID", "worker-id"),
             // template:begin authn:jobs-operator-test-authn-env
             ("APP__AUTHN__MODE", "invalid"),
             // template:end authn:jobs-operator-test-authn-env
@@ -143,6 +146,7 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         ]),
     )
     .unwrap();
+    assert!(cfg.postgres().local_development);
     assert_eq!(
         cfg.postgres().session_budgets,
         crate::PostgresSessionBudgets::Server
@@ -160,11 +164,13 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     let enabled = [
         ("APP__POSTGRES__ENABLED", "true"),
         ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ("APP__APP__ENV", "local"),
     ];
     let dir = tempfile::tempdir().unwrap();
     let secrets = tempfile::tempdir().unwrap();
     let mut options = LoadOptions::default();
     let defaults = load_jobs_operator_from(&options, env(&enabled)).unwrap();
+    assert!(!defaults.postgres().local_development);
     assert_eq!(password_file(&defaults), None);
 
     options.config = Some(write(
@@ -213,6 +219,19 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     let disabled =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "false")])).unwrap_err();
     assert_matches!(disabled, JobsOperatorLoadError::PostgresDisabled);
+    let invalid_opt_in = load_jobs_operator_from(
+        &options,
+        env(&[
+            ("APP__APP__ENV", "production"),
+            ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+        ]),
+    )
+    .unwrap_err();
+    assert_matches!(
+        invalid_opt_in,
+        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("app.allow_insecure_development")
+    );
+
     let unknown =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
     assert_matches!(

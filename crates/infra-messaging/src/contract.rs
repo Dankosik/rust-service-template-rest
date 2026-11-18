@@ -103,9 +103,12 @@ fn message(
     });
     json!({
         "name": event_type,
+        "description": format!(
+            "The NATS publisher sets {NATS_MSG_ID} to the publication ID and reuses it when retrying the same publication."
+        ),
         "headers": {
             "type": "object",
-            "required": [MESSAGE_ID, EVENT_TYPE, EVENT_SCHEMA, CREATED_AT, NATS_MSG_ID],
+            "required": [MESSAGE_ID, EVENT_TYPE, EVENT_SCHEMA, CREATED_AT],
             "properties": {
                 MESSAGE_ID: identity,
                 EVENT_TYPE: { "const": event_type },
@@ -115,7 +118,6 @@ fn message(
                     "format": "date-time",
                     "description": CREATED_AT_DESCRIPTION,
                 },
-                NATS_MSG_ID: identity,
             },
         },
         "payload": {
@@ -299,8 +301,7 @@ mod tests {
             created["headers"],
             json!({
                 "type": "object",
-                "required":
-                    ["Message-Id", "Event-Type", "Event-Schema", "Created-At", "Nats-Msg-Id"],
+                "required": ["Message-Id", "Event-Type", "Event-Schema", "Created-At"],
                 "properties": {
                     "Message-Id": identity,
                     "Event-Type": { "const": "order.created" },
@@ -310,7 +311,6 @@ mod tests {
                         "format": "date-time",
                         "description": "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.",
                     },
-                    "Nats-Msg-Id": identity,
                 },
             })
         );

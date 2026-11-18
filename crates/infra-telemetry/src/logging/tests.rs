@@ -13,6 +13,21 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 #[derive(Clone, Default)]
 pub(crate) struct Buffer(Arc<Mutex<Vec<u8>>>);
 
+#[test]
+fn invalid_filter_is_reported_without_its_value() {
+    let options = LoggingOptions {
+        level: "app=private-marker=invalid",
+        format: LoggingFormat::Json,
+        tracer_provider: None,
+    };
+    let Err(error) = install_subscriber(&options) else {
+        panic!("expected malformed filter to be refused");
+    };
+    assert!(matches!(error, LoggingError::Directive));
+    assert!(error.to_string().contains("log.level"));
+    assert!(!format!("{options:?} {error} {error:?}").contains("private-marker"));
+}
+
 impl Buffer {
     pub(crate) fn records(&self) -> String {
         String::from_utf8(self.0.lock().expect("test writer mutex").clone())

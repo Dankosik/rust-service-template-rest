@@ -33,8 +33,7 @@ opentelemetry = { workspace = true, features = ["trace"] }
 # `reqwest-rustls` gives the exporter TLS (rustls + aws-lc-rs, system roots
 # through the platform verifier); without it an https:// collector fails at
 # export time with "URL scheme is not allowed".
-# `gzip-http` lets the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` work;
-# without it that variable fails the exporter build and tracing degrades.
+# `gzip-http` supports the standard `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`.
 opentelemetry-otlp = { workspace = true, features = ["http-proto", "reqwest-blocking-client", "reqwest-rustls", "gzip-http", "trace", "internal-logs"] }
 opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
@@ -52,6 +51,9 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }

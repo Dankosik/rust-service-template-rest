@@ -77,9 +77,10 @@ def compute_metadata(
     short_sha = candidate_sha[:12]
     image_repo = f"ghcr.io/{repository.lower()}"
     if mode == "main":
+        if ref_name != default_branch or ref != f"refs/heads/{default_branch}":
+            raise _fail("main publication requires the default branch ref")
         promote_tags = f"sha-{short_sha} main"
         artifact_name = f"sbom-main-{short_sha}-{run_id}-{run_attempt}"
-        identity = f"https://github.com/{repository}/.github/workflows/cd.yml@refs/heads/{default_branch}"
     elif mode == "release":
         if (
             not ref.startswith("refs/tags/v")
@@ -91,7 +92,6 @@ def compute_metadata(
             raise _fail(f"release tag {ref_name} does not match the crate version {crate_version}")
         promote_tags = f"{ref_name} latest"
         artifact_name = f"sbom-{ref_name}-{run_id}-{run_attempt}"
-        identity = f"https://github.com/{repository}/.github/workflows/cd.yml@{ref}"
     else:
         raise _fail(f"unsupported mode '{mode}'")
 
@@ -101,7 +101,7 @@ def compute_metadata(
         "version": crate_version,
         "promote_tags": promote_tags,
         "artifact_name": artifact_name,
-        "identity": identity,
+        "identity": f"https://github.com/{repository}/.github/workflows/cd.yml@{ref}",
     }
 
 

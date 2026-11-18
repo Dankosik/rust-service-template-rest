@@ -348,10 +348,7 @@ run_messaging() {
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
 
-	start_owned_messaging() {
-		messaging_config=$1
-		messaging_project="${messaging_project_base}-$2"
-		messaging_cleanup_pending=true
+	wait_owned_messaging() {
 		if ! messaging_compose up -d --wait --wait-timeout 30 nats >>"${messaging_work_dir}/compose.log" 2>&1; then
 			messaging_compose ps --all >&2 || true
 			messaging_compose logs --no-color --tail 100 nats >&2 || true
@@ -364,6 +361,13 @@ run_messaging() {
 		port=${address##*:}
 		[[ ${port} =~ ^[0-9]+$ ]] || { echo "failed to resolve the owned NATS port" >&2; return 1; }
 		owned_url="nats://127.0.0.1:${port}"
+	}
+
+	start_owned_messaging() {
+		messaging_config=$1
+		messaging_project="${messaging_project_base}-$2"
+		messaging_cleanup_pending=true
+		wait_owned_messaging
 	}
 
 	local ordinary_url=${NATS_URL:-}
@@ -388,6 +392,22 @@ run_messaging() {
 		[[ ${messaging_primary_status} != 0 ]] || messaging_primary_status=${idle_status}
 	else
 		messaging_primary_status=$?
+	fi
+	if [[ ${messaging_primary_status} == 0 ]]; then
+		if [[ -z ${owned_url} ]]; then
+			start_owned_messaging "${ROOT_DIR}/env/nats/nats-server.conf" cursor
+		fi
+		run_cursor_check() {
+			local log="${messaging_work_dir}/$1.log"
+			NATS_URL="${owned_url}" NATS_CURSOR_RECEIPT="${messaging_work_dir}/cursor.json" \
+				cargo test --locked -p infra-messaging --features integration --test jetstream \
+				"connection::$1" -- --ignored --exact | tee "${log}" || return
+			grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "${log}"
+		}
+		run_cursor_check save_ack_floor_before_restart &&
+			messaging_compose restart --timeout 10 nats &&
+			wait_owned_messaging &&
+			run_cursor_check read_ack_floor_after_restart || messaging_primary_status=$?
 	fi
 	if ! cleanup_owned_messaging; then
 		[[ ${messaging_primary_status} != 0 ]] || messaging_primary_status=1

@@ -46,11 +46,32 @@ impl Pki {
         self.file(CERTIFICATE_VARS[1], "ca.pem", &self.issuer.pem())
     }
 
-    fn client_files(&self) -> (TrustFile, TrustFile) {
+    fn client_files(&self, bundled: bool) -> (TrustFile, TrustFile) {
         let key = KeyPair::generate().expect("client key");
         let mut params = CertificateParams::new(vec!["exporter".to_owned()]).expect("client names");
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
+        if bundled {
+            let certificate = self.file(
+                CLIENT_CERTIFICATE_VARS[1],
+                "client-bundle.pem",
+                &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
+            );
+            #[cfg(unix)]
+            let certificate = {
+                let path = self.files.path().join("mounted-client.pem");
+                std::os::unix::fs::symlink(&certificate.path, &path).expect("link to the bundle");
+                TrustFile {
+                    path,
+                    ..certificate
+                }
+            };
+            let key = TrustFile {
+                variable: CLIENT_KEY_VARS[1],
+                path: certificate.path.clone(),
+            };
+            return (certificate, key);
+        }
         (
             self.file(CLIENT_CERTIFICATE_VARS[1], "client.pem", &certificate.pem()),
             self.file(CLIENT_KEY_VARS[1], "client.key", &key.serialize_pem()),
@@ -93,11 +114,11 @@ impl Pki {
 
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
     span_exporter(
-        &Endpoint::Typed(&format!("https://{}/v1/traces", collector.addr)),
+        &format!("https://{}/v1/traces", collector.addr),
         HashMap::new(),
         trust,
         export_timeout(&|_: &str| None),
-        &|_: &str| None,
+        None,
     )
     .expect("the exporter builds")
     .export(Vec::new())
@@ -138,12 +159,100 @@ fn a_client_certificate_is_presented_to_a_collector_that_requires_one() {
     };
     export(&collector, &anonymous).expect_err("the collector requires a client certificate");
 
-    let (client_certificate, client_key) = pki.client_files();
-    let identified = CollectorTrust {
-        client_certificate: Some(client_certificate),
-        client_key: Some(client_key),
-        ..anonymous
-    };
-    export(&collector, &identified).expect("the client certificate is accepted");
-    assert_eq!(collector.received().path, "/v1/traces");
+    let endpoint = format!("https://{}/v1/traces", collector.addr);
+    for (typed, bundled) in [("", false), (&endpoint, false), (&endpoint, true)] {
+        let (client_certificate, client_key) = pki.client_files(bundled);
+        let identified = CollectorTrust {
+            client_certificate: Some(client_certificate),
+            client_key: Some(client_key),
+            ..anonymous.clone()
+        };
+        let handle = tracer_provider(
+            &options(typed),
+            env(&[(
+                opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                &endpoint,
+            )]),
+            &identified,
+        )
+        .expect("the standard destination binds the client identity");
+        handle.tracer().start("authenticated export").end();
+        assert_eq!(shutdown(handle), ProviderShutdown::Completed);
+        let request = collector.received();
+        assert_eq!(request.path, "/v1/traces");
+        assert_eq!(request.span_names(), ["authenticated export"]);
+    }
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the synchronous child process isolates SDK environment and exporter globals"
+)]
+fn admitted_credentials_reach_only_the_selected_tls_collector() {
+    const CHILD: &str = "OTLP_TEST_COLLECTOR_MODE";
+    const ENDPOINT: &str = "OTLP_TEST_COLLECTOR_URL";
+    const HEADERS: &str =
+        "Authorization=Bearer%20fixture,X-Once=%250A,X-Bad-Escape=%0A%ZZ,X-Bad-Utf8=%0A%FF";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let mut opts = options("");
+        if mode == "typed" {
+            opts.otlp_endpoint = Some(std::env::var(ENDPOINT).unwrap());
+            opts.otlp_headers = Some(SecretString::from(HEADERS));
+        }
+        let provider = install_tracer_provider(&opts).unwrap();
+        provider.tracer().start("admitted span").end();
+        assert_eq!(shutdown(provider), ProviderShutdown::Completed);
+        return;
+    }
+    let pki = Pki::new();
+    let collector = tls_collector(pki.collector(false));
+    let endpoint = format!("https://{}", collector.addr);
+    let ca = pki.certificate_file();
+    for mode in ["typed", "empty signal headers", "trace headers"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "traces::tests::delivery::tls::admitted_credentials_reach_only_the_selected_tls_collector", "--nocapture"])
+            .env_clear()
+            .env(CHILD, mode)
+            .env(CERTIFICATE_VARS[0], &ca.path);
+        match mode {
+            "typed" => {
+                child.env(ENDPOINT, &endpoint);
+            }
+            "empty signal headers" => {
+                child
+                    .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
+                    .env("OTEL_EXPORTER_OTLP_HEADERS", HEADERS)
+                    .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "");
+            }
+            _ => {
+                child
+                    .env(
+                        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                        format!("{endpoint}/v1/traces"),
+                    )
+                    .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://unused.invalid")
+                    .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", HEADERS)
+                    .env(
+                        "OTEL_EXPORTER_OTLP_HEADERS",
+                        "Authorization=other,X-Unused=other",
+                    );
+            }
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let received = collector.received();
+        assert_eq!(received.path, "/v1/traces");
+        assert_eq!(received.header("authorization"), Some("Bearer fixture"));
+        assert_eq!(received.header("x-once"), Some("%0A"));
+        assert_eq!(received.header("x-bad-escape"), Some("%0A%ZZ"));
+        assert_eq!(received.header("x-bad-utf8"), Some("%0A%FF"));
+        assert_eq!(received.header("x-unused"), None);
+        assert_eq!(received.span_names(), ["admitted span"]);
+    }
 }

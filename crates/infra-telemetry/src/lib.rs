@@ -8,7 +8,7 @@ pub use logging::{
 };
 pub use metrics::{Metrics, MetricsError, diagnostics_router, runtime_metrics};
 pub use traces::{
-    EndpointSource, ExporterBuildStage, ExporterState, ProviderShutdown, ProviderShutdownReasons,
-    ResolvedSampler, SHUTDOWN_JOIN_SLACK, TracerProviderHandle, TracingError, TracingOptions,
+    EndpointSource, ExporterState, ProviderShutdown, ProviderShutdownReasons, ResolvedSampler,
+    SHUTDOWN_JOIN_SLACK, TracerProviderHandle, TracingError, TracingOptions,
     install_tracer_provider,
 };

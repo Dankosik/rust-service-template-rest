@@ -35,13 +35,17 @@ pub fn fixture_dir(name: &str) -> std::path::PathBuf {
 }
 
 pub async fn dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit(url_for(pool, DATABASE_URL).await.as_str())
+    Dsn::admit_for_environment(url_for(pool, DATABASE_URL).await.as_str(), None, true)
         .expect("DATABASE_URL must be an admitted DSN")
 }
 
 pub async fn pooler_dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit(url_for(pool, PGBOUNCER_DATABASE_URL).await.as_str())
-        .expect("PGBOUNCER_DATABASE_URL must be an admitted DSN")
+    Dsn::admit_for_environment(
+        url_for(pool, PGBOUNCER_DATABASE_URL).await.as_str(),
+        None,
+        true,
+    )
+    .expect("PGBOUNCER_DATABASE_URL must be an admitted DSN")
 }
 
 pub async fn url_for(pool: &PgPool, variable: &str) -> Url {
