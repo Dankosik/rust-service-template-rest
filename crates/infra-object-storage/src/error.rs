@@ -156,8 +156,10 @@ impl Failure<MutationError> {
         };
         Self::with_stop(outcome(reason), stopped)
     }
+}
 
-    pub(crate) fn mutation_interrupted(interrupted: Interrupted) -> Self {
+impl From<Interrupted> for Failure<MutationError> {
+    fn from(interrupted: Interrupted) -> Self {
         Self::mutation_stopped(
             interrupted.stopped,
             if interrupted.polled {

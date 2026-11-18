@@ -1,12 +1,9 @@
-use infra_object_storage::{CredentialSource, ObjectStorage, ObjectStorageOptions, Provider};
-use service_config::{Config, ObjectStorageCredentials, ObjectStorageProvider};
+use infra_object_storage::{
+    ConfigError, CredentialSource, ObjectStorage, ObjectStorageOptions, Provider,
+};
+use service_config::{ObjectStorageConfig, ObjectStorageCredentials, ObjectStorageProvider};
 
-use super::BootstrapError;
-
-pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapError> {
-    let Some(settings) = &config.object_storage else {
-        return Ok(None);
-    };
+pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, ConfigError> {
     let provider = match &settings.provider {
         ObjectStorageProvider::AmazonS3 {
             region,
@@ -62,5 +59,5 @@ pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapEr
         object_storage.max_concurrency = settings.max_concurrency,
         "object_storage_configured"
     );
-    Ok(Some(storage))
+    Ok(storage)
 }

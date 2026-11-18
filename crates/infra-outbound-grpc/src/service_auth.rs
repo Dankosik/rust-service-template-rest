@@ -6,7 +6,7 @@ use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use tonic::body::Body;
 
-use crate::{Client, ClientError};
+use crate::{Client, ClientError, PreparedCall};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -34,6 +34,18 @@ impl Client {
     }
 }
 
+impl ServiceTokenClient {
+    fn prepare(&self, request: http::Request<Body>) -> Result<PreparedCall, tonic::Status> {
+        let mut prepared = self.resource.prepare_call(request)?;
+        if prepared.headers_mut().contains_key(AUTHORIZATION) {
+            return Err(prepared.refuse(tonic::Status::internal(
+                "authorization conflicts with the service token",
+            )));
+        }
+        Ok(prepared)
+    }
+}
+
 impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Response = http::Response<Body>;
     type Error = tonic::Status;
@@ -44,15 +56,10 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let mut prepared = match self.resource.prepare_call(request) {
+        let prepared = match self.prepare(request) {
             Ok(prepared) => prepared,
             Err(status) => return Box::pin(std::future::ready(Err(status))),
         };
-        if prepared.headers_mut().contains_key(AUTHORIZATION) {
-            return Box::pin(std::future::ready(Err(prepared.refuse(
-                tonic::Status::internal("authorization conflicts with the service token"),
-            ))));
-        }
         let tokens = self.tokens.clone();
         Box::pin(prepared.send_inner(
             move |headers| {
