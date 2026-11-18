@@ -7,7 +7,8 @@ use prost::Message as _;
 use tonic::server::NamedService as _;
 use tonic::service::LayerExt as _;
 use tonic_reflection::pb::{v1, v1alpha};
-use tower::util::MapRequestLayer;
+use tower::util::{BoxCloneSyncServiceLayer, MapRequestLayer};
+use tower::{Layer, Service};
 
 use crate::Error;
 use crate::health::HealthServer;
@@ -82,8 +83,16 @@ pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
 ];
 
+pub(crate) type ListenerLayer = BoxCloneSyncServiceLayer<
+    axum::Router,
+    axum::extract::Request,
+    axum::response::Response,
+    Infallible,
+>;
+
 #[derive(Debug, Default)]
 pub struct Services {
+    pub(crate) listener_layer: Option<ListenerLayer>,
     pub(crate) routes: tonic::service::RoutesBuilder,
     pub(crate) names: BTreeSet<&'static str>,
     described: HashMap<String, Vec<(String, CallType)>>,
@@ -103,6 +112,19 @@ impl Services {
         Self::default()
     }
 
+    pub fn set_listener_layer<L>(&mut self, layer: L)
+    where
+        L: Layer<axum::Router> + Send + Sync + 'static,
+        L::Service: Service<axum::extract::Request, Response = axum::response::Response, Error = Infallible>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as Service<axum::extract::Request>>::Future: Send + 'static,
+    {
+        self.listener_layer = Some(ListenerLayer::new(layer));
+    }
+
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
         self.learn(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
@@ -111,7 +133,7 @@ impl Services {
 
     pub(crate) fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+            .map_err(Error::DecodeDescriptorSet)?;
         let mut described: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
         for file in set.file {
             let package = file.package.as_deref().unwrap_or_default();
@@ -205,12 +227,10 @@ impl Services {
                     tonic_reflection::server::Builder::with_service_name,
                 )
         };
-        let v1 = builder()
-            .build_v1()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        let v1 = builder().build_v1().map_err(Error::BuildReflectionV1)?;
         let v1alpha = builder()
             .build_v1alpha()
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+            .map_err(Error::BuildReflectionV1Alpha)?;
         let layer = MapRequestLayer::new(reflection::cancel_request_body);
         self.add(layer.named_layer(v1))?;
         self.add(layer.named_layer(v1alpha))
@@ -374,9 +394,9 @@ mod tests {
             "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
         ];
         for path in paths {
-            assert_eq!(
+            std::assert_matches!(
                 services.require_scopes(path, &["reflection.read"]),
-                Err(Error::UnregisteredMethodPath(path.to_owned()))
+                Err(Error::UnregisteredMethodPath(rejected)) if rejected == path
             );
         }
         services.add_reflection().unwrap();
@@ -384,9 +404,9 @@ mod tests {
             services.require_scopes(path, &["reflection.read"]).unwrap();
         }
         let unknown = "/grpc.reflection.v1.ServerReflection/Unknown";
-        assert_eq!(
+        std::assert_matches!(
             services.require_scopes(unknown, &["reflection.read"]),
-            Err(Error::UnregisteredMethodPath(unknown.to_owned()))
+            Err(Error::UnregisteredMethodPath(rejected)) if rejected == unknown
         );
     }
     // template:end authn:grpc-services-test-reflection-scopes

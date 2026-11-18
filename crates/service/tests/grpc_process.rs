@@ -1087,11 +1087,10 @@ const PRIVATE_BACKGROUND_ERROR: &str = "withheld-feature-failure-fixture";
 
 fn register_background_fixture(
     services: &mut infra_grpc::Services,
-    _state: &service::AppState,
     background: &mut service::BackgroundRegistration<'_>,
+    scenario: String,
+    control: String,
 ) -> Result<(), infra_grpc::Error> {
-    let scenario = std::env::var(BACKGROUND_SCENARIO).expect("fixture scenario");
-    let control = std::env::var(BACKGROUND_CONTROL).expect("fixture control address");
     let startup_refusal = scenario == "startup_refusal";
     background.spawn("feature_manager", move |stop, reporter| async move {
         let mut control = tokio::net::TcpStream::connect(control)
@@ -1128,12 +1127,15 @@ fn register_background_fixture(
     reason = "child-only fixture bypasses libtest output after completing runtime and telemetry cleanup"
 )]
 fn registered_background_fixture() {
-    if std::env::var_os(BACKGROUND_SCENARIO).is_none() {
+    let Ok(scenario) = std::env::var(BACKGROUND_SCENARIO) else {
         return;
-    }
-    let code = service::run_with_grpc(
+    };
+    let control = std::env::var(BACKGROUND_CONTROL).expect("fixture control address");
+    let code = service::run_with_grpc_resource(
         [std::ffi::OsString::from("background-fixture")],
-        register_background_fixture,
+        move |services, _, background| {
+            register_background_fixture(services, background, scenario, control).map_err(Into::into)
+        },
     );
     let code = if code == std::process::ExitCode::SUCCESS {
         0
@@ -1191,7 +1193,11 @@ fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
             .expect("registered manager connects")
             .unwrap();
         if scenario == "startup_refusal" {
-            example.await_record("service failed");
+            let record = example.await_record("service failed");
+            let error = record["error"].as_str().unwrap();
+            assert!(error.contains("gRPC service registration"), "{error}");
+            assert!(error.contains("decode gRPC file descriptor set"), "{error}");
+            assert!(!error.contains("invalid protobuf descriptor"), "{error}");
         } else {
             example.await_record("service_ready");
             if scenario == "live_error" {

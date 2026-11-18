@@ -26,6 +26,14 @@ fn app() -> (axum::Router, ::health::Readiness) {
         ::health::RefreshPolicy::try_new(Duration::from_mins(1), OPENING, NonZeroU32::MIN).unwrap(),
     );
     let mut services = Services::new();
+    services.set_listener_layer(tower::util::MapResponseLayer::new(
+        |mut response: axum::response::Response| {
+            response
+                .headers_mut()
+                .insert("x-native", "yes".parse().unwrap());
+            response
+        },
+    ));
     services.attach_reflection().unwrap();
     services
         .learn(tonic_health::pb::FILE_DESCRIPTOR_SET)
@@ -35,6 +43,7 @@ fn app() -> (axum::Router, ::health::Readiness) {
     (
         native_router(
             routes,
+            services.listener_layer,
             readiness.control().reader(),
             services.names,
             methods,
@@ -71,6 +80,7 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
         assert_eq!(response.headers()[header::ALLOW], "POST");
+        assert!(!response.headers().contains_key("x-native"));
         assert!(!response.headers().contains_key("grpc-status"));
     }
     for (path, media) in [
@@ -90,6 +100,7 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "{path} {media:?}"
         );
+        assert!(!response.headers().contains_key("x-native"));
         assert!(!response.headers().contains_key("grpc-status"));
     }
     for media in [
@@ -103,6 +114,7 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{media}");
         assert_eq!(response.headers()["grpc-status"], "12", "{media}");
+        assert_eq!(response.headers()["x-native"], "yes", "{media}");
     }
 }
 

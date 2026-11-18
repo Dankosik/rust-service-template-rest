@@ -16,6 +16,9 @@ use jsonwebtoken::{
     jwk::{Jwk, PublicKeyUse},
 };
 
+#[cfg(feature = "test-support")]
+pub use crate::source::has_cached_authorization;
+
 #[must_use]
 pub fn now_secs() -> u64 {
     crate::unix_seconds().expect("the system clock follows the Unix epoch")

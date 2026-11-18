@@ -158,6 +158,12 @@ impl ReceiverTokens {
     }
 }
 
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn has_cached_authorization(tokens: &ReceiverTokens) -> bool {
+    matches!(&tokens.0, ReceiverState::Active(active) if active.cached.load().is_some())
+}
+
 impl ActiveReceiver {
     fn reusable(cached: Option<&Arc<Cached>>, now: u64) -> Option<HeaderValue> {
         cached
