@@ -273,14 +273,6 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::ResponseLimit,
         ),
         (
-            b"HTTP/1.1 202 Accepted\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{".to_vec(),
-            AcquisitionError::InvalidResponse,
-        ),
-        (
-            b"HTTP/1.1 202 Accepted\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
-            AcquisitionError::InvalidResponse,
-        ),
-        (
             b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n".to_vec(),
             AcquisitionError::InvalidResponse,
         ),
@@ -352,23 +344,30 @@ async fn an_accepted_response_with_a_valid_token_is_refused_until_the_provider_r
         "token_type": "Bearer",
         "expires_in": 60,
     });
-    fixture.token_json(StatusCode::ACCEPTED, &token);
-    assert_matches!(
-        fixture.send(&client).await,
-        Err(Error::Acquisition(AcquisitionError::InvalidResponse))
-    );
+    for response in [
+        b"HTTP/1.1 202 Accepted\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{".to_vec(),
+        b"HTTP/1.1 202 Accepted\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+        json_response(StatusCode::ACCEPTED, &token),
+    ] {
+        advance(Duration::from_secs(1)).await;
+        fixture.token_raw(response);
+        assert_matches!(
+            fixture.send(&client).await,
+            Err(Error::Acquisition(AcquisitionError::InvalidResponse))
+        );
+    }
 
     fixture.token_json(StatusCode::OK, &token);
     assert_matches!(
         fixture.send(&client).await,
         Err(Error::Acquisition(AcquisitionError::InvalidResponse))
     );
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_requests().len(), 3);
     assert!(fixture.resource_requests().is_empty());
 
     advance(Duration::from_secs(1)).await;
     fixture.send(&client).await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), 4);
     let resources = fixture.resource_requests();
     assert_eq!(resources.len(), 1);
     assert_eq!(
