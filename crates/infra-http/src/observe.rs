@@ -618,13 +618,14 @@ mod tests {
             let _recorder = metrics::set_default_local_recorder(&recorder);
             let handler = move || async move {
                 let initial = stream::iter([Ok(Bytes::from_static(b"initial"))]);
+                let result = if fail {
+                    Err(std::io::Error::other("injected response body error"))
+                } else {
+                    Ok(Bytes::from_static(b"tail"))
+                };
                 let tail = stream::once(async move {
                     tokio::time::sleep(delay).await;
-                    if fail {
-                        Err(std::io::Error::other("injected response body error"))
-                    } else {
-                        Ok(Bytes::from_static(b"tail"))
-                    }
+                    result
                 });
                 Body::from_stream(initial.chain(tail))
             };
@@ -680,45 +681,51 @@ mod tests {
                     assert!(body.frame().await.is_none());
                 }
             }
-            let metrics = snapshotter.snapshot().into_vec();
-            assert_eq!(metrics.len(), 2, "{metrics:?}");
-            for (key, _, _, value) in metrics {
-                match key.key().name() {
-                    ACTIVE_REQUESTS_METRIC => {
-                        assert_eq!(value, DebugValue::Gauge((-1.0).into()));
-                    }
-                    REQUEST_DURATION_METRIC => {
-                        let mut expected = vec![
-                            Label::new("http_request_method", "GET"),
-                            Label::new("url_scheme", "https"),
-                            Label::new("http_response_status_code", "200"),
-                            Label::new("http_route", "/stream"),
-                        ];
-                        if let Some(error_type) = error_type {
-                            expected.push(Label::new("error_type", error_type));
-                        }
-                        assert_eq!(key.key().labels().cloned().collect::<Vec<_>>(), expected);
-                        let DebugValue::Histogram(samples) = value else {
-                            panic!("expected a duration histogram, got {value:?}");
-                        };
-                        assert_eq!(samples.len(), 1, "{samples:?}");
-                        assert!(
-                            (2.0..2.01).contains(&samples[0].into_inner()),
-                            "{samples:?}"
-                        );
-                    }
-                    name => panic!("unexpected metric {name}"),
-                }
-            }
+            assert_stream_completion_metrics(&snapshotter, error_type);
             drop(body);
             assert!(snapshotter.snapshot().into_vec().into_iter().all(
                 |(_, _, _, value)| match value {
                     DebugValue::Gauge(value) => value.into_inner() == 0.0,
                     DebugValue::Histogram(samples) => samples.is_empty(),
-                    _ => false,
+                    DebugValue::Counter(_) => false,
                 }
             ));
         }
+    }
+
+    fn assert_stream_completion_metrics(
+        snapshotter: &Snapshotter,
+        error_type: Option<&'static str>,
+    ) {
+        let mut observations = snapshotter.snapshot().into_vec();
+        observations.sort_by_key(|(key, ..)| key.key().name() != ACTIVE_REQUESTS_METRIC);
+        let [(active_key, _, _, gauge), (duration_key, _, _, duration)] = observations.as_slice()
+        else {
+            panic!("expected active and duration observations, got {observations:?}");
+        };
+        assert_eq!(active_key.key().name(), ACTIVE_REQUESTS_METRIC);
+        assert_eq!(*gauge, DebugValue::Gauge((-1.0).into()));
+        assert_eq!(duration_key.key().name(), REQUEST_DURATION_METRIC);
+        let mut expected = vec![
+            Label::new("http_request_method", "GET"),
+            Label::new("url_scheme", "https"),
+            Label::new("http_response_status_code", "200"),
+            Label::new("http_route", "/stream"),
+        ];
+        if let Some(error_type) = error_type {
+            expected.push(Label::new("error_type", error_type));
+        }
+        assert_eq!(
+            duration_key.key().labels().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        let DebugValue::Histogram(samples) = duration else {
+            panic!("expected a duration histogram, got {duration:?}");
+        };
+        let [sample] = samples.as_slice() else {
+            panic!("expected one duration sample, got {samples:?}");
+        };
+        assert!((2.0..2.01).contains(&sample.into_inner()), "{samples:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -910,7 +917,7 @@ mod tests {
                     "{parents:?}"
                 );
                 assert_ne!(context.trace_id().to_string(), trace_id);
-                assert!(context.trace_state().header().is_empty());
+                assert_eq!(context.trace_state().header(), "");
                 assert!(!headers.contains_key("traceparent"));
                 assert!(!headers.contains_key("tracestate"));
             }

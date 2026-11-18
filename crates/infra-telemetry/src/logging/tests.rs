@@ -441,7 +441,7 @@ impl std::fmt::Debug for NeverFormat {
 
 fn emit_denied_diagnostics() {
     tracing::error!("ordinary_record");
-    tracing::warn!(target: "infra_messaging::consumer::delivery", messaging.destination.template = "events.>", "messaging_delivery_failed");
+    tracing::warn!(target: "infra_messaging::consumer::delivery", "messaging_delivery_failed");
     tracing::debug!(target: "async_nats", "received MESSAGE: sid=1, subject=events.PRIVATE_NATS");
     tracing::trace!(target: "async_nats::connection", "server op: events.PRIVATE_NATS");
     tracing::debug!(name: "HttpTraceClient.ResponseParseError", target: "opentelemetry-otlp", error = ?NeverFormat);

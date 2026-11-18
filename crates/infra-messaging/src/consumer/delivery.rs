@@ -284,7 +284,7 @@ impl DeliveryHandler {
                     message,
                     &self.filter_subject,
                 )
-                .await
+                .await;
             }
             Settlement::DeadLetter(reason) => {
                 return self
@@ -292,7 +292,7 @@ impl DeliveryHandler {
                     .await;
             }
             Settlement::Redeliver(delay) => {
-                redeliver_after(message, delay, &self.filter_subject).await
+                redeliver_after(message, delay, &self.filter_subject).await;
             }
         }
         Ok(())
