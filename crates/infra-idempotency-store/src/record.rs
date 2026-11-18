@@ -148,25 +148,9 @@ impl Record {
             .and_then(|status| StatusCode::from_u16(status).ok())
             .filter(|status| status.is_success() || is_terminal_refusal(*status))
             .ok_or(Undecodable::Status)?;
-        let mut admitted = HeaderMap::new();
-        let mut size = 0_usize;
-        for HeaderPair { name, value } in headers {
-            let name = REPLAYABLE
-                .iter()
-                .find(|candidate| candidate.as_str() == name)
-                .ok_or(Undecodable::HeaderName)?;
-            let value = HeaderValue::try_from(value).map_err(|_| Undecodable::HeaderValue)?;
-            size = size.saturating_add(header_size(name, &value));
-            if size <= MAX_TOTAL_STORED_HEADER_BYTES {
-                admitted.append(name, value);
-            }
-        }
-        if size > MAX_TOTAL_STORED_HEADER_BYTES {
-            return Err(Undecodable::HeaderLimit);
-        }
         Ok(Self {
             status,
-            headers: admitted,
+            headers: decode_headers(headers)?,
             body: if forbids_body(status) {
                 Bytes::new()
             } else {
@@ -211,6 +195,26 @@ fn replayable_headers(
     REPLAYABLE
         .iter()
         .flat_map(move |name| headers.get_all(name).iter().map(move |value| (name, value)))
+}
+
+fn decode_headers(headers: Vec<HeaderPair>) -> Result<HeaderMap, Undecodable> {
+    let mut admitted = HeaderMap::new();
+    let mut size = 0_usize;
+    for HeaderPair { name, value } in headers {
+        let name = REPLAYABLE
+            .iter()
+            .find(|candidate| candidate.as_str() == name)
+            .ok_or(Undecodable::HeaderName)?;
+        let value = HeaderValue::try_from(value).map_err(|_| Undecodable::HeaderValue)?;
+        size = size.saturating_add(header_size(name, &value));
+        if size <= MAX_TOTAL_STORED_HEADER_BYTES {
+            admitted.append(name, value);
+        }
+    }
+    if size > MAX_TOTAL_STORED_HEADER_BYTES {
+        return Err(Undecodable::HeaderLimit);
+    }
+    Ok(admitted)
 }
 
 fn header_size(name: &HeaderName, value: &HeaderValue) -> usize {

@@ -73,21 +73,7 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
             None
         }
         Sink::Stalled => {
-            writer.set_nonblocking(true).unwrap();
-            let bytes = [b'x'; 8192];
-            let mut size = bytes.len();
-            loop {
-                match writer.write(&bytes[..size]) {
-                    Ok(0) => panic!("stdout socket unexpectedly closed"),
-                    Ok(_) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && size > 1 => {
-                        size /= 2;
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(err) => panic!("fill stdout socket: {err}"),
-                }
-            }
-            writer.set_nonblocking(false).unwrap();
+            fill_stdout_until_blocked(&mut writer);
             Some(reader)
         }
         Sink::Healthy => Some(reader),
@@ -122,6 +108,28 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
         .read_to_string(&mut stderr)
         .unwrap();
     (status.code().unwrap(), stdout, stderr, elapsed)
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "the terminal fixture fills its synchronous stdout socket before releasing the child"
+)]
+fn fill_stdout_until_blocked(writer: &mut UnixStream) {
+    writer.set_nonblocking(true).unwrap();
+    let bytes = [b'x'; 8192];
+    let mut size = bytes.len();
+    loop {
+        match writer.write(&bytes[..size]) {
+            Ok(0) => panic!("stdout socket unexpectedly closed"),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && size > 1 => {
+                size /= 2;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(err) => panic!("fill stdout socket: {err}"),
+        }
+    }
+    writer.set_nonblocking(false).unwrap();
 }
 
 #[test]

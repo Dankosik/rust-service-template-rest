@@ -205,7 +205,7 @@ impl Store {
         if self.terminal_refusals {
             tx.begin_command_savepoint()
                 .await
-                .map_err(|err| failed(&err, "savepoint", AttemptError::classify_sql(&err), None))?;
+                .map_err(|err| sql_failed(&err, "savepoint"))?;
         }
         let record = work(tx).await.map_err(Stop::RolledBack)?;
         if record.is_terminal_refusal() {
@@ -216,14 +216,9 @@ impl Store {
                     "undeclared_terminal_refusal",
                 )));
             }
-            tx.rollback_command_savepoint().await.map_err(|err| {
-                failed(
-                    &err,
-                    "rollback_command",
-                    AttemptError::classify_sql(&err),
-                    None,
-                )
-            })?;
+            tx.rollback_command_savepoint()
+                .await
+                .map_err(|err| sql_failed(&err, "rollback_command"))?;
         }
         write(tx, scope, fingerprint, &record, self.retention).await?;
         Ok(record)
@@ -282,47 +277,39 @@ async fn arbitrate(
             "not_writable",
         ));
     }
-    let live = match (row.fingerprint, row.status, row.headers) {
-        (Some(stored_fingerprint), Some(status), Some(headers)) => Some(decide_live(
-            stored_fingerprint,
-            status,
-            headers,
+    if let (Some(stored_fingerprint), Some(status), Some(headers)) =
+        (row.fingerprint, row.status, row.headers)
+    {
+        return decide_live(stored_fingerprint, status, headers, row.body, fingerprint).map(Some);
+    }
+    if !row.acquired {
+        return Ok(Some(Decision::InProgress));
+    }
+    let row = observed(
+        "read idempotency record",
+        sqlx::query!(
+            "SELECT fingerprint AS \"fingerprint: Digest\", status, \
+             headers AS \"headers: Vec<HeaderPair>\", \
+             CASE WHEN fingerprint = $2 THEN body END AS body \
+             FROM http_idempotency_records \
+             WHERE scope_key = $1 AND expires_at > statement_timestamp()",
+            scope.digest.as_slice(),
+            fingerprint.as_bytes().as_slice(),
+        )
+        .fetch_optional(tx),
+    )
+    .await
+    .map_err(|err| read_failed(&err, "read_record"))?;
+    row.map(|row| {
+        decide_live(
+            row.fingerprint,
+            row.status,
+            row.headers,
             row.body,
             fingerprint,
-        )?),
-        _ => None,
-    };
-    match live {
-        Some(decision) => Ok(Some(decision)),
-        None if !row.acquired => Ok(Some(Decision::InProgress)),
-        None => {
-            let row = observed(
-                "read idempotency record",
-                sqlx::query!(
-                    "SELECT fingerprint AS \"fingerprint: Digest\", status, \
-                     headers AS \"headers: Vec<HeaderPair>\", \
-                     CASE WHEN fingerprint = $2 THEN body END AS body \
-                     FROM http_idempotency_records \
-                     WHERE scope_key = $1 AND expires_at > statement_timestamp()",
-                    scope.digest.as_slice(),
-                    fingerprint.as_bytes().as_slice(),
-                )
-                .fetch_optional(tx),
-            )
-            .await
-            .map_err(|err| read_failed(&err, "read_record"))?;
-            row.map(|row| {
-                decide_live(
-                    row.fingerprint,
-                    row.status,
-                    row.headers,
-                    row.body,
-                    fingerprint,
-                )
-            })
-            .transpose()
-        }
-    }
+        )
+    })
+    .transpose()
 }
 
 fn decide_live(
@@ -346,7 +333,7 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
             failed(err, "decode_record", AttemptError::Integrity, None)
         }
-        _ => failed(err, phase, AttemptError::classify_sql(err), None),
+        _ => sql_failed(err, phase),
     }
 }
 
@@ -387,7 +374,7 @@ async fn write(
         .execute(tx),
     )
     .await
-    .map_err(|err| failed(&err, "write_record", AttemptError::classify_sql(&err), None))?;
+    .map_err(|err| sql_failed(&err, "write_record"))?;
     if written.rows_affected() == 1 {
         Ok(())
     } else {
@@ -435,6 +422,10 @@ fn classify_tx(err: &TxError) -> AttemptError {
         TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
     };
     failed(err.driver(), phase, class, commit_outcome)
+}
+
+fn sql_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
+    failed(err, phase, AttemptError::classify_sql(err), None)
 }
 
 fn failed(
