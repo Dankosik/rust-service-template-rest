@@ -14,7 +14,7 @@ pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
 pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, is_transient, sqlstate};
 pub use maintenance::{
-    Cleanup, CleanupError, CleanupPass, CleanupPassResult, CleanupSchedule,
+    Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, CleanupSchedule,
     MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
     MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx, run_scheduled_cleanup,
 };

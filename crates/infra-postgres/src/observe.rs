@@ -232,19 +232,11 @@ fn record_statement_error(
     .record(started.elapsed().as_secs_f64());
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TransactionOutcome {
-    Committed,
-    RolledBack,
-    AcquireFailed,
-    BeginFailed,
-    CommitFailed,
-    CommitUnknown,
-    Cancelled,
-}
-
 macro_rules! transaction_outcomes {
     ($($variant:ident => $label:literal),* $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum TransactionOutcome { $($variant),* }
+
         impl TransactionOutcome {
             pub(crate) const fn label(self) -> &'static str {
                 match self {
@@ -303,8 +295,13 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
-    outcome: TransactionOutcome,
-    commit_started: bool,
+    phase: TransactionPhase,
+}
+
+enum TransactionPhase {
+    Running,
+    Committing,
+    Finished(TransactionOutcome),
 }
 
 impl TransactionObservation {
@@ -312,8 +309,7 @@ impl TransactionObservation {
         Self {
             started: Instant::now(),
             span,
-            outcome: TransactionOutcome::Cancelled,
-            commit_started: false,
+            phase: TransactionPhase::Running,
         }
     }
 
@@ -326,11 +322,11 @@ impl TransactionObservation {
     }
 
     pub(crate) fn begin_commit(&mut self) {
-        self.commit_started = true;
+        self.phase = TransactionPhase::Committing;
     }
 
     pub(crate) fn end(&mut self, outcome: TransactionOutcome) {
-        self.outcome = outcome;
+        self.phase = TransactionPhase::Finished(outcome);
     }
 
     pub(crate) fn fail(&mut self, error: TxError) -> TxError {
@@ -340,24 +336,29 @@ impl TransactionObservation {
             None => self.span.record("error.type", failure_cause(source)),
         };
         self.span.record("otel.status_code", "ERROR");
-        self.outcome = TransactionOutcome::of(&error);
+        self.end(TransactionOutcome::of(&error));
         error
     }
 }
 
 impl Drop for TransactionObservation {
     fn drop(&mut self) {
-        if self.commit_started && self.outcome == TransactionOutcome::Cancelled {
-            tracing::warn!(
-                parent: &self.span,
-                phase = "commit",
-                commit_outcome = "unknown",
-                "postgres_transaction_cancelled"
-            );
-        }
+        let outcome = match self.phase {
+            TransactionPhase::Running => TransactionOutcome::Cancelled,
+            TransactionPhase::Committing => {
+                tracing::warn!(
+                    parent: &self.span,
+                    phase = "commit",
+                    commit_outcome = "unknown",
+                    "postgres_transaction_cancelled"
+                );
+                TransactionOutcome::Cancelled
+            }
+            TransactionPhase::Finished(outcome) => outcome,
+        };
         self.span
-            .record("postgres.transaction.outcome", self.outcome.label());
-        self.outcome
+            .record("postgres.transaction.outcome", outcome.label());
+        outcome
             .duration_histogram()
             .record(self.started.elapsed().as_secs_f64());
     }
