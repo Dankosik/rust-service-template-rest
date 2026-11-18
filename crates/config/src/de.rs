@@ -229,7 +229,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = string(deserializer)?;
-    parse_listen_addr(&raw).ok_or_else(|| invalid_listen_addr(&raw))
+    parse_listen_addr(&raw)
 }
 
 pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<SocketAddr>, D::Error>
@@ -237,21 +237,18 @@ where
     D: serde::Deserializer<'de>,
 {
     blank_as_none::<_, String>(deserializer)?
-        .map(|value| parse_listen_addr(&value).ok_or_else(|| invalid_listen_addr(&value)))
+        .as_deref()
+        .map(parse_listen_addr)
         .transpose()
 }
 
-fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
-    E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR_FORM)
-}
-
-fn parse_listen_addr(value: &str) -> Option<SocketAddr> {
+fn parse_listen_addr<E: serde::de::Error>(value: &str) -> Result<SocketAddr, E> {
     let trimmed = value.trim();
     match trimmed.strip_prefix(':') {
         Some(port) => format!("0.0.0.0:{port}").parse(),
         None => trimmed.parse(),
     }
-    .ok()
+    .map_err(|_| E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR_FORM))
 }
 
 pub(crate) fn duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -304,7 +301,7 @@ mod tests {
     #[case::trimmed("  :8080  ", "0.0.0.0:8080")]
     fn socket_addr_accepts_supported_forms(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(
-            parse_listen_addr(input).unwrap(),
+            parse_listen_addr::<serde::de::value::Error>(input).unwrap(),
             expected.parse::<SocketAddr>().unwrap()
         );
     }
@@ -318,7 +315,6 @@ mod tests {
             addr: SocketAddr,
         }
 
-        assert_eq!(parse_listen_addr("localhost:8080"), None);
         let err = toml::from_str::<Probe>("addr = \"localhost:8080\"").unwrap_err();
         let rendered = err.to_string();
         assert!(rendered.contains("localhost:8080"), "{rendered}");

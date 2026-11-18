@@ -73,36 +73,22 @@ pub(crate) struct MessagingInput {
 
 impl Default for MessagingInput {
     fn default() -> Self {
-        let MessagingConfig {
-            urls,
-            credentials: _,
-            root_ca_path,
-            allow_plaintext,
-            tls_first,
-            trusted_network,
-            allow_unauthenticated,
-            source_stream,
-            max_payload_bytes,
-            consumer_durable,
-            consumer_filter_subject,
-            dlq_subject,
-            consumer_concurrency,
-        } = MessagingConfig::default();
+        let defaults = MessagingConfig::default();
         Self {
-            urls,
+            urls: defaults.urls,
             credentials: None,
             credentials_file: None,
-            root_ca_path,
-            allow_plaintext,
-            tls_first,
-            trusted_network,
-            allow_unauthenticated,
-            source_stream,
-            max_payload_bytes,
-            consumer_durable,
-            consumer_filter_subject,
-            dlq_subject,
-            consumer_concurrency,
+            root_ca_path: defaults.root_ca_path,
+            allow_plaintext: defaults.allow_plaintext,
+            tls_first: defaults.tls_first,
+            trusted_network: defaults.trusted_network,
+            allow_unauthenticated: defaults.allow_unauthenticated,
+            source_stream: defaults.source_stream,
+            max_payload_bytes: defaults.max_payload_bytes,
+            consumer_durable: defaults.consumer_durable,
+            consumer_filter_subject: defaults.consumer_filter_subject,
+            dlq_subject: defaults.dlq_subject,
+            consumer_concurrency: defaults.consumer_concurrency,
         }
     }
 }

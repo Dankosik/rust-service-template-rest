@@ -84,10 +84,10 @@ impl ServiceAuthInput {
         match self.mode {
             ServiceAuthMode::None => {
                 if grpc_enabled && !insecure_development {
-                    v.check(Err(ValidationError::new(
+                    v.reject(ValidationError::new(
                         "service_auth.mode",
                         "must be jwt when grpc.enabled is true unless app.allow_insecure_development is enabled",
-                    )));
+                    ));
                 }
                 for (key, present) in [
                     ("service_auth.name", self.name.is_some()),
@@ -97,10 +97,10 @@ impl ServiceAuthInput {
                     ("service_auth.private_key", self.private_key.is_some()),
                 ] {
                     if present {
-                        v.check(Err(ValidationError::new(
+                        v.reject(ValidationError::new(
                             key,
                             "is only valid when service_auth.mode = jwt",
-                        )));
+                        ));
                     }
                 }
                 Ok(ServiceAuthConfig::None)

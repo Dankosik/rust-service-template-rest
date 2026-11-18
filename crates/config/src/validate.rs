@@ -54,10 +54,6 @@ fn join(errors: &[ValidationError]) -> String {
 }
 
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "removing every profile with conditional input leaves no admission that rejects"
-)]
 pub(crate) struct Rejected(());
 
 #[derive(Debug, Default)]
@@ -78,10 +74,6 @@ impl Violations {
         result.map_err(|error| self.reject(error))
     }
 
-    #[allow(
-        dead_code,
-        reason = "removing every profile with conditional input leaves the method without a caller"
-    )]
     pub(crate) fn reject(&mut self, error: ValidationError) -> Rejected {
         self.0.push(error);
         Rejected(())

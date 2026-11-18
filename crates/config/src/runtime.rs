@@ -25,10 +25,10 @@ impl RuntimeConfig {
         if let Some(count) = self.worker_threads
             && count.get() > MAX_WORKER_THREADS
         {
-            v.check(Err(ValidationError::new(
+            v.reject(ValidationError::new(
                 "runtime.worker_threads",
                 format!("must be at most {MAX_WORKER_THREADS}, got {count}"),
-            )));
+            ));
         }
     }
 
