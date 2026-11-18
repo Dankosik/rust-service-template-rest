@@ -1,6 +1,7 @@
 use std::{error::Error as StdError, fmt};
 
 use http::StatusCode;
+use operation_context::Stopped;
 use serde::Deserialize;
 
 use crate::request_admission::AdmissionRefusal;
@@ -172,6 +173,15 @@ impl AcquisitionError {
             Self::Rejected(rejection) => rejection.label(),
             Self::InvalidResponse => "invalid",
             Self::Assertion => "assertion",
+        }
+    }
+}
+
+impl From<Stopped> for AcquisitionError {
+    fn from(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::Deadline => Self::Timeout,
+            Stopped::Cancelled => Self::Cancelled,
         }
     }
 }

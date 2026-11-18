@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
 
-pub(crate) trait OutcomeLabel: Copy + Enum + 'static {
+pub(crate) trait OutcomeLabel: Enum {
     fn label(self) -> &'static str;
 }
 
