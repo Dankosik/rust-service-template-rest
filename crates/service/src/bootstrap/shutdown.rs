@@ -630,13 +630,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), entered.cancelled())
             .await
             .unwrap();
-        let mut config = super::super::test_config(&[]);
-        config.http.drain_timeout = Duration::from_millis(30);
+        let mut http_config = super::super::test_config(&[]).http.clone();
+        http_config.drain_timeout = Duration::from_millis(30);
         let mut signals = Signals::install().unwrap();
         let shutdown = run(Plan {
-            http_config: &config.http,
+            http_config: &http_config,
             signals: &mut signals,
-            deadline: Instant::now() + config.http.grace_period,
+            deadline: Instant::now() + http_config.grace_period,
             serving: Serving {
                 app_listener: Some(server),
                 ..Serving::default()
