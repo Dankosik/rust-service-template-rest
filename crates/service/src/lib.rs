@@ -5,7 +5,7 @@ pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration, run_with}
 mod state;
 pub use state::AppState;
 // template:begin grpc:service-registration-module
-pub use bootstrap::GrpcRegistration;
+pub use bootstrap::{GrpcRegistration, run_with_grpc_resource};
 // template:end grpc:service-registration-module
 
 use std::ffi::OsString;

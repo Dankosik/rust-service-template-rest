@@ -699,6 +699,21 @@ class SurfacesTests(unittest.TestCase):
         self.assertFalse(quota_union.surfaces["initializer_artifacts"])
         # template:end runtime-progress:test-surfaces-quota-union
 
+        legacy_classifier = union_repo / "scripts/verify/surfaces.py"
+        legacy_classifier.write_text(
+            'import sys\nprint("rust_source=true" if "old.rs" in sys.argv else "lint_config=true")\n',
+            encoding="utf-8",
+        )
+        deleted = ("old.rs", "clippy.toml", "rustfmt.toml")
+        for path in deleted:
+            (union_repo / path).touch()
+        _git(union_repo, "add", legacy_classifier.as_posix(), *deleted)
+        _git(union_repo, "commit", "-qm", "base classifier predates profiling selection")
+        for path in deleted:
+            (union_repo / path).unlink()
+            report = surfaces.classify_union_report(union_repo, "HEAD", [path])
+            self.assertEqual(report.surfaces["profiling"], path != "rustfmt.toml", path)
+
 
 class AffectedCratesTests(unittest.TestCase):
     @classmethod
@@ -1046,6 +1061,18 @@ class VerifyRunnerTests(unittest.TestCase):
         res = self._run_verify("--plan", "--files", ".agents/roles/worker-agent.toml")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("  make check-instructions\n", res.stdout)
+
+        for path, expected in (
+            ("clippy.toml", True),
+            ("Cargo.lock", True),
+            ("crates/leaf/src/lib.rs", True),
+            ("rustfmt.toml", False),
+            (".typos.toml", False),
+        ):
+            with self.subTest(path=path):
+                res = self._run_verify("--plan", "--files", path, REPOSITORY_CI="none")
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual("  make profiling-check\n" in res.stdout, expected)
 
         res = self._run_verify("--plan", "--files", "README.md")
         self.assertEqual(res.returncode, 0)

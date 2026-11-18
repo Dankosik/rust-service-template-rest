@@ -18,6 +18,9 @@ pub mod grpc;
 
 pub use credentials::{ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens};
 pub use discovery::verify_keycloak_metadata;
-pub use error::{AcquisitionError, ConfigurationError, Error, Rejection};
+pub use error::{
+    AcquisitionError, ConfigurationError, DiscoveryTransportError, Error, KeycloakError,
+    PreparationError, Rejection, TransportBuildFailure, TransportFailure,
+};
 pub use http_client::{AuthenticatedClient, RequestClient};
 pub use options::{Algorithm, ExchangeTokenTarget, Options, ServiceTokenTarget};

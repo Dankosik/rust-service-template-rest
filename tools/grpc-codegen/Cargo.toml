@@ -23,7 +23,7 @@ blanket_hint_mostly_unused = "warn"
 non_kebab_case_bins = "deny"
 non_kebab_case_packages = "deny"
 redundant_homepage = "deny"
-unused_dependencies = "warn"
+unused_dependencies = "deny"
 
 [lints.rust]
 ambiguous_negative_literals = "warn"

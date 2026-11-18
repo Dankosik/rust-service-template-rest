@@ -14,5 +14,6 @@ workspace = true
 [dependencies]
 derive-where = { workspace = true }
 prost = { workspace = true, features = ["std", "derive"] }
+prost-types = { workspace = true }
 tonic = { workspace = true, features = ["codegen"] }
 tonic-prost = { workspace = true }

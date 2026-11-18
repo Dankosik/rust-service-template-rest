@@ -97,6 +97,7 @@ struct Proxy {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+#[warn(clippy::let_underscore_must_use)]
 impl Proxy {
     async fn plain(upstream: SocketAddr) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy bind");
@@ -128,11 +129,12 @@ impl Proxy {
     }
 
     async fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-            let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.task).await;
+        if self.stop.take().is_some() {
+            tokio::time::timeout(Duration::from_secs(1), &mut self.task)
+                .await
+                .expect("Valkey proxy did not stop")
+                .expect("Valkey proxy task failed");
         }
-        self.task.abort();
     }
 
     async fn restart_plain(&mut self, upstream: SocketAddr) {

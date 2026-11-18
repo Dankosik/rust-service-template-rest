@@ -59,9 +59,9 @@ impl ExchangeState {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let (context, request_context) = deadline.fetch_contexts(Instant::now());
+        let context = deadline.fetch_context(Instant::now());
         let result = endpoint
-            .fetch_exchange(subject, target, &context, request_context.as_ref())
+            .fetch_exchange(subject, target, &context)
             .await
             .map(Arc::new);
         if let Some(error) = deadline.stopped_error() {

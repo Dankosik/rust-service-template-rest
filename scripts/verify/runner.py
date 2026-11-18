@@ -354,7 +354,7 @@ def _build_plan(
     if is_true("cargo_dependencies") and (repo / "scripts/checks/native_transport.py").is_file():
         add_command("make", "native-transport-regressions", "patched native transport graph or source changed", "cpu", heavy=True)
 
-    if ci_mode == "none" and (is_true("rust_source") or is_true("cargo_dependencies")):
+    if ci_mode == "none" and is_true("profiling"):
         add_command("make", "profiling-check", "no CI compiles the optional profiling configurations", "cpu")
 
     if is_true("openapi"):

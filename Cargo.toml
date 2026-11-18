@@ -246,6 +246,7 @@ wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
 # template:begin outbound-http:workspace-outbound-http-transport
 hyper-rustls = { version = "0.27.9", default-features = false }
+once_cell = { version = "1.21.4", default-features = false }
 # template:end outbound-http:workspace-outbound-http-transport
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }
@@ -277,8 +278,8 @@ blanket_hint_mostly_unused = "warn"
 non_kebab_case_bins = "deny"
 non_kebab_case_packages = "deny"
 redundant_homepage = "deny"
-unused_dependencies = "warn"
-unused_workspace_dependencies = "warn"
+unused_dependencies = "deny"
+unused_workspace_dependencies = "deny"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

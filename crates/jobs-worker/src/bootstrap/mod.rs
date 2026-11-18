@@ -69,6 +69,10 @@ pub(crate) enum WorkerError {
     Metrics(#[from] infra_telemetry::MetricsError),
     #[error("worker registration failed: {0}")]
     Registration(#[source] BuildError),
+    // template:begin webhooks:worker-bootstrap-webhook-tls-error
+    #[error("outbound webhook TLS preparation failed ({0})")]
+    WebhookTls(#[source] infra_outbound_http::BuildError),
+    // template:end webhooks:worker-bootstrap-webhook-tls-error
     #[error("background task {0} stopped without a stop signal")]
     BackgroundStopped(&'static str),
     // template:begin jobs:worker-bootstrap-job-errors
@@ -334,6 +338,13 @@ async fn prepare(
         Ok(_) => {}
     }
     install_panic_hook();
+    // template:begin webhooks:worker-bootstrap-webhook-tls
+    if !config.webhooks.endpoints.is_empty() {
+        infra_outbound_http::prepare_tls()
+            .await
+            .map_err(WorkerError::WebhookTls)?;
+    }
+    // template:end webhooks:worker-bootstrap-webhook-tls
     let mut capabilities = register_capabilities(config, register, background)?;
     telemetry::log_startup_record(
         config,

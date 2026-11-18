@@ -10,16 +10,13 @@ fn register(
     _state: &service::AppState,
     _background: &mut service::BackgroundRegistration<'_>,
 ) -> Result<(), infra_grpc::Error> {
-    echo::register(services)?;
-    // template:begin service-auth:grpc-example-caller-rules
-    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-        services.allow_callers(
-            &format!("/example.v1.EchoService/{method}"),
-            &["example-caller"],
-        )?;
-    }
-    // template:end service-auth:grpc-example-caller-rules
-    Ok(())
+    echo::register(services, |services, path| {
+        // template:begin service-auth:grpc-example-caller-rules
+        services.allow_callers(path, &["example-caller"])?;
+        // template:end service-auth:grpc-example-caller-rules
+        let _ = (services, path);
+        Ok(())
+    })
 }
 
 pub(crate) fn main() -> ExitCode {

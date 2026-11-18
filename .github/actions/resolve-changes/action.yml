@@ -27,6 +27,9 @@ outputs:
   lint_config:
     description: Rustfmt or Clippy configuration changed.
     value: ${{ steps.surfaces.outputs.lint_config }}
+  profiling:
+    description: Rust sources, dependencies, or Clippy rules affecting profiling builds changed.
+    value: ${{ steps.surfaces.outputs.profiling }}
   openapi:
     description: OpenAPI contract or generator changed.
     value: ${{ steps.surfaces.outputs.openapi }}

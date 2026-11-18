@@ -5,7 +5,14 @@
     reason = "integration fixtures fail closed with their local setup context"
 )]
 
-use std::{net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    assert_matches,
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 // template:begin oidc-introspection:grpc-transport-test-auth-std-imports
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -729,22 +736,29 @@ fn request<T>(message: T) -> Request<T> {
 
 #[tokio::test(start_paused = true)]
 async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
-    let client = Client::try_new(
+    let client = Client::with_opening_limit(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
-        Duration::from_secs(2),
+        ClientTimeout::FullRpc(Duration::from_secs(2)),
+        Some(NonZeroUsize::MIN),
     )
     .expect("client config is valid");
     let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
     let mut request = http::Request::new(tonic::body::Body::empty());
     request.extensions_mut().insert(parent.clone());
-    let prepared = client.prepare_call(request);
+    let prepared = client.prepare_call(request).unwrap();
     assert_eq!(
         prepared.opening_context().remaining(),
         Some(Duration::from_secs(1))
     );
 
     tokio::time::advance(Duration::from_secs(1)).await;
+    let mut expired = http::Request::new(tonic::body::Body::empty());
+    expired.extensions_mut().insert(parent.clone());
+    assert_eq!(
+        client.prepare_call(expired).unwrap_err().code(),
+        Code::DeadlineExceeded
+    );
     assert_eq!(
         prepared.send().await.unwrap_err().code(),
         Code::DeadlineExceeded
@@ -752,6 +766,11 @@ async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
     assert!(
         !parent.cancellation().is_cancelled(),
         "the prepared call owns a child cancellation scope"
+    );
+    assert!(
+        client
+            .prepare_call(http::Request::new(tonic::body::Body::empty()))
+            .is_ok()
     );
 }
 
@@ -1244,7 +1263,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
         }
     }
 
-    assert_eq!(
+    assert_matches!(
         infra_grpc::router(
             services,
             readiness().control().reader(),
@@ -1252,7 +1271,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
             limits(),
         )
         .unwrap_err(),
-        Error::MissingScopeRequirement(SERVER_STREAM_PATH.to_owned())
+        Error::MissingScopeRequirement(path) if path == SERVER_STREAM_PATH
     );
     fixture.stop().await;
 }
@@ -1260,9 +1279,9 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
 #[test]
 fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
     let mut services = described();
-    assert_eq!(
+    assert_matches!(
         services.require_scopes(UNARY_PATH, &["echo.read"]),
-        Err(Error::UnregisteredMethodPath(UNARY_PATH.to_owned()))
+        Err(Error::UnregisteredMethodPath(path)) if path == UNARY_PATH
     );
     services
         .add(EchoServiceServer::new(Echo::new()))
@@ -1276,19 +1295,37 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         "/example.v1.EchoService/Unry",
         "/example.v1.Other/Unary",
     ] {
-        assert_eq!(
+        assert_matches!(
             services.require_scopes(path, &["echo.read"]),
-            Err(Error::UnregisteredMethodPath(path.to_owned())),
+            Err(Error::UnregisteredMethodPath(rejected)) if rejected == path,
             "{path}"
         );
     }
     services
         .require_scopes(UNARY_PATH, &["echo.read"])
         .expect("first requirement");
-    assert_eq!(
+    assert_matches!(
         services.require_scopes(UNARY_PATH, &["echo.write"]),
-        Err(Error::DuplicateScopeRequirement(UNARY_PATH.to_owned()))
+        Err(Error::DuplicateScopeRequirement(path)) if path == UNARY_PATH
     );
+}
+
+#[test]
+fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
+    let mut services = described();
+    services.add(EchoServiceServer::new(Echo::new())).unwrap();
+
+    assert_matches!(
+        services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
+        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
+    );
+    assert_matches!(
+        services.require_scopes_for_delegation(UNARY_PATH, &[""]),
+        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
+    );
+    services
+        .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])
+        .unwrap();
 }
 // template:end authn:grpc-transport-test-insufficient-scope
 
@@ -2261,6 +2298,103 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
 }
 
 #[tokio::test]
+async fn client_clones_share_opening_capacity_until_cancellation_or_response_headers() {
+    let fixture = Fixture::plaintext().await;
+    let new_client = || {
+        EchoServiceClient::new(
+            Client::with_opening_limit(
+                &format!("http://{}", fixture.address),
+                ClientSecurity::Plaintext,
+                ClientTimeout::OpeningOnly(CLIENT_TIMEOUT),
+                Some(NonZeroUsize::MIN),
+            )
+            .unwrap(),
+        )
+    };
+    let mut client = new_client();
+    let mut clone = client.clone();
+    let parent = operation_context::OperationContext::unbounded();
+    let mut held_request = request(unary("hold"));
+    held_request.extensions_mut().insert(parent.clone());
+    let mut opening = Box::pin(client.unary(held_request));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = fixture.echo.hold.wait_for(1) => {},
+            result = &mut opening => panic!("the opening must remain held: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+
+    let error = timeout(WAIT, clone.unary(request(unary("shed"))))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    let mut cancelled = request(unary("cancelled"));
+    let stopped = operation_context::OperationContext::unbounded();
+    stopped.cancel();
+    cancelled.extensions_mut().insert(stopped);
+    assert_eq!(
+        clone.unary(cancelled).await.unwrap_err().code(),
+        Code::Cancelled
+    );
+    assert_seen(&fixture.echo, &[Seen::Unary]);
+
+    let separate = timeout(WAIT, new_client().unary(request(unary("independent"))))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(separate.into_inner().message, "independent");
+    parent.cancel();
+    assert_eq!(
+        timeout(WAIT, opening).await.unwrap().unwrap_err().code(),
+        Code::Cancelled
+    );
+
+    let mut response = timeout(
+        WAIT,
+        clone.server_stream(request(ServerStreamRequest {
+            message: "hold-after-first".to_owned(),
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .message,
+        "hold-after-first"
+    );
+    fixture.echo.hold.wait_for(2).await;
+    let second = timeout(WAIT, client.unary(request(unary("after-headers"))))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.into_inner().message, "after-headers");
+    fixture.echo.hold.release();
+    assert_eq!(
+        timeout(WAIT, response.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .message,
+        "released"
+    );
+    assert_seen(
+        &fixture.echo,
+        &[Seen::Unary, Seen::Unary, Seen::ServerStream, Seen::Unary],
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
     let fixture = Fixture::open_with(
         true,
@@ -2375,7 +2509,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
                     Duration::from_secs(seconds),
                 ));
         }
-        let mut prepared = client.prepare_call(request);
+        let mut prepared = client.prepare_call(request).unwrap();
         prepared
             .headers_mut()
             .insert("grpc-timeout", http::HeaderValue::from_static("1H"));
@@ -2719,7 +2853,7 @@ fn the_builtin_health_name_cannot_be_registered_as_a_business_service() {
         .describe(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .unwrap();
     let (_, health) = tonic_health::server::health_reporter();
-    assert_eq!(
+    assert_matches!(
         services.add(health).unwrap_err(),
         Error::DuplicateService("grpc.health.v1.Health")
     );
@@ -3129,11 +3263,11 @@ fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
 #[test]
 fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
-    assert_eq!(
+    assert_matches!(
         Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
         ClientError::DestinationSecurityMismatch
     );
-    assert_eq!(
+    assert_matches!(
         Client::try_new(
             "https://127.0.0.1:1",
             ClientSecurity::Plaintext,
@@ -3295,10 +3429,18 @@ async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
 
 #[test]
 fn bytes_that_are_not_a_descriptor_set_are_rejected() {
-    assert_eq!(
-        Services::new().describe(&[0xff]),
-        Err(Error::InvalidFileDescriptorSet)
+    let error = Services::new()
+        .describe(b"\xffprivate descriptor fixture")
+        .unwrap_err();
+    assert_matches!(&error, Error::DecodeDescriptorSet(_));
+    let source = std::error::Error::source(&error).unwrap();
+    assert!(source.is::<prost::DecodeError>());
+    assert!(
+        error
+            .to_string()
+            .contains("decode gRPC file descriptor set")
     );
+    assert!(!format!("{error:?} {error} {source}").contains("private descriptor fixture"));
 }
 
 #[test]
@@ -3327,11 +3469,9 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         ..Default::default()
     };
     descriptor.file.insert(0, unnamed_file);
-    assert_eq!(
+    assert_matches!(
         services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(
-            "example.v1.EchoService".to_owned()
-        ))
+        Err(Error::ConflictingServiceDescription(name)) if name == "example.v1.EchoService"
     );
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
@@ -3351,9 +3491,9 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
     let service = &mut file.service[0];
     service.name = Some(String::new());
     service.method.remove(0);
-    assert_eq!(
+    assert_matches!(
         services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(String::new()))
+        Err(Error::ConflictingServiceDescription(name)) if name.is_empty()
     );
     descriptor.file[0].service[0]
         .method
@@ -3370,7 +3510,7 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
 fn reflection_added_twice_is_rejected() {
     let mut services = Services::new();
     services.add_reflection().expect("first registration");
-    assert_eq!(
+    assert_matches!(
         services.add_reflection(),
         Err(Error::DuplicateService(
             "grpc.reflection.v1.ServerReflection"
@@ -3380,7 +3520,7 @@ fn reflection_added_twice_is_rejected() {
 
 #[test]
 fn a_service_is_described_before_it_is_added_and_added_once() {
-    assert_eq!(
+    assert_matches!(
         Services::new().add(EchoServiceServer::new(Echo::new())),
         Err(Error::UndescribedService("example.v1.EchoService"))
     );
@@ -3388,7 +3528,7 @@ fn a_service_is_described_before_it_is_added_and_added_once() {
     services
         .add(EchoServiceServer::new(Echo::new()))
         .expect("first registration");
-    assert_eq!(
+    assert_matches!(
         services.add(EchoServiceServer::new(Echo::new())),
         Err(Error::DuplicateService("example.v1.EchoService"))
     );

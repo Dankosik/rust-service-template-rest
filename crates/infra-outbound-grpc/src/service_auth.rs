@@ -6,7 +6,7 @@ use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use tonic::body::Body;
 
-use crate::{Client, ClientError, call::client_stopped};
+use crate::{Client, ClientError};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -44,11 +44,10 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let mut prepared = self.resource.prepare_call(request);
-        if let Err(reason) = prepared.opening_context().check() {
-            let status = prepared.refuse(client_stopped(reason));
-            return Box::pin(std::future::ready(Err(status)));
-        }
+        let mut prepared = match self.resource.prepare_call(request) {
+            Ok(prepared) => prepared,
+            Err(status) => return Box::pin(std::future::ready(Err(status))),
+        };
         if prepared.headers_mut().contains_key(AUTHORIZATION) {
             return Box::pin(std::future::ready(Err(prepared.refuse(
                 tonic::Status::internal("authorization conflicts with the service token"),
@@ -74,6 +73,7 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::time::Duration;
 
     use infra_serviceauth::{
@@ -103,7 +103,7 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap();
-        assert_eq!(
+        assert_matches!(
             plain.with_service_tokens(tokens.clone()).unwrap_err(),
             ClientError::ServiceTokensRequireTls
         );
@@ -129,7 +129,7 @@ mod tests {
             "https://peer.example:65536",
         ] {
             let elsewhere = source.receiver("catalog", wrong.parse().unwrap()).unwrap();
-            assert_eq!(
+            assert_matches!(
                 client.with_service_tokens(elsewhere).unwrap_err(),
                 ClientError::ServiceTokenOriginMismatch
             );

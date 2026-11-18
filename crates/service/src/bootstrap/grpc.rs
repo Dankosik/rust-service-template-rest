@@ -17,6 +17,14 @@ pub type GrpcRegistration = fn(
     &mut BackgroundRegistration<'_>,
 ) -> Result<(), infra_grpc::Error>;
 
+pub(super) type ResourceRegistration = Box<
+    dyn FnOnce(
+        &mut infra_grpc::Services,
+        &crate::AppState,
+        &mut BackgroundRegistration<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+>;
+
 pub(super) struct Prepared {
     pub(super) addr: SocketAddr,
     pub(super) app: infra_grpc::Application,
@@ -26,7 +34,7 @@ pub(super) struct Prepared {
 
 pub(super) fn prepare(
     grpc: &GrpcConfig,
-    registration: Option<GrpcRegistration>,
+    registration: Option<ResourceRegistration>,
     state: &crate::AppState,
     // template:begin grpc-authn:bootstrap-grpc-bearer-parameter
     bearer: Option<&infra_bearerauthn::Verifier>,
@@ -64,7 +72,8 @@ pub(super) fn prepare(
             &mut services,
             state,
             &mut BackgroundRegistration { background },
-        )?;
+        )
+        .map_err(BootstrapError::GrpcRegistration)?;
     }
     let app = infra_grpc::router(services, state.readiness.clone(), authentication, limits)?;
     Ok(Prepared {
