@@ -528,6 +528,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
             ("status", "active"),
         ])),
     };
+    let replay_route = publication.clone();
     let committed = publication
         .prepare(&event)
         .expect("original account update");
@@ -598,14 +599,16 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         serde_json::value::RawValue::from_string(REORDERED_JSON.to_owned())
             .expect("reordered account update JSON"),
     );
-    let reordered = publication
+    let reordered = replay_route
         .prepare(&event)
         .expect("reordered account update");
     assert_eq!(reordered.payload().as_ref(), REORDERED_JSON.as_bytes());
 
     event.payload =
         AccountUpdated::Sorted(BTreeMap::from([("status", "active"), ("account_id", "42")]));
-    let same = publication.prepare(&event).expect("rebuilt account update");
+    let same = replay_route
+        .prepare(&event)
+        .expect("rebuilt account update");
 
     verify_completed_identity(&fixture, &messaging, &business, &reordered, &same, &row.id).await;
     finish(run, &[&publisher, &business]).await;
