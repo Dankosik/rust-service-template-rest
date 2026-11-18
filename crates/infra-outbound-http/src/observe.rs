@@ -28,12 +28,7 @@ impl Error {
             Self::Cancelled => "operation was cancelled",
             Self::DispatchRefused => "dispatch was refused",
             Self::ResponseBodyTooLarge => "response body is too large",
-            Self::Transport { source } => match transport_error_type(&**source) {
-                "tls" => "HTTP transport failed during the TLS exchange",
-                "connect" => "HTTP transport failed during connection setup",
-                "protocol" => "HTTP transport failed while parsing the response",
-                _ => "HTTP transport failed",
-            },
+            Self::Transport { source } => describe_transport_error(&**source).diagnostic,
         }
     }
 }
@@ -72,7 +67,7 @@ impl Outcome {
             Error::DispatchRefused => Self::Failed("dispatch_refused"),
             Error::Timeout => Self::Failed("timeout"),
             Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
-            Error::Transport { source } => Self::Failed(transport_error_type(&**source)),
+            Error::Transport { source } => Self::Failed(describe_transport_error(&**source).label),
         }
     }
 
@@ -256,24 +251,41 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
+struct TransportErrorDescription {
+    label: &'static str,
+    diagnostic: &'static str,
+}
+
+fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorDescription {
     let causes = || shared_rules::error_chain::causes(source);
     if causes().any(<dyn StdError>::is::<rustls::Error>) {
-        "tls"
+        TransportErrorDescription {
+            label: "tls",
+            diagnostic: "HTTP transport failed during the TLS exchange",
+        }
     } else if causes().any(|cause| {
         cause
             .downcast_ref::<hyper_util::client::legacy::Error>()
             .is_some_and(hyper_util::client::legacy::Error::is_connect)
     }) {
-        "connect"
+        TransportErrorDescription {
+            label: "connect",
+            diagnostic: "HTTP transport failed during connection setup",
+        }
     } else if causes().any(|cause| {
         cause
             .downcast_ref::<hyper::Error>()
             .is_some_and(hyper::Error::is_parse)
     }) {
-        "protocol"
+        TransportErrorDescription {
+            label: "protocol",
+            diagnostic: "HTTP transport failed while parsing the response",
+        }
     } else {
-        "transport"
+        TransportErrorDescription {
+            label: "transport",
+            diagnostic: "HTTP transport failed",
+        }
     }
 }
 
