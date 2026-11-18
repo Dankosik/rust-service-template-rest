@@ -82,7 +82,7 @@ impl ServerOutcome {
 
 type FramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
 
-struct ActiveStream<B: Body> {
+struct ActiveStream<B> {
     body: B,
     call: Call,
     _permit: Option<OwnedSemaphorePermit>,
@@ -92,18 +92,18 @@ struct ActiveStream<B: Body> {
     waker: Option<Waker>,
 }
 
-enum ServerState<B: Body> {
+enum ServerState<B> {
     Active(ActiveStream<B>),
     PendingTrailers(HeaderMap),
     Closed,
 }
 
-struct StreamFinalizer<B: Body> {
+struct StreamFinalizer<B> {
     active: ActiveStream<B>,
     outcome: ServerOutcome,
 }
 
-impl<B: Body> StreamFinalizer<B> {
+impl<B> StreamFinalizer<B> {
     fn emit(self) {
         if let Some(failure) = self.outcome.failure {
             self.active.call.record_failure(failure);
@@ -112,7 +112,7 @@ impl<B: Body> StreamFinalizer<B> {
     }
 }
 
-impl<B: Body> ServerState<B> {
+impl<B> ServerState<B> {
     fn is_expired(&self) -> bool {
         let Self::Active(active) = self else {
             return false;
@@ -138,7 +138,9 @@ impl<B: Body> ServerState<B> {
             ServerOutcome::from_status(status),
         )
     }
+}
 
+impl<B: Body> ServerState<B> {
     fn cut_off(
         &mut self,
         status: &tonic::Status,
@@ -170,22 +172,19 @@ impl<B: Body> ServerState<B> {
     }
 }
 
-struct ResponseBody<B: Body> {
+struct ResponseBody<B> {
     state: Arc<Mutex<ServerState<B>>>,
     timer: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
     timer_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
-pub(crate) fn attach_server<B>(
-    mut response: http::Response<B>,
+pub(crate) fn attach_server(
+    mut response: axum::response::Response,
     call: Call,
     fallback: Option<opentelemetry::Context>,
     custody: ServerCustody,
-) -> http::Response<impl Body<Data = Bytes, Error = B::Error> + Send + 'static>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
+) -> axum::response::Response {
     let initial = if custody.deadline.is_some_and(Deadline::expired) {
         let status = deadline_status();
         for header in [
@@ -200,7 +199,9 @@ where
     } else {
         ServerOutcome::from_response(&response)
     };
-    response.map(|body| ResponseBody::start(body, call, fallback, custody, initial))
+    response
+        .map(|body| ResponseBody::start(body, call, fallback, custody, initial))
+        .map(axum::body::Body::new)
 }
 
 impl<B> ResponseBody<B>
@@ -301,7 +302,7 @@ where
     }
 }
 
-fn terminate_from_timer<B: Body>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
+fn terminate_from_timer<B>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
     let finalizer = state.lock().stage_status_trailers(status);
     if let Some(mut finalizer) = finalizer {
         if let Some(waker) = finalizer.active.waker.take() {
@@ -377,7 +378,7 @@ where
     }
 }
 
-impl<B: Body> Drop for ResponseBody<B> {
+impl<B> Drop for ResponseBody<B> {
     fn drop(&mut self) {
         let stage = {
             let mut guard = self.state.lock();
