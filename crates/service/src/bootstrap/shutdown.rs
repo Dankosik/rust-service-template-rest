@@ -380,7 +380,7 @@ async fn stop_serving(
         serving.app_listener.take(),
         graceful_deadline,
         confirmation_deadline,
-        ListenerKind::Http,
+        &DrainEvents::HTTP,
     );
     // template:begin grpc:shutdown-concurrent-grpc-drain
     let drain = async {
@@ -390,7 +390,7 @@ async fn stop_serving(
                 serving.grpc_listener.take(),
                 graceful_deadline,
                 confirmation_deadline,
-                ListenerKind::Grpc
+                &DrainEvents::GRPC
             )
         );
         http_outcome.combine(grpc_outcome)
@@ -399,49 +399,36 @@ async fn stop_serving(
     outcome.combine(drain.await)
 }
 
-#[derive(Clone, Copy)]
-enum ListenerKind {
-    Http,
-    // template:begin grpc:shutdown-listener-kind-grpc
-    Grpc,
-    // template:end grpc:shutdown-listener-kind-grpc
-}
-
 struct DrainEvents {
     completed: &'static str,
     forced: &'static str,
     failed: &'static str,
 }
 
-impl ListenerKind {
-    const fn drain_events(self) -> DrainEvents {
-        match self {
-            Self::Http => DrainEvents {
-                completed: "drain_completed",
-                forced: "shutdown_forced",
-                failed: "drain_failed",
-            },
-            // template:begin grpc:shutdown-listener-kind-grpc-events
-            Self::Grpc => DrainEvents {
-                completed: "grpc_drain_completed",
-                forced: "grpc_drain_forced",
-                failed: "grpc_drain_failed",
-            },
-            // template:end grpc:shutdown-listener-kind-grpc-events
-        }
-    }
+impl DrainEvents {
+    const HTTP: Self = Self {
+        completed: "drain_completed",
+        forced: "shutdown_forced",
+        failed: "drain_failed",
+    };
+    // template:begin grpc:shutdown-grpc-drain-events
+    const GRPC: Self = Self {
+        completed: "grpc_drain_completed",
+        forced: "grpc_drain_forced",
+        failed: "grpc_drain_failed",
+    };
+    // template:end grpc:shutdown-grpc-drain-events
 }
 
 async fn drain_listener(
     listener: Option<Server>,
     graceful_deadline: Instant,
     confirmation_deadline: Instant,
-    kind: ListenerKind,
+    events: &DrainEvents,
 ) -> Outcome {
     let Some(listener) = listener else {
         return Outcome::Graceful;
     };
-    let events = kind.drain_events();
     let (drained, residue) = listener
         .drain_until(graceful_deadline, confirmation_deadline)
         .await;

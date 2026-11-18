@@ -474,6 +474,7 @@
     "remove_when_unselected": [
       "crates/config/src/webhooks.rs",
       "crates/config/src/webhooks/",
+      "crates/jobs-worker/src/outbound_webhooks.rs",
       "crates/infra-webhooks/src/outbound.rs",
       "crates/infra-webhooks/src/outbound/",
       "test/tests/webhooks/outbound.rs"

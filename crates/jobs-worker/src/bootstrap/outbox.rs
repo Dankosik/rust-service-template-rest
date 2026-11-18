@@ -37,7 +37,7 @@ impl RetainedMessages {
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
             let pool = super::postgres::admitted_pool(resources)?;
-            factory(pool, &mut self.registry).map_err(WorkerError::Registration)?;
+            factory(pool, &mut self.registry)?;
             self.registry.require_handlers()?;
         }
         Ok(())
