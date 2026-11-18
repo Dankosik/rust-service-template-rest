@@ -317,14 +317,11 @@ impl Exchange {
             ExchangeMode::Document { .. } => None,
         };
         let guard = std::mem::DropGuard::new(self, |exchange| {
-            exchange.record(
-                &span,
-                Some(
-                    caller_stop
-                        .and_then(|stopped| stopped())
-                        .map_or("cancelled", stopped_label),
-                ),
-            );
+            exchange.record(Some(
+                caller_stop
+                    .and_then(|stopped| stopped())
+                    .map_or("cancelled", stopped_label),
+            ));
         });
         let require_json_content_type = matches!(mode, ExchangeMode::Introspection { .. });
         let receive = receive(request, require_json_content_type, &span).instrument(span.clone());
@@ -338,17 +335,15 @@ impl Exchange {
                 .await
                 .unwrap_or(Err(ProviderFailure::Timeout)),
         };
-        std::mem::DropGuard::dismiss(guard).record(
-            &span,
-            result.as_ref().err().copied().map(ProviderFailure::label),
-        );
+        std::mem::DropGuard::dismiss(guard)
+            .record(result.as_ref().err().copied().map(ProviderFailure::label));
         result
     }
 
-    fn record(&self, span: &tracing::Span, failure: Option<&'static str>) {
+    fn record(&self, failure: Option<&'static str>) {
         if let Some(failure) = failure {
-            span.record("error.type", failure);
-            span.record("otel.status_code", "ERROR");
+            self.span.record("error.type", failure);
+            self.span.record("otel.status_code", "ERROR");
         }
         let outcome = failure.unwrap_or("success");
         metrics::histogram!(
