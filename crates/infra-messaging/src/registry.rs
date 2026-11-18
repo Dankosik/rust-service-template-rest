@@ -2,6 +2,7 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
 use futures_util::FutureExt as _;
@@ -16,7 +17,7 @@ use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
 type ErasedHandler =
-    Arc<dyn Fn(InboundEnvelope, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
+    Arc<dyn Fn(Event<Bytes>, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
@@ -301,11 +302,11 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(move |envelope, context| {
-            let payload = serde_json::from_slice::<T>(&envelope.payload).ok()?;
+        entry.handler = Some(Arc::new(move |encoded, context| {
+            let payload = serde_json::from_slice::<T>(&encoded.payload).ok()?;
             let event = Event {
-                id: envelope.message_id,
-                occurred_at: envelope.occurred_at.to_utc(),
+                id: encoded.id,
+                occurred_at: encoded.occurred_at,
                 payload,
             };
             Some(handler(event, context).boxed())
@@ -362,21 +363,24 @@ impl Registry {
         let routes: &HashMap<RouteKey<'_>, RegisteredRoute> = &self.routes;
         let handler = routes
             .get(&RouteKey {
-                event_type: envelope.event_type(),
-                schema_version: envelope.schema_version(),
+                event_type: &envelope.event_type,
+                schema_version: envelope.schema_version,
             })
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let run = handler(envelope, context).ok_or(DispatchError::Undecodable)?;
+        let encoded = Event {
+            id: envelope.message_id,
+            occurred_at: envelope.occurred_at.to_utc(),
+            payload: envelope.payload,
+        };
+        let run = handler(encoded, context).ok_or(DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
 
     #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
