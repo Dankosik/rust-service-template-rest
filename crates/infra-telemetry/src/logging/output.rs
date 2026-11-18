@@ -1093,7 +1093,7 @@ mod tests {
             *counted.bytes.lock().expect("test output mutex"),
             lines.concat().as_bytes()
         );
-        assert!(counted.sizes.lock().expect("sizes mutex").len() <= lines.len());
+        assert!(counted.sizes.try_iter().count() <= lines.len());
     }
 
     #[test]
