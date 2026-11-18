@@ -28,17 +28,17 @@ fn options() -> HardenOptions {
 }
 
 fn app(options: &HardenOptions) -> Router {
-    let handler_1 = || async { "ok" };
-    let handler_2 = || async {
+    let ok = || async { "ok" };
+    let slow = || async {
         tokio::time::sleep(Duration::from_secs(5)).await;
         "late"
     };
-    let handler_3 = || async {
+    let panics = || async {
         let armed = std::hint::black_box(true);
         assert!(!armed, "boom {}", 42);
         "unreachable"
     };
-    let handler_4 = |body: Result<String, axum::extract::rejection::StringRejection>| async move {
+    let echo = |body: Result<String, axum::extract::rejection::StringRejection>| async move {
         match body {
             Ok(body) => body.into_response(),
             Err(rejection) => ([(RETRY_AFTER, "60")], rejection).into_response(),
@@ -49,14 +49,11 @@ fn app(options: &HardenOptions) -> Router {
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
     let routes = Router::new()
-        .route("/ok", get(handler_1))
-        .route("/slow", get(handler_2))
-        .route("/panic", get(handler_3))
-        .route("/echo", post(handler_4))
-        .route(
-            "/small-echo",
-            post(handler_4).layer(DefaultBodyLimit::max(4)),
-        );
+        .route("/ok", get(ok))
+        .route("/slow", get(slow))
+        .route("/panic", get(panics))
+        .route("/echo", post(echo))
+        .route("/small-echo", post(echo).layer(DefaultBodyLimit::max(4)));
     harden(routes, options)
 }
 

@@ -355,8 +355,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         for (path, item) in &contract.routes.get_openapi().paths.paths {
             for (method, op) in self::fixed_path_operations!(item, as_ref) {
                 if op.is_some() {
-                    let path = if path.is_empty() { "/" } else { path.as_str() };
-                    contract.idempotency.0.push((path.into(), method));
+                    contract.idempotency.0.push((path.as_str().into(), method));
                 }
             }
         }
@@ -690,11 +689,7 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
     use crate::idempotency::{KEY_HEADER, REPLAYED_HEADER};
     use utoipa::openapi::path::ParameterIn;
     let components = document.components.as_ref();
-    let path_item = document.paths.paths.get(path).or_else(|| {
-        (path == "/")
-            .then(|| document.paths.paths.get(""))
-            .flatten()
-    });
+    let path_item = document.paths.paths.get(path);
     let key = path_item
         .and_then(|item| item.parameters.as_deref())
         .into_iter()
@@ -1337,11 +1332,11 @@ mod tests {
             .openapi(utoipa::openapi::OpenApiVersion::Version32)
             .build();
         for (body, response, adds_problem) in [
-            (json_body.clone(), explicit.clone(), true),
-            (json_body.clone(), local, true),
-            (json_body.clone(), opaque_content, false),
-            (json_body, opaque, false),
-            (mixed_body, explicit.clone(), false),
+            (&json_body, &explicit, true),
+            (&json_body, &local, true),
+            (&json_body, &opaque_content, false),
+            (&json_body, &opaque, false),
+            (&mixed_body, &explicit, false),
         ] {
             let document = serde_json::from_value(serde_json::json!({
                 "openapi": "3.2.0",
@@ -1386,7 +1381,7 @@ mod tests {
                         .contains("unsupported widget version")
                 );
             } else {
-                assert_eq!(media_type_response, &response);
+                assert_eq!(media_type_response, response);
             }
         }
     }

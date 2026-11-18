@@ -414,14 +414,15 @@ mod tests {
     }
 
     fn app() -> Router {
-        let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
-        let handler_2 = |Query(_): Query<Page>| async { "page" };
+        let count_order_lines =
+            |Json(order): Json<Order>| async move { order.lines.len().to_string() };
+        let list_orders = |Query(_): Query<Page>| async { "page" };
         let filtered = |Query(filters): Query<Filters>| async move {
             filters.quantity.iter().sum::<u32>().to_string()
         };
-        let handler_3 = |Path(_): Path<u32>| async { "order" };
-        let handler_4 = |Path(_): Path<(u32, u32)>| async { "line" };
-        let handler_5 = |Path(_): Path<(u32, u32)>| async { "unreachable" };
+        let get_order = |Path(_): Path<u32>| async { "order" };
+        let get_order_line = |Path(_): Path<(u32, u32)>| async { "line" };
+        let miswired_pair = |Path(_): Path<(u32, u32)>| async { "unreachable" };
         let state = |Path(_): Path<OrderState>| async { "state" };
         let order_state = |Path(params): Path<StatePath>| async move {
             match params.state {
@@ -437,12 +438,12 @@ mod tests {
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
         let routes = Router::new()
-            .route("/orders", post(handler_1))
-            .route("/orders", get(handler_2))
+            .route("/orders", post(count_order_lines))
+            .route("/orders", get(list_orders))
             .route("/lines", get(filtered))
-            .route("/orders/{id}", get(handler_3))
-            .route("/orders/{id}/lines/{line}", get(handler_4))
-            .route("/miswired/{id}", get(handler_5))
+            .route("/orders/{id}", get(get_order))
+            .route("/orders/{id}/lines/{line}", get(get_order_line))
+            .route("/miswired/{id}", get(miswired_pair))
             .route("/miswired-struct/{id}", get(order_state))
             .route("/miswired-extra/{id}/{extra}", get(strict_path))
             .route("/miswired-alias/{id}/{old_id}", get(aliased_path))
