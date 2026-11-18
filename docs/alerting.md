@@ -24,7 +24,7 @@ the last change to that database's writers for the population.
 <!-- template:end postgres:docs-alerting-maintenance-inventory -->
 
 1. Update the shared scrape-job selector and the exact API job selector in
-   `ServiceDown`. For example, if your scrape jobs are named `orders-api`
+   `ServiceDown` and `ServiceNoReadyTargets`. For example, if your scrape jobs are named `orders-api`
    and `orders-worker`, run these from the repository root.
 
    ```sh
@@ -68,8 +68,11 @@ source of truth for exact SLI ratios, thresholds, windows, and `for` durations;
 tune objectives directly in those rule expressions rather than introducing a
 second configuration surface:
 
-- **HTTP availability & latency:** Non-5xx responses (excluding `/health/live`
-  and `/health/ready`) and responses within the latency bucket threshold.
+- **HTTP availability and latency.** Availability counts server errors, failed
+  response bodies and forced shutdowns. The latency objective counts bodies
+  completed locally within the bucket threshold. An interrupted body misses
+  this objective even if its response headers arrived promptly. Both measures
+  exclude probes. A client disconnect alone does not burn the availability budget.
 <!-- template:begin grpc:docs-alerting-grpc-objectives -->
 - **gRPC availability & latency:** Calls not ending in server-fault statuses
   (`Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`,
@@ -104,12 +107,20 @@ within minutes of a fault and reset promptly after recovery.
   ```promql
   and on(job) (
     sum by(job) (
-      rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1h])
+      rate(instance:slo_http_requests:sum[1h])
     ) > (1 / 60)
   )
   ```
 
-- **Labels.** Recording rules aggregate `by(job)`; add `http_route` only for
+- **Rule rollout.** Load the per-instance recording rules alongside the existing
+  alerts before switching the burn-rate expressions. Allow up to three days
+  for the longest window to fill. Scrape `process_start_time_seconds` with the
+  request metrics from each target. The rules use it to distinguish replacements
+  at the same address before calculating rates. The intermediate counters
+  provide a zero baseline once eligible traffic has
+  been observed, so a new error series contributes its first failure. Work
+  completed before the first observation of a process has no measured baseline.
+- **Labels.** Burn-rate rules aggregate `by(job)`; add `http_route` only for
   routes that genuinely require an independent SLO. The template ships no
   Grafana JSON model because series in `service.rules.yml` (`job:slo_*`,
   `http_server_shed_requests_total`, `http_server_active_requests`,
@@ -132,13 +143,14 @@ the alert window.
 <!-- template:end worker:docs-alerting-dead-letter-recency -->
 ### HTTPErrorBudgetBurn
 
-The service records 5xx outcomes faster than the objective allows. Break them
-down by route and status for the alerting job. Replace `service` with the
+The service is returning server errors or failing to finish response bodies.
+Group the failures by route, status and cause for the alerting job. Replace `service` with the
 alert's `job` label.
 
 ```promql
-sum by(http_route, http_response_status_code) (
+sum by(http_route, http_response_status_code, error_type) (
   rate(http_server_request_duration_seconds_count{job="service",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[5m])
+  or rate(http_server_request_duration_seconds_count{job="service",http_route!~"/health/live|/health/ready",error_type=~"server_shutdown|response_body_error"}[5m])
 )
 ```
 
@@ -151,9 +163,10 @@ of those waits.
 
 `problem_code="gateway_timeout"` identifies an exhausted request budget.
 Expiry during a tracked request-body read returns `408 request_timeout` and
-does not count here. An access log with `termination="server_shutdown"`
-records a forced shutdown before the response head as 503 for the SLO.
-The client received no HTTP status.
+does not count here. A forced shutdown before headers records
+`error_type="server_shutdown"` without an HTTP status label. After headers,
+body failures retain the response status. Look for `response_body_error` even
+when that status is 200.
 
 Roll back a fresh deployment first. Add replicas for load shedding. If the
 request failed on a dependency, compare the adapter's signals for the
@@ -188,7 +201,8 @@ affected instances during the same period.
 
 ### HTTPLatencyBudgetBurn
 
-Too many requests take longer than 500 ms. Find the route with
+Too many responses failed to complete within 500 ms. Check body errors and
+disconnects alongside the latency histogram. Find slow routes with
 `histogram_quantile(0.99, sum by(http_route, le) (rate(http_server_request_duration_seconds_bucket[5m])))`,
 then check what that route waits on: pool waits (`PostgresPoolSaturated`),
 outbound calls (`http_client_request_duration_seconds`) and
@@ -218,10 +232,19 @@ refused, and that wait is part of its handling time;
 ### ServiceDown
 
 No target of the job answers a scrape, or service discovery lost the service.
-Every other alert for it is now blind. Check the platform's deployment and
+Probe a representative API operation through the public ingress independently.
+If it succeeds, investigate the scrape network, discovery and diagnostics listener. Check the platform's deployment and
 restart history, then the process logs from its last start for a startup
 refusal: invalid configuration and an unreachable required dependency both
 stop the process before it serves.
+
+### ServiceNoReadyTargets
+
+Every reachable API replica has reported unready for five minutes. The ingress
+may have removed all backends even while Prometheus continues scraping them.
+Check the deployment endpoints and a client-facing request, then inspect the
+failing readiness probes and the last rollout. Restore at least one ready
+replica. A missing readiness sample alone cannot confirm this condition.
 
 ### ServiceTargetDown
 
@@ -278,6 +301,25 @@ A build with `RUSTFLAGS="--cfg tokio_unstable"` adds per-poll and queue detail
 `tokio_blocking_queue_depth` and 31 more names) for under 1% CPU per request on
 a DigitalOcean c-4. The default build leaves it off because Tokio exempts that
 API from its compatibility guarantee.
+
+### RuntimeSchedulerSampleStale
+
+Prometheus can still scrape the process, but its scheduler heartbeat is stale.
+Inspect runtime CPU and blocked tasks. A flat latency histogram can persist
+after the timer stops producing observations.
+
+### TelemetryRecordsLost
+
+Check the affected instance for `telemetry_log_records_dropped_total` by
+`reason` and `telemetry_log_sink_errors_total` by `operation`. Relieve stdout
+backpressure or restore the log sink. For tracing, inspect
+`telemetry_trace_exporter_sdk_result_spans_total{outcome="error"}` and
+`telemetry_sdk_diagnostics_total` by `event`. Check collector reachability,
+trust and capacity. The SDK result counts all spans in a batch by the final
+call result. The receiver separately reports explicit rejections through
+`telemetry_sdk_reported_rejected_spans_total`. Verify recovery at the
+destination with a sampled trace. After a queue-overflow diagnostic, the SDK
+may publish the exact dropped-span count only during shutdown.
 
 ### RuntimeThreadsElevated
 

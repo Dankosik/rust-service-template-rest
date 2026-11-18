@@ -100,6 +100,7 @@ fn mounted_receiver_with_limit(
                 max_in_flight: None,
                 admission_wait: budget,
                 log_health_probes: false,
+                trust_trace_context: false,
                 draining: None,
             },
         )

@@ -11,20 +11,6 @@ use super::service_auth::PreparedServiceAuth;
 // template:end service-auth:bootstrap-grpc-service-auth-import
 use super::BootstrapError;
 
-pub type GrpcRegistration = fn(
-    &mut infra_grpc::Services,
-    &crate::AppState,
-    &mut BackgroundRegistration<'_>,
-) -> Result<(), infra_grpc::Error>;
-
-pub(super) type ResourceRegistration = Box<
-    dyn FnOnce(
-        &mut infra_grpc::Services,
-        &crate::AppState,
-        &mut BackgroundRegistration<'_>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
->;
-
 pub(super) struct Prepared {
     pub(super) addr: SocketAddr,
     pub(super) app: infra_grpc::Application,
@@ -34,7 +20,7 @@ pub(super) struct Prepared {
 
 pub(super) fn prepare(
     grpc: &GrpcConfig,
-    registration: Option<ResourceRegistration>,
+    registration: Option<crate::GrpcResourceRegistration>,
     state: &crate::AppState,
     // template:begin grpc-authn:bootstrap-grpc-bearer-parameter
     bearer: Option<&infra_bearerauthn::Verifier>,
@@ -75,7 +61,13 @@ pub(super) fn prepare(
         )
         .map_err(BootstrapError::GrpcRegistration)?;
     }
-    let app = infra_grpc::router(services, state.readiness.clone(), authentication, limits)?;
+    let app = infra_grpc::router(
+        services,
+        state.readiness.clone(),
+        authentication,
+        limits,
+        grpc.trust_trace_context,
+    )?;
     Ok(Prepared {
         addr: grpc.addr,
         app,

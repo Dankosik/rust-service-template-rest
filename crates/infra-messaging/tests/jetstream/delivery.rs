@@ -148,6 +148,10 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         assert_eq!(span.span_context.trace_id(), observed, "{name}");
         assert_eq!(span.span_kind, kind, "{name}");
         assert_eq!(
+            attribute(span, "messaging.system.name").as_deref(),
+            Some("nats")
+        );
+        assert_eq!(
             attribute(span, "messaging.operation.name").as_deref(),
             Some(operation)
         );
@@ -349,9 +353,10 @@ fn exported_settlement(
         process.span_context.trace_id()
     );
     assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Client);
-    for key in ["messaging.system", "messaging.system.name"] {
-        assert_eq!(attribute(&span, key).as_deref(), Some("nats"), "{key}");
-    }
+    assert_eq!(
+        attribute(&span, "messaging.system.name").as_deref(),
+        Some("nats")
+    );
     assert_eq!(
         attribute(&span, "messaging.operation.type").as_deref(),
         Some("settle")

@@ -115,6 +115,7 @@ mod tests {
             max_in_flight: None,
             admission_wait: Duration::from_secs(1),
             log_health_probes: false,
+            trust_trace_context: false,
             draining: None,
         }
     }

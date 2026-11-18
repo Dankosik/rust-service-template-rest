@@ -184,9 +184,11 @@ fn plaintext_and_unauthenticated_are_only_available_in_local_development() {
     let config = load_worker_from(
         &options,
         BUILD,
-        local
-            .into_iter()
-            .chain([("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")]),
+        env(&[
+            local.as_slice(),
+            &[("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")],
+        ]
+        .concat()),
     )
     .unwrap();
     config.messaging.producer_source_stream().unwrap();

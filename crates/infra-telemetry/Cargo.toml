@@ -24,7 +24,6 @@ smallvec = { workspace = true, features = ["const_generics"] }
 hotpath = { workspace = true, optional = true }
 axum = { workspace = true, features = ["http1", "tokio"] }
 bitflags = { workspace = true }
-gethostname = { workspace = true }
 jiff = { workspace = true, features = ["std"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -51,6 +50,7 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["fs"] }

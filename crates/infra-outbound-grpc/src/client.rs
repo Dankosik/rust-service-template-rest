@@ -9,7 +9,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use operation_context::{Deadline, OperationContext};
 use secrecy::SecretString;
-use shared_rules::error_chain::{DisplayErrorChain, causes};
+use shared_rules::error_chain::{self, DisplayErrorChain};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -472,8 +472,7 @@ fn apply_forwarded_timeout(
 }
 
 fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
-    let error = error as &(dyn std::error::Error + 'static);
-    if causes(error).any(<dyn std::error::Error>::is::<tonic::TimeoutExpired>) {
+    if error_chain::contains::<tonic::TimeoutExpired>(error) {
         return client_deadline();
     }
     tracing::warn!(error = %DisplayErrorChain(error), "grpc_client_transport_failed");

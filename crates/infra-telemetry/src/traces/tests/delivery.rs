@@ -170,6 +170,7 @@ fn a_finished_span_reaches_an_anonymous_http_collector() {
             has_certificate_file: false,
             has_client_certificate: false,
             ignored_compression: vec![],
+            invalid_batch_sizes: vec![],
         }
     );
 
@@ -412,6 +413,47 @@ fn ignored_compression_is_reported_after_logging_starts_without_disabling_export
     let request = collector.received();
     assert_eq!(request.header("content-encoding"), Some("gzip"));
     assert!(request.body.starts_with(&[0x1f, 0x8b]));
+}
+
+#[test]
+fn zero_batch_processor_sizes_warn_and_spans_still_reach_the_collector() {
+    use crate::logging::{LoggingFormat, tests::capture};
+
+    let queue = sdktrace::OTEL_BSP_MAX_QUEUE_SIZE;
+    let batch = sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
+    for (variable, vars, batch_limit) in [
+        (queue, [(queue, "0"), (batch, "1")], 1),
+        (batch, [(queue, "1024"), (batch, "0")], 512),
+    ] {
+        let collector = Collector::start(exchange);
+        let handle = tracer_provider(
+            &options(&format!("http://{}", collector.addr)),
+            env(&vars),
+            &CollectorTrust::default(),
+        )
+        .unwrap();
+        let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
+        tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
+        std::assert_matches!(
+            guard.shutdown(std::time::Instant::now() + WAIT),
+            crate::logging::LoggerShutdown::Completed(_)
+        );
+        let record: serde_json::Value = serde_json::from_str(&buffer.records()).unwrap();
+        assert_eq!(record["level"], "WARN");
+        assert_eq!(record["variable"], variable);
+
+        for _ in 0..=batch_limit {
+            handle.tracer().start("still exported").end();
+        }
+        assert_eq!(shutdown(handle), ProviderShutdown::Completed);
+        let mut delivered = 0;
+        while delivered <= batch_limit {
+            let spans = collector.received().span_names();
+            assert!((1..=batch_limit).contains(&spans.len()), "{variable}");
+            delivered += spans.len();
+        }
+        assert_eq!(delivered, batch_limit + 1);
+    }
 }
 
 fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {

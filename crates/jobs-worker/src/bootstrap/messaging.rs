@@ -1,17 +1,15 @@
 use std::time::Duration;
 
-use futures_util::FutureExt;
 use health::Probe;
 use infra_messaging::{
-    Consumer, ConsumerError, ConsumerOptions, Credentials, Messaging, MessagingError,
-    MessagingOptions, Registry as MessagingRegistry,
+    Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
+    Registry as MessagingRegistry,
 };
 use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::{Ended, WorkerError, pending_end, worker_identity};
-use crate::Registration;
 use crate::background::Background;
 use crate::resources::{BrokerResource, Resources};
 use crate::signals::Signals;
@@ -33,15 +31,15 @@ pub(super) struct MessagingPlan {
 impl MessagingPlan {
     pub(super) fn retain(
         config: &WorkerConfig,
-        registration: Registration<'_>,
+        messages: RetainedMessages,
     ) -> Result<Option<Self>, WorkerError> {
-        registration.messages.check_publication_limit(
+        messages.registry.check_publication_limit(
             usize::try_from(config.messaging.max_payload_bytes.as_u64())
                 .map_err(|_| WorkerError::MessagingPayloadBound)?,
         )?;
-        let consumes_messages = registration.messages.has_handlers();
+        let consumes_messages = messages.registry.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
-        let consumes_messages = consumes_messages || registration.postgres_messages.is_some();
+        let consumes_messages = consumes_messages || messages.postgres_messages.is_some();
         // template:end outbox:worker-bootstrap-postgres-messages-intent
         if !consumes_messages {
             return Ok(None);
@@ -57,12 +55,7 @@ impl MessagingPlan {
         };
         Ok(Some(Self {
             options: messaging_options(config, keys.source_stream, Some(consumer))?,
-            consumer: Some(RetainedMessages {
-                registry: registration.messages,
-                // template:begin outbox:worker-bootstrap-postgres-messages-value
-                postgres_messages: registration.postgres_messages,
-                // template:end outbox:worker-bootstrap-postgres-messages-value
-            }),
+            consumer: Some(messages),
         }))
     }
 
@@ -167,16 +160,10 @@ pub(super) fn start_consumer(
     None
 }
 
-pub(super) fn consumer_failure(resources: &Resources) -> Option<WorkerError> {
-    let error = resources.consumer.as_ref()?.failed().now_or_never()?;
-    Some(WorkerError::ConsumerStopped(error))
-}
-
-pub(super) async fn consumer_stopped(resources: &Resources) -> ConsumerError {
-    if let Some(consumer) = resources.consumer.as_ref() {
-        consumer.failed().await
-    } else {
-        std::future::pending::<ConsumerError>().await
+pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {
+    match &resources.consumer {
+        Some(consumer) => WorkerError::ConsumerStopped(consumer.failed().await),
+        None => std::future::pending().await,
     }
 }
 

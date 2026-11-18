@@ -52,11 +52,9 @@ use tokio_util::sync::CancellationToken;
 
 use self::background::{Background, BackgroundFailure, background_failure};
 pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
-// template:begin grpc:bootstrap-grpc-registration-export
-pub use self::grpc::GrpcRegistration;
-// template:end grpc:bootstrap-grpc-registration-export
 use self::shutdown::{Dependencies, Outcome, Serving};
 use self::signals::Signals;
+use crate::StartupRegistration;
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -177,64 +175,7 @@ fn process_failure(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-struct StartupRegistration<C> {
-    http_resource: Option<crate::HttpResource<C>>,
-    // template:begin grpc:bootstrap-registration-callback
-    grpc: Option<grpc::ResourceRegistration>,
-    // template:end grpc:bootstrap-registration-callback
-}
-
-impl<C> From<crate::ServiceRegistration<C>> for StartupRegistration<C> {
-    fn from(registration: crate::ServiceRegistration<C>) -> Self {
-        Self {
-            http_resource: registration.http_resource,
-            // template:begin grpc:bootstrap-adapt-legacy-registration
-            grpc: registration
-                .grpc
-                .map(|register| -> grpc::ResourceRegistration {
-                    Box::new(move |services, state, background| {
-                        register(services, state, background).map_err(Into::into)
-                    })
-                }),
-            // template:end grpc:bootstrap-adapt-legacy-registration
-        }
-    }
-}
-
-// template:begin grpc:bootstrap-run-with-grpc-resource
-pub fn run_with_grpc_resource<I>(
-    args: I,
-    register: impl FnOnce(
-        &mut infra_grpc::Services,
-        &crate::AppState,
-        &mut BackgroundRegistration<'_>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-    + 'static,
-) -> ExitCode
-where
-    I: IntoIterator<Item = OsString>,
-{
-    run_registered(
-        args,
-        StartupRegistration::<()> {
-            http_resource: None,
-            grpc: Some(Box::new(register)),
-        },
-    )
-}
-// template:end grpc:bootstrap-run-with-grpc-resource
-
-pub fn run_with<I>(
-    args: I,
-    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
-) -> ExitCode
-where
-    I: IntoIterator<Item = OsString>,
-{
-    run_registered(args, registration.into())
-}
-
-fn run_registered<I>(
+pub(super) fn run_registered<I>(
     args: I,
     registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
 ) -> ExitCode
@@ -366,22 +307,21 @@ async fn serve(
             }
         };
         drop(config);
-        if let Err(error) = finish_startup(race, signals, &mut background, &mut serving) {
-            return Some(error);
-        }
+        finish_startup(race, signals, &mut background, &mut serving)?;
         if !serving.admitted {
-            return None;
+            return Ok(());
         }
         tokio::select! {
             biased;
-            stopped = signals.wait() => stopped.err().map(BootstrapError::from),
-            failed = background_failure(&mut observer) => Some(background_error(failed)),
+            stopped = signals.wait() => stopped.map_err(BootstrapError::from),
+            failed = background_failure(&mut observer) => Err(background_error(failed)),
         }
     })
     .catch_unwind()
     .await
-    .unwrap_or(Some(BootstrapError::Panicked));
-    let failure = failure.or_else(|| pending_failure(&background, &serving));
+    .unwrap_or(Err(BootstrapError::Panicked))
+    .err()
+    .or_else(|| pending_failure(&background, &serving));
     let deadline = *deadline.get_or_insert_with(|| {
         signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period
     });
@@ -665,6 +605,7 @@ async fn http_application(
         max_in_flight: http.max_in_flight,
         admission_wait: http.admission_wait,
         log_health_probes: http.access_log_health_probes,
+        trust_trace_context: http.trust_trace_context,
         draining: Some(state.readiness.clone()),
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation

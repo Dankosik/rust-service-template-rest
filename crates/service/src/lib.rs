@@ -1,12 +1,9 @@
 pub mod api;
 
 mod bootstrap;
-pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration, run_with};
+pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration};
 mod state;
 pub use state::AppState;
-// template:begin grpc:service-registration-module
-pub use bootstrap::{GrpcRegistration, run_with_grpc_resource};
-// template:end grpc:service-registration-module
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -17,6 +14,22 @@ pub type HttpResource<C> = Box<
         &mut BackgroundRegistration<'_>,
     ) -> Result<C, Box<dyn std::error::Error + Send + Sync>>,
 >;
+
+// template:begin grpc:service-registration-callbacks
+pub type GrpcRegistration = fn(
+    &mut infra_grpc::Services,
+    &AppState,
+    &mut BackgroundRegistration<'_>,
+) -> Result<(), infra_grpc::Error>;
+
+type GrpcResourceRegistration = Box<
+    dyn FnOnce(
+        &mut infra_grpc::Services,
+        &AppState,
+        &mut BackgroundRegistration<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+>;
+// template:end grpc:service-registration-callbacks
 
 #[derive(derive_more::Debug)]
 #[debug("ServiceRegistration {{ .. }}")]
@@ -34,6 +47,30 @@ impl<C> Default for ServiceRegistration<C> {
             // template:begin grpc:service-default-grpc-registration
             grpc: None,
             // template:end grpc:service-default-grpc-registration
+        }
+    }
+}
+
+struct StartupRegistration<C> {
+    http_resource: Option<HttpResource<C>>,
+    // template:begin grpc:bootstrap-registration-callback
+    grpc: Option<GrpcResourceRegistration>,
+    // template:end grpc:bootstrap-registration-callback
+}
+
+impl<C> From<ServiceRegistration<C>> for StartupRegistration<C> {
+    fn from(registration: ServiceRegistration<C>) -> Self {
+        Self {
+            http_resource: registration.http_resource,
+            // template:begin grpc:bootstrap-adapt-legacy-registration
+            grpc: registration
+                .grpc
+                .map(|register| -> GrpcResourceRegistration {
+                    Box::new(move |services, state, background| {
+                        register(services, state, background).map_err(Into::into)
+                    })
+                }),
+            // template:end grpc:bootstrap-adapt-legacy-registration
         }
     }
 }
@@ -59,6 +96,39 @@ where
     )
 }
 // template:end grpc:service-run-with-grpc
+
+// template:begin grpc:bootstrap-run-with-grpc-resource
+pub fn run_with_grpc_resource<I>(
+    args: I,
+    register: impl FnOnce(
+        &mut infra_grpc::Services,
+        &AppState,
+        &mut BackgroundRegistration<'_>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    + 'static,
+) -> ExitCode
+where
+    I: IntoIterator<Item = OsString>,
+{
+    bootstrap::run_registered(
+        args,
+        StartupRegistration::<()> {
+            http_resource: None,
+            grpc: Some(Box::new(register)),
+        },
+    )
+}
+// template:end grpc:bootstrap-run-with-grpc-resource
+
+pub fn run_with<I>(
+    args: I,
+    registration: ServiceRegistration<impl Clone + Send + Sync + 'static>,
+) -> ExitCode
+where
+    I: IntoIterator<Item = OsString>,
+{
+    bootstrap::run_registered(args, registration.into())
+}
 
 #[cfg(test)]
 mod tests {

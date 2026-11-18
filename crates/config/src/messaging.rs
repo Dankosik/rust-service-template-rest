@@ -290,8 +290,8 @@ fn validate_urls(
     let mut plaintext = false;
     let mut rejected = Ok(());
     for (index, raw) in urls.iter().enumerate() {
-        match url_scheme(index, raw) {
-            Ok(scheme) => plaintext |= scheme == "nats",
+        match uses_plaintext(index, raw) {
+            Ok(is_plaintext) => plaintext |= is_plaintext,
             Err(error) => rejected = Err(v.reject(error)),
         }
     }
@@ -311,7 +311,7 @@ fn validate_urls(
     Ok(())
 }
 
-fn url_scheme(index: usize, raw: &str) -> Result<String, ValidationError> {
+fn uses_plaintext(index: usize, raw: &str) -> Result<bool, ValidationError> {
     let key = format!("messaging.urls[{index}]");
     non_blank(&key, raw)?;
     if shared_rules::uri::has_whitespace_or_control(raw) {
@@ -333,7 +333,8 @@ fn url_scheme(index: usize, raw: &str) -> Result<String, ValidationError> {
         ));
     }
     match url.scheme() {
-        scheme @ ("tls" | "nats") => Ok(scheme.to_owned()),
+        "nats" => Ok(true),
+        "tls" => Ok(false),
         _ => Err(ValidationError::new(key, "must use nats:// or tls://")),
     }
 }

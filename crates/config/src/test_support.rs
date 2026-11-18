@@ -1,4 +1,5 @@
 use std::assert_matches;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::load::{Error, load_from};
@@ -19,10 +20,10 @@ pub(crate) fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf 
     path
 }
 
-pub(crate) fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+pub(crate) fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .map(|&(key, value)| (key.into(), value.into()))
         .collect()
 }
 

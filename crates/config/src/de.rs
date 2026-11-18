@@ -258,9 +258,7 @@ pub(crate) fn duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let text = string(deserializer)?;
-    parse_duration(&text)
-        .ok_or_else(|| serde::de::Error::invalid_value(Unexpected::Str(&text), &"a duration"))
+    decoded_duration(&string(deserializer)?, "a duration")
 }
 
 #[allow(
@@ -272,15 +270,18 @@ where
     D: serde::Deserializer<'de>,
 {
     optional_string(deserializer)?
-        .map(|text| {
-            parse_duration(&text).ok_or_else(|| {
-                serde::de::Error::invalid_value(Unexpected::Str(&text), &"a duration")
-            })
-        })
+        .map(|text| decoded_duration(&text, "a duration"))
         .transpose()
 }
 
-pub(crate) fn parse_duration(text: &str) -> Option<Duration> {
+pub(crate) fn decoded_duration<E: serde::de::Error>(
+    text: &str,
+    expected: &str,
+) -> Result<Duration, E> {
+    parse_duration(text).ok_or_else(|| E::invalid_value(Unexpected::Str(text), &expected))
+}
+
+fn parse_duration(text: &str) -> Option<Duration> {
     let span: jiff::Span = text.trim().parse().ok()?;
     let signed = span
         .to_duration(jiff::SpanRelativeTo::days_are_24_hours())

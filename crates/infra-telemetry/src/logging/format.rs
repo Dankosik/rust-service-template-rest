@@ -476,9 +476,7 @@ impl FormatLayer {
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
         let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
         self.write_record(event, ctx, &mut scratch, &mut line)?;
-        Ok(Record {
-            bytes: line.buf.into_boxed_slice(),
-        })
+        Ok(line.buf.into_boxed_slice())
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]

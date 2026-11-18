@@ -118,12 +118,15 @@ impl OperationContext {
     }
 
     #[must_use]
+    pub fn effective_deadline(&self, ceiling: Deadline) -> Deadline {
+        self.deadline
+            .map_or(ceiling, |parent| parent.earlier(ceiling))
+    }
+
+    #[must_use]
     pub fn child_until(&self, ceiling: Deadline) -> Self {
         Self::new(
-            Some(
-                self.deadline
-                    .map_or(ceiling, |parent| parent.earlier(ceiling)),
-            ),
+            Some(self.effective_deadline(ceiling)),
             self.cancellation.child_token(),
         )
     }

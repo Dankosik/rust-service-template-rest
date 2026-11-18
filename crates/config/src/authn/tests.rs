@@ -445,7 +445,9 @@ fn modes_reject_foreign_provider_fields() {
 }
 
 // template:begin oidc-introspection:load-introspection-environment
-fn introspection_environment(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+use std::ffi::OsString;
+
+fn introspection_environment(extra: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
     let mut values = env(&[
         ("APP__AUTHN__MODE", "oidc-introspection"),
         ("APP__AUTHN__ISSUER", "https://issuer.example/tenant"),
@@ -510,14 +512,14 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
         .iter_mut()
         .find(|(name, _)| name == "APP__AUTHN__AUDIENCE")
         .unwrap();
-    single.1 = literal.to_owned();
+    single.1 = literal.into();
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
     let AuthnConfig::OidcIntrospection { audience, .. } = &config.authn else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(audience.as_slice(), [literal]);
 
-    environment.push(("APP__AUTHN__AUDIENCES".to_owned(), literal.to_owned()));
+    environment.push(("APP__AUTHN__AUDIENCES".into(), literal.into()));
     let error = load_from(&options, BUILD, environment.clone()).unwrap_err();
     assert_matches!(
         &error,
@@ -532,7 +534,7 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
     };
     assert_eq!(audience.as_slice(), ["api-a", "api-b"]);
 
-    environment.last_mut().unwrap().1 = "malformed-list".to_owned();
+    environment.last_mut().unwrap().1 = "malformed-list".into();
     let error = load_from(&options, BUILD, environment)
         .unwrap_err()
         .to_string();

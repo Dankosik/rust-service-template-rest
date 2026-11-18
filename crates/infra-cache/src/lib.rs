@@ -2,6 +2,7 @@ mod admission;
 mod connection;
 mod credentials;
 mod dial;
+mod error;
 mod namespace;
 mod observe;
 
@@ -14,8 +15,8 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 
-use self::admission::Admitted;
 use self::connection::Link;
+pub use self::error::{MutationError, OperationError, SetError};
 pub use self::observe::HISTOGRAMS;
 use self::observe::NamespaceHistograms;
 
@@ -89,34 +90,6 @@ pub enum CloseOutcome {
     TimedOut,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum OperationError {
-    #[error("cache key exceeds the configured size limit")]
-    KeyTooLarge,
-    #[error("cache value exceeds the configured size limit")]
-    ValueTooLarge,
-    #[error("cache operation stopped by caller ({0:?})")]
-    Stopped(operation_context::Stopped),
-    #[error("cache unavailable")]
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum MutationError {
-    #[error("cache mutation was not applied: {0}")]
-    NotApplied(#[source] OperationError),
-    #[error("cache mutation outcome is unknown: {0}")]
-    OutcomeUnknown(#[source] OperationError),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SetError {
-    #[error("cache ttl is outside the supported expiration range")]
-    InvalidTtl,
-    #[error(transparent)]
-    Mutation(#[from] MutationError),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServerEndpoint {
     pub(crate) host: String,
@@ -153,12 +126,7 @@ impl Cache {
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             admission::admit(options)
         }));
-        let Admitted {
-            server,
-            dial,
-            settings,
-            password_file,
-        } = tokio::time::timeout_at(deadline, admission)
+        let admitted = tokio::time::timeout_at(deadline, admission)
             .await
             .map_err(|_| CacheError::AdmissionTimedOut)?
             .map_err(|_| CacheError::ClientBuild)??;
@@ -166,14 +134,7 @@ impl Cache {
         Ok(Self {
             max_key_bytes,
             max_value_bytes,
-            link: Arc::new(Link::start(
-                server,
-                dial,
-                settings,
-                password_file,
-                command_timeout,
-                max_concurrency,
-            )),
+            link: Arc::new(Link::start(admitted, command_timeout, max_concurrency)),
         })
     }
 

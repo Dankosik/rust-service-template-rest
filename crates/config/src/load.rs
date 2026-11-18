@@ -132,30 +132,20 @@ pub fn load(
 }
 
 #[cfg(test)]
-pub(crate) fn load_from<I, K, V>(
+pub(crate) fn load_from(
     options: &LoadOptions,
     build: BuildInfo,
-    environment: I,
-) -> Result<Config, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<Config, Error> {
     load_with_tail_from(options, build, None, environment)
 }
 
-pub(crate) fn load_with_tail_from<I, K, V>(
+pub(crate) fn load_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
     shutdown_tail: Option<crate::ShutdownTail>,
-    environment: I,
-) -> Result<Config, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<Config, Error> {
     let mut input: ConfigInput = merge(options, environment)?;
     input.app.apply_build_info(build);
     Ok(input.admit(shutdown_tail)?)
@@ -171,30 +161,20 @@ pub fn load_worker(
 }
 
 #[cfg(test)]
-pub(crate) fn load_worker_from<I, K, V>(
+pub(crate) fn load_worker_from(
     options: &LoadOptions,
     build: BuildInfo,
-    environment: I,
-) -> Result<crate::WorkerConfig, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::WorkerConfig, Error> {
     load_worker_with_tail_from(options, build, None, environment)
 }
 
-pub(crate) fn load_worker_with_tail_from<I, K, V>(
+pub(crate) fn load_worker_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
     shutdown_tail: Option<crate::ShutdownTail>,
-    environment: I,
-) -> Result<crate::WorkerConfig, Error>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::WorkerConfig, Error> {
     let mut input: crate::WorkerInput = merge(options, environment)?;
     input.app.apply_build_info(build);
     Ok(input.admit(shutdown_tail)?)
@@ -217,16 +197,11 @@ pub fn load_migration(
     load_migration_from(options, build, std::env::vars_os())
 }
 
-pub(crate) fn load_migration_from<I, K, V>(
+pub(crate) fn load_migration_from(
     options: &LoadOptions,
     build: BuildInfo,
-    environment: I,
-) -> Result<crate::MigrationConfig, MigrationLoadError>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::MigrationConfig, MigrationLoadError> {
     let mut input: crate::postgres::MigrationInput = merge(options, environment)?;
     input.app.apply_build_info(build);
     input.admit()
@@ -248,27 +223,19 @@ pub fn load_jobs_operator(
     load_jobs_operator_from(options, std::env::vars_os())
 }
 
-pub(crate) fn load_jobs_operator_from<I, K, V>(
+pub(crate) fn load_jobs_operator_from(
     options: &LoadOptions,
-    environment: I,
-) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError> {
     let input: crate::jobs::JobsOperatorInput = merge(options, environment)?;
     input.admit()
 }
 // template:end jobs:load-jobs-operator
 
-fn merge<T, I, K, V>(options: &LoadOptions, environment: I) -> Result<T, Error>
-where
-    T: DeserializeOwned,
-    I: IntoIterator<Item = (K, V)>,
-    K: Into<OsString>,
-    V: Into<OsString>,
-{
+fn merge<T: DeserializeOwned>(
+    options: &LoadOptions,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<T, Error> {
     let mut errors = Vec::new();
     let variables =
         collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
