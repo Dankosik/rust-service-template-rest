@@ -65,11 +65,9 @@ impl Principal {
         }
     }
 
-    // template:begin oidc-jwt:authn-precise-expiry
     pub(crate) const fn expiry_from_epoch(&self) -> Duration {
         self.expiry_from_epoch
     }
-    // template:end oidc-jwt:authn-precise-expiry
 
     /// RFC 8693 §4.1
     #[must_use]

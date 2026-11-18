@@ -10,8 +10,8 @@ use shared_rules::rfc7515;
 
 use crate::{
     JwtAlgorithm, PresentedToken, Principal, VerificationError, VerificationReason,
-    claims::{ClaimPolicy, VerifiedJwt, validate_jwt_claims},
-    jwks::{KeySet, MAX_SIGNATURE_BYTES},
+    claims::{ClaimPolicy, VerifiedClaims, validate_jwt_claims},
+    jwks::{KeySet, MAX_SIGNATURE_BYTES, SignatureInput},
     refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh},
 };
 
@@ -122,7 +122,7 @@ pub enum TokenProfile {
 
 #[derive(Clone)]
 struct Remembered {
-    verified: VerifiedJwt,
+    verified: VerifiedClaims,
     key_generation: u64,
     sampled_at: MonotonicInstant,
     held_for: Duration,
@@ -234,19 +234,18 @@ impl JwtVerifier {
         let admitted_claims = |payload: Vec<u8>, now: Duration| {
             validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
         };
+        let input = SignatureInput {
+            message,
+            signature,
+            kid: header.kid.as_deref(),
+            algorithm,
+        };
         let signing_keys = self
-            .verify_signature(
-                keys,
-                message,
-                signature,
-                header.kid.as_deref(),
-                algorithm,
-                || {
-                    decoded_payload()
-                        .and_then(|payload| admitted_claims(payload, now()?))
-                        .is_ok()
-                },
-            )
+            .verify_signature(keys, &input, || {
+                decoded_payload()
+                    .and_then(|payload| admitted_claims(payload, now()?))
+                    .is_ok()
+            })
             .await?;
         let payload = decoded_payload()?;
         let sampled_at = MonotonicInstant::now();
@@ -290,13 +289,10 @@ impl JwtVerifier {
     async fn verify_signature(
         &self,
         checked: Arc<KeySet>,
-        message: &[u8],
-        signature: &[u8],
-        kid: Option<&str>,
-        algorithm: JwtAlgorithm,
+        input: &SignatureInput<'_>,
         claims_would_be_admitted: impl FnOnce() -> bool,
     ) -> Result<Arc<KeySet>, VerificationError> {
-        let Err(miss) = checked.verify(message, signature, kid, algorithm) else {
+        let Err(miss) = checked.verify(input) else {
             return Ok(checked);
         };
         if !claims_would_be_admitted() {
@@ -305,7 +301,7 @@ impl JwtVerifier {
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::NewerSet(key_set) => {
                 key_set.require_fresh(self.jwks_max_age)?;
-                key_set.verify(message, signature, kid, algorithm)?;
+                key_set.verify(input)?;
                 Ok(key_set)
             }
             SignatureRefresh::NoNewerSet => {

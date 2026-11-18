@@ -55,6 +55,13 @@ impl From<SignatureVerificationError> for VerificationError {
     }
 }
 
+pub(super) struct SignatureInput<'a> {
+    pub(super) message: &'a [u8],
+    pub(super) signature: &'a [u8],
+    pub(super) kid: Option<&'a str>,
+    pub(super) algorithm: JwtAlgorithm,
+}
+
 struct JwtKey {
     kid: Option<String>,
     algorithm: JwtAlgorithm,
@@ -105,14 +112,11 @@ impl KeySet {
 
     pub(crate) fn verify(
         &self,
-        message: &[u8],
-        signature: &[u8],
-        kid: Option<&str>,
-        algorithm: JwtAlgorithm,
+        input: &SignatureInput<'_>,
     ) -> Result<(), SignatureVerificationError> {
         let mut miss = SignatureVerificationError::NoCandidate;
-        for key in self.candidates(kid, algorithm) {
-            if key.verify_sig(message, signature).is_ok() {
+        for key in self.candidates(input.kid, input.algorithm) {
+            if key.verify_sig(input.message, input.signature).is_ok() {
                 return Ok(());
             }
             miss = SignatureVerificationError::BadSignature;
