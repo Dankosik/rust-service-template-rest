@@ -269,7 +269,10 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, Envelope
         .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
 
-pub(crate) fn check_timestamp(value: OffsetDateTime) -> Result<(), EnvelopeError> {
+pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), EnvelopeError> {
+    if is_zero_time(value) {
+        return Err(EnvelopeError::CreatedAtRequired);
+    }
     value
         .checked_to_offset(UtcOffset::UTC)
         .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())

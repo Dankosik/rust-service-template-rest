@@ -122,7 +122,7 @@ fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     }
 }
 
-fn transfer_message(
+fn build_dead_letter_message(
     source: &Message,
     info: &Info<'_>,
     dead_letter_stream: &str,
@@ -306,7 +306,9 @@ impl DeliveryHandler {
         event_type: &'static str,
         cancel: &CancellationToken,
     ) -> Result<(), ConsumerError> {
-        let Some(message) = transfer_message(source, info, &self.dead_letter_stream, reason) else {
+        let Some(message) =
+            build_dead_letter_message(source, info, &self.dead_letter_stream, reason)
+        else {
             tracing::error!(
                 messaging.destination.template = self.filter_subject.as_str(),
                 reason = reason.label(),

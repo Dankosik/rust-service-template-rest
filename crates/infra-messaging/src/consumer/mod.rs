@@ -370,7 +370,7 @@ impl Consumer {
                             break 'pulls;
                         }
                         pull_failed("batch_create", error_kind);
-                        if self.recheck_subscription(stop).await?.is_break()
+                        if self.recheck_durable_consumer(stop).await?.is_break()
                             || retry_after_backoff(stop).await.is_break()
                         {
                             break 'pulls;
@@ -399,7 +399,8 @@ impl Consumer {
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
-                    if self.recheck_subscription(stop).await?.is_break() || stop.is_cancelled() {
+                    if self.recheck_durable_consumer(stop).await?.is_break() || stop.is_cancelled()
+                    {
                         break 'pulls;
                     }
                     let was_retrying_large_retained_record = retry_large_retained_record;
@@ -434,7 +435,7 @@ impl Consumer {
         Ok(())
     }
 
-    async fn recheck_subscription(
+    async fn recheck_durable_consumer(
         &self,
         stop: &CancellationToken,
     ) -> Result<ControlFlow<()>, ConsumerError> {
@@ -513,42 +514,15 @@ impl Consumer {
         let expires = Instant::now() + batch.expires + PULL_EXPIRY_GRACE;
         let mut remaining = batch.messages;
         while remaining > 0 {
-            tokio::select! {
+            let message = tokio::select! {
                 biased;
                 () = stop.cancelled() => return Ok(BatchEnd::Stopped),
-                joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
+                joined = deliveries.join_next(), if !deliveries.is_empty() => {
+                    check_delivery_task_result(joined)?;
+                    continue;
+                },
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
-                    Ok(Some(Ok(message))) => {
-                        if remaining == batch.messages {
-                            let loss_check = tokio::select! {
-                                biased;
-                                () = stop.cancelled() => {
-                                    release_message(&message, stop, &self.handler.filter_subject).await;
-                                    return Ok(BatchEnd::Stopped);
-                                }
-                                limits = self.durable_pull_limits() => limits,
-                            };
-                            match loss_check {
-                                Ok(Some(_)) => {}
-                                Ok(None) => return Err(ConsumerError::ConsumerLost),
-                                Err(error) => {
-                                    release_message(&message, stop, &self.handler.filter_subject).await;
-                                    return Ok(BatchEnd::Failed {
-                                        phase: "consumer_info",
-                                        error_kind: consumer_info_error_kind(&error.kind()),
-                                    });
-                                }
-                            }
-                        }
-                        if stop.is_cancelled() {
-                            release_message(&message, stop, &self.handler.filter_subject).await;
-                            return Ok(BatchEnd::Stopped);
-                        }
-                        remaining -= 1;
-                        let handler = Arc::clone(&self.handler);
-                        let cancel = force.clone();
-                        deliveries.spawn(async move { handler.handle(message, cancel).await });
-                    }
+                    Ok(Some(Ok(message))) => message,
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
                         let failure = classify_batch_receive_error(&error);
@@ -565,7 +539,36 @@ impl Consumer {
                         error_kind: "local_timeout",
                     }),
                 }
+            };
+            if remaining == batch.messages {
+                let loss_check = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => {
+                        release_message(&message, stop, &self.handler.filter_subject).await;
+                        return Ok(BatchEnd::Stopped);
+                    }
+                    limits = self.durable_pull_limits() => limits,
+                };
+                match loss_check {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return Err(ConsumerError::ConsumerLost),
+                    Err(error) => {
+                        release_message(&message, stop, &self.handler.filter_subject).await;
+                        return Ok(BatchEnd::Failed {
+                            phase: "consumer_info",
+                            error_kind: consumer_info_error_kind(&error.kind()),
+                        });
+                    }
+                }
             }
+            if stop.is_cancelled() {
+                release_message(&message, stop, &self.handler.filter_subject).await;
+                return Ok(BatchEnd::Stopped);
+            }
+            remaining -= 1;
+            let handler = Arc::clone(&self.handler);
+            let cancel = force.clone();
+            deliveries.spawn(async move { handler.handle(message, cancel).await });
         }
         Ok(BatchEnd::Filled)
     }

@@ -2,7 +2,6 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
 use futures_util::FutureExt as _;
@@ -17,7 +16,7 @@ use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
 type ErasedHandler = Arc<
-    dyn Fn(Event<Bytes>, OperationContext) -> Result<HandlerFuture, serde_json::Error>
+    dyn Fn(InboundEnvelope, OperationContext) -> Result<HandlerFuture, serde_json::Error>
         + Send
         + Sync,
 >;
@@ -303,11 +302,12 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(move |encoded, context| {
-            let payload = serde_json::from_slice::<T>(&encoded.payload)?;
+        entry.handler = Some(Arc::new(move |envelope, context| {
+            let occurred_at = envelope.occurred_at.to_utc();
+            let payload = serde_json::from_slice::<T>(&envelope.payload)?;
             let event = Event {
-                id: encoded.id,
-                occurred_at: encoded.occurred_at,
+                id: envelope.message_id,
+                occurred_at,
                 payload,
             };
             Ok(handler(event, context).boxed())
@@ -372,12 +372,7 @@ impl Registry {
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let encoded = Event {
-            id: envelope.message_id,
-            occurred_at: envelope.occurred_at.to_utc(),
-            payload: envelope.payload,
-        };
-        let run = handler(encoded, context).map_err(|_| DispatchError::Undecodable)?;
+        let run = handler(envelope, context).map_err(|_| DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
@@ -385,6 +380,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
     struct Created {

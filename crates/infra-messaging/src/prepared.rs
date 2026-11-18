@@ -50,10 +50,7 @@ impl PreparedEvent {
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
         let key = route_key::<T>();
-        if crate::wire::is_zero_time(occurred_at) {
-            return Err(EnvelopeError::CreatedAtRequired);
-        }
-        crate::wire::check_timestamp(occurred_at)?;
+        crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
             message_id: event.id.clone(),
@@ -85,10 +82,7 @@ impl PreparedEvent {
         if schema_version == 0 {
             return Err(EnvelopeError::Schema);
         }
-        if crate::wire::is_zero_time(occurred_at) {
-            return Err(EnvelopeError::CreatedAtRequired);
-        }
-        crate::wire::check_timestamp(occurred_at)?;
+        crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
             message_id,
@@ -458,70 +452,89 @@ mod tests {
 
     #[test]
     fn preparation_serializes_once_and_preserves_error_precedence() {
-        for (subject, limit, fail_at_end, invalid_id, zero_time, reason, calls) in [
-            ("events.*", 31, true, true, true, EnvelopeError::Subject, 0),
-            (
-                "events.created",
-                31,
-                true,
-                true,
-                true,
-                EnvelopeError::Serialization,
-                1,
-            ),
-            (
-                "events.created",
-                31,
-                false,
-                true,
-                true,
-                EnvelopeError::PayloadTooLarge,
-                1,
-            ),
-            (
-                "events.created",
-                0,
-                false,
-                false,
-                false,
-                EnvelopeError::PayloadTooLarge,
-                1,
-            ),
-            (
-                "events.created",
-                32_769,
-                false,
-                true,
-                false,
-                EnvelopeError::Identity,
-                1,
-            ),
-            (
-                "events.created",
-                32_769,
-                false,
-                false,
-                true,
-                EnvelopeError::CreatedAtRequired,
-                1,
-            ),
+        struct Case {
+            subject: &'static str,
+            limit: usize,
+            fail_at_end: bool,
+            invalid_id: bool,
+            zero_time: bool,
+            expected_error: EnvelopeError,
+            expected_calls: usize,
+        }
+
+        for case in [
+            Case {
+                subject: "events.*",
+                limit: 31,
+                fail_at_end: true,
+                invalid_id: true,
+                zero_time: true,
+                expected_error: EnvelopeError::Subject,
+                expected_calls: 0,
+            },
+            Case {
+                subject: "events.created",
+                limit: 31,
+                fail_at_end: true,
+                invalid_id: true,
+                zero_time: true,
+                expected_error: EnvelopeError::Serialization,
+                expected_calls: 1,
+            },
+            Case {
+                subject: "events.created",
+                limit: 31,
+                fail_at_end: false,
+                invalid_id: true,
+                zero_time: true,
+                expected_error: EnvelopeError::PayloadTooLarge,
+                expected_calls: 1,
+            },
+            Case {
+                subject: "events.created",
+                limit: 0,
+                fail_at_end: false,
+                invalid_id: false,
+                zero_time: false,
+                expected_error: EnvelopeError::PayloadTooLarge,
+                expected_calls: 1,
+            },
+            Case {
+                subject: "events.created",
+                limit: 32_769,
+                fail_at_end: false,
+                invalid_id: true,
+                zero_time: false,
+                expected_error: EnvelopeError::Identity,
+                expected_calls: 1,
+            },
+            Case {
+                subject: "events.created",
+                limit: 32_769,
+                fail_at_end: false,
+                invalid_id: false,
+                zero_time: true,
+                expected_error: EnvelopeError::CreatedAtRequired,
+                expected_calls: 1,
+            },
         ] {
             let mut event = event(StreamingPayload {
                 calls: Cell::new(0),
                 elements: 16_384,
-                fail_at_end,
+                fail_at_end: case.fail_at_end,
             });
-            if invalid_id {
+            if case.invalid_id {
                 event.id.clear();
             }
-            if zero_time {
+            if case.zero_time {
                 event.occurred_at = OffsetDateTime::from_unix_timestamp(-62_135_596_800)
                     .expect("Go zero time is representable")
                     .to_utc();
             }
-            let error = prepare(subject, &event, limit).expect_err("invalid event must be refused");
-            assert_eq!(error, reason);
-            assert_eq!(event.payload.calls.get(), calls);
+            let error = prepare(case.subject, &event, case.limit)
+                .expect_err("invalid event must be refused");
+            assert_eq!(error, case.expected_error);
+            assert_eq!(event.payload.calls.get(), case.expected_calls);
         }
         let event = event(StreamingPayload {
             calls: Cell::new(0),
