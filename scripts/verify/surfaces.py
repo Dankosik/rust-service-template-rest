@@ -471,6 +471,7 @@ def classify_report(
             ".dockerignore", "build/docker/*", "scripts/image/build.sh", "scripts/image/check.sh",
             "scripts/image/inventory.py", "scripts/image/scan.sh", "scripts/image/cargo_artifact.py",
             "scripts/service/runtime-image.sh", "scripts/service/runtime-binaries.json", "Cargo.toml",
+            "deny.toml", "tools/versions.env", "LICENSE",
         ):
             mark("runtime_image")
 
@@ -590,7 +591,7 @@ def classify_report(
                 ".jscpd.json", "ruff.toml", "quality/*.json",
                 "scripts/checks/*", ".dockerignore", "build/docker/*", "README.md",
                 "SECURITY.md", ".gitleaks.toml", ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/*",
-                ".github/dependabot.yml", ".github/workflows/cd.yml",
+                ".github/dependabot.yml", ".github/workflows/cd.yml", ".github/workflows/published-image-scan.yml",
                 ".github/actions/publish-image/action.yml", ".github/actions/rust-toolchain/action.yml",
                 "scripts/verify/*", "scripts/image/*",
                 "scripts/profiles/migration_history.sh", "scripts/profiles/migration_validate.sh",

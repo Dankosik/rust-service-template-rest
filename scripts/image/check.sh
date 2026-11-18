@@ -79,6 +79,16 @@ docker run -d --name "${container}" \
 	"${docker_args[@]}" \
 	"${image}" ${run_args[@]+"${run_args[@]}"} >/dev/null
 
+read_runtime_license() {
+	docker cp "${container}:/usr/share/licenses/service/$1" - | tar -xO
+}
+if ! read_runtime_license LICENSE | grep -c '[^[:space:]]' >/dev/null ||
+	! read_runtime_license THIRD-PARTY-RUST.txt | grep -cFx 'Copyright (c) Tokio Contributors' >/dev/null; then
+	echo "runtime image is missing the service license or Tokio's copyright in the Rust notices" >&2
+	exit 1
+fi
+echo "runtime image carries license notices in /usr/share/licenses/service/"
+
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
 port=${address##*:}
 if [[ -z ${port} ]]; then

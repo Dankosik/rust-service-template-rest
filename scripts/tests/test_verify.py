@@ -288,6 +288,8 @@ class SurfacesTests(unittest.TestCase):
                 img_file,
                 ("runtime_image", "module_initializer", "initializer_artifacts"),
             )
+        for img_input in ("deny.toml", "tools/versions.env", "LICENSE"):
+            self._assert_surfaces(self.source_fixture, img_input, ("runtime_image", "initializer_artifacts"))
 
         # template:begin grpc:test-surfaces-grpc
         for grpc_file in (

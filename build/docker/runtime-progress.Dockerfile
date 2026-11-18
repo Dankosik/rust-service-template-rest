@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 
 # The runner reads the digest-pinned Rust/Debian base from the production
 # Dockerfile. The Linux release binary is built once before this packaging step.

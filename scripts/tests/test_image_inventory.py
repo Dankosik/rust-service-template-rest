@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -20,7 +21,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "scripts/template"))
 from state import TEMPLATE_REPOSITORY
 
-IMAGE_ID = "sha256:" + "a" * 64
+IMAGE_CONFIG = b'{"architecture":"amd64","os":"linux"}'
+IMAGE_ID = "sha256:" + hashlib.sha256(IMAGE_CONFIG).hexdigest()
+DESCRIPTOR_ID = "sha256:" + "a" * 64
 
 
 def runtime_result(path: str, name: str, version: str) -> dict:
@@ -120,7 +123,7 @@ class Inventory(unittest.TestCase):
             "SchemaVersion": 2,
             "ArtifactName": IMAGE_ID,
             "ArtifactType": "container_image",
-            "Metadata": {"ImageID": IMAGE_ID, "ImageConfig": {"config": {}}},
+            "Metadata": {"ImageID": IMAGE_ID, "ImageConfig": {"config": {}}, "OS": {"Family": "debian", "Name": "13"}},
             "Results": [],
         }
         for path in self.paths:
@@ -154,6 +157,14 @@ class Inventory(unittest.TestCase):
             )
             copies.append(f"COPY --from={path[1:]}-build /out/{binary} {path}\n")
             self.report["Results"].append(runtime_result(path, package, version))
+        self.report["Results"].append(
+            {
+                "Target": "image.tar (debian 13)",
+                "Class": "os-pkgs",
+                "Type": "debian",
+                "Packages": [{"Name": "libc6", "Version": "2.41-12+deb13u1", "SrcName": "glibc"}],
+            }
+        )
         dockerfile = self.root / "build/docker/Dockerfile"
         dockerfile.parent.mkdir(parents=True, exist_ok=True)
         dockerfile.write_text("".join(stages) + "FROM distroless\n" + "".join(copies), encoding="utf-8")
@@ -195,11 +206,37 @@ class Inventory(unittest.TestCase):
 
     def test_each_retained_binary_is_required_despite_other_valid_graphs(self) -> None:
         original = copy.deepcopy(self.report)
-        for result in original["Results"]:
+        for result in original["Results"][:-1]:
             with self.subTest(target=result["Target"]):
                 self.report = copy.deepcopy(original)
                 self.report["Results"].remove(result)
                 self.run_check(f'/{result["Target"]}: missing Rust inventory')
+
+    def test_debian_inventory_is_required_despite_valid_rust_graphs(self) -> None:
+        original = copy.deepcopy(self.report)
+        for name, mutate, refusal in (
+            ("wrong OS", lambda report: report["Metadata"]["OS"].update(Family="ubuntu"), "Debian OS"),
+            ("missing result", lambda report: report["Results"].pop(), "Debian OS inventory"),
+            (
+                "wrong result class",
+                lambda report: report["Results"][-1].update(Class="lang-pkgs"),
+                "Debian OS inventory",
+            ),
+            (
+                "missing libc6",
+                lambda report: report["Results"][-1]["Packages"][0].update(Name="libssl3t64"),
+                "libc6",
+            ),
+            (
+                "malformed package",
+                lambda report: report["Results"][-1]["Packages"][0].pop("Version"),
+                "Debian package version",
+            ),
+        ):
+            with self.subTest(name=name):
+                self.report = copy.deepcopy(original)
+                mutate(self.report)
+                self.run_check(refusal)
 
     def test_additional_processes_require_their_own_runtime_inventory(self) -> None:
         self.select(database="postgres", jobs="postgres", messaging="nats-jetstream", extra_roles=True)
@@ -342,7 +379,12 @@ elif args[0] == "export":
     with (root / "rootfs.tar").open("rb") as archive:
         shutil.copyfileobj(archive, sys.stdout.buffer)
     sys.exit(int(os.environ.get("EXPORT_EXIT", "0")))
-elif args[:2] == ["image", "inspect"]: print(os.environ["FIXTURE_IMAGE"])
+elif args[:2] == ["image", "inspect"]:
+    print(os.environ["FIXTURE_IMAGE"], os.environ["FIXTURE_ID_KIND"], "linux/amd64")
+elif args[:2] == ["image", "save"]:
+    assert args[-1] == os.environ["FIXTURE_IMAGE"]
+    with (root / "image.tar").open("rb") as archive:
+        shutil.copyfileobj(archive, sys.stdout.buffer)
 elif args[0] == "create":
     assert args[-1] == os.environ["FIXTURE_IMAGE"]
     print(create_container())
@@ -353,16 +395,21 @@ elif args[0] == "cp":
 elif args[0] == "rm": (containers / args[-1]).unlink(missing_ok=True)
 elif args[0] == "run":
     identity = create_container()
-    mount = next(arg[:-6] for arg in args if arg.endswith(":/work"))
-    work = pathlib.Path(mount)
     status = 0
-    if "convert" not in args:
-        assert args[-1] == os.environ["FIXTURE_IMAGE"]
-        shutil.copyfile(root / "scan.json", work / "native.json")
+    if "--download-db-only" in args:
+        pass
+    elif "convert" not in args:
+        archive = pathlib.Path(next(arg.removesuffix(":/input/image.tar:ro") for arg in args
+                                    if arg.endswith(":/input/image.tar:ro")))
+        assert archive.read_bytes() == (root / "image.tar").read_bytes()
+        with (root / "scan.json").open("rb") as report:
+            shutil.copyfileobj(report, sys.stdout.buffer)
     elif "cyclonedx" in args:
         if os.environ.get("FAIL_CONVERT"): status = 1
-        else: (work / "sbom.cdx.json").write_text("converted-report")
-    else: status = int(os.environ.get("SECURITY_EXIT", "0"))
+        else: print("converted-report", end="")
+    else:
+        for result in json.load(sys.stdin)["Results"]:
+            for vuln in result.get("Vulnerabilities", []): print(vuln["VulnerabilityID"])
     if "--rm" in args: (containers / identity).unlink()
     sys.exit(status)
 else: sys.exit(2)
@@ -376,6 +423,7 @@ else: sys.exit(2)
         mode: str,
         *,
         binaries: list[str] | None = None,
+        archive_image_count: int = 1,
         **extra: str,
     ) -> subprocess.CompletedProcess:
         self.report_path.write_text(json.dumps(self.report), encoding="utf-8")
@@ -386,6 +434,13 @@ else: sys.exit(2)
                 info.mode = 0o755
                 info.size = len(b"executable")
                 archive.addfile(info, io.BytesIO(b"executable"))
+        config_path = "blobs/sha256/" + IMAGE_ID.removeprefix("sha256:")
+        manifest = json.dumps([{"Config": config_path, "Layers": []}] * archive_image_count).encode()
+        with tarfile.open(self.root / "image.tar", "w") as archive:
+            for name, data in (("manifest.json", manifest), (config_path, IMAGE_CONFIG)):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
         environment = {key: value for key, value in os.environ.items() if not key.startswith("VALIDATION_LOCK_")}
         return subprocess.run(
             ["bash", "scripts/image/scan.sh", mode, "mutable:tag", "result.cdx.json"],
@@ -398,7 +453,9 @@ else: sys.exit(2)
                 "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
                 "FIXTURE_ROOT": str(self.root),
                 "FIXTURE_IMAGE": IMAGE_ID,
+                "FIXTURE_ID_KIND": "config",
                 "FIXTURE_BINARIES": json.dumps(binaries),
+                "DOCKER_DEFAULT_PLATFORM": "",
                 **extra,
             },
         )
@@ -478,14 +535,19 @@ else: sys.exit(2)
         self.assertEqual(output.read_text(encoding="utf-8"), "converted-report")
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(sum(call[:2] == ["image", "inspect"] for call in calls), 1)
+        self.assertIn(["image", "save", IMAGE_ID], calls)
         self.assertFalse(any(call[0] == "export" for call in calls))
-        scan = next(call for call in calls if call[0] == "run" and "convert" not in call)
+        trivy = [call for call in calls if call[0] == "run"]
+        self.assertFalse(any("docker.sock" in arg or "DOCKER_HOST" in arg for call in trivy for arg in call))
+        refresh = next(call for call in trivy if "--download-db-only" in call)
+        self.assertFalse(any("image.tar" in arg for arg in refresh))
+        scan = next(call for call in trivy if "--input" in call)
+        self.assertEqual(scan[scan.index("--network") + 1], "none")
         self.assertIn("--list-all-pkgs=true", scan)
-        self.assertEqual(scan[-1], IMAGE_ID)
         self.assertNotIn("--severity", scan)
         self.assertNotIn("--ignore-unfixed", scan)
         output.write_text("previous-report", encoding="utf-8")
-        self.report["Results"].pop()
+        self.report["Results"].pop(0)
         (self.root / "calls.jsonl").unlink()
         result = self.run_scan("sbom")
         self.assertNotEqual(result.returncode, 0)
@@ -493,24 +555,54 @@ else: sys.exit(2)
         self.assertEqual(output.read_text(encoding="utf-8"), "previous-report")
         self.assertNotIn('"convert"', (self.root / "calls.jsonl").read_text(encoding="utf-8"))
 
-    def test_conversion_failure_preserves_output_and_security_verdict_propagates(self) -> None:
+    def test_descriptor_scan_compares_trivy_with_the_archived_platform_config(self) -> None:
+        self.install_docker_fixture()
+        descriptor_image = {"FIXTURE_IMAGE": DESCRIPTOR_ID, "FIXTURE_ID_KIND": "descriptor"}
+        result = self.run_scan("sbom", **descriptor_image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertIn(["image", "save", "--platform", "linux/amd64", DESCRIPTOR_ID], calls)
+        create = next(call for call in calls if call[0] == "create")
+        self.assertEqual(create[create.index("--platform") + 1], "linux/amd64")
+
+        self.report["Metadata"]["ImageID"] = DESCRIPTOR_ID
+        result = self.run_scan("security", **descriptor_image)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Trivy report does not identify the fixed image ID", result.stderr)
+        result = self.run_scan("security", archive_image_count=2, **descriptor_image)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Docker archive: expected exactly one image", result.stderr)
+
+    def test_conversion_failure_preserves_output(self) -> None:
         self.install_docker_fixture()
         output = self.root / "result.cdx.json"
         output.write_text("previous-report", encoding="utf-8")
         result = self.run_scan("sbom", FAIL_CONVERT="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output.read_text(encoding="utf-8"), "previous-report")
-        result = self.run_scan("security", SECURITY_EXIT="1")
+
+    def test_security_displays_unfixed_findings_and_blocks_only_fixed_high_critical(self) -> None:
+        self.install_docker_fixture()
+        self.report["Results"][-1]["Vulnerabilities"] = [
+            {"VulnerabilityID": "CVE-2026-1234", "Severity": "HIGH", "Status": "affected"},
+            {"VulnerabilityID": "CVE-2026-1235", "Severity": "MEDIUM", "Status": "fixed", "FixedVersion": "2.42"},
+        ]
+        result = self.run_scan("security")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CVE-2026-1234", result.stdout)
+        self.report["Results"][0]["Vulnerabilities"] = [
+            {"VulnerabilityID": "RUSTSEC-2026-0001", "Severity": "CRITICAL", "Status": "fixed", "FixedVersion": "1.2.4"}
+        ]
+        result = self.run_scan("security")
         self.assertEqual(result.returncode, 1)
+        self.assertIn("CVE-2026-1234", result.stdout)
+        self.assertIn("RUSTSEC-2026-0001", result.stdout)
+        self.assertIn("1 fixed HIGH/CRITICAL vulnerabilities", result.stderr)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         verdict = next(call for call in reversed(calls) if call[0] == "run" and "convert" in call)
         self.assertIn("HIGH,CRITICAL", verdict)
-        self.assertNotIn("--ignore-unfixed", verdict)
-        scan = next(call for call in reversed(calls) if call[0] == "run" and "convert" not in call)
-        self.assertIn("--ignore-unfixed", scan)
-        self.assertIn("--list-all-pkgs=true", scan)
-        self.assertNotIn("--severity", scan)
-        self.assertEqual(verdict[-1], "/work/native.json")
+        scan = next(call for call in reversed(calls) if call[0] == "run" and "--input" in call)
+        self.assertNotIn("--ignore-unfixed", scan)
 
 
 if __name__ == "__main__":
