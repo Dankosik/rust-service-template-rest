@@ -111,14 +111,3 @@ impl RequestClient<'_> {
             .await
     }
 }
-
-impl From<AdmissionRefusal> for Error {
-    fn from(refusal: AdmissionRefusal) -> Self {
-        match refusal {
-            AdmissionRefusal::AuthorizationConflict => Self::AuthorizationConflict,
-            AdmissionRefusal::SubjectRequired => Self::SubjectRequired,
-            AdmissionRefusal::UnexpectedSubject => Self::UnexpectedSubject,
-            AdmissionRefusal::Acquisition(error) => Self::Acquisition(error),
-        }
-    }
-}
