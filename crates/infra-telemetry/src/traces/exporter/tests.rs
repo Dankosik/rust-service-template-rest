@@ -1,4 +1,4 @@
-use super::super::tests::{env, options};
+use super::super::tests::{env, options, tracer_provider};
 use super::*;
 
 #[test]
@@ -101,7 +101,7 @@ fn tracer_provider_for_test(
     options: &TracingOptions,
     pairs: &[(&str, &str)],
 ) -> Result<super::super::TracerProviderHandle, TracingError> {
-    super::super::tracer_provider(options, env(pairs), &CollectorTrust::from_env(env(pairs)))
+    tracer_provider(options, env(pairs), &CollectorTrust::from_env(env(pairs)))
 }
 
 #[test]

@@ -15,7 +15,8 @@ use integration_tests::poll_until;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use sqlx::Row;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout, timeout_at};
@@ -863,27 +864,44 @@ async fn worker_readiness_recovers_when_postgres_becomes_writable_again(pool: Pg
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
-    prepare(&pool).await;
+async fn required_background_task_distinguishes_self_cancel_from_sigterm(pool: PgPool) {
     let database_url = child_database_url(&pool).await;
     // template:begin outbox:test-jobs-process-nats-fixture-use-6
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-6
-    let mut worker = Worker::spawn(
-        &database_url,
-        // template:begin outbox:test-jobs-process-nats-fixture-argument-6
-        &nats,
-        // template:end outbox:test-jobs-process-nats-fixture-argument-6
-        &[(integration_tests::jobs::BACKGROUND_TASK_RETURNS, "1")],
-    );
-    let stopped = worker.await_record("background_task_stopped").await;
-    assert_eq!(stopped["task"], "fixture", "{stopped}");
-    assert_eq!(stopped["panicked"], false, "{stopped}");
-    assert_refused(
-        worker,
-        "background task fixture stopped without a stop signal",
-    )
-    .await;
+    for self_cancel in [true, false] {
+        let gate = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = gate.local_addr().unwrap().to_string();
+        let mut worker = Worker::spawn(
+            &database_url,
+            // template:begin outbox:test-jobs-process-nats-fixture-argument-6
+            &nats,
+            // template:end outbox:test-jobs-process-nats-fixture-argument-6
+            &[("JOBS_WORKER_FIXTURE_BACKGROUND_RELEASE", &address)],
+        );
+        worker.await_record("jobs_worker_ready").await;
+        let (mut release, _) = timeout(RECORD_BOUND, gate.accept()).await.unwrap().unwrap();
+        let expected = if self_cancel {
+            release.write_all(&[1]).await.unwrap();
+            let stopped = worker.await_record("background_task_stopped").await;
+            assert_eq!(stopped["task"], "fixture", "{stopped}");
+            assert_eq!(stopped["panicked"], false, "{stopped}");
+            let failure = worker.await_record("jobs worker failed").await;
+            assert_eq!(
+                failure["error"],
+                "background task fixture stopped without a stop signal"
+            );
+            1
+        } else {
+            worker.terminate();
+            0
+        };
+        worker.await_record("readiness_disabled").await;
+        worker.await_record("shutdown_finishing").await;
+        let (code, stderr, stdout) = worker.wait().await;
+        assert_eq!(code, Some(expected), "stderr: {stderr}; stdout:\n{stdout}");
+        assert!(stderr.is_empty(), "stderr: {stderr}");
+    }
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-6
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-6

@@ -6,7 +6,7 @@ use infra_jobs::{
     EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, KindsBuilder,
     LivePayloadComparison, Policy, compare_live_payload, enqueue,
 };
-use infra_postgres::Tx;
+use infra_postgres::{Tx, TxMode};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -74,7 +74,10 @@ impl<'a> OutboxText<'a> {
 }
 
 impl PreparedEvent {
-    pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+    pub async fn enqueue(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+    ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
         let key = event_key(&intent.message_id);
         match enqueue(

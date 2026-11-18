@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 use std::time::Duration;
 
-use infra_postgres::{Tx, observed};
+use infra_postgres::{Tx, TxMode, observed};
 
 use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
@@ -74,7 +74,7 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue<K: JobKind>(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     payload: &K,
     options: EnqueueOptions<'_>,
 ) -> Result<Enqueued, EnqueueError> {
@@ -114,7 +114,7 @@ pub async fn enqueue<K: JobKind>(
 }
 
 pub async fn compare_live_payload<K: JobKind>(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     unique_key: &str,
     payload: &K,
 ) -> Result<LivePayloadComparison, EnqueueError> {

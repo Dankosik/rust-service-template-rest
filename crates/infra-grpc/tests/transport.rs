@@ -2323,19 +2323,16 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
 }
 
 #[tokio::test]
-async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
-    let peer = |request: axum::extract::Request| async move {
-        let mut response = Status::new(Code::Ok, "").into_http::<axum::body::Body>();
-        if let Some(timeout) = request.headers().get("grpc-timeout") {
-            response
-                .headers_mut()
-                .insert("grpc-timeout", timeout.clone());
-        }
-        response
+async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metadata_edits() {
+    use ClientTimeout::{FullRpc, OpeningOnly};
+    let (received, mut wire) = tokio::sync::mpsc::unbounded_channel();
+    let peer = move |request: axum::extract::Request| {
+        received.send(request.into_parts().0.headers).unwrap();
+        async { Status::new(Code::Ok, "").into_http::<axum::body::Body>() }
     };
     #[expect(
         clippy::disallowed_methods,
-        reason = "the loopback peer echoes the timeout it received over HTTP/2"
+        reason = "the loopback peer records the timeout it received over HTTP/2"
     )]
     let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
     let server = BoundListener::bind(loopback()).unwrap().serve_h2(
@@ -2343,8 +2340,21 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
         server_options(connection_limits()),
         None,
     );
-    let client = plaintext_client(server.local_addr());
-    for original in [None, Some("30S")] {
+    let destination = format!("http://{}", server.local_addr());
+    let local = Duration::from_secs(5);
+    let admission = Duration::from_secs(1);
+    for (policy, original, parent_seconds, lifetime_seconds) in [
+        (FullRpc(local), None, None, Some(5)),
+        (FullRpc(local), Some("30S"), Some(10), Some(5)),
+        (FullRpc(local), Some("3S"), Some(10), Some(3)),
+        (FullRpc(local), Some("30S"), Some(1), Some(1)),
+        (FullRpc(local), Some("30S"), Some(3), Some(3)),
+        (OpeningOnly(local), None, None, None),
+        (OpeningOnly(local), Some("30S"), None, Some(30)),
+        (OpeningOnly(local), Some("30S"), Some(10), Some(10)),
+    ] {
+        let client =
+            Client::with_timeout_policy(&destination, ClientSecurity::Plaintext, policy).unwrap();
         let mut request = http::Request::builder()
             .method("POST")
             .uri(ECHO_SERVICE_UNARY)
@@ -2356,20 +2366,47 @@ async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
                 .headers_mut()
                 .insert("grpc-timeout", http::HeaderValue::from_static(original));
         }
+        tokio::time::pause();
+        let origin = tokio::time::Instant::now();
+        if let Some(seconds) = parent_seconds {
+            request
+                .extensions_mut()
+                .insert(operation_context::OperationContext::with_timeout(
+                    Duration::from_secs(seconds),
+                ));
+        }
         let mut prepared = client.prepare_call(request);
         prepared
             .headers_mut()
             .insert("grpc-timeout", http::HeaderValue::from_static("1H"));
-        let response = timeout(WAIT, prepared.send()).await.unwrap().unwrap();
+        tokio::time::advance(admission).await;
+        tokio::time::resume();
+        let result = timeout(WAIT, prepared.send()).await.unwrap();
+        let lifetime = lifetime_seconds.map(Duration::from_secs);
+        if lifetime.is_some_and(|budget| budget <= admission) {
+            assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
+            assert!(matches!(
+                wire.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            continue;
+        }
+        let response = result.unwrap();
         assert_eq!(response.headers()["grpc-status"], "0");
-        if original.is_some() {
-            let forwarded = infra_outbound_grpc::grpc_timeout(response.headers()).unwrap();
-            assert!((Duration::from_secs(20)..=Duration::from_secs(30)).contains(&forwarded));
+        let headers = wire.try_recv().unwrap();
+        if let Some(lifetime) = lifetime {
+            let forwarded = infra_outbound_grpc::grpc_timeout(&headers).unwrap();
+            let precision = Duration::from_micros(1);
+            let earliest = lifetime.saturating_sub(origin.elapsed() + precision);
+            let latest = lifetime.saturating_sub(admission) + precision;
+            assert!(
+                (earliest..=latest).contains(&forwarded),
+                "{policy:?} {original:?} {parent_seconds:?}: {forwarded:?}"
+            );
         } else {
-            assert!(!response.headers().contains_key("grpc-timeout"));
+            assert!(!headers.contains_key("grpc-timeout"));
         }
     }
-    drop(client);
     assert_eq!(
         server.drain(Duration::from_secs(1)).await.unwrap(),
         Drained::Complete

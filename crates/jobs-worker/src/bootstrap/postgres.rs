@@ -1,7 +1,8 @@
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use health::Probe;
-use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
+use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
@@ -10,6 +11,7 @@ use crate::background::Background;
 use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
+const CREDENTIAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) fn pool_config(
     config: &WorkerConfig,
@@ -41,7 +43,17 @@ pub(super) async fn admit_pool(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    let pool = open_pool(config, postgres, background, resources).await?;
+    let dsn = postgres.dsn.clone();
+    let password_file = postgres.password_file.clone();
+    let local_development = config.app.is_local_development();
+    let pool = open_pool(config, postgres, background, resources, move || {
+        Dsn::admit_for_environment(
+            dsn.expose_secret(),
+            password_file.as_deref(),
+            local_development,
+        )
+    })
+    .await?;
     migrate::verify_history(&pool).await?;
     resources.pool = Some(PoolResource::Admitted(pool));
     Ok(())
@@ -52,12 +64,16 @@ async fn open_pool(
     postgres: &PostgresConfig,
     background: &Background,
     resources: &mut Resources,
+    prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
-    let dsn = Dsn::admit_for_environment(
-        postgres.dsn.expose_secret(),
-        postgres.password_file.as_deref(),
-        config.app.is_local_development(),
-    )?;
+    let deadline = tokio::time::Instant::now() + CREDENTIAL_PREPARATION_TIMEOUT;
+    let preparation = tokio::task::spawn_blocking(prepare);
+    let dsn = match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => {
+            result.map_err(|_| WorkerError::PostgresPreparationJoin)??
+        }
+        _ => return Err(WorkerError::PostgresPreparationTimeout),
+    };
     let application_name = application_name(&config.observability.otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
@@ -130,8 +146,108 @@ pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
 
 #[cfg(test)]
 mod tests {
-    use super::application_name;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use infra_postgres::Dsn;
+    use service_config::WorkerConfig;
+
+    use super::{application_name, open_pool, probe};
+    use crate::background::Background;
     use crate::bootstrap::{WorkerError, worker_identity};
+    use crate::resources::Resources;
+
+    const DSN: &str = "postgres://worker:fixture@127.0.0.1:5432/example?sslmode=verify-full";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn config() -> WorkerConfig {
+        service_config::fixtures::worker(
+            &[
+                ("APP__POSTGRES__ENABLED", "true"),
+                ("APP__POSTGRES__DSN", DSN),
+            ],
+            crate::BUILD_INFO,
+            crate::shutdown::TAIL,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn stopped_or_expired_preparation_cannot_admit_a_late_pool() {
+        let config = config();
+        let postgres = config.postgres.as_ref().unwrap();
+        for (expired, result_ready) in [(false, false), (true, false), (true, true)] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .max_blocking_threads(1)
+                .build()
+                .unwrap();
+            let (began, started) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let mut resources = Resources::default();
+            let background = Background::new();
+            let dsn = Dsn::admit(DSN).unwrap();
+            runtime.block_on(async {
+                let admission =
+                    open_pool(&config, postgres, &background, &mut resources, move || {
+                        began.send(()).unwrap();
+                        wait.recv_timeout(WAIT)
+                            .expect("release after stop or expiry");
+                        Ok(dsn)
+                    });
+                tokio::pin!(admission);
+                assert!(futures_util::poll!(&mut admission).is_pending());
+                started.recv_timeout(WAIT).expect("preparation started");
+                if expired {
+                    tokio::time::advance(Duration::from_secs(4)).await;
+                    assert!(futures_util::poll!(&mut admission).is_pending());
+                    tokio::time::advance(Duration::from_millis(1001)).await;
+                    if result_ready {
+                        release.send(()).unwrap();
+                        tokio::task::spawn_blocking(|| ()).await.unwrap();
+                    }
+                    std::assert_matches!(
+                        admission.await,
+                        Err(WorkerError::PostgresPreparationTimeout)
+                    );
+                } else {
+                    tokio::select! {
+                        biased;
+                        () = std::future::ready(()) => {}
+                        _ = &mut admission => panic!("startup finished before stop"),
+                    }
+                }
+            });
+            assert!(resources.pool.is_none());
+            if !result_ready {
+                release.send(()).unwrap();
+            }
+            drop(runtime);
+            assert!(resources.pool.is_none());
+            assert!(probe(&resources).is_none());
+            assert!(background.tracker.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_task_withholds_its_panic_payload() {
+        let config = config();
+        let postgres = config.postgres.as_ref().unwrap();
+        let mut resources = Resources::default();
+        let background = Background::new();
+        let error = open_pool(&config, postgres, &background, &mut resources, || {
+            panic!("synthetic preparation payload")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "postgres credential preparation task failed"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+        assert!(resources.pool.is_none());
+    }
 
     #[test]
     fn refusal_texts_name_the_failed_check() {

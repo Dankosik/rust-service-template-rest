@@ -154,6 +154,8 @@ pub enum TracingError {
     ClientBuild,
     #[error("the OTLP collector client initialization thread failed")]
     ClientThread,
+    #[error("OTLP collector preparation timed out")]
+    PreparationTimeout,
     #[error("could not initialize the OTLP trace exporter")]
     ExporterBuild,
 }
@@ -171,17 +173,17 @@ const SPAN_QUEUE_CAPACITY: usize = 16_384;
 
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
-pub fn install_tracer_provider(
+pub async fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
     let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
-    let handle = tracer_provider(options, |name| std::env::var_os(name), &trust)?;
+    let handle = prepare_tracer_provider(options, |name| std::env::var_os(name), &trust).await?;
     global::set_text_map_propagator(TraceContextPropagator::new());
     global::set_tracer_provider(handle.provider.clone());
     Ok(handle)
 }
 
-fn tracer_provider(
+async fn prepare_tracer_provider(
     options: &TracingOptions,
     env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
@@ -198,13 +200,23 @@ fn tracer_provider(
         None => ExporterState::Disabled,
         Some(collector) => {
             let (compression, ignored_compression) = compression(&env);
-            let span_exporter = span_exporter(
-                collector.url.as_str(),
-                collector.headers,
-                trust,
-                timeout,
-                compression,
-            )?;
+            let trust_files = trust.clone();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let preparation = tokio::task::spawn_blocking(move || {
+                span_exporter(
+                    collector.url.as_str(),
+                    collector.headers,
+                    &trust_files,
+                    timeout,
+                    compression,
+                )
+            });
+            let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
+                Ok(result) if tokio::time::Instant::now() < deadline => {
+                    result.map_err(|_| TracingError::ClientThread)??
+                }
+                _ => return Err(TracingError::PreparationTimeout),
+            };
             builder = builder.with_span_processor(
                 sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                     inner: span_exporter,

@@ -93,21 +93,19 @@ pub trait FreshCommand: Send {
 
 impl Attempt {
     pub(super) async fn run(self, command: impl FreshCommand) -> Response {
-        let timeout = command.attempt_timeout();
-        let execution = self.execute(command);
-        match timeout {
-            Some(budget) => tokio::time::timeout(budget, execution)
+        let command_end = command
+            .attempt_timeout()
+            .and_then(|budget| Instant::now().checked_add(budget));
+        let execution = self.execute(command, command_end);
+        match command_end {
+            Some(end) => tokio::time::timeout_at(end, execution)
                 .await
-                .unwrap_or_else(|_| {
-                    Problem::new(Code::GatewayTimeout)
-                        .detail(ATTEMPT_TIMEOUT_DETAIL)
-                        .into_response()
-                }),
+                .unwrap_or_else(|_| command_timeout()),
             None => execution.await,
         }
     }
 
-    async fn execute<C: FreshCommand>(self, command: C) -> Response {
+    async fn execute<C: FreshCommand>(self, command: C, command_end: Option<Instant>) -> Response {
         let Attempt {
             store,
             scope,
@@ -121,10 +119,11 @@ impl Attempt {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
                 let store = store.with_terminal_refusals(C::ALLOW_TERMINAL_REFUSALS);
-                let attempt = store.attempt_with_acquire_deadline(
+                let command_cutoff = command_end.filter(|end| *end <= attempt_end);
+                let attempt = store.attempt_with_deadline(
                     &scope,
                     &fingerprint,
-                    attempt_end,
+                    command_cutoff.unwrap_or(attempt_end),
                     async |tx: &mut Tx<'_>| match command.execute(tx).await {
                         Ok(response) => Ok(response.into_record()),
                         Err(Rollback::Terminal(problem)) => {
@@ -133,9 +132,13 @@ impl Attempt {
                         Err(rollback) => Err(rollback),
                     },
                 );
-                tokio::time::timeout_at(attempt_end, attempt)
+                let result = tokio::time::timeout_at(attempt_end, attempt)
                     .await
-                    .unwrap_or(Err(AttemptError::Unavailable))
+                    .unwrap_or(Err(AttemptError::Unavailable));
+                if command_cutoff.is_some() && matches!(result, Err(AttemptError::Deadline)) {
+                    return command_timeout();
+                }
+                result
             }
         };
         let mut answer = map_attempted(attempted, &scope, &operation_id);
@@ -147,6 +150,12 @@ impl Attempt {
         }
         answer.settle(deadline.at(), guard).await
     }
+}
+
+fn command_timeout() -> Response {
+    Problem::new(Code::GatewayTimeout)
+        .detail(ATTEMPT_TIMEOUT_DETAIL)
+        .into_response()
 }
 
 #[derive(thiserror::Error)]
@@ -284,7 +293,9 @@ fn map_attempted(
 
 fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) -> Answer {
     match error {
-        AttemptError::Unavailable => Answer::boundary_problem(unavailable(), Outcome::Unavailable),
+        AttemptError::Unavailable | AttemptError::Deadline => {
+            Answer::boundary_problem(unavailable(), Outcome::Unavailable)
+        }
         AttemptError::Internal => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
         }
