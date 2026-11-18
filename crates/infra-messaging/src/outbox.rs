@@ -218,23 +218,23 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
             .publish_after_admission(&event, &context, admission)
             .await
             .map(|_| ())
-            .map_err(|error| match error {
-                PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
-                PublishError::Rejected(reason) => match reason {
-                    PublishRejection::InvalidEnvelope(_) => {
-                        JobError::permanent("outbox_envelope_invalid")
-                    }
-                    PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed => {
-                        JobError::retryable("broker_refused")
-                    }
-                    PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
-                    PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
-                    PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),
-                    PublishRejection::ContextStopped => {
-                        JobError::retryable("publish_context_stopped")
-                    }
-                },
-            })
+            .map_err(publication_job_error)
+    }
+}
+
+fn publication_job_error(error: PublishError) -> JobError {
+    match error {
+        PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
+        PublishError::Rejected(reason) => match reason {
+            PublishRejection::InvalidEnvelope(_) => JobError::permanent("outbox_envelope_invalid"),
+            PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed => {
+                JobError::retryable("broker_refused")
+            }
+            PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
+            PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
+            PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),
+            PublishRejection::ContextStopped => JobError::retryable("publish_context_stopped"),
+        },
     }
 }
 

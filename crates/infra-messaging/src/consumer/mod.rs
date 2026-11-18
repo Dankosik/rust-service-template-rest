@@ -395,7 +395,13 @@ impl Consumer {
                     | BatchEnd::MaxBytesExceededBeforeFirstDelivery
                     | BatchEnd::Failed { .. }),
                 ) => {
-                    release(messages, batch.messages, stop, &self.handler.filter_subject).await;
+                    release_prefetched_messages(
+                        messages,
+                        batch.messages,
+                        stop,
+                        &self.handler.filter_subject,
+                    )
+                    .await;
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
@@ -403,15 +409,16 @@ impl Consumer {
                     {
                         break 'pulls;
                     }
-                    let was_retrying_large_retained_record = retry_large_retained_record;
-                    retry_large_retained_record =
-                        matches!(end, BatchEnd::MaxBytesExceededBeforeFirstDelivery);
-                    if retry_large_retained_record {
+                    if matches!(end, BatchEnd::MaxBytesExceededBeforeFirstDelivery) {
                         pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
-                        if was_retrying_large_retained_record {
+                        if retry_large_retained_record {
                             return Err(ConsumerError::RetainedMessageTooLarge);
                         }
-                    } else if let BatchEnd::Failed { phase, error_kind } = end {
+                        retry_large_retained_record = true;
+                        continue 'pulls;
+                    }
+                    retry_large_retained_record = false;
+                    if let BatchEnd::Failed { phase, error_kind } = end {
                         pull_failed(phase, error_kind);
                         if retry_after_backoff(stop).await.is_break() {
                             break 'pulls;
@@ -421,7 +428,12 @@ impl Consumer {
                 Err(error) if error.requires_delivery_drain() => {
                     let _ = tokio::time::timeout(
                         BROKER_OPERATION_BUDGET,
-                        release(messages, batch.messages, stop, &self.handler.filter_subject),
+                        release_prefetched_messages(
+                            messages,
+                            batch.messages,
+                            stop,
+                            &self.handler.filter_subject,
+                        ),
                     )
                     .await;
                     return Err(error);
@@ -667,7 +679,7 @@ async fn retry_after_backoff(stop: &CancellationToken) -> ControlFlow<()> {
     }
 }
 
-async fn release(
+async fn release_prefetched_messages(
     mut messages: pull::Batch,
     slots: usize,
     stop: &CancellationToken,

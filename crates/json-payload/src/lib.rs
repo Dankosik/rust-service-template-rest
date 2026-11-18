@@ -8,12 +8,12 @@ pub fn to_writer<W: Write, T: Serialize + ?Sized>(
     writer: W,
     value: &T,
 ) -> Result<(), serde_json::Error> {
-    let rejected = Cell::new(false);
+    let saw_non_finite_float = Cell::new(false);
     let result = value.serialize(FiniteSerializer {
         inner: &mut serde_json::Serializer::new(writer),
-        rejected: &rejected,
+        saw_non_finite_float: &saw_non_finite_float,
     });
-    if rejected.get() {
+    if saw_non_finite_float.get() {
         return Err(ser::Error::custom(NON_FINITE));
     }
     result
@@ -21,26 +21,26 @@ pub fn to_writer<W: Write, T: Serialize + ?Sized>(
 
 struct FiniteSerializer<'a, S> {
     inner: S,
-    rejected: &'a Cell<bool>,
+    saw_non_finite_float: &'a Cell<bool>,
 }
 
 struct FiniteValue<'a, T: ?Sized> {
     inner: &'a T,
-    rejected: &'a Cell<bool>,
+    saw_non_finite_float: &'a Cell<bool>,
 }
 
 impl<T: Serialize + ?Sized> Serialize for FiniteValue<'_, T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.inner.serialize(FiniteSerializer {
             inner: serializer,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 }
 
 struct Compound<'a, C> {
     inner: C,
-    rejected: &'a Cell<bool>,
+    saw_non_finite_float: &'a Cell<bool>,
 }
 
 macro_rules! forward_scalar {
@@ -73,7 +73,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
 
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
         if !value.is_finite() {
-            self.rejected.set(true);
+            self.saw_non_finite_float.set(true);
             return Err(ser::Error::custom(NON_FINITE));
         }
         self.inner.serialize_f32(value)
@@ -81,7 +81,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
 
     fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
         if !value.is_finite() {
-            self.rejected.set(true);
+            self.saw_non_finite_float.set(true);
             return Err(ser::Error::custom(NON_FINITE));
         }
         self.inner.serialize_f64(value)
@@ -94,7 +94,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_some(&FiniteValue {
             inner: value,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -125,7 +125,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
             name,
             &FiniteValue {
                 inner: value,
-                rejected: self.rejected,
+                saw_non_finite_float: self.saw_non_finite_float,
             },
         )
     }
@@ -143,7 +143,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
             variant,
             &FiniteValue {
                 inner: value,
-                rejected: self.rejected,
+                saw_non_finite_float: self.saw_non_finite_float,
             },
         )
     }
@@ -151,14 +151,14 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Ok(Compound {
             inner: self.inner.serialize_seq(len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         Ok(Compound {
             inner: self.inner.serialize_tuple(len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -169,7 +169,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
         Ok(Compound {
             inner: self.inner.serialize_tuple_struct(name, len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -184,14 +184,14 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
             inner: self
                 .inner
                 .serialize_tuple_variant(name, variant_index, variant, len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Ok(Compound {
             inner: self.inner.serialize_map(len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -202,7 +202,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     ) -> Result<Self::SerializeStruct, Self::Error> {
         Ok(Compound {
             inner: self.inner.serialize_struct(name, len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -217,7 +217,7 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
             inner: self
                 .inner
                 .serialize_struct_variant(name, variant_index, variant, len)?,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -239,7 +239,7 @@ macro_rules! sequence_compound {
             fn $method<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
                 self.inner.$method(&FiniteValue {
                     inner: value,
-                    rejected: self.rejected,
+                    saw_non_finite_float: self.saw_non_finite_float,
                 })
             }
 
@@ -262,14 +262,14 @@ impl<C: ser::SerializeMap> ser::SerializeMap for Compound<'_, C> {
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
         self.inner.serialize_key(&FiniteValue {
             inner: key,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
         self.inner.serialize_value(&FiniteValue {
             inner: value,
-            rejected: self.rejected,
+            saw_non_finite_float: self.saw_non_finite_float,
         })
     }
 
@@ -281,11 +281,11 @@ impl<C: ser::SerializeMap> ser::SerializeMap for Compound<'_, C> {
         self.inner.serialize_entry(
             &FiniteValue {
                 inner: key,
-                rejected: self.rejected,
+                saw_non_finite_float: self.saw_non_finite_float,
             },
             &FiniteValue {
                 inner: value,
-                rejected: self.rejected,
+                saw_non_finite_float: self.saw_non_finite_float,
             },
         )
     }
@@ -310,7 +310,7 @@ macro_rules! struct_compound {
                     key,
                     &FiniteValue {
                         inner: value,
-                        rejected: self.rejected,
+                        saw_non_finite_float: self.saw_non_finite_float,
                     },
                 )
             }

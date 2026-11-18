@@ -350,7 +350,7 @@ pub(crate) async fn recheck_outbox_source(
     validate_stream_publication(config)
         .and_then(|()| validate_outbox_source(config))
         .map_err(|refusal| {
-            refusal_failure("source_stream", refusal, shared.envelope_limit, None);
+            report_refusal("source_stream", refusal, shared.envelope_limit, None);
             PublishRejection::BrokerRefused
         })?;
     if shared.refuses_work() {
@@ -445,36 +445,9 @@ pub(crate) async fn bind_durable(
     name: &str,
     config: PullConfig,
 ) -> Result<PullConsumer, MessagingError> {
-    let existing = find_durable(jetstream, stream, name).await?;
-    let pull = match existing {
+    let pull = match find_durable(jetstream, stream, name).await? {
         Some(pull) => pull,
-        None => match jetstream
-            .create_consumer_strict_on_stream(config.clone(), stream)
-            .await
-        {
-            Ok(pull) => pull,
-            Err(error) => match error.kind() {
-                ConsumerCreateStrictErrorKind::AlreadyExists => {
-                    find_durable(jetstream, stream, name)
-                        .await?
-                        .ok_or(MessagingError::Topology)?
-                }
-                ConsumerCreateStrictErrorKind::JetStream(broker) => {
-                    return Err(topology_failure(
-                        "create_consumer",
-                        None,
-                        &error,
-                        Some(&broker),
-                    ));
-                }
-                ConsumerCreateStrictErrorKind::TimedOut => {
-                    return Err(MessagingError::TimedOut {
-                        budget: BROKER_OPERATION_BUDGET,
-                    });
-                }
-                _ => return Err(topology_failure("create_consumer", None, &error, None)),
-            },
-        },
+        None => create_or_find_durable(jetstream, stream, name, config.clone()).await?,
     };
     let expected = config.into_consumer_config();
     if let Some(error_type) = durable_contract_error_type(&expected, &pull.cached_info().config) {
@@ -482,6 +455,36 @@ pub(crate) async fn bind_durable(
         return Err(MessagingError::Topology);
     }
     Ok(pull)
+}
+
+async fn create_or_find_durable(
+    jetstream: &Context,
+    stream: &str,
+    name: &str,
+    config: PullConfig,
+) -> Result<PullConsumer, MessagingError> {
+    let error = match jetstream
+        .create_consumer_strict_on_stream(config, stream)
+        .await
+    {
+        Ok(pull) => return Ok(pull),
+        Err(error) => error,
+    };
+    match error.kind() {
+        ConsumerCreateStrictErrorKind::AlreadyExists => find_durable(jetstream, stream, name)
+            .await?
+            .ok_or(MessagingError::Topology),
+        ConsumerCreateStrictErrorKind::JetStream(broker) => Err(topology_failure(
+            "create_consumer",
+            None,
+            &error,
+            Some(&broker),
+        )),
+        ConsumerCreateStrictErrorKind::TimedOut => Err(MessagingError::TimedOut {
+            budget: BROKER_OPERATION_BUDGET,
+        }),
+        _ => Err(topology_failure("create_consumer", None, &error, None)),
+    }
 }
 
 pub(crate) fn durable_contract_error_type(
@@ -625,16 +628,24 @@ pub(crate) fn refusal_failure(
     required_bytes: usize,
     limit_bytes: Option<i64>,
 ) -> MessagingError {
-    let failure = refusal.failure();
+    report_refusal(operation, refusal, required_bytes, limit_bytes);
+    refusal.failure()
+}
+
+fn report_refusal(
+    operation: &'static str,
+    refusal: Refusal,
+    required_bytes: usize,
+    limit_bytes: Option<i64>,
+) {
     tracing::warn!(
         operation,
-        reason = %failure,
+        reason = %refusal.failure(),
         error.type = refusal.error_type(),
         required_bytes,
         limit_bytes,
         "messaging_admission_failed"
     );
-    failure
 }
 
 pub(crate) fn validate_server(

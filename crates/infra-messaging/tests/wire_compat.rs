@@ -141,6 +141,12 @@ fn fixtures() -> FixtureSet {
     reason = "keep one Go-produced record's decode, DLQ identity, and restore assertions together with its provenance"
 )]
 fn verify_go_record_in_rust(fixture: &FixtureCase) {
+    verify_inbound_record(fixture);
+    verify_reencoded_record(fixture);
+    verify_dead_letter_round_trip(fixture);
+}
+
+fn verify_inbound_record(fixture: &FixtureCase) {
     let inbound_headers = headers(&fixture.inbound.headers);
     let inbound_body = Bytes::from(fixture.inbound.body.clone());
     let decoded = decode_envelope(&fixture.inbound.subject, &inbound_headers, inbound_body)
@@ -187,7 +193,9 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         "{} publication identity",
         fixture.name
     );
+}
 
+fn verify_reencoded_record(fixture: &FixtureCase) {
     assert_eq!(
         fixture.reencoded.headers.get(CREATED_AT),
         Some(&fixture.decoded.created_at),
@@ -219,7 +227,9 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
             fixture.name
         );
     }
+}
 
+fn verify_dead_letter_round_trip(fixture: &FixtureCase) {
     let source_publication_id = fixture
         .inbound
         .headers
