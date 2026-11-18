@@ -421,7 +421,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::ResourceExhausted);
-    assert!(echo.seen().is_empty());
+    assert_eq!(echo.seen(), Vec::<Seen>::new());
     assert!(!has_cached_authorization(&catalog_tokens));
     drop(held);
 
