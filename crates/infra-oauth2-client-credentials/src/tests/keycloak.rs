@@ -350,6 +350,10 @@ impl Realm {
             first_inactive_received >= earliest_expiry,
             "the original bearer token became inactive before its expiration"
         );
+        assert!(
+            first_inactive_received.duration_since(last_active_started) <= Duration::from_secs(1),
+            "the final active probe and first inactive reply must bracket expiry within one second"
+        );
         (last_active_started, first_inactive_received)
     }
 

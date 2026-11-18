@@ -3,6 +3,10 @@ use std::{env, fs};
 use infra_serviceauth::TrustRegistry;
 
 #[expect(clippy::print_stdout, reason = "report a successful withdrawal check")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this synchronous operator command reads two local registry snapshots"
+)]
 fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let (Some(previous), Some(candidate), Some(caller), kid, None) = (
