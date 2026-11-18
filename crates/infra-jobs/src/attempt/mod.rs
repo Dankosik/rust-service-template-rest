@@ -300,7 +300,7 @@ async fn run_attempt(
             &bytes,
         )
     });
-    let (ended, ran) = match prepared {
+    let (ended, handler_duration) = match prepared {
         Err(ended) => (ended, None),
         Ok(future) => {
             let started = Instant::now();
@@ -335,15 +335,12 @@ async fn run_attempt(
     }
     record_on_span(&tracing::Span::current(), &transition);
     let handles = registered.metrics();
-    if let Some(ran) = ran {
-        handles.duration.record(ran);
+    if let Some(duration) = handler_duration {
+        handles.duration.record(duration);
     }
-    let terminal_summary = if let Transition::Fail { summary, .. } = &transition {
-        Some(summary.as_str())
-    } else {
+    if !matches!(transition, Transition::Fail { .. }) {
         observe_attempt(Some(handles), &attempt, &transition);
-        None
-    };
+    }
     if matches!(transition, Transition::Complete(Completion::Committed)) {
         observe_acknowledged(
             shared,
@@ -364,7 +361,7 @@ async fn run_attempt(
         &slots,
     )
     .await;
-    if let Some(summary) = terminal_summary {
+    if let Transition::Fail { summary, .. } = &transition {
         if written == Some(Written::Applied) {
             observe_attempt(Some(handles), &attempt, &transition);
         } else {
