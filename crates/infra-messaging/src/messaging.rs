@@ -14,7 +14,10 @@ use crate::error::MessagingError;
 use crate::probe::{MessagingProbe, PublishWork};
 use crate::producer::{Producer, PublishMetrics};
 use crate::registry::Registry;
-use crate::topology::{ConsumerAdmission, admit_topology};
+// template:begin outbox:messaging-outbox-refusal-import
+use crate::topology::refusal_failure;
+// template:end outbox:messaging-outbox-refusal-import
+use crate::topology::{TopologyAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
@@ -51,8 +54,13 @@ pub struct ConsumerOptions {
 #[derive(Clone, Debug)]
 pub struct Messaging {
     pub(crate) shared: Arc<Shared>,
-    consumer: Option<ConsumerAdmission>,
+    topology: TopologyAdmission,
 }
+
+// template:begin outbox:messaging-outbox-producer
+#[derive(Debug)]
+pub struct OutboxProducer(pub(crate) Producer);
+// template:end outbox:messaging-outbox-producer
 
 #[derive(Debug)]
 pub struct MessagingStartup {
@@ -170,6 +178,15 @@ impl Messaging {
         }
     }
 
+    // template:begin outbox:messaging-outbox-producer-access
+    pub fn outbox_producer(&self) -> Result<OutboxProducer, MessagingError> {
+        self.topology.outbox_source.map_err(|refusal| {
+            refusal_failure("source_stream", refusal, self.shared.envelope_limit, None)
+        })?;
+        Ok(OutboxProducer(self.producer()))
+    }
+    // template:end outbox:messaging-outbox-producer-access
+
     #[must_use]
     pub fn probe(&self) -> MessagingProbe {
         MessagingProbe {
@@ -187,6 +204,7 @@ impl Messaging {
             return Err(MessagingError::Unavailable);
         }
         let admission = self
+            .topology
             .consumer
             .clone()
             .ok_or(MessagingError::Configuration("consumer is not configured"))?;
@@ -239,7 +257,7 @@ impl MessagingStartup {
             .max_ack_inflight(self.publication_permits)
             .backpressure_on_inflight(false)
             .build(client.clone());
-        let consumer = admit_topology(
+        let topology = admit_topology(
             options,
             self.envelope_limit,
             client,
@@ -263,7 +281,7 @@ impl MessagingStartup {
                 ),
                 connection,
             }),
-            consumer,
+            topology,
         };
         self.phase = StartupPhase::Admitted;
         Ok(messaging)

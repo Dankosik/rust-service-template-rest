@@ -15,6 +15,10 @@ use crate::engine::{
 };
 use infra_postgres::set_statement_timeout;
 
+// template:begin outbox:jobs-maintenance-outbox-module
+mod outbox;
+// template:end outbox:jobs-maintenance-outbox-module
+
 const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
 pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
@@ -108,6 +112,11 @@ pub(crate) async fn run_sampling(
             reset_kind_metrics(kind);
         }
         invalidate_sample();
+        // template:begin outbox:jobs-maintenance-outbox-reset
+        if outbox::is_registered(kinds) {
+            outbox::reset_metrics();
+        }
+        // template:end outbox:jobs-maintenance-outbox-reset
     });
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
@@ -126,6 +135,11 @@ async fn run_kind_sampling(shared: &Shared, kinds: &[&str], cancel: &Cancellatio
         if cancel.is_cancelled() {
             return;
         }
+        // template:begin outbox:jobs-maintenance-outbox-sampler
+        if outbox::is_registered(kinds) {
+            outbox::sample(shared).await;
+        }
+        // template:end outbox:jobs-maintenance-outbox-sampler
         match sample_once(shared, kinds).await {
             Ok(sample) => {
                 publish_sample(&sample);
@@ -234,6 +248,11 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
         reset_kind_metrics(kind);
     }
     invalidate_sample();
+    // template:begin outbox:jobs-maintenance-outbox-init
+    if outbox::is_registered(kinds) {
+        outbox::init_metrics();
+    }
+    // template:end outbox:jobs-maintenance-outbox-init
 }
 
 fn reset_kind_metrics(kind: &'static str) {
@@ -277,6 +296,8 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                              WHERE job.kind = registered.kind \
                                AND job.state = 'pending' \
                                AND job.not_before <= sampled.observed_at \
+                               AND NOT EXISTS (SELECT 1 FROM background_jobs prior \
+                                               WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') \
                              ORDER BY job.not_before, job.id \
                              LIMIT $2 \
                          ) AS capped \
@@ -288,7 +309,9 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                              FROM background_jobs AS job \
                              WHERE job.kind = registered.kind \
                                AND job.state = 'pending' \
-                               AND job.not_before > sampled.observed_at \
+                               AND (job.not_before > sampled.observed_at OR EXISTS ( \
+                                   SELECT 1 FROM background_jobs prior \
+                                   WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed')) \
                             LIMIT $2 \
                          ) AS capped \
                      ) AS scheduled \
@@ -308,6 +331,8 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                          WHERE job.kind = registered.kind \
                            AND job.state = 'running' \
                            AND job.claim_expires_at <= sampled.observed_at \
+                           AND NOT EXISTS (SELECT 1 FROM background_jobs prior \
+                                           WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') \
                          ORDER BY job.claim_expires_at \
                          LIMIT 1 \
                      ) AS expired ON true \

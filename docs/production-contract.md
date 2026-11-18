@@ -49,6 +49,67 @@ unable to serve, and budget every downstream deadline inside
 - Asynchronous propagation, replay, deduplication, and retention: Unresolved
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
+<!-- template:begin outbox:outbox-effect-contract -->
+- For each outbox publisher, retain the original event ID, occurrence time,
+  and payload with the business operation. Receipts compare exact payload
+  bytes. Reordering JSON object keys for the same event yields
+  `EventIdConflict`. Reuse the original bytes or serialize the original
+  values deterministically. This example uses `BTreeMap` to keep string
+  fields in key order across submissions.
+
+  ```rust
+  use std::collections::BTreeMap;
+
+  use domain_events::{Event, EventPayload};
+  use infra_messaging::outbox::{OutboxEnqueued, OutboxRoute};
+  use infra_postgres::Tx;
+
+  #[derive(serde::Deserialize, serde::Serialize)]
+  #[serde(transparent)]
+  struct AccountUpdated(BTreeMap<String, String>);
+
+  impl EventPayload for AccountUpdated {
+      const EVENT_TYPE: &'static str = "account.updated";
+      const SCHEMA_VERSION: u16 = 1;
+  }
+
+  async fn enqueue_account_update(
+      tx: &mut Tx<'_>,
+      route: &OutboxRoute<AccountUpdated>,
+      event_id: &str,
+      occurred_at: time::UtcDateTime,
+      json: &str,
+  ) -> Result<OutboxEnqueued, Box<dyn std::error::Error + Send + Sync>> {
+      let event = route.prepare(&Event {
+          id: event_id.to_owned(),
+          occurred_at,
+          payload: serde_json::from_str(json)?,
+      })?;
+      Ok(event.enqueue(tx).await?)
+  }
+  ```
+
+  Bind the route once with `publication.for_outbox(publisher_id)`. In the
+  business transaction, submitting `{"account_id":"42","status":"active"}`
+  returns `Created` for a new event. After commit, resubmitting
+  `{"status":"active","account_id":"42"}` with the original ID and occurrence
+  time returns `Duplicate`: both inputs produce the same bytes through this
+  type. Propagate an enqueue error so the business transaction rolls back. The
+  [outbox integration test](../test/tests/messaging_outbox.rs) exercises a
+  reordered replay, a byte-identical replay, and the retained broker message.
+- For each outbox consumer, record its logical subscription and effect key.
+  Commit the key and the business mutation together. For an external effect,
+  reuse the remote operation's idempotency key or reconcile an uncertain
+  result there before retrying. Retain evidence through the last permitted
+  replay, including operator redrive. Exercise both a lost consumer ACK after
+  commit and a repeated publication beyond the stream's duplicate window.
+  The [consumer recovery examples](../test/tests/messaging_recovery.rs) cover
+  matching and conflicting identities, rollback and uncertain commit.
+- For a route requiring order, assign one contiguous event version per
+  namespaced aggregate key, starting at one, in the transaction that updates
+  that aggregate. Consumers applying ordered changes must also guard their
+  own applied version. Redelivery can reintroduce an earlier version.
+<!-- template:end outbox:outbox-effect-contract -->
 <!-- template:begin http-idempotency:production-contract-retry-window -->
 - [HTTP idempotency decisions](decisions/http-idempotency-decisions.md) give
   the reasons for the replay policy and when a derived service should revisit it.
@@ -412,6 +473,77 @@ snapshot guarantee. Any multi-store recovery runbook must:
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
 
+<!-- template:begin outbox:outbox-delivery-rollout -->
+### Activating outbox delivery guarantees
+
+Allocate a non-nil UUID once for each independent logical publisher. Persist it with
+the publisher's business identity and bind its declared routes with
+`PublicationRoute::for_outbox(publisher_id)`. Replicas, restarts and restores
+of that publisher reuse the UUID. A separately writable fork or independent
+publisher gets its own UUID, including when it shares the database or stream.
+Keep each local event ID and occurrence time with its business operation.
+The wire ID for new events is `outbox-v1-<32 lowercase UUID hex digits>-<64
+lowercase SHA-256 hex digits of the UTF-8 local ID>` in both `Message-Id` and
+`Nats-Msg-Id`. Reserve this prefix across all stream publishers, including
+direct publishers that supply their own globally unique IDs. Check historical
+IDs for overlap before activating the new namespace.
+
+Route resubmissions of pre-upgrade operations by their recorded identity.
+Use the original unbound route, event contents, time and order to reconcile
+an existing receipt. An unknown unbound event fails with `PublisherRequired`.
+New operations use the bound route, including when their local ID also
+appears in another publisher's history. Workers retry already committed
+intents with their stored headers. DLQ restoration preserves the logical
+ID and derives its own publication ID from the retained record.
+
+Set the source stream's retention for the longest promised consumer outage
+and recovery interval. Use Limits retention for independent subscriptions.
+A WorkQueue stream serves one competing group. Provision capacity and
+verify discard and per-subject limits, MaxAge, storage, replication and
+sync policy before enabling publishers or changing stream configuration.
+Before changing a live stream, run outbox admission against the proposed
+configuration on an isolated broker. Fence and drain all outbox publishers,
+apply the change, then restart them against the updated stream. The outbox accepts
+identity mappings made from literal tokens, captures in their original order,
+and the unchanged wildcard tail. It refuses other transform functions. The
+relay reads stream configuration before sending each attempt. JetStream's
+expected-stream header checks the stream name; it does not pin a revision
+between that read and the publish.
+Monitor rejection on a full stream and free capacity by the retention policy.
+Set a delivery freshness objective for the service and page on the age of
+outstanding publications against that objective. Allow for the next retry,
+queued work, broker admission and the time needed to drain the backlog after
+recovery. The retry delay bounds only the interval until a job is eligible
+again.
+
+Fence all producers, workers, cleanup and operator processes before applying
+the receipt and retry migrations. A stopped old relay cannot schedule another
+multi-day retry after the cutoff. The retry migration shortens long waits
+only when the retained attempt and its timestamp identify the previous
+automatic schedule. Inspect other long waits before changing their due time.
+The receipt backfill uses retained queue rows.
+Recover previously pruned identities from authoritative business history or
+adopt a disjoint ID namespace and fence historical submissions. Resolve
+conflicting historical intents against business records before migration.
+Verify failed, pending and completed rows against their receipts, then start
+the new cohort. Retire old operator binaries before relying on the outbox
+discard prohibition. Keep permanent receipts while replay remains possible.
+For a stalled ordered aggregate, look up its versions and the queue status
+of each original job. Redrive a verified failed predecessor after resolving
+its cause. A receipt can outlive a completed job's cleanup.
+
+```sql
+SELECT r.aggregate_version, r.job_id, j.state, j.error_summary, j.not_before
+FROM outbox_event_receipts AS r
+LEFT JOIN background_jobs AS j ON j.id = r.job_id
+WHERE r.aggregate_key = $1
+ORDER BY r.aggregate_version;
+```
+
+An old writer or worker can bypass these guarantees. After new writes, fence
+all participants and reconcile identity, aggregate progress and external
+effects before permitting a rollback.
+<!-- template:end outbox:outbox-delivery-rollout -->
 <!-- template:begin jobs:production-contract-jobs-rollout -->
 ### First HTTP operation that enqueues a job
 

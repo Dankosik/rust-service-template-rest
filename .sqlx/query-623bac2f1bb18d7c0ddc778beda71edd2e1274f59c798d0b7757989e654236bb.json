@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH predecessor AS MATERIALIZED (\n                SELECT (\n                    SELECT job_id FROM outbox_event_receipts\n                    WHERE aggregate_key = $2::text COLLATE \"C\" AND aggregate_version = $3::bigint - 1\n                ) AS id\n            ), receipt AS (\n                INSERT INTO outbox_event_receipts\n                    (event_key, job_id, intent_sha256, aggregate_key, aggregate_version)\n                SELECT outbox_event_key($1::text::jsonb), $4, outbox_intent_sha256($1::text::jsonb), $2, $3\n                FROM predecessor\n                WHERE $3 IS NULL OR $3 = 1 OR predecessor.id IS NOT NULL\n                ON CONFLICT DO NOTHING\n                RETURNING event_key, job_id\n            )\n            INSERT INTO background_jobs\n                (id, kind, payload_text, unique_key, not_before, trace_context, trace_state, predecessor_job_id)\n            SELECT receipt.job_id, $5, $1, receipt.event_key, statement_timestamp(), $6, $7, predecessor.id\n            FROM receipt CROSS JOIN predecessor\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "623bac2f1bb18d7c0ddc778beda71edd2e1274f59c798d0b7757989e654236bb"
+}

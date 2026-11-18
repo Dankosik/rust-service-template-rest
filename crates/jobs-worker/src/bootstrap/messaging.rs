@@ -106,10 +106,13 @@ pub(super) async fn connect_messaging(
             .broker
             .replace(BrokerResource::Admitted(messaging)),
     );
+    let messaging = resources
+        .admitted_messaging()
+        .ok_or(MessagingError::Connection)?;
+    // template:begin outbox:worker-bootstrap-admit-outbox-source
+    messaging.outbox_producer()?;
+    // template:end outbox:worker-bootstrap-admit-outbox-source
     if let Some(registration) = consumer {
-        let messaging = resources
-            .admitted_messaging()
-            .ok_or(MessagingError::Connection)?;
         Ok(Some(
             messaging
                 .consumer(registration.registry, deadline, cancel)

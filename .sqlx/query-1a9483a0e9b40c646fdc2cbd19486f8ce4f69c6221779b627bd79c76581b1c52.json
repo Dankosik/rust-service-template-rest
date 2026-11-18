@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT intent_sha256 = outbox_intent_sha256($1::text::jsonb)\n               AND aggregate_key IS NOT DISTINCT FROM $2::text COLLATE \"C\"\n               AND aggregate_version IS NOT DISTINCT FROM $3::bigint AS \"same!\"\n            FROM outbox_event_receipts WHERE event_key = outbox_event_key($1::text::jsonb)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "same!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1a9483a0e9b40c646fdc2cbd19486f8ce4f69c6221779b627bd79c76581b1c52"
+}

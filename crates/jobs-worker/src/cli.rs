@@ -35,7 +35,7 @@ pub(crate) enum OperatorCommand {
     },
     /// Redrive an inspected failed version after reconciling prior effects.
     Redrive(RecoveryArgs),
-    /// Permanently abandon and delete exactly one inspected failed version.
+    /// Permanently abandon and delete an eligible failed job at its inspected version.
     Discard(RecoveryArgs),
 }
 
