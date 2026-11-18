@@ -45,6 +45,8 @@ def intersection(left: Route, right: Route) -> Route | None:
                 return None
             if narrower == prefix and index == max(len(left), len(right)):
                 return None
+        if narrower.endswith("{*}") and wider.endswith("{}"):
+            narrower = literal_prefix(narrower) + "{}"
         common.append(narrower)
         if old.endswith("{*}"):
             return (*common, *right[index:])
@@ -55,7 +57,28 @@ def intersection(left: Route, right: Route) -> Route | None:
 
 def exposed_overlap(left: Route, right: Route, shadows: list[Route]) -> bool:
     overlap = intersection(left, right)
-    return overlap is not None and all(intersection(overlap, shadow) != overlap for shadow in shadows)
+    if overlap is None:
+        return False
+    coverings = [part for shadow in shadows if (part := intersection(overlap, shadow)) is not None]
+    if overlap in coverings:
+        return False
+    if not coverings or not overlap[-1].endswith("{*}"):
+        return True
+
+    def exposed(shape: Route) -> bool:
+        return all(intersection(shape, covering) != shape for covering in coverings)
+
+    shape = (*overlap[:-1], literal_prefix(overlap[-1]) + "{}")
+    if exposed(shape):
+        return True
+    deepest_shadow = max(map(len, coverings))
+    while len(shape) <= deepest_shadow:
+        if exposed((*shape, "")):
+            return True
+        shape = (*shape, "{}")
+        if exposed(shape):
+            return True
+    return False
 
 
 def resolve(document: dict, item: dict) -> dict:

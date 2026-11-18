@@ -119,6 +119,16 @@ class MakeGateTests(unittest.TestCase):
         detail_path = "/v1/widgets/{id}/details"
         static_detail = "/v1/widgets/latest/details"
         overlapping_dynamic = "/v1/widgets/latest/{view}"
+        partitioned = {
+            "/v1/{group}/{name}": ordinary_get,
+            "/v1/{group}/{name}/": ordinary_get,
+            "/v1/{group}/{name}/{*tail}": ordinary_get,
+        }
+        old_routes = {"/{*old}": first, **partitioned}
+        missing_slash = {p: item for p, item in old_routes.items() if not p.endswith("/")}
+        fallback_routes = {"/{*old}": ordinary_post, **partitioned}
+        prefix_catchall = "/v1/widgets/archive/late{*tail}"
+        archive_routes = {catchall_path: first, "/v1/widgets/archive/{name}": ordinary_get}
         components = {"parameters": {"Region": header("X-Region")}}
         cases = (
             (
@@ -185,6 +195,30 @@ class MakeGateTests(unittest.TestCase):
                 f"{overlapping_dynamic} would take precedence over POST /v1/widgets/{{id}}/{{action}}",
             ),
             (
+                "three routes cover every length of the added catchall",
+                old_routes,
+                {**old_routes, catchall_path: ordinary_get},
+                None,
+            ),
+            (
+                "the added catchall takes previously protected trailing slashes",
+                missing_slash,
+                {**missing_slash, catchall_path: ordinary_get},
+                f"{catchall_path} would take precedence over POST /{{*old}}",
+            ),
+            (
+                "a one-segment blocker leaves deeper prefixed catchall retries exposed",
+                archive_routes,
+                {**archive_routes, prefix_catchall: ordinary_get},
+                f"{prefix_catchall} would take precedence over POST {catchall_path}",
+            ),
+            (
+                "retiring a catchall leaves every retry covered by a more specific GET",
+                {catchall_path: deprecated, **fallback_routes},
+                fallback_routes,
+                None,
+            ),
+            (
                 "retiring a static route exposes an ordinary POST handler",
                 {static_path: deprecated, path: ordinary_post},
                 {path: ordinary_post},
@@ -234,7 +268,7 @@ class MakeGateTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                 else:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
-                    self.assertIn("POST /v1/widgets/", result.stderr)
+                    self.assertIn("POST /", result.stderr)
                     self.assertIn(expected, result.stderr)
 
     def test_source_make_captures_initializer_inputs_literally(self) -> None:
