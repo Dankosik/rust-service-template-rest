@@ -826,7 +826,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         let before_tokens = tokens.token_requests().len();
         warm_and_age(&credentials).await;
         let before_calls = resource.calls();
-        let parent = token_context();
+        let parent = OperationContext::with_timeout(Duration::from_secs(10));
         let mut client =
             EchoServiceClient::new(resource.transport(&credentials).with_context(&parent));
         let error = client

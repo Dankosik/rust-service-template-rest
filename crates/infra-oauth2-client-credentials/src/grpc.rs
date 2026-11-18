@@ -86,7 +86,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
         }
         let subject = take_request_subject(&mut request);
         let mut prepared = self.resource.prepare_call(request);
-        let context = prepared.opening_context().clone();
+        let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
         let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
             Ok(grant) => grant,
             Err(refusal) => {

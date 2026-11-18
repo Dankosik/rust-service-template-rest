@@ -1,7 +1,7 @@
 use std::time::UNIX_EPOCH;
 
 use super::*;
-use crate::assertion::Signer;
+use crate::{ConfigurationError, PreparationError, assertion::Signer};
 
 fn valid_options() -> Options {
     Options {
@@ -91,7 +91,11 @@ fn direct_construction_repeats_sensitive_option_admission() {
     ] {
         let mut options = options;
         let error = Registration::prepare(options.clone()).unwrap_err();
-        assert_eq!(error.key, key);
+        std::assert_matches!(
+            error,
+            PreparationError::Configuration(ConfigurationError { key: actual, .. })
+            if actual == key
+        );
         options.private_key = SecretString::from("different-secret");
         assert!(!format!("{options:?} {error:?}").contains("different-secret"));
     }
@@ -113,7 +117,14 @@ fn the_assertion_audience_must_be_an_issuer_distinct_from_the_token_endpoint() {
             ..valid_options()
         })
         .unwrap_err();
-        assert_eq!(error.key, "assertion_audience", "{audience:?}");
+        std::assert_matches!(
+            error,
+            PreparationError::Configuration(ConfigurationError {
+                key: "assertion_audience",
+                ..
+            }),
+            "{audience:?}"
+        );
     }
 }
 
@@ -159,8 +170,13 @@ fn a_token_url_with_whitespace_reports_the_character_rule() {
         ..valid_options()
     })
     .unwrap_err();
-    assert_eq!(error.key, "token_url");
-    assert_eq!(error.reason, "must not contain whitespace or controls");
+    std::assert_matches!(
+        error,
+        PreparationError::Configuration(ConfigurationError {
+            key: "token_url",
+            reason: "must not contain whitespace or controls",
+        })
+    );
 }
 
 #[test]
@@ -182,7 +198,14 @@ fn a_token_url_with_an_at_sign_in_its_raw_authority_is_refused() {
             ..valid_options()
         })
         .unwrap_err();
-        assert_eq!(error.key, "token_url", "{token_url}");
+        std::assert_matches!(
+            error,
+            PreparationError::Configuration(ConfigurationError {
+                key: "token_url",
+                ..
+            }),
+            "{token_url}"
+        );
     }
 }
 
@@ -198,7 +221,13 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
             ..valid_options()
         };
         let error = Registration::prepare(options).unwrap_err();
-        assert_eq!(error.key, "private_key");
+        std::assert_matches!(
+            error,
+            PreparationError::Configuration(ConfigurationError {
+                key: "private_key",
+                ..
+            })
+        );
     }
 }
 
@@ -231,5 +260,11 @@ fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
         ..valid_options()
     })
     .unwrap_err();
-    assert_eq!(error.key, "token_url");
+    std::assert_matches!(
+        error,
+        PreparationError::Configuration(ConfigurationError {
+            key: "token_url",
+            ..
+        })
+    );
 }

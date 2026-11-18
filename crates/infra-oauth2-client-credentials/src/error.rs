@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{error::Error as StdError, fmt};
 
 use http::StatusCode;
 use serde::Deserialize;
@@ -19,16 +19,90 @@ impl ConfigurationError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(derive_more::Debug, thiserror::Error)]
+pub enum PreparationError {
+    #[error("{0}")]
+    Configuration(#[from] ConfigurationError),
+    #[error(transparent)]
+    Transport(#[from] TransportBuildFailure),
+}
+
+impl PreparationError {
+    #[must_use]
+    pub const fn diagnostic_cause(&self) -> Option<&infra_outbound_http::BuildError> {
+        match self {
+            Self::Configuration(_) => None,
+            Self::Transport(error) => Some(&error.cause),
+        }
+    }
+}
+
+#[derive(derive_more::Debug, thiserror::Error)]
+#[error("OAuth2 transport construction failed for {endpoint} ({cause})")]
+pub struct TransportBuildFailure {
+    endpoint: &'static str,
+    #[debug(skip)]
+    cause: infra_outbound_http::BuildError,
+}
+
+impl TransportBuildFailure {
+    pub(crate) const fn new(
+        endpoint: &'static str,
+        cause: infra_outbound_http::BuildError,
+    ) -> Self {
+        Self { endpoint, cause }
+    }
+}
+
+#[derive(derive_more::Debug, thiserror::Error)]
 pub enum KeycloakError {
     #[error(transparent)]
     Configuration(#[from] ConfigurationError),
+    #[error(transparent)]
+    Transport(#[from] TransportBuildFailure),
     #[error("OAuth2 discovery: {0}")]
     Discovery(&'static str),
     #[error("OAuth2 discovery: issuer discovery returned HTTP {0}")]
     DiscoveryStatus(StatusCode),
-    #[error("OAuth2 discovery: issuer discovery request failed: {0}")]
-    DiscoveryTransport(#[source] TransportFailure),
+    #[error(transparent)]
+    DiscoveryTransport(DiscoveryTransportError),
+    #[error("OAuth2 discovery: invalid issuer metadata")]
+    DiscoveryMetadata(#[debug(skip)] serde_json::Error),
+}
+
+impl KeycloakError {
+    #[must_use]
+    pub fn diagnostic_cause(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Transport(error) => Some(&error.cause),
+            Self::DiscoveryTransport(error) => Some(&error.cause),
+            Self::DiscoveryMetadata(error) => Some(error),
+            Self::Configuration(_) | Self::Discovery(_) | Self::DiscoveryStatus(_) => None,
+        }
+    }
+}
+
+#[derive(derive_more::Debug, thiserror::Error)]
+#[error("OAuth2 discovery: issuer discovery request failed: {}", .cause.diagnostic_reason())]
+pub struct DiscoveryTransportError {
+    #[source]
+    kind: TransportFailure,
+    #[debug(skip)]
+    cause: infra_outbound_http::Error,
+}
+
+impl DiscoveryTransportError {
+    pub(crate) fn new(cause: infra_outbound_http::Error) -> Self {
+        Self {
+            kind: TransportFailure::from(&cause),
+            cause,
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> TransportFailure {
+        self.kind
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -45,6 +119,12 @@ pub enum TransportFailure {
 
 impl From<infra_outbound_http::Error> for TransportFailure {
     fn from(error: infra_outbound_http::Error) -> Self {
+        Self::from(&error)
+    }
+}
+
+impl From<&infra_outbound_http::Error> for TransportFailure {
+    fn from(error: &infra_outbound_http::Error) -> Self {
         match error {
             infra_outbound_http::Error::Timeout => Self::Timeout,
             infra_outbound_http::Error::Cancelled => Self::Cancelled,
