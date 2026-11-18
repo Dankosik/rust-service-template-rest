@@ -197,7 +197,7 @@ fn attempted<R>(outcome: Result<Record, Stop<R>>) -> Result<Attempted<R>, Attemp
     match outcome {
         Ok(value) => Ok(Attempted::Committed(value)),
         Err(Stop::Decided(decision)) => Ok(match decision {
-            Decision::Replay(record) => Attempted::Replay(record),
+            Decision::Replay(record) => Attempted::Replay(*record),
             Decision::Mismatch => Attempted::Mismatch,
             Decision::InProgress => Attempted::InProgress,
         }),
@@ -207,7 +207,7 @@ fn attempted<R>(outcome: Result<Record, Stop<R>>) -> Result<Attempted<R>, Attemp
 }
 
 enum Decision {
-    Replay(Record),
+    Replay(Box<Record>),
     Mismatch,
     InProgress,
 }
@@ -300,7 +300,7 @@ fn decide_live(
     }
     let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
     Record::decode(status, headers, Bytes::from(body))
-        .map(Decision::Replay)
+        .map(|record| Decision::Replay(Box::new(record)))
         .map_err(|err| refused("decode_record", AttemptError::Integrity, err.class()))
 }
 

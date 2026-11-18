@@ -502,28 +502,31 @@ fn http2_options() -> Http2Options {
     }
 }
 
+fn hold_stream_handler(
+    entered: &CancellationToken,
+    held: &std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+) -> &'static str {
+    entered.cancel();
+    tokio::task::block_in_place(|| {
+        held.lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    });
+    "released"
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forced_http2_drain_waits_for_the_stream_handler_or_reports_it_at_cutoff() {
     for confirm in [false, true] {
         let entered = CancellationToken::new();
         let (release, held) = std::sync::mpsc::channel();
         let held = Arc::new(std::sync::Mutex::new(held));
-        let handler = {
-            let entered = entered.clone();
-            move || {
-                let entered = entered.clone();
-                let held = held.clone();
-                async move {
-                    entered.cancel();
-                    tokio::task::block_in_place(|| {
-                        held.lock()
-                            .unwrap()
-                            .recv_timeout(Duration::from_secs(5))
-                            .unwrap();
-                    });
-                    "released"
-                }
-            }
+        let handler_entered = entered.clone();
+        let handler = move || {
+            let entered = handler_entered.clone();
+            let held = held.clone();
+            async move { hold_stream_handler(&entered, &held) }
         };
         #[expect(
             clippy::disallowed_methods,
