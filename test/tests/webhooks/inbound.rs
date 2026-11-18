@@ -1588,7 +1588,13 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
             .expect("jobs after");
     for job in &mut jobs_after {
         let row = job.as_object_mut().expect("job row is a JSON object");
-        assert_eq!(row.remove("payload_text"), Some(serde_json::Value::Null));
+        for column in ["payload_text", "claim_token"] {
+            assert_eq!(
+                row.remove(column),
+                Some(serde_json::Value::Null),
+                "{column}"
+            );
+        }
         for column in ["errors", "recovery_history"] {
             assert_eq!(row.remove(column), Some(serde_json::json!([])), "{column}");
         }
