@@ -182,11 +182,12 @@ fn required_value<'a>(
 
 fn required_header<'a>(
     headers: &'a HeaderMap,
-    name: HeaderName,
     header: &'static str,
 ) -> Result<&'a str, EnvelopeError> {
     required_value(
-        headers.get(name).map(async_nats::HeaderValue::as_str),
+        headers
+            .get(HeaderName::from_static(header))
+            .map(async_nats::HeaderValue::as_str),
         header,
     )
 }

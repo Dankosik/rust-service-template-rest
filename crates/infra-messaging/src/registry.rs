@@ -1,10 +1,12 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
+use futures_util::FutureExt as _;
+use futures_util::future::BoxFuture;
 use operation_context::OperationContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -12,13 +14,10 @@ use serde::de::DeserializeOwned;
 use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::HandlerError;
 use crate::wire::{InboundEnvelope, valid_subject};
-use bytes::Bytes;
-use time::OffsetDateTime;
 
-type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
-type ErasedHandler = Arc<
-    dyn Fn(String, OffsetDateTime, Bytes, OperationContext) -> Option<HandlerFuture> + Send + Sync,
->;
+type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
+type ErasedHandler =
+    Arc<dyn Fn(Event<Bytes>, OperationContext) -> Option<HandlerFuture> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
@@ -303,17 +302,15 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(
-            move |id, occurred_at: OffsetDateTime, payload: Bytes, context| {
-                let payload = serde_json::from_slice::<T>(&payload).ok()?;
-                let event = Event {
-                    id,
-                    occurred_at: occurred_at.to_utc(),
-                    payload,
-                };
-                Some(Box::pin(handler(event, context)) as HandlerFuture)
-            },
-        ));
+        entry.handler = Some(Arc::new(move |encoded, context| {
+            let payload = serde_json::from_slice::<T>(&encoded.payload).ok()?;
+            let event = Event {
+                id: encoded.id,
+                occurred_at: encoded.occurred_at,
+                payload,
+            };
+            Some(handler(event, context).boxed())
+        }));
         Ok(())
     }
 
@@ -363,24 +360,21 @@ impl Registry {
         envelope: InboundEnvelope,
         context: OperationContext,
     ) -> Result<(), DispatchError> {
-        let InboundEnvelope {
-            message_id,
-            event_type,
-            schema_version,
-            occurred_at,
-            payload,
-        } = envelope;
         let routes: &HashMap<RouteKey<'_>, RegisteredRoute> = &self.routes;
         let handler = routes
             .get(&RouteKey {
-                event_type: &event_type,
-                schema_version,
+                event_type: &envelope.event_type,
+                schema_version: envelope.schema_version,
             })
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let run =
-            handler(message_id, occurred_at, payload, context).ok_or(DispatchError::Undecodable)?;
+        let encoded = Event {
+            id: envelope.message_id,
+            occurred_at: envelope.occurred_at.to_utc(),
+            payload: envelope.payload,
+        };
+        let run = handler(encoded, context).ok_or(DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
