@@ -379,6 +379,7 @@
       "migrations/20261112120000_preserve_background_job_payload_text.sql",
       "migrations/20261117120000_allow_text_only_background_job_payload.sql",
       "migrations/20261118120000_add_background_job_claim_token.sql",
+      "migrations/20261118120010_create_outbox_event_receipts.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/"
@@ -445,9 +446,17 @@
   },
   "outbox": {
     "remove_when_unselected": [
+      "migrations/20261118120011_backfill_outbox_event_receipts.sql",
+      "migrations/20261118120100_requeue_exhausted_outbox_jobs.sql",
+      "migrations/20261118140000_index_unconfirmed_outbox_jobs.sql",
+      "migrations/20261118140001_index_ordered_outbox_jobs.sql",
+      "migrations/20261118140100_bound_outbox_retry_schedule.sql",
+      "crates/infra-jobs/src/enqueue/outbox.rs",
+      "crates/infra-jobs/src/maintenance/outbox.rs",
       "crates/infra-messaging/src/outbox.rs",
       "crates/jobs-worker/src/bootstrap/outbox.rs",
       "test/tests/messaging_outbox.rs",
+      "test/tests/messaging_outbox/",
       "test/tests/messaging_recovery.rs",
       "test/fixtures/messaging_recovery.sql"
     ]

@@ -343,6 +343,7 @@ impl KindsBuilder {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
+            recover_at_exhaustion: false,
             running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
@@ -360,6 +361,31 @@ impl KindsBuilder {
     }
 
     pub fn validate(self) -> Result<Kinds, KindError> {
+        // template:begin outbox:jobs-outbox-registry-guard
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.name == crate::outbox::KIND)
+        {
+            return Err(KindError::OutboxKind);
+        }
+        // template:end outbox:jobs-outbox-registry-guard
+        self.validate_kinds()
+    }
+
+    // template:begin outbox:jobs-outbox-registry
+    pub(crate) fn validate_outbox(mut self) -> Result<Kinds, KindError> {
+        match self.entries.as_mut_slice() {
+            [entry] if entry.name == crate::outbox::KIND => {
+                entry.recover_at_exhaustion = true;
+                self.validate_kinds()
+            }
+            _ => Err(KindError::OutboxKind),
+        }
+    }
+    // template:end outbox:jobs-outbox-registry
+
+    fn validate_kinds(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
         }
@@ -431,6 +457,10 @@ impl fmt::Debug for Kinds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
+    // template:begin outbox:jobs-outbox-registry-error
+    #[error("publish_domain_event requires a dedicated single-kind outbox publisher registry")]
+    OutboxKind,
+    // template:end outbox:jobs-outbox-registry-error
     #[error("no job kind is registered")]
     NoKinds,
     #[error("job kind {0:?} is registered twice")]
@@ -474,6 +504,7 @@ pub const fn assert_valid_kind_name(name: &str) {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
+    pub(crate) recover_at_exhaustion: bool,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<Dispatch>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,

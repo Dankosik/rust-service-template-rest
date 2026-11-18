@@ -14,7 +14,7 @@ pub(super) fn with_publisher(
     let messaging = resources
         .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
-    let kinds = infra_messaging::outbox::kinds(messaging.producer())?;
+    let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer()?)?;
     match ordinary {
         Some(mut engine) => {
             engine

@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT job.kind, job.claim_generation, job.state,\n                   CASE\n                     WHEN job.kind IS DISTINCT FROM $2::text THEN true\n                     WHEN $3::bool THEN false\n                     ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,\n                                                  job.payload_text, job.payload) IS NOT NULL\n                   END AS \"allowed!\"\n            FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "claim_generation",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "claim_generation"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "allowed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "9878f40650d06b2547860d73b8508432c5cf8efe76ca67f405a92b10009a8ef8"
+}

@@ -109,6 +109,257 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
     }
 }
 
+// template:begin outbox:messaging-outbox-topology-tests
+#[tokio::test]
+async fn outbox_refuses_route_changing_subject_transforms() {
+    let fixture = Fixture::create(false).await;
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let swapped = fixture
+        .subject
+        .replacen("test.jetstream", "jetstream.test", 1);
+    let subject = fixture.subject.as_str();
+    let literal_braces = format!("{subject}.{}", "{{}}");
+    let function_token = format!("{subject}.{{{{random(1)}}}}");
+    let evaluated = format!("{subject}.0");
+    for (id, published_subject, transform, stored_subject) in [
+        ("none", subject, None, subject),
+        ("literal", subject, Some((subject, subject)), subject),
+        (
+            "literal-braces",
+            literal_braces.as_str(),
+            Some((literal_braces.as_str(), literal_braces.as_str())),
+            literal_braces.as_str(),
+        ),
+        (
+            "captures",
+            subject,
+            Some(("*.*.>", "$+01.{{ Wildcard ( 2 ) }}.>")),
+            subject,
+        ),
+        (
+            "swap",
+            subject,
+            Some(("*.*.>", "$2.$1.>")),
+            swapped.as_str(),
+        ),
+        (
+            "function",
+            function_token.as_str(),
+            Some((function_token.as_str(), function_token.as_str())),
+            evaluated.as_str(),
+        ),
+    ] {
+        let mut config = source.cached_info().config.clone();
+        config.subjects = vec![published_subject.to_owned()];
+        config.subject_transform = transform.map(|(src, dest)| stream::SubjectTransform {
+            source: src.to_owned(),
+            destination: dest.to_owned(),
+        });
+        fixture.jetstream.update_stream(config).await.unwrap();
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, None, 1024),
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .expect("ordinary publication accepts a stream transform");
+        let event = Registry::default()
+            .declare_publication(&Route::<ExampleEvent>::new(published_subject), 1024)
+            .unwrap()
+            .prepare(&event_with_value(id, "route"))
+            .unwrap();
+        let ack = messaging
+            .producer()
+            .publish(&event, &context(deadline(), &cancel))
+            .await
+            .unwrap();
+        let stored = source.get_raw_message(ack.sequence).await.unwrap();
+        assert_eq!(stored.subject.as_str(), stored_subject);
+        if stored_subject == published_subject {
+            messaging
+                .outbox_producer()
+                .expect("transform preserves the route");
+        } else {
+            std::assert_matches!(
+                messaging.outbox_producer(),
+                Err(infra_messaging::MessagingError::OutboxSource(
+                    "subject transform must preserve the publication subject"
+                ))
+            );
+        }
+        close(messaging).await;
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn outbox_refuses_interest_retention_when_puback_does_not_imply_storage() {
+    let fixture = Fixture::create(false).await;
+    let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let mut config = source.cached_info().config.clone();
+    config.retention = stream::RetentionPolicy::Interest;
+    fixture.replace_stream(config).await;
+    fixture
+        .jetstream
+        .publish(fixture.subject.clone(), "no-interest".into())
+        .await
+        .unwrap()
+        .await
+        .expect("JetStream acknowledges publication without a consumer");
+    let state = &source.info().await.unwrap().state;
+    assert_eq!(state.consumer_count, 0);
+    assert_eq!(state.messages, 0);
+    std::assert_matches!(
+        Messaging::connect(
+            options(&fixture, None, 1024),
+            deadline(),
+            CancellationToken::new()
+        )
+        .await,
+        Err(infra_messaging::MessagingError::Topology)
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn outbox_capacity_refuses_new_publication_and_preserves_unread_messages() {
+    let fixture = Fixture::create(false).await;
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    for (max_messages, max_bytes, max_messages_per_subject, expected) in [
+        (
+            1,
+            -1,
+            -1,
+            "bounded message or byte capacity requires DiscardNew",
+        ),
+        (
+            -1,
+            1400,
+            -1,
+            "bounded message or byte capacity requires DiscardNew",
+        ),
+        (
+            -1,
+            -1,
+            1,
+            "a per-subject message limit requires DiscardNewPerSubject",
+        ),
+    ] {
+        let mut config = source.cached_info().config.clone();
+        config.retention = stream::RetentionPolicy::WorkQueue;
+        config.max_age = Duration::from_secs(3600);
+        config.max_messages = max_messages;
+        config.max_bytes = max_bytes;
+        config.max_messages_per_subject = max_messages_per_subject;
+        config.discard = if max_messages_per_subject > 0 {
+            stream::DiscardPolicy::New
+        } else {
+            stream::DiscardPolicy::Old
+        };
+        fixture.replace_stream(config.clone()).await;
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, None, 1024),
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .expect("ordinary publisher admission is unchanged");
+        std::assert_matches!(
+            messaging.outbox_producer(),
+            Err(infra_messaging::MessagingError::OutboxSource(reason)) if reason == expected
+        );
+        close(messaging).await;
+
+        config.discard = stream::DiscardPolicy::New;
+        config.discard_new_per_subject = max_messages_per_subject > 0;
+        fixture.replace_stream(config).await;
+        verify_full_stream(&fixture).await;
+    }
+    fixture.cleanup().await;
+}
+
+async fn verify_full_stream(fixture: &Fixture) {
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(fixture, None, 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("admit WorkQueue source");
+    messaging
+        .outbox_producer()
+        .expect("bounded source safely refuses new messages");
+    let producer = messaging.producer();
+    let first = fixture
+        .publication
+        .prepare(&event_with_value("first", &"a".repeat(750)))
+        .unwrap();
+    let second = fixture
+        .publication
+        .prepare(&event_with_value("second", &"b".repeat(750)))
+        .unwrap();
+    let ack = producer
+        .publish(&first, &context(deadline(), &cancel))
+        .await
+        .expect("the first event fits into an empty stream");
+    assert_eq!(
+        producer
+            .publish(&second, &context(deadline(), &cancel))
+            .await,
+        Err(PublishError::Rejected(
+            infra_messaging::PublishRejection::BrokerRefused
+        ))
+    );
+
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    assert_eq!(source.cached_info().state.messages, 1);
+    let durable = source
+        .create_consumer(consumer::pull::Config {
+            durable_name: Some(fixture.durable.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("first consumer can be added after the publish");
+    let mut deliveries = durable
+        .fetch()
+        .max_messages(1)
+        .expires(Duration::from_secs(3))
+        .messages()
+        .await
+        .unwrap();
+    let retained = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(&retained.payload, first.payload());
+    assert_eq!(retained.info().unwrap().stream_sequence, ack.sequence);
+    retained.double_ack().await.unwrap();
+    eventually(
+        Duration::from_secs(3),
+        "acknowledged event frees WorkQueue capacity",
+        async || {
+            let info = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+            (info.cached_info().state.messages == 0).then_some(())
+        },
+    )
+    .await;
+    let stored = producer
+        .publish(&second, &context(deadline(), &cancel))
+        .await
+        .expect("the same rejected event fits after old bytes are acknowledged");
+    assert!(!stored.duplicate);
+    assert_eq!(
+        &source
+            .get_raw_message(stored.sequence)
+            .await
+            .unwrap()
+            .payload,
+        second.payload()
+    );
+    close(messaging).await;
+}
+// template:end outbox:messaging-outbox-topology-tests
+
 #[tokio::test]
 async fn an_explicit_dead_letter_stream_must_receive_the_dead_letter_subject() {
     let fixture = Fixture::create(false).await;

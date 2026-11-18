@@ -279,7 +279,7 @@ async fn run_attempt(
     registered: &Registered,
     attempt: AttemptId,
     fence: ClaimFence,
-    payload: Vec<u8>,
+    payload: Result<Vec<u8>, JobError>,
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
 ) {
@@ -290,18 +290,19 @@ async fn run_attempt(
     let policy = registered.policy;
     let attempt_deadline = clamped_deadline(Instant::now(), policy.timeout, supervisor_deadline);
     let cancel = CancellationToken::new();
-    let prepared = prepare_handler(
-        registered.dispatch.as_ref(),
-        Attempt {
-            fence,
-            number: attempt.number,
-            attempt_deadline,
-            cancellation: cancel.clone(),
-        },
-        shared.pool.clone(),
-        &payload,
-    );
-    drop(payload);
+    let prepared = payload.map_err(Ended::Error).and_then(|bytes| {
+        prepare_handler(
+            registered.dispatch.as_ref(),
+            Attempt {
+                number: attempt.number,
+                fence,
+                attempt_deadline,
+                cancellation: cancel.clone(),
+            },
+            shared.pool.clone(),
+            &bytes,
+        )
+    });
     let (ended, ran) = match prepared {
         Err(ended) => (ended, None),
         Ok(future) => {
@@ -322,7 +323,7 @@ async fn run_attempt(
         }
     };
     let committed = matches!(ended, Ended::Success(Completion::Committed));
-    let transition = map_outcome(&attempt, policy, ended);
+    let transition = map_outcome(&attempt, policy, registered.recover_at_exhaustion, ended);
     if matches!(transition, Transition::Release) {
         shared
             .lifecycle
@@ -880,7 +881,10 @@ mod tests {
                     kind: "sample",
                     number: 3,
                 };
-                record_on_span(&span, &map_outcome(&attempt, Policy::default(), ended));
+                record_on_span(
+                    &span,
+                    &map_outcome(&attempt, Policy::default(), false, ended),
+                );
             }
         });
         let spans = spans.0.lock().unwrap();

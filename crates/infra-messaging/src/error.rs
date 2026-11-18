@@ -10,6 +10,10 @@ pub enum MessagingError {
     Authentication,
     #[error("messaging broker topology is unavailable")]
     Topology,
+    // template:begin outbox:messaging-outbox-source-error
+    #[error("outbox source stream is unsafe: {0}")]
+    OutboxSource(&'static str),
+    // template:end outbox:messaging-outbox-source-error
     #[error("messaging operation exceeded its {budget:?} budget")]
     TimedOut { budget: Duration },
     #[error("messaging operation was cancelled")]

@@ -349,6 +349,36 @@ recover retained jobs with the operator commands `jobs-worker --help` lists
 (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
+<!-- template:begin outbox:docs-alerting-outbox-runbook -->
+### Outbox delivery age
+
+`jobs_outbox_oldest_unconfirmed_age_seconds` measures time since creation of
+the oldest retained publication job without recorded completion. It includes
+future retries, active attempts, blocked successors, and retained failures.
+After an upgrade, an unresolved historical copy still counts even if another
+job delivered the same logical event. The operator retains every failed outbox
+job for recovery. Reconcile the consumer's recorded effect and resolve the
+cause before redriving the original job. Set the alert threshold and duration
+from the service's delivery SLO.
+
+`jobs_outbox_oldest_blocked_age_seconds` reports the age of the oldest pending
+ordered event with an unfinished predecessor. The worker checks up to 1,001
+ordered candidates in creation order. Zero means the scan found no blockers
+and covered every candidate. `NaN` means the sample found no blocker within
+its limit or the worker has yet to observe the outbox. When blockers are
+present, check for broker refusals, exhausted retries, or permanent failures
+on predecessor events before recovering the ordered chain.
+
+Evaluate the age gauges only on live worker targets with a fresh, nonzero
+`jobs_outbox_observation_timestamp_seconds` and
+`jobs_outbox_last_attempt_success == 1`. The worker retains the last successful
+ages and timestamp after a failed observation. Check
+`jobs_worker_operation_failures_total{operation="sample_outbox"}` and the
+`jobs_operation_failed` log if sampling fails. An old timestamp with a
+successful last attempt indicates that sampling has stopped or fallen behind.
+Aggregate valid worker observations with `max` for each shared jobs database.
+<!-- template:end outbox:docs-alerting-outbox-runbook -->
+
 <!-- template:begin webhooks:docs-alerting-webhook-delivery -->
 For `webhooks.deliver`, start with the job ID and error in the worker's
 `job_failed` log. A payload decoding failure can exhaust the job before the

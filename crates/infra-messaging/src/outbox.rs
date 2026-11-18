@@ -2,24 +2,23 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use bytes::Bytes;
-use infra_jobs::{
-    EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, KindsBuilder,
-    LivePayloadComparison, Policy, compare_live_payload, enqueue,
-};
+use domain_events::{Event, EventPayload};
+use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
+use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::{Tx, TxMode};
+use operation_context::{Deadline, OperationContext};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::base64::Base64;
 use serde_with::{DeserializeAs, SerializeAs, serde_as};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
+use uuid::NonNilUuid;
 
-use crate::Producer;
 use crate::error::{PublishError, PublishRejection};
 use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
-use crate::wire::prefixed_digest_hex;
+use crate::{EnvelopeError, OutboxProducer, Producer, PublicationRoute};
 
-const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
@@ -37,20 +36,57 @@ pub enum OutboxEnqueued {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
+    #[error("new outbox events require a publication route bound with for_outbox(publisher_id)")]
+    PublisherRequired,
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
     PayloadTooLarge { bytes: usize, max_bytes: usize },
-    #[error("outbox event identity conflicts with a live immutable intent")]
+    #[error("outbox event identity conflicts with its immutable intent or business order")]
     EventIdConflict,
-    #[error("outbox live identity changed; retry the caller transaction")]
-    LiveIdentityChanged,
+    #[error("outbox aggregate version is occupied or its predecessor is missing")]
+    OrderConflict,
+    #[error(
+        "outbox order requires a 1..=255 byte key without control characters and a positive version"
+    )]
+    InvalidOrder,
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
 }
 
-pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
-    let mut kinds = KindsBuilder::new();
-    kinds.register(POLICY, Publisher { producer });
-    kinds.validate()
+#[derive(Clone, Debug)]
+pub struct OutboxRoute<T: EventPayload> {
+    publication: PublicationRoute<T>,
+    publisher_id: NonNilUuid,
+}
+
+impl<T: EventPayload> PublicationRoute<T> {
+    #[must_use]
+    pub fn for_outbox(self, publisher_id: NonNilUuid) -> OutboxRoute<T> {
+        OutboxRoute {
+            publication: self,
+            publisher_id,
+        }
+    }
+}
+
+impl<T: EventPayload + Serialize> OutboxRoute<T> {
+    pub fn prepare(&self, event: &Event<T>) -> Result<PreparedEvent, EnvelopeError> {
+        let mut prepared = self.publication.prepare(event)?;
+        let prefix = format!("outbox-v1-{}-", self.publisher_id.get().simple());
+        let id =
+            crate::wire::prefixed_digest_hex(&prefix, &Sha256::digest(event.id.as_bytes()).into());
+        prepared.publication_id = Some(id.clone());
+        prepared.message_id = id;
+        Ok(prepared)
+    }
+}
+
+pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
+    job_outbox::publisher_kinds(
+        POLICY,
+        Publisher {
+            producer: producer.0,
+        },
+    )
 }
 
 #[derive(Default)]
@@ -78,24 +114,37 @@ impl PreparedEvent {
         &self,
         tx: &mut Tx<'_, impl TxMode>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+        self.enqueue_with_order(tx, None).await
+    }
+
+    pub async fn enqueue_ordered(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+        aggregate_key: &str,
+        version: i64,
+    ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+        self.enqueue_with_order(tx, Some((aggregate_key, version)))
+            .await
+    }
+
+    async fn enqueue_with_order(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+        order: Option<(&str, i64)>,
+    ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
-        let key = event_key(&intent.message_id);
-        match enqueue(
-            tx,
-            &intent,
-            EnqueueOptions {
-                delay: Duration::ZERO,
-                unique_key: Some(&key),
-            },
-        )
-        .await?
-        {
-            Enqueued::Created(_) => Ok(OutboxEnqueued::Created),
-            Enqueued::Duplicate => match compare_live_payload(tx, &key, &intent).await? {
-                LivePayloadComparison::Same => Ok(OutboxEnqueued::Duplicate),
-                LivePayloadComparison::Different => Err(OutboxEnqueueError::EventIdConflict),
-                LivePayloadComparison::NoLongerLive => Err(OutboxEnqueueError::LiveIdentityChanged),
-            },
+        let admission = if self.publication_id.is_some() {
+            job_outbox::enqueue(tx, &intent, order).await?
+        } else {
+            job_outbox::reconcile(tx, &intent, order).await?
+        };
+        match admission {
+            Admission::Created => Ok(OutboxEnqueued::Created),
+            Admission::Duplicate => Ok(OutboxEnqueued::Duplicate),
+            Admission::EventIdConflict => Err(OutboxEnqueueError::EventIdConflict),
+            Admission::OrderConflict => Err(OutboxEnqueueError::OrderConflict),
+            Admission::InvalidOrder => Err(OutboxEnqueueError::InvalidOrder),
+            Admission::MissingReceipt => Err(OutboxEnqueueError::PublisherRequired),
         }
     }
 
@@ -162,8 +211,15 @@ struct Publisher {
 impl Handler<PublishDomainEvent> for Publisher {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
         let event = job.payload().to_prepared().map_err(JobError::permanent)?;
+        let deadline = crate::budget::within_operation_budget(job.deadline());
+        let context = OperationContext::new(Some(Deadline::at(deadline)), job.cancellation());
+        let admission = crate::topology::recheck_outbox_source(
+            &self.producer.shared,
+            deadline,
+            context.cancellation(),
+        );
         self.producer
-            .publish(&event, &job.context())
+            .publish_after_admission(&event, &context, admission)
             .await
             .map(|_| ())
             .map_err(|error| match error {
@@ -298,10 +354,6 @@ impl PublishDomainEvent {
     }
 }
 
-fn event_key(message_id: &str) -> String {
-    prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()).into())
-}
-
 fn raw_payload_capacity(overhead: usize) -> usize {
     (infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead) / 4) * 3
 }
@@ -317,7 +369,7 @@ mod tests {
 
     use super::{
         FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
-        event_key, raw_payload_capacity,
+        raw_payload_capacity,
     };
     use crate::prepared::{PreparedEvent, PreparedEventParts};
 
@@ -395,14 +447,6 @@ mod tests {
         let mut non_string = baseline;
         non_string["payload_base64"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<PublishDomainEvent>(non_string).is_err());
-    }
-
-    #[test]
-    fn event_key_hashes_the_full_logical_identity() {
-        assert_eq!(
-            event_key("logical-id"),
-            "event-4f63c63f6201a9f96cf5efafede950d7bb7d4c83edfff141074bfbf9622e1d03"
-        );
     }
 
     #[test]

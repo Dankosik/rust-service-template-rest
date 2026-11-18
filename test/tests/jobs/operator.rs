@@ -192,7 +192,15 @@ mod outbox {
         };
         let route = Route::<Note>::new("events.operator.created");
         let mut registry = Registry::default();
-        let publication = registry.declare_publication(&route, 1024).unwrap();
+        let publication = registry
+            .declare_publication(&route, 1024)
+            .unwrap()
+            .for_outbox(
+                uuid::NonNilUuid::new(uuid::Uuid::from_u128(
+                    0x132f59cc_617b_476a_b77f_c53313a20154,
+                ))
+                .unwrap(),
+            );
         let prepared = publication.prepare(&event).unwrap();
         in_tx(&jobs, async |tx| {
             assert_eq!(prepared.enqueue(tx).await.unwrap(), OutboxEnqueued::Created);
@@ -212,6 +220,13 @@ mod outbox {
         let target =
             RecoveryTarget::try_new(&id, "publish_domain_event", &version.to_string()).unwrap();
         let before = stored(&pool, &target).await;
+        let discard = in_tx(&jobs, async |tx| {
+            Ok::<_, OperatorError>(operator::discard(tx, &target).await)
+        })
+        .await
+        .unwrap();
+        std::assert_matches!(discard, Err(OperatorError::Conflict));
+        assert_eq!(stored(&pool, &target).await, before);
         in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
             .await
             .unwrap();
@@ -222,8 +237,8 @@ mod outbox {
         assert_eq!(super::super::job_count(&pool).await, 1);
         let intent: Value = serde_json::from_str(after["payload_text"].as_str().unwrap()).unwrap();
         assert_eq!(intent["subject"], "events.operator.created");
-        assert_eq!(intent["message_id"], "operator-recovery-event");
-        assert_eq!(intent["publication_id"], "operator-recovery-event");
+        assert_eq!(intent["message_id"], prepared.message_id());
+        assert_eq!(intent["publication_id"], prepared.publication_id());
         assert_eq!(intent["event_type"], "test.operator.created");
         assert_eq!(intent["schema_version"], 1);
         assert_eq!(

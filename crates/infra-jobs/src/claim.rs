@@ -32,7 +32,7 @@ pub(crate) struct Claimed {
     pub(crate) registered: Arc<Registered>,
     pub(crate) attempt: AttemptId,
     pub(crate) fence: ClaimFence,
-    pub(crate) payload: Vec<u8>,
+    pub(crate) payload: Result<Vec<u8>, crate::JobError>,
     pub(crate) trace: Carrier,
     pub(crate) slot: OwnedSemaphorePermit,
     pub(crate) kind_slot: Option<KindSlot>,
@@ -247,14 +247,14 @@ async fn claim(
             ClaimRow,
             "WITH policy AS ( \
                  SELECT policy.kind, policy.max_attempts, policy.lease_offset_micros, \
-                        policy.claim_limit \
-                 FROM unnest($1::text[], $2::smallint[], $3::bigint[], $6::bigint[]) \
-                     AS policy (kind, max_attempts, lease_offset_micros, claim_limit) \
+                        policy.claim_limit, policy.recover_at_exhaustion \
+                 FROM unnest($1::text[], $2::smallint[], $3::bigint[], $6::bigint[], $8::bool[]) \
+                     AS policy (kind, max_attempts, lease_offset_micros, claim_limit, recover_at_exhaustion) \
              ), \
              candidates AS ( \
                  SELECT candidate.id, candidate.not_before, candidate.attempts, candidate.state, \
                         candidate.claim_expires_at, policy.max_attempts, \
-                        policy.lease_offset_micros, policy.kind, policy.claim_limit \
+                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.recover_at_exhaustion \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before, job.attempts, job.state, \
@@ -263,6 +263,9 @@ async fn claim(
                      WHERE job.state = 'pending' \
                        AND job.kind = policy.kind \
                        AND job.not_before <= statement_timestamp() \
+                       AND NOT EXISTS (SELECT 1 FROM background_jobs AS predecessor \
+                                       WHERE predecessor.id = job.predecessor_job_id \
+                                         AND predecessor.state <> 'completed') \
                      ORDER BY job.not_before, job.id \
                      LIMIT policy.claim_limit \
                      FOR UPDATE SKIP LOCKED \
@@ -270,7 +273,7 @@ async fn claim(
                  UNION ALL \
                  SELECT candidate.id, candidate.not_before, candidate.attempts, candidate.state, \
                         candidate.claim_expires_at, policy.max_attempts, \
-                        policy.lease_offset_micros, policy.kind, policy.claim_limit \
+                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.recover_at_exhaustion \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before, job.attempts, job.state, \
@@ -279,6 +282,9 @@ async fn claim(
                      WHERE job.state = 'running' \
                        AND job.kind = policy.kind \
                        AND job.claim_expires_at <= statement_timestamp() \
+                       AND NOT EXISTS (SELECT 1 FROM background_jobs AS predecessor \
+                                       WHERE predecessor.id = job.predecessor_job_id \
+                                         AND predecessor.state <> 'completed') \
                      ORDER BY job.not_before, job.id \
                      LIMIT policy.claim_limit \
                      FOR UPDATE SKIP LOCKED \
@@ -288,7 +294,7 @@ async fn claim(
                  SELECT candidates.id, candidates.not_before, candidates.attempts, \
                         candidates.state, candidates.claim_expires_at, \
                         candidates.max_attempts, candidates.lease_offset_micros, \
-                        candidates.claim_limit, \
+                        candidates.claim_limit, candidates.recover_at_exhaustion, \
                         row_number() OVER ( \
                             PARTITION BY candidates.kind \
                             ORDER BY candidates.not_before, candidates.id \
@@ -296,8 +302,9 @@ async fn claim(
                  FROM candidates \
              ), \
              picked AS ( \
-                 SELECT ranked.id, ranked.attempts, ranked.lease_offset_micros, \
-                        ranked.attempts >= ranked.max_attempts AS exhausted, \
+                 SELECT ranked.id, ranked.attempts, ranked.lease_offset_micros, ranked.max_attempts, \
+                        ranked.recover_at_exhaustion, \
+                        ranked.attempts >= ranked.max_attempts AND NOT ranked.recover_at_exhaustion AS exhausted, \
                         ranked.state = 'running' \
                             AND ranked.claim_expires_at <= statement_timestamp() AS rescued \
                  FROM ranked \
@@ -314,7 +321,7 @@ async fn claim(
                                               + picked.lease_offset_micros \
                                                 * interval '1 microsecond' END, \
                  attempts = CASE WHEN picked.exhausted THEN picked.attempts \
-                                 ELSE picked.attempts + 1 END, \
+                                 ELSE LEAST(picked.attempts + 1, picked.max_attempts) END, \
                  attempted_by = CASE WHEN picked.exhausted THEN job.attempted_by \
                                      ELSE $5 END, \
                  error_summary = CASE WHEN picked.rescued \
@@ -323,7 +330,8 @@ async fn claim(
                                       THEN COALESCE(job.error_summary, 'attempt budget spent') \
                                       ELSE job.error_summary END, \
                  errors = CASE WHEN picked.rescued \
-                               THEN job.errors || jsonb_build_object( \
+                               THEN (CASE WHEN jsonb_array_length(job.errors) >= $9 \
+                                          THEN job.errors - 0 ELSE job.errors END) || jsonb_build_object( \
                                         'attempt', picked.attempts, 'at', statement_timestamp(), \
                                         'error', $7::text) \
                                ELSE job.errors END, \
@@ -335,7 +343,10 @@ async fn claim(
                      OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
              RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
                        job.claim_generation, job.claim_token AS \"claim_token!\", \
-                       CASE WHEN job.state = 'running' THEN COALESCE(job.payload_text, job.payload::text) END AS payload, \
+                       CASE WHEN job.state <> 'running' THEN NULL \
+                            WHEN picked.recover_at_exhaustion THEN outbox_verified_payload( \
+                                job.id, job.unique_key, job.predecessor_job_id, job.payload_text, job.payload) \
+                            ELSE COALESCE(job.payload_text, job.payload::text) END AS payload, \
                        job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",
@@ -346,6 +357,8 @@ async fn claim(
             worker_id,
             &claim_limits[..],
             rescued_summary,
+            &policy.recover_at_exhaustion[..],
+            i32::from(crate::kind::MAX_ATTEMPTS),
         )
         .try_map(|row| row.into_drawn(policy.registry))
         .fetch_all(&mut *connection),
@@ -358,17 +371,19 @@ struct PolicyBinds<'a> {
     names: Vec<&'static str>,
     max_attempts: Vec<i16>,
     lease_offsets_micros: Vec<i64>,
+    recover_at_exhaustion: Vec<bool>,
 }
 
 impl<'a> PolicyBinds<'a> {
     fn new(registry: &'a crate::Kinds) -> Self {
-        let (names, max_attempts, lease_offsets_micros) = registry
+        let (names, max_attempts, lease_offsets_micros, recover_at_exhaustion) = registry
             .iter()
             .map(|registered| {
                 (
                     registered.name,
                     i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX),
                     saturating_micros(lease_offset(registered.policy.timeout)),
+                    registered.recover_at_exhaustion,
                 )
             })
             .collect();
@@ -377,6 +392,7 @@ impl<'a> PolicyBinds<'a> {
             names,
             max_attempts,
             lease_offsets_micros,
+            recover_at_exhaustion,
         }
     }
 }
@@ -473,7 +489,7 @@ fn dispatch_known(
                     registered,
                     attempt,
                     fence,
-                    payload: payload.into_bytes(),
+                    payload,
                     trace,
                     slot,
                     kind_slot,
@@ -501,7 +517,7 @@ enum Drawn {
         registered: Arc<Registered>,
         attempt: AttemptId,
         fence: ClaimFence,
-        payload: String,
+        payload: Result<Vec<u8>, crate::JobError>,
         trace: Carrier,
         lease_offset: Duration,
         queue_wait_seconds: f64,
@@ -543,8 +559,12 @@ impl ClaimRow {
                 error_summary: self.error_summary,
             });
         }
-        let Some(payload) = self.payload else {
-            return Err(ClaimDecodeError::MissingPayload.into_sqlx());
+        let payload = match self.payload {
+            Some(payload) => Ok(payload.into_bytes()),
+            None if registered.recover_at_exhaustion => {
+                Err(crate::JobError::permanent("outbox_receipt_mismatch"))
+            }
+            None => return Err(ClaimDecodeError::MissingPayload.into_sqlx()),
         };
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),

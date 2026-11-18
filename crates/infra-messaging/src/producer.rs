@@ -61,6 +61,16 @@ impl Producer {
         event: &PreparedEvent,
         context: &OperationContext,
     ) -> Result<PublishAck, PublishError> {
+        self.publish_after_admission(event, context, std::future::ready(Ok(())))
+            .await
+    }
+
+    pub(crate) async fn publish_after_admission(
+        &self,
+        event: &PreparedEvent,
+        context: &OperationContext,
+        admission: impl Future<Output = Result<(), PublishError>>,
+    ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
         let span = tracing::info_span!(
             "messaging_publish",
@@ -74,7 +84,10 @@ impl Producer {
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        let result = self.send_prepared(event, &span, context).await;
+        let result = self
+            .send_prepared(event, &span, context, admission)
+            .instrument(span.clone())
+            .await;
         let outcome = match &result {
             Ok(_) => PublishOutcome::Acknowledged,
             Err(PublishError::Rejected(_)) => PublishOutcome::Rejected,
@@ -104,6 +117,7 @@ impl Producer {
         event: &PreparedEvent,
         span: &tracing::Span,
         context: &OperationContext,
+        admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
             return Err(PublishRejection::Unavailable.into());
@@ -114,13 +128,13 @@ impl Producer {
             &self.shared.source_stream,
             self.shared.max_payload_bytes,
         )?;
+        admission.await?;
         send_publication(
             &self.shared,
             event.subject_handle().clone(),
             message,
             context,
         )
-        .instrument(span.clone())
         .await
     }
 }

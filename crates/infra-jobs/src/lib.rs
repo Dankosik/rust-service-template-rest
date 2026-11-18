@@ -15,6 +15,9 @@ mod trace_context;
 pub use attempt::ATTEMPT_DURATION_METRIC;
 pub use claim::{CLAIM_DURATION_METRIC, QUEUE_WAIT_METRIC};
 pub use engine::{DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started};
+// template:begin outbox:jobs-outbox-export
+pub use enqueue::outbox;
+// template:end outbox:jobs-outbox-export
 pub use enqueue::{
     EnqueueError, EnqueueOptions, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES,
     compare_live_payload, enqueue, json_payload_len,
@@ -25,6 +28,14 @@ pub use kind::{
     TransactionalJob, assert_valid_kind_name,
 };
 pub use session::StartupError;
+
+const RESERVED_OUTBOX_KIND: Option<&str> = [
+    // template:begin outbox:jobs-outbox-reserved-kind
+    outbox::KIND,
+    // template:end outbox:jobs-outbox-reserved-kind
+]
+.first()
+.copied();
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (ATTEMPT_DURATION_METRIC, attempt::ATTEMPT_DURATION_BUCKETS),

@@ -550,6 +550,9 @@ pub(crate) enum Operation {
     Release,
     Retention,
     Sample,
+    // template:begin outbox:jobs-operation-sample-outbox
+    SampleOutbox,
+    // template:end outbox:jobs-operation-sample-outbox
     Listen,
 }
 
@@ -562,6 +565,9 @@ impl Operation {
             Self::Release => "release",
             Self::Retention => "retention",
             Self::Sample => "sample",
+            // template:begin outbox:jobs-operation-sample-outbox-name
+            Self::SampleOutbox => "sample_outbox",
+            // template:end outbox:jobs-operation-sample-outbox-name
             Self::Listen => "listen",
         }
     }
@@ -697,7 +703,7 @@ mod tests {
                     generation: 1,
                     token: uuid::Uuid::nil(),
                 },
-                payload: b"null".to_vec(),
+                payload: Ok(b"null".to_vec()),
                 trace: crate::trace_context::Carrier::default(),
                 slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
                 kind_slot: None,
@@ -917,7 +923,7 @@ mod tests {
                         generation: 1,
                         token: uuid::Uuid::nil(),
                     },
-                    payload: b"null".to_vec(),
+                    payload: Ok(b"null".to_vec()),
                     trace: crate::trace_context::Carrier::default(),
                     slot: Arc::clone(&engine.shared.slots)
                         .try_acquire_owned()

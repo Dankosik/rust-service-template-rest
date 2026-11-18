@@ -21,6 +21,9 @@ pub use budget::BROKER_OPERATION_BUDGET;
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
 pub use contract::ContractError;
 pub use error::{EnvelopeError, HandlerError, MessagingError, PublishError, PublishRejection};
+// template:begin outbox:messaging-outbox-producer-export
+pub use messaging::OutboxProducer;
+// template:end outbox:messaging-outbox-producer-export
 pub use messaging::{
     CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
 };

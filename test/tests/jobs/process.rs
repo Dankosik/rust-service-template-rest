@@ -365,8 +365,24 @@ async fn await_capped_probe_sample(
         POLL,
         async || {
             let (status, scraped) = get(url).await.ok()?;
+            let sampled_outbox = true;
+            // template:begin outbox:test-jobs-capped-outbox-sample
+            let sampled_outbox = sampled_outbox
+                && sample_value::<f64>(&scraped, "jobs_outbox_last_attempt_success") == Some(1.0)
+                && sample_value::<f64>(&scraped, "jobs_outbox_oldest_blocked_age_seconds")
+                    .is_some_and(f64::is_nan)
+                && sample_value::<f64>(&scraped, "jobs_outbox_observation_timestamp_seconds")
+                    .zip(sample_value::<f64>(
+                        &scraped,
+                        "jobs_outbox_oldest_unconfirmed_age_seconds",
+                    ))
+                    .is_some_and(|(time, age)| {
+                        age > 0.0 && (time - age - OLDEST_DUE_UNIX_SECONDS).abs() < 0.001
+                    });
+            // template:end outbox:test-jobs-capped-outbox-sample
             (status == 200
                 && capped_probe_sample(&scraped, failed_kinds)
+                && sampled_outbox
                 && populations.iter().all(|(population, oldest)| {
                     population_gauge(
                         &scraped,
@@ -437,6 +453,13 @@ async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
 fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
     body.lines()
         .filter(|line| {
+            // template:begin outbox:test-jobs-observed-outbox-metrics
+            if line.starts_with("jobs_outbox_oldest_")
+                || line.starts_with("jobs_outbox_observation_timestamp_seconds ")
+            {
+                return true;
+            }
+            // template:end outbox:test-jobs-observed-outbox-metrics
             line.starts_with("jobs_live_jobs{")
                 || line.starts_with("jobs_failed_jobs{")
                 || line.starts_with("jobs_oldest_available_age_seconds{")
@@ -466,8 +489,15 @@ async fn await_failed_sample_with_last_good_values(
         POLL,
         async || {
             let (status, scraped) = get(url).await.ok()?;
+            let sampled_outbox = true;
+            // template:begin outbox:test-jobs-failed-outbox-observation
+            let sampled_outbox = sampled_outbox
+                && operation_failed(&scraped, "sample_outbox")
+                && sample_value::<f64>(&scraped, "jobs_outbox_last_attempt_success") == Some(0.0);
+            // template:end outbox:test-jobs-failed-outbox-observation
             (status == 200
                 && operation_failed(&scraped, "sample")
+                && sampled_outbox
                 && ["jobs", "failed_jobs"].iter().all(|population| {
                     population_gauge(
                         &scraped,
@@ -678,6 +708,187 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
     nats.cleanup().await;
 }
 // template:end outbox:test-jobs-process-outbox-capacity
+
+// template:begin outbox:test-jobs-process-outbox-source
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn outbox_source_refusal_prevents_worker_startup(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    let source = nats.jetstream.get_stream(&nats.stream).await.unwrap();
+    let mut config = source.cached_info().config.clone();
+    config.max_messages = 1;
+    config.discard = stream::DiscardPolicy::Old;
+    nats.jetstream.delete_stream(&nats.stream).await.unwrap();
+    nats.jetstream.create_stream(config).await.unwrap();
+
+    let mut worker = Worker::spawn(&database_url, &nats, &[]);
+    let refusal = worker.await_record("messaging_admission_failed").await;
+    assert_eq!(refusal["operation"], "source_stream");
+    assert_eq!(refusal["error.type"], "outbox_discard_old");
+    let (code, stderr, stdout) = worker.wait().await;
+    assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(stderr.is_empty(), "stderr: {stderr}; stdout:\n{stdout}");
+    assert!(!stdout.contains("\"message\":\"jobs_worker_ready\""));
+    assert!(!stdout.contains("\"message\":\"messaging_consuming_started\""));
+    assert!(stdout.contains("\"message\":\"postgres_pool_closed\""));
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-outbox-source
+
+// template:begin outbox:test-jobs-process-outbox-age
+#[derive(serde::Serialize)]
+struct OutboxAgeEvent {
+    name: &'static str,
+}
+
+impl domain_events::EventPayload for OutboxAgeEvent {
+    const EVENT_TYPE: &'static str = "test.outbox.age";
+    const SCHEMA_VERSION: u16 = 1;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn outbox_age_reports_deferred_and_blocked_events_through_broker_refusal(pool: PgPool) {
+    const FIRST_CREATED_AT: f64 = OLDEST_DUE_UNIX_SECONDS;
+    const SECOND_CREATED_AT: f64 = FIRST_CREATED_AT + 100.0;
+    const UNCONFIRMED: &str = "jobs_outbox_oldest_unconfirmed_age_seconds";
+    const BLOCKED: &str = "jobs_outbox_oldest_blocked_age_seconds";
+    const OBSERVATION: &str = "jobs_outbox_observation_timestamp_seconds";
+
+    let database_url = child_database_url(&pool).await;
+    let nats = NatsFixture::create().await;
+    let source = nats.jetstream.get_stream(&nats.stream).await.unwrap();
+    let mut config = source.cached_info().config.clone();
+    let subject = format!("{}age", config.subjects[0].trim_end_matches('>'));
+    let capacity = config.max_messages;
+    config.max_messages = 1;
+    nats.jetstream.update_stream(&config).await.unwrap();
+    nats.jetstream
+        .publish(subject.clone(), "occupy source capacity".into())
+        .await
+        .expect("send the fixture publication")
+        .await
+        .expect("the stream is full");
+
+    let mut registry = infra_messaging::Registry::default();
+    let publication = registry
+        .declare_publication(
+            &infra_messaging::Route::<OutboxAgeEvent>::new(subject),
+            1024,
+        )
+        .unwrap()
+        .for_outbox(uuid::NonNilUuid::new(uuid::Uuid::from_u128(1)).unwrap());
+    in_tx(&pool, async |tx| -> Result<(), TxError> {
+        for (version, name) in [(1, "first"), (2, "second")] {
+            let event = publication
+                .prepare(&domain_events::Event {
+                    id: name.to_owned(),
+                    occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                    payload: OutboxAgeEvent { name },
+                })
+                .unwrap();
+            assert_eq!(
+                event
+                    .enqueue_ordered(tx, "age-test", version)
+                    .await
+                    .unwrap(),
+                infra_messaging::outbox::OutboxEnqueued::Created
+            );
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE background_jobs SET created_at = to_timestamp( \
+            CASE WHEN predecessor_job_id IS NULL THEN $1 ELSE $2 END) \
+         WHERE kind = 'publish_domain_event'",
+    )
+    .bind(FIRST_CREATED_AT)
+    .bind(SECOND_CREATED_AT)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut worker = Worker::spawn(&database_url, &nats, &[]);
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
+    let (retry_id, deferred_at): (uuid::Uuid, f64) = poll_until(
+        "the broker refuses the first event and the worker schedules a retry",
+        JOB_BOUND,
+        DB_POLL,
+        async || {
+            sqlx::query_as(
+                "UPDATE background_jobs SET not_before = statement_timestamp() + interval '1 hour' \
+                 WHERE kind = 'publish_domain_event' AND predecessor_job_id IS NULL \
+                   AND state = 'pending' AND error_summary = 'broker_refused' \
+                   AND not_before > statement_timestamp() \
+                 RETURNING id, EXTRACT(EPOCH FROM statement_timestamp())::double precision",
+            )
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+
+    let metrics = format!("http://{diagnostics}/metrics");
+    let observed = poll_until(
+        "fresh outbox ages include the future retry and its blocked successor",
+        JOB_BOUND,
+        POLL,
+        async || {
+            let (status, body) = get(&metrics).await.ok()?;
+            let observed = sample_value::<f64>(&body, OBSERVATION)?;
+            let unconfirmed = sample_value::<f64>(&body, UNCONFIRMED)?;
+            let blocked = sample_value::<f64>(&body, BLOCKED)?;
+            (status == 200
+                && observed > deferred_at
+                && sample_value::<f64>(&body, "jobs_outbox_last_attempt_success") == Some(1.0)
+                && (observed - unconfirmed - FIRST_CREATED_AT).abs() < 0.001
+                && (observed - blocked - SECOND_CREATED_AT).abs() < 0.001)
+                .then_some(observed)
+        },
+    )
+    .await;
+
+    config.max_messages = capacity;
+    nats.jetstream.update_stream(&config).await.unwrap();
+    sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() WHERE id = $1")
+        .bind(retry_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    poll_until(
+        "both age gauges reset after the broker has acknowledged both ordered events",
+        JOB_BOUND,
+        POLL,
+        async || {
+            let (status, body) = get(&metrics).await.ok()?;
+            (status == 200
+                && sample_value::<f64>(&body, OBSERVATION)? > observed
+                && sample_value::<f64>(&body, UNCONFIRMED) == Some(0.0)
+                && sample_value::<f64>(&body, BLOCKED) == Some(0.0))
+            .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(
+        nats.jetstream
+            .get_stream(&nats.stream)
+            .await
+            .unwrap()
+            .cached_info()
+            .state
+            .messages,
+        3,
+    );
+
+    worker.terminate();
+    let (code, stderr, stdout) = worker.wait().await;
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
+    nats.cleanup().await;
+}
+// template:end outbox:test-jobs-process-outbox-age
 
 // template:begin outbox:test-jobs-process-deferred-messages
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1034,16 +1245,31 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         kinds.push("publish_domain_event");
         kinds
     };
+    sqlx::query(
+        "WITH predecessor AS ( \
+             INSERT INTO background_jobs \
+                 (id, kind, payload, state, not_before, finished_at) \
+             VALUES (gen_random_uuid(), 'publish_domain_event', '{}'::jsonb, 'completed', now(), now()) \
+             RETURNING id \
+         ) \
+         INSERT INTO background_jobs (id, kind, payload, not_before, predecessor_job_id) \
+         SELECT gen_random_uuid(), 'publish_domain_event', '{}'::jsonb, now() + interval '1 hour', predecessor.id \
+         FROM predecessor CROSS JOIN generate_series(1, 1001)",
+    )
+    .execute(&pool)
+    .await
+    .expect("a capped sample of ordered successors with completed predecessors");
     // template:end outbox:test-jobs-process-nats-fixture-use-4
     for kind in failed_kinds.iter().copied().chain(["test.unregistered"]) {
         sqlx::query(
             "INSERT INTO background_jobs \
-             (id, kind, payload, state, failure_reason, not_before, finished_at) \
+             (id, kind, payload, state, failure_reason, not_before, finished_at, created_at) \
              SELECT gen_random_uuid(), $1, '{}'::jsonb, 'failed', 'exhausted', \
-                    statement_timestamp(), statement_timestamp() \
+                    statement_timestamp(), statement_timestamp(), to_timestamp($2) \
              FROM generate_series(1, 1001)",
         )
         .bind(kind)
+        .bind(OLDEST_DUE_UNIX_SECONDS)
         .execute(&pool)
         .await
         .expect("retained failures for registered and unknown kinds");
