@@ -118,24 +118,24 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             })
         }
         Provider::CloudflareR2 { endpoint } => {
-            let origin = origin(endpoint, OriginScheme::HttpsOnly)?;
+            let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
             Ok(Admitted::at_endpoint(
-                serialize(&origin),
+                origin_without_path(&origin),
                 "auto".to_owned(),
                 false,
                 UploadChecksum::BytesOnly,
             ))
         }
         Provider::Railway { endpoint, region } => {
-            let origin = origin(endpoint, OriginScheme::HttpsOnly)?;
+            let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
             Ok(Admitted::at_endpoint(
-                serialize(&origin),
+                origin_without_path(&origin),
                 signing_region(region, Some("auto"))?,
                 false,
                 UploadChecksum::Never,
@@ -146,13 +146,13 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             region,
             path_style,
         } => Ok(Admitted::at_endpoint(
-            serialize(&origin(endpoint, OriginScheme::HttpsOnly)?),
+            origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?),
             signing_region(region, Some("us-east-1"))?,
             *path_style,
             UploadChecksum::Never,
         )),
         Provider::Local { endpoint, region } => Ok(Admitted::at_endpoint(
-            serialize(&origin(endpoint, OriginScheme::HttpOrHttps)?),
+            origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?),
             signing_region(region, Some("us-east-1"))?,
             true,
             UploadChecksum::Always,
@@ -166,7 +166,7 @@ enum OriginScheme {
     HttpOrHttps,
 }
 
-fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
+fn parse_endpoint_origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
     {
@@ -190,7 +190,7 @@ fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     }
 }
 
-fn serialize(origin: &Url) -> String {
+fn origin_without_path(origin: &Url) -> String {
     origin[..url::Position::BeforePath].to_owned()
 }
 

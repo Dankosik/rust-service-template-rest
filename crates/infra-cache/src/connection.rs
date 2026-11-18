@@ -8,7 +8,7 @@ use backon::BackoffBuilder;
 use futures_util::future::BoxFuture;
 use futures_util::stream::StreamExt;
 use metrics::{Counter, Gauge};
-use operation_context::{Deadline, OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext};
 use parking_lot::Mutex;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
@@ -146,7 +146,7 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
         };
         match reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
-                if !command_keeps_generation(&result) {
+                if reply_requires_retirement(&result) {
                     self.generation.retired.cancel();
                 }
                 Poll::Ready(result)
@@ -159,9 +159,9 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
     }
 }
 
-fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
-    reply.as_ref().err().is_none_or(|error| {
-        error_type(error) == ErrorType::ServerErrorReply && error.code() != Some("READONLY")
+fn reply_requires_retirement<T>(reply: &redis::RedisResult<T>) -> bool {
+    reply.as_ref().is_err_and(|error| {
+        error_type(error) != ErrorType::ServerErrorReply || error.code() == Some("READONLY")
     })
 }
 
@@ -178,7 +178,7 @@ impl<T: Send + 'static> Drop for Exchange<'_, T> {
                 tokio::select! {
                     biased;
                     result = reply => {
-                        if !command_keeps_generation(&result) {
+                        if reply_requires_retirement(&result) {
                             retired.cancel();
                         }
                     }
@@ -367,7 +367,7 @@ impl Link {
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,
     {
         let context = parent.child(self.command_timeout);
-        let stop = |_: Stopped| {
+        let classify_stop = || {
             parent.stopped().map_or(
                 CommandFailure::Failed(ErrorType::Timeout),
                 CommandFailure::Stopped,
@@ -376,21 +376,21 @@ impl Link {
         let check = || {
             context
                 .check()
-                .map_err(|stopped| CommandError::NotApplied(stop(stopped)))
+                .map_err(|_| CommandError::NotApplied(classify_stop()))
         };
         check()?;
         let _slot = self.claim_slot()?;
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
-            stopped = context.wait_stopped() => return Err(CommandError::NotApplied(stop(stopped))),
+            _ = context.wait_stopped() => return Err(CommandError::NotApplied(classify_stop())),
         };
         check()?;
         let generation = generation?;
         let reservation = tokio::select! {
             biased;
             result = generation.reserve() => result?,
-            stopped = context.wait_stopped() => return Err(CommandError::NotApplied(stop(stopped))),
+            _ = context.wait_stopped() => return Err(CommandError::NotApplied(classify_stop())),
             () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
         let check_dispatch = || -> Result<(), CommandError> {
@@ -412,11 +412,15 @@ impl Link {
         let reply = tokio::select! {
             biased;
             reply = &mut exchange => reply,
-            stopped = context.wait_stopped() => return Err(CommandError::OutcomeUnknown(stop(stopped))),
+            _ = context.wait_stopped() => return Err(CommandError::OutcomeUnknown(classify_stop())),
             () = generation.retired.cancelled() => return Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io))),
         };
         let value = reply.map_err(|error| {
-            CommandError::from_reply(&error, operation, context.stopped().map(stop))
+            CommandError::from_reply(
+                &error,
+                operation,
+                context.stopped().map(|_| classify_stop()),
+            )
         })?;
         if matches!(operation, Operation::Get) {
             check()?;

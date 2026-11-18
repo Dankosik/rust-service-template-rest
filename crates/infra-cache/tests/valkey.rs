@@ -433,10 +433,7 @@ async fn a_silent_server_times_out_within_the_command_bound() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("silent bind");
     let port = listener.local_addr().expect("port").port();
     tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
+        while let Ok((stream, _)) = listener.accept().await {
             tokio::spawn(async move {
                 let _stream = stream;
                 std::future::pending::<()>().await;
@@ -451,6 +448,22 @@ async fn a_silent_server_times_out_within_the_command_bound() {
     assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
     assert!(scrape.contains("outcome=\"timeout\""), "{scrape}");
+}
+
+async fn wait_for_recovered_value(
+    namespace: &infra_cache::CacheNamespace,
+    caller: &OperationContext,
+    key: &str,
+    failure: &str,
+) {
+    let deadline = Instant::now() + RECOVERY_DEADLINE;
+    loop {
+        if namespace.get(caller, key).await.unwrap_or(None).as_deref() == Some(&b"kept"[..]) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{failure}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]
@@ -477,20 +490,7 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
     let err = namespace.get(&caller, &key).await.unwrap_err();
     std::assert_matches!(err, OperationError::Unavailable);
     proxy.restart_plain(upstream).await;
-    let deadline = Instant::now() + RECOVERY_DEADLINE;
-    loop {
-        if namespace
-            .get(&caller, &key)
-            .await
-            .unwrap_or(None)
-            .as_deref()
-            == Some(&b"kept"[..])
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "cache did not recover");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_recovered_value(&namespace, &caller, &key, "cache did not recover").await;
 }
 
 #[tokio::test]
@@ -549,23 +549,13 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
         Some(tls_acceptor(&material)),
     );
 
-    let deadline = Instant::now() + RECOVERY_DEADLINE;
-    loop {
-        if namespace
-            .get(&caller, &key)
-            .await
-            .unwrap_or(None)
-            .as_deref()
-            == Some(&b"kept"[..])
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "TLS recovery did not reach the IPv6 replacement"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_recovered_value(
+        &namespace,
+        &caller,
+        &key,
+        "TLS recovery did not reach the IPv6 replacement",
+    )
+    .await;
     proxy.stop().await;
 }
 

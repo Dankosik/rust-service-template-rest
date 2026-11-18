@@ -49,16 +49,14 @@ impl ServerEndpoint {
     }
 
     async fn connect_tcp(&self) -> io::Result<TcpStream> {
-        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((self.host.as_str(), self.port))
+        let mut addresses = tokio::net::lookup_host((self.host.as_str(), self.port))
             .await?
-            .collect();
-        if addresses.is_empty() {
+            .peekable();
+        if addresses.peek().is_none() {
             return Err(io::ErrorKind::NotFound.into());
         }
         let (stream, _) = futures_util::future::select_ok(
-            addresses
-                .into_iter()
-                .map(|address| Box::pin(connect_address(address))),
+            addresses.map(|address| Box::pin(connect_address(address))),
         )
         .await?;
         Ok(stream)
