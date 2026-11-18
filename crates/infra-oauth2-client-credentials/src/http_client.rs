@@ -7,7 +7,7 @@ use tokio::time::Instant;
 use crate::{
     AcquisitionError, ConfigurationError, Error, ExchangeTokens, ServiceTokens,
     credentials::{TokenSource, acquisition_deadline},
-    request_admission::{AdmissionRefusal, take_request_subject},
+    request_admission::take_request_subject,
 };
 
 #[derive(Clone, derive_more::Debug)]

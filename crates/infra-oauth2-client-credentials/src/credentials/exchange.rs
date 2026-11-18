@@ -7,10 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, RegistrationState, provider_timeout};
-use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token,
-    token_endpoint::TokenEndpoint,
-};
+use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
@@ -24,6 +21,32 @@ struct ExchangeOwner {
     target: ExchangeTokenTarget,
     resource_origin: http::Uri,
     state: ExchangeState,
+}
+
+impl ExchangeOwner {
+    async fn fetch(
+        &self,
+        key: SubjectKey,
+        subject: &SecretString,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> ExchangeResult {
+        let context = deadline.fetch_context(Instant::now());
+        let result = self
+            .registration
+            .endpoint
+            .fetch_exchange(subject, &self.target, &context)
+            .await
+            .map(Arc::new);
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
+        }
+        if let Ok(token) = &result
+            && token.is_reusable(Instant::now())
+        {
+            self.state.cache.insert(key, token.clone()).await;
+        }
+        result.map_err(provider_timeout)
+    }
 }
 
 type ExchangedTokenCache =
@@ -49,30 +72,6 @@ impl ExchangeState {
                 .build_with_hasher(foldhash::quality::RandomState::default()),
             flights: Mutex::default(),
         }
-    }
-
-    async fn fetch(
-        &self,
-        endpoint: &TokenEndpoint,
-        target: &ExchangeTokenTarget,
-        key: SubjectKey,
-        subject: &SecretString,
-        deadline: AcquisitionDeadline<'_>,
-    ) -> ExchangeResult {
-        let context = deadline.fetch_context(Instant::now());
-        let result = endpoint
-            .fetch_exchange(subject, target, &context)
-            .await
-            .map(Arc::new);
-        if let Some(error) = deadline.stopped_error() {
-            return Err(error);
-        }
-        if let Ok(token) = &result
-            && token.is_reusable(Instant::now())
-        {
-            self.cache.insert(key, token.clone()).await;
-        }
-        result.map_err(provider_timeout)
     }
 
     async fn reusable(&self, key: SubjectKey) -> Option<Arc<Token>> {
@@ -242,15 +241,7 @@ impl ExchangeTokens {
                     let result = if let Some(token) = state.reusable(key).await {
                         Ok(token)
                     } else {
-                        state
-                            .fetch(
-                                &registration.endpoint,
-                                &self.0.target,
-                                key,
-                                subject,
-                                deadline,
-                            )
-                            .await
+                        self.0.fetch(key, subject, deadline).await
                     };
                     registration.check_admission(deadline)?;
                     leader.publish(result.clone());

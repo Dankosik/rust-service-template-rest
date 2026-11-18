@@ -27,7 +27,7 @@ impl Token {
         expires_in: Option<u64>,
     ) -> Result<Self, AcquisitionError> {
         let value = zeroize::Zeroizing::new(format!("Bearer {access_token}"));
-        if shared_rules::rfc6750::token([value.as_bytes()]) != Ok(access_token) {
+        if !shared_rules::rfc6750::is_b64token(access_token.as_bytes()) {
             return Err(AcquisitionError::InvalidResponse);
         }
         let mut header =
