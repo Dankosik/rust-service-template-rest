@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT job.kind, job.claim_generation, job.state,\n                   CASE\n                     WHEN job.kind IS DISTINCT FROM $2::text THEN true\n                     WHEN $3::bool THEN NOT EXISTS (\n                         SELECT 1 FROM outbox_event_receipts\n                         WHERE job_id = job.id AND aggregate_version IS NOT NULL\n                     )\n                     ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,\n                                                  job.payload_text, job.payload) IS NOT NULL\n                   END AS \"allowed!\"\n            FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job\n            ",
+  "query": "\n            SELECT job.kind, job.claim_generation, job.state,\n                   CASE\n                     WHEN job.kind IS DISTINCT FROM $2::text THEN true\n                     WHEN $3::bool THEN false\n                     ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,\n                                                  job.payload_text, job.payload) IS NOT NULL\n                   END AS \"allowed!\"\n            FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job\n            ",
   "describe": {
     "columns": [
       {
@@ -57,5 +57,5 @@
       null
     ]
   },
-  "hash": "861232682c1edfa7089f9c28bf0f60d90fb7e11602801030401c42ce891ebd46"
+  "hash": "9878f40650d06b2547860d73b8508432c5cf8efe76ca67f405a92b10009a8ef8"
 }

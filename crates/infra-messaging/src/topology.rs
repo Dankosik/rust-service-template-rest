@@ -11,7 +11,7 @@ use async_nats::jetstream::stream::{
     RetentionPolicy, StorageType, Stream,
 };
 // template:begin outbox:messaging-outbox-topology-imports
-use async_nats::jetstream::stream::DiscardPolicy;
+use async_nats::jetstream::stream::{DiscardPolicy, SubjectTransform};
 // template:end outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::{Context, ErrorCode};
 use sha2::{Digest as _, Sha256};
@@ -275,6 +275,89 @@ fn validate_outbox_source(config: &StreamConfig) -> Result<(), Refusal> {
     if config.max_messages_per_subject > 0 && !config.discard_new_per_subject {
         return Err(Refusal::OutboxDiscardOldPerSubject);
     }
+    if config
+        .subject_transform
+        .as_ref()
+        .is_some_and(|transform| !preserves_subject(transform))
+    {
+        return Err(Refusal::OutboxSubjectTransform);
+    }
+    Ok(())
+}
+
+fn preserves_subject(transform: &SubjectTransform) -> bool {
+    if transform.destination.is_empty() {
+        return true;
+    }
+    let source = if transform.source.is_empty() {
+        ">"
+    } else {
+        &transform.source
+    };
+    let mut destination = transform.destination.split('.');
+    let mut capture = 0_usize;
+    for token in source.split('.') {
+        let Some(output) = destination.next() else {
+            return false;
+        };
+        if token == "*" {
+            capture += 1;
+            let index = output.strip_prefix('$').or_else(|| {
+                let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
+                let argument = function
+                    .strip_prefix("wildcard")
+                    .or_else(|| function.strip_prefix("Wildcard"))?
+                    .trim_ascii_start()
+                    .strip_prefix('(')?
+                    .strip_suffix(')')?;
+                Some(argument.trim_matches(' '))
+            });
+            if index.and_then(|value| value.parse::<usize>().ok()) != Some(capture) {
+                return false;
+            }
+        } else if output != token
+            || output
+                .strip_prefix('$')
+                .is_some_and(|value| value.parse::<i64>().is_ok())
+            || (output.len() > 4 && output.starts_with("{{") && output.ends_with("}}"))
+        {
+            return false;
+        }
+    }
+    destination.next().is_none()
+}
+
+pub(crate) async fn recheck_outbox_source(
+    shared: &crate::messaging::Shared,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<(), crate::PublishError> {
+    use crate::PublishRejection;
+
+    let source = get_stream(
+        &shared.jetstream,
+        &shared.source_stream,
+        "source",
+        deadline,
+        cancel,
+    )
+    .await
+    .map_err(|error| match error {
+        MessagingError::Cancelled | MessagingError::TimedOut { .. } => {
+            PublishRejection::ContextStopped
+        }
+        _ => PublishRejection::BrokerRefused,
+    })?;
+    let config = &source.cached_info().config;
+    validate_stream_publication(config)
+        .and_then(|()| validate_outbox_source(config))
+        .map_err(|refusal| {
+            refusal_failure("source_stream", refusal, shared.envelope_limit, None);
+            PublishRejection::BrokerRefused
+        })?;
+    if shared.refuses_work() {
+        return Err(PublishRejection::Unavailable.into());
+    }
     Ok(())
 }
 // template:end outbox:messaging-outbox-topology-validation
@@ -467,6 +550,7 @@ pub(crate) enum Refusal {
     // template:begin outbox:messaging-outbox-topology-refusals
     OutboxDiscardOld,
     OutboxDiscardOldPerSubject,
+    OutboxSubjectTransform,
     // template:end outbox:messaging-outbox-topology-refusals
     DeadLetterBoundsUnavailable,
     DeadLetterHeaderSize,
@@ -491,6 +575,7 @@ impl Refusal {
             // template:begin outbox:messaging-outbox-topology-refusal-types
             Self::OutboxDiscardOld => "outbox_discard_old",
             Self::OutboxDiscardOldPerSubject => "outbox_discard_old_per_subject",
+            Self::OutboxSubjectTransform => "outbox_subject_transform",
             // template:end outbox:messaging-outbox-topology-refusal-types
             Self::DeadLetterBoundsUnavailable => "dead_letter_bounds_unavailable",
             Self::DeadLetterHeaderSize => "dead_letter_header_bytes",
@@ -505,6 +590,9 @@ impl Refusal {
             }
             Self::OutboxDiscardOldPerSubject => MessagingError::OutboxSource(
                 "a per-subject message limit requires DiscardNewPerSubject",
+            ),
+            Self::OutboxSubjectTransform => MessagingError::OutboxSource(
+                "subject transform must preserve the publication subject",
             ),
             // template:end outbox:messaging-outbox-topology-errors
             Self::ServerMaxPayload

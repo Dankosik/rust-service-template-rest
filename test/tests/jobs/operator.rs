@@ -220,6 +220,13 @@ mod outbox {
         let target =
             RecoveryTarget::try_new(&id, "publish_domain_event", &version.to_string()).unwrap();
         let before = stored(&pool, &target).await;
+        let discard = in_tx(&jobs, async |tx| {
+            Ok::<_, OperatorError>(operator::discard(tx, &target).await)
+        })
+        .await
+        .unwrap();
+        std::assert_matches!(discard, Err(OperatorError::Conflict));
+        assert_eq!(stored(&pool, &target).await, before);
         in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
             .await
             .unwrap();

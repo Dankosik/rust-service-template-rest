@@ -202,6 +202,10 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
     .await
     .unwrap();
     assert_eq!(outbox_count(&jobs).await, 2);
+    std::assert_matches!(
+        in_tx(&jobs, async |tx| operator::discard(tx, &alias_target).await).await,
+        Err(OperatorError::Conflict)
+    );
     in_tx(&jobs, async |tx| operator::redrive(tx, &alias_target).await)
         .await
         .expect("matching historical job can be redriven");

@@ -460,10 +460,7 @@ async fn lock_failed_target(
             SELECT job.kind, job.claim_generation, job.state,
                    CASE
                      WHEN job.kind IS DISTINCT FROM $2::text THEN true
-                     WHEN $3::bool THEN NOT EXISTS (
-                         SELECT 1 FROM outbox_event_receipts
-                         WHERE job_id = job.id AND aggregate_version IS NOT NULL
-                     )
+                     WHEN $3::bool THEN false
                      ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,
                                                   job.payload_text, job.payload) IS NOT NULL
                    END AS "allowed!"

@@ -50,6 +50,53 @@ unable to serve, and budget every downstream deadline inside
   (for each durable job, event, or webhook handler, define logical effect
   identity, idempotency/reconciliation boundary, and retention horizon).
 <!-- template:begin outbox:outbox-effect-contract -->
+- For each outbox publisher, retain the original event ID, occurrence time,
+  and payload with the business operation. Receipts compare exact payload
+  bytes. Reordering JSON object keys for the same event yields
+  `EventIdConflict`. Reuse the original bytes or serialize the original
+  values deterministically. This example uses `BTreeMap` to keep string
+  fields in key order across submissions.
+
+  ```rust
+  use std::collections::BTreeMap;
+
+  use domain_events::{Event, EventPayload};
+  use infra_messaging::outbox::{OutboxEnqueued, OutboxRoute};
+  use infra_postgres::Tx;
+
+  #[derive(serde::Deserialize, serde::Serialize)]
+  #[serde(transparent)]
+  struct AccountUpdated(BTreeMap<String, String>);
+
+  impl EventPayload for AccountUpdated {
+      const EVENT_TYPE: &'static str = "account.updated";
+      const SCHEMA_VERSION: u16 = 1;
+  }
+
+  async fn enqueue_account_update(
+      tx: &mut Tx<'_>,
+      route: &OutboxRoute<AccountUpdated>,
+      event_id: &str,
+      occurred_at: time::UtcDateTime,
+      json: &str,
+  ) -> Result<OutboxEnqueued, Box<dyn std::error::Error + Send + Sync>> {
+      let event = route.prepare(&Event {
+          id: event_id.to_owned(),
+          occurred_at,
+          payload: serde_json::from_str(json)?,
+      })?;
+      Ok(event.enqueue(tx).await?)
+  }
+  ```
+
+  Bind the route once with `publication.for_outbox(publisher_id)`. In the
+  business transaction, submitting `{"account_id":"42","status":"active"}`
+  returns `Created` for a new event. After commit, resubmitting
+  `{"status":"active","account_id":"42"}` with the original ID and occurrence
+  time returns `Duplicate`: both inputs produce the same bytes through this
+  type. Propagate an enqueue error so the business transaction rolls back. The
+  [outbox integration test](../test/tests/messaging_outbox.rs) exercises a
+  reordered replay, a byte-identical replay, and the retained broker message.
 - For each outbox consumer, record its logical subscription and effect key.
   Commit the key and the business mutation together. For an external effect,
   reuse the remote operation's idempotency key or reconcile an uncertain
@@ -180,6 +227,14 @@ and recovery interval. Use Limits retention for independent subscriptions.
 A WorkQueue stream serves one competing group. Provision capacity and
 verify discard and per-subject limits, MaxAge, storage, replication and
 sync policy before enabling publishers or changing stream configuration.
+Before changing a live stream, run outbox admission against the proposed
+configuration on an isolated broker. Fence and drain all outbox publishers,
+apply the change, then restart them against the updated stream. The outbox accepts
+identity mappings made from literal tokens, captures in their original order,
+and the unchanged wildcard tail. It refuses other transform functions. The
+relay reads stream configuration before sending each attempt. JetStream's
+expected-stream header checks the stream name; it does not pin a revision
+between that read and the publish.
 Monitor rejection on a full stream and free capacity by the retention policy.
 Set a delivery freshness objective for the service and page on the age of
 outstanding publications against that objective. Allow for the next retry,
@@ -197,7 +252,8 @@ Recover previously pruned identities from authoritative business history or
 adopt a disjoint ID namespace and fence historical submissions. Resolve
 conflicting historical intents against business records before migration.
 Verify failed, pending and completed rows against their receipts, then start
-the new cohort. Keep permanent receipts while replay remains possible.
+the new cohort. Retire old operator binaries before relying on the outbox
+discard prohibition. Keep permanent receipts while replay remains possible.
 For a stalled ordered aggregate, look up its versions and the queue status
 of each original job. Redrive a verified failed predecessor after resolving
 its cause. A receipt can outlive a completed job's cleanup.

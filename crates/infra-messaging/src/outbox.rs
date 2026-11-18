@@ -6,6 +6,7 @@ use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
 use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::Tx;
+use operation_context::{Deadline, OperationContext};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -207,8 +208,15 @@ struct Publisher {
 impl Handler<PublishDomainEvent> for Publisher {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
         let event = job.payload().to_prepared().map_err(JobError::permanent)?;
+        let deadline = crate::budget::within_operation_budget(job.deadline());
+        let context = OperationContext::new(Some(Deadline::at(deadline)), job.cancellation());
+        let admission = crate::topology::recheck_outbox_source(
+            &self.producer.shared,
+            deadline,
+            context.cancellation(),
+        );
         self.producer
-            .publish(&event, &job.context())
+            .publish_after_admission(&event, &context, admission)
             .await
             .map(|_| ())
             .map_err(|error| match error {

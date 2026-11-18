@@ -6,6 +6,7 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -464,6 +465,21 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(pool: PgPool) {
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum AccountUpdated {
+        Sorted(BTreeMap<&'static str, &'static str>),
+        Reordered(Box<serde_json::value::RawValue>),
+    }
+
+    impl EventPayload for AccountUpdated {
+        const EVENT_TYPE: &'static str = "test.outbox.account_updated";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    const ORIGINAL_JSON: &str = r#"{"account_id":"42","status":"active"}"#;
+    const REORDERED_JSON: &str = r#"{"status":"active","account_id":"42"}"#;
+
     let fixture = Fixture::create_with_window(false, Duration::from_secs(1)).await;
     let messaging = Box::pin(Messaging::connect(
         messaging_options(&fixture),
@@ -497,7 +513,23 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     );
     assert_eq!(outbox_count(&business).await, 0);
 
-    let committed = prepared(&fixture, "event-commit", "committed");
+    let route = Route::<AccountUpdated>::new(fixture.subject.clone());
+    let publication = Registry::default()
+        .declare_publication(&route, 1024)
+        .expect("account publication route")
+        .for_outbox(PUBLISHER_ID);
+    let mut event = Event {
+        id: "event-commit".into(),
+        occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000)
+            .expect("fixed occurrence"),
+        payload: AccountUpdated::Sorted(BTreeMap::from([
+            ("account_id", "42"),
+            ("status", "active"),
+        ])),
+    };
+    let committed = publication
+        .prepare(&event)
+        .expect("original account update");
     let committed_outcome = in_tx(&business, async |tx| -> Result<_, Step> {
         sqlx::query("INSERT INTO business_effects (id) VALUES ('commit')")
             .execute(&mut *tx)
@@ -544,7 +576,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         .await
         .expect("acknowledged publication is retained by JetStream");
     assert_eq!(stored.subject.as_ref(), committed.subject());
-    assert_eq!(stored.payload.as_ref(), committed.payload().as_ref());
+    assert_eq!(stored.payload.as_ref(), ORIGINAL_JSON.as_bytes());
     assert_eq!(
         stored.headers.get("Message-Id").map(ToString::to_string),
         Some(committed.message_id().to_owned())
@@ -561,8 +593,22 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         1
     );
 
-    verify_completed_identity(&fixture, &messaging, &business, &committed, &row.id).await;
+    event.payload = AccountUpdated::Reordered(
+        serde_json::value::RawValue::from_string(REORDERED_JSON.to_owned())
+            .expect("reordered account update JSON"),
+    );
+    let reordered = publication
+        .prepare(&event)
+        .expect("reordered account update");
+    assert_eq!(reordered.payload().as_ref(), REORDERED_JSON.as_bytes());
+
+    event.payload =
+        AccountUpdated::Sorted(BTreeMap::from([("status", "active"), ("account_id", "42")]));
+    let same = publication.prepare(&event).expect("rebuilt account update");
+
+    verify_completed_identity(&fixture, &messaging, &business, &reordered, &same, &row.id).await;
     finish(run, &[&publisher, &business]).await;
+    assert_eq!(fixture.published().await, 1);
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -571,7 +617,8 @@ async fn verify_completed_identity(
     fixture: &Fixture,
     messaging: &Messaging,
     business: &PgPool,
-    committed: &infra_messaging::PreparedEvent,
+    reordered: &infra_messaging::PreparedEvent,
+    same: &infra_messaging::PreparedEvent,
     job_id: &str,
 ) {
     let cleanup = Engine::new(
@@ -579,7 +626,6 @@ async fn verify_completed_identity(
         infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap(),
         NonZeroU32::MIN,
     );
-    let changed = prepared(fixture, "event-commit", "changed");
     for retained in [true, false] {
         if !retained {
             sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
@@ -594,19 +640,19 @@ async fn verify_completed_identity(
             sqlx::query("INSERT INTO business_effects (id) VALUES ('conflicting')")
                 .execute(&mut *tx)
                 .await?;
-            changed.enqueue(tx).await.map_err(Step::from)
+            reordered.enqueue(tx).await.map_err(Step::from)
         })
         .await;
         std::assert_matches!(
             conflicting,
             Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
         );
-        let same = in_tx(business, async |tx| -> Result<_, Step> {
-            committed.enqueue(tx).await.map_err(Step::from)
+        let duplicate = in_tx(business, async |tx| -> Result<_, Step> {
+            same.enqueue(tx).await.map_err(Step::from)
         })
         .await
         .unwrap();
-        assert_eq!(same, OutboxEnqueued::Duplicate);
+        assert_eq!(duplicate, OutboxEnqueued::Duplicate);
         assert_eq!(outbox_count(business).await, i64::from(retained));
     }
     let business_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM business_effects")
@@ -614,7 +660,6 @@ async fn verify_completed_identity(
         .await
         .unwrap();
     assert_eq!(business_rows, 1);
-    assert_eq!(fixture.published().await, 1);
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -925,6 +970,61 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 
     finish(retry_run, &[&retry_pool, &jobs]).await;
     close(retry_messaging).await;
+    fixture.cleanup().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
+    let fixture = Fixture::create().await;
+    let messaging = Box::pin(Messaging::connect(
+        messaging_options(&fixture),
+        Instant::now() + WAIT,
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap();
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let original = source.cached_info().config.clone();
+    let mut rewritten = original.clone();
+    rewritten.subject_transform = Some(stream::SubjectTransform {
+        source: fixture.subject.clone(),
+        destination: format!("{}.rewritten", fixture.subject),
+    });
+    fixture.jetstream.update_stream(rewritten).await.unwrap();
+
+    let jobs = template_pool(&pool, 3).await;
+    let intent = prepared(&fixture, "live-transform", "preserve route");
+    let key = event_key(intent.message_id());
+    in_tx(&jobs, async |tx| -> Result<_, Step> {
+        intent.enqueue(tx).await.map_err(Step::from)
+    })
+    .await
+    .unwrap();
+    let run = start(&jobs, kinds).await;
+    let attempt = poll_until("relay attempts publication", WAIT, POLL, async || {
+        let row = job(&jobs, &key).await;
+        (row.attempts > 0 && row.state != "running").then_some(row)
+    })
+    .await;
+    assert_eq!(attempt.state, "pending");
+    assert_eq!(attempt.error_summary.as_deref(), Some("broker_refused"));
+    assert_eq!(fixture.published().await, 0);
+
+    fixture.jetstream.update_stream(original).await.unwrap();
+    poll_until(
+        "same relay completes after route repair",
+        WAIT,
+        POLL,
+        async || (job(&jobs, &key).await.state == "completed").then_some(()),
+    )
+    .await;
+    assert_eq!(fixture.published().await, 1);
+    let stored = source.get_raw_message(1).await.unwrap();
+    assert_eq!(stored.subject.as_str(), fixture.subject);
+    assert_eq!(&stored.payload, intent.payload());
+    finish(run, &[&jobs]).await;
+    close(messaging).await;
     fixture.cleanup().await;
 }
 

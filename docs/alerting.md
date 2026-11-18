@@ -353,8 +353,10 @@ recover retained jobs with the operator commands `jobs-worker --help` lists
 the oldest retained publication job without recorded completion. It includes
 future retries, active attempts, blocked successors, and retained failures.
 After an upgrade, an unresolved historical copy still counts even if another
-job delivered the same logical event. Reconcile the failed copy before
-discarding it. Set the alert threshold and duration from the service's delivery SLO.
+job delivered the same logical event. The operator retains every failed outbox
+job for recovery. Reconcile the consumer's recorded effect and resolve the
+cause before redriving the original job. Set the alert threshold and duration
+from the service's delivery SLO.
 
 `jobs_outbox_oldest_blocked_age_seconds` reports the age of the oldest pending
 ordered event with an unfinished predecessor. The worker checks up to 1,001
