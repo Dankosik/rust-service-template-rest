@@ -5226,6 +5226,7 @@ dependencies = [
  "service-config",
  "service-failure",
  "similar 3.2.1",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tikv-jemallocator",
@@ -5239,6 +5240,7 @@ dependencies = [
  "tower",
  "tracing",
  "ureq",
+ "url",
  "utoipa",
 ]
 

@@ -618,6 +618,97 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
 // template:end object-storage:service-object-storage-lifecycle-admission
 
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[ignore = "the database integration runner supplies a migrated PostgreSQL test database"]
+async fn restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job(
+    pool: sqlx::PgPool,
+) {
+    use infra_webhooks::protocol::KeyRing;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
+    let id = "historical-delivery";
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ('partner', $1, timestamptz '2000-01-01 00:00:00+00')",
+    )
+    .bind(id.as_bytes())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut dsn = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    dsn.set_path(pool.connect_options().get_database().unwrap());
+    let service = Service::spawn(&[
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", dsn.as_str()),
+        ("APP__POSTGRES__MAX_CONNECTIONS", "1"),
+        ("APP__HEALTH__REFRESH_INTERVAL", "100ms"),
+        (
+            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+            "v1",
+        ),
+        ("APP__INBOUND_WEBHOOKS__SECRETS__V1", KEY),
+    ]);
+    let api = service.await_addr("http listener bound");
+    let diagnostics = service.await_addr("diagnostics listener bound");
+    service.await_record("service_ready");
+    let metrics_url = format!("http://{diagnostics}/metrics");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, scrape) = get(&metrics_url).unwrap();
+            assert_eq!(status, 200);
+            let checks: u64 = scrape
+                .lines()
+                .find_map(|line| line.strip_prefix("readiness_checks_total{outcome=\"ok\"} "))
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0);
+            let receipt_observer =
+                "postgres_maintenance_observer_enabled{population=\"webhook_receipts\"} 1";
+            let receipt_pass =
+                "postgres_cleanup_passes_total{cleanup=\"webhook_receipts\",outcome=\"completed\"}";
+            if checks >= 3 && (!scrape.contains(receipt_observer) || scrape.contains(receipt_pass))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("database readiness rounds and any initial receipt cleanup complete");
+
+    let body = b"freshly signed redelivery";
+    let timestamp = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let signature = KeyRing::from_encoded(KEY, None)
+        .unwrap()
+        .signatures(id.as_bytes(), timestamp, body)
+        .unwrap();
+    let response = agent()
+        .post(&format!("http://{api}/webhooks/partner"))
+        .header("webhook-id", id)
+        .header("webhook-timestamp", timestamp.to_string())
+        .header("webhook-signature", signature)
+        .send(body.as_slice())
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 204);
+    service.terminate();
+    assert_eq!(service.wait().0, Some(0));
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM webhook_receipts \
+                 WHERE received_at = timestamptz '2000-01-01 00:00:00+00'), \
+                (SELECT count(*) FROM background_jobs)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 0), "(original receipts, new processing jobs)");
+}
+
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {
     let (code, stdout, stderr) = Service::spawn(&[

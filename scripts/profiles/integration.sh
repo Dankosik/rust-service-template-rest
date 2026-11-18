@@ -210,6 +210,10 @@ run_db() {
 
 	service_db_before_tests
 	cargo test --locked -p integration-tests --features integration "$@"
+	if [[ $# == 0 && -f crates/service/src/bootstrap/inbound_webhooks.rs ]]; then
+		cargo test --locked --manifest-path crates/service/Cargo.toml --test lifecycle \
+			restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job -- --ignored --exact
+	fi
 	service_db_after_tests "$@"
 }
 
