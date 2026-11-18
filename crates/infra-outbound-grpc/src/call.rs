@@ -13,7 +13,7 @@ use tokio_util::sync::DropGuard;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{decoded_header_status_code, header_status_code, http_status_code};
+use crate::protocol::{header_status_code, http_status_code};
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
 type FramePoll = Poll<Option<Result<Frame<Bytes>, tonic::Status>>>;
@@ -86,11 +86,13 @@ impl ClientOutcome {
 
     fn from_headers(observation: &ClientObservation, headers: &HeaderMap) -> Option<Self> {
         let wire_code = header_status_code(headers)?;
-        let metric_code = match observation {
-            ClientObservation::Transport(_) => {
-                decoded_header_status_code(headers).unwrap_or(wire_code)
-            }
-            ClientObservation::Decoded { .. } => wire_code,
+        let metric_code = if matches!(observation, ClientObservation::Transport(_))
+            && (headers.contains_key(tonic::Status::GRPC_MESSAGE)
+                || headers.contains_key(tonic::Status::GRPC_STATUS_DETAILS))
+        {
+            tonic::Status::from_header_map(headers).map_or(wire_code, |status| status.code())
+        } else {
+            wire_code
         };
         Some(Self {
             metric_code,
@@ -143,10 +145,7 @@ struct StreamState<B> {
     missing_status: ClientOutcome,
 }
 
-impl<B> StreamState<B>
-where
-    B: Body<Data = Bytes, Error = tonic::Status>,
-{
+impl<B> StreamState<B> {
     fn stopped_status(&self) -> Option<tonic::Status> {
         let StreamPhase::Open(active) = &self.phase else {
             return None;
@@ -349,10 +348,7 @@ where
     }
 }
 
-fn terminate_stream<B>(state: &Mutex<StreamState<B>>, status: &tonic::Status)
-where
-    B: Body<Data = Bytes, Error = tonic::Status>,
-{
+fn terminate_stream<B>(state: &Mutex<StreamState<B>>, status: &tonic::Status) {
     let completion = state.lock().complete_stopped(status);
     if let Some(mut completion) = completion {
         if let Some(waker) = completion.active.waker.take() {

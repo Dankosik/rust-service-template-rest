@@ -34,15 +34,6 @@ pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
     }
 }
 
-pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    if headers.contains_key(tonic::Status::GRPC_MESSAGE)
-        || headers.contains_key(tonic::Status::GRPC_STATUS_DETAILS)
-    {
-        return tonic::Status::from_header_map(headers).map(|status| status.code());
-    }
-    header_status_code(headers)
-}
-
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
         .get(tonic::Status::GRPC_STATUS)
@@ -66,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn http_and_decoded_header_status_codes_follow_grpc_mappings() {
+    fn http_status_codes_follow_grpc_mappings() {
         assert_eq!(http_status_code(StatusCode::OK), None);
         assert_eq!(
             http_status_code(StatusCode::UNAUTHORIZED),
@@ -75,17 +66,6 @@ mod tests {
         assert_eq!(
             http_status_code(StatusCode::SERVICE_UNAVAILABLE),
             Some(tonic::Code::Unavailable)
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("14"));
-        assert_eq!(
-            decoded_header_status_code(&headers),
-            Some(tonic::Code::Unavailable)
-        );
-        headers.insert(tonic::Status::GRPC_MESSAGE, HeaderValue::from_static("%FF"));
-        assert_eq!(
-            decoded_header_status_code(&headers),
-            Some(tonic::Code::Unknown)
         );
     }
 }

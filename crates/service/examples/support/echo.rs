@@ -1,10 +1,8 @@
-use std::pin::Pin;
-
-use futures_util::{Stream, StreamExt as _};
+use futures_util::{StreamExt as _, stream::BoxStream};
 use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
-    echo_service_server::{EchoService, EchoServiceServer},
+    echo_service_server::{EchoService, EchoServiceServer, SERVICE_NAME},
 };
 use infra_grpc::{Failure, ResponseContext, Services};
 use service_failure::Code;
@@ -12,6 +10,8 @@ use tonic::{Request, Response, Status};
 
 const MAX_MESSAGE_BYTES: usize = 1024;
 const MAX_AGGREGATE_BYTES: usize = 1024;
+
+type ReplyStream<T> = BoxStream<'static, Result<T, Status>>;
 
 #[derive(Clone, Debug, Default)]
 struct Echo;
@@ -22,9 +22,8 @@ pub(super) fn register(
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))?;
-    let service_name = <EchoServiceServer<Echo> as tonic::server::NamedService>::NAME;
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-        let path = format!("/{service_name}/{method}");
+        let path = format!("/{SERVICE_NAME}/{method}");
         // template:begin grpc-authn:grpc-example-scope-requirements
         services.require_scopes(&path, &[])?;
         // template:end grpc-authn:grpc-example-scope-requirements
@@ -59,8 +58,7 @@ impl EchoService for Echo {
         Ok(Response::new(ClientStreamResponse { message }))
     }
 
-    type ServerStreamStream =
-        Pin<Box<dyn Stream<Item = Result<ServerStreamResponse, Status>> + Send>>;
+    type ServerStreamStream = ReplyStream<ServerStreamResponse>;
 
     async fn server_stream(
         &self,
@@ -72,7 +70,7 @@ impl EchoService for Echo {
         )]))))
     }
 
-    type BidiStreamStream = Pin<Box<dyn Stream<Item = Result<BidiStreamResponse, Status>> + Send>>;
+    type BidiStreamStream = ReplyStream<BidiStreamResponse>;
 
     async fn bidi_stream(
         &self,

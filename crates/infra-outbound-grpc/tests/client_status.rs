@@ -168,6 +168,21 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         }
     }
     let adapter = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let mut raw = client_request(
+        "/example.v1.EchoService/Unary",
+        Some(("example.v1.EchoService", "Unary")),
+    );
+    raw.headers_mut()
+        .insert("x-test-reply", "malformed-status-head".parse().unwrap());
+    let (report, wire_code) = tokio::sync::oneshot::channel();
+    let response = adapter
+        .prepare_call(raw)
+        .unwrap()
+        .send_with_dispatch_check(|| Ok(()), move |code| report.send(code).unwrap())
+        .await
+        .unwrap();
+    drop(response);
+    assert_eq!(wire_code.await.unwrap(), tonic::Code::Unavailable);
     let mut generated =
         grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(adapter);
     for (reply, expected) in [
@@ -385,7 +400,7 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     }
     let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
     assert!(
-        rendered.contains(&format!("grpc_client_started_total{{{unary}}} 10")),
+        rendered.contains(&format!("grpc_client_started_total{{{unary}}} 11")),
         "{rendered}"
     );
     let handled_prefix = format!("grpc_client_handled_total{{{unary},");
@@ -402,7 +417,7 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         ("InvalidArgument", 1),
         ("Internal", 3),
         ("ResourceExhausted", 1),
-        ("Unknown", 2),
+        ("Unknown", 3),
         ("Unimplemented", 1),
         ("Unavailable", 1),
     ] {

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use ::health::ReadinessReader;
+use futures_util::stream::BoxStream;
 use tonic::{Request, Response, Status};
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::Health;
@@ -42,7 +43,7 @@ impl Health for Adapter {
         Ok(Response::new(response(status)))
     }
 
-    type WatchStream = tonic::codegen::BoxStream<HealthCheckResponse>;
+    type WatchStream = BoxStream<'static, Result<HealthCheckResponse, Status>>;
 
     async fn watch(
         &self,

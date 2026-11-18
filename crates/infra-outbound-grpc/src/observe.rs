@@ -83,6 +83,11 @@ impl Call {
         self.finished = true;
     }
 
+    pub(crate) fn refuse(self, status: tonic::Status) -> tonic::Status {
+        self.finish(status.code());
+        status
+    }
+
     fn record(&self, code: tonic::Code) {
         let span_code = status_code_names(code as usize).span;
         self.span.set_attribute("rpc.status_code", span_code);
