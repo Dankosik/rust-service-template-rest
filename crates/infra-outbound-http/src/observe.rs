@@ -185,7 +185,7 @@ impl Attempt {
             REQUEST_DURATION_METRIC,
             self.labels(outcome, status_label, error_type)
         )
-        .record(self.started.elapsed().as_secs_f64());
+        .record(self.started.elapsed());
     }
 
     fn labels(

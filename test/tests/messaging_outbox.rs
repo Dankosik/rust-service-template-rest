@@ -34,7 +34,7 @@ use infra_webhooks::inbound::{
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use integration_tests::{close_pools, dsn_for, poll_until};
-use nats_test_support::AckDroppingRelay;
+use nats_test_support::{AckDroppingRelay, DroppedAck};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
@@ -1673,18 +1673,26 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
 async fn lost_source_ack_request_redelivers_a_committed_effect_without_applying_it_again(
     pool: PgPool,
 ) {
-    Box::pin(committed_effect_after_lost_settlement(pool, true)).await;
+    Box::pin(committed_effect_after_lost_settlement(
+        pool,
+        DroppedAck::Request,
+    ))
+    .await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_source_ack_reply_can_hide_a_settled_committed_effect(pool: PgPool) {
-    Box::pin(committed_effect_after_lost_settlement(pool, false)).await;
+    Box::pin(committed_effect_after_lost_settlement(
+        pool,
+        DroppedAck::Reply,
+    ))
+    .await;
 }
 
-async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool) {
+async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAck) {
     let fixture = Fixture::create_with_consumer(false).await;
     let relay =
-        AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, drop_request).await;
+        AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, dropped).await;
     let mut options = consumer_options(&fixture, &fixture.durable);
     options.servers = vec![relay.url.clone()];
     let messaging = Box::pin(Messaging::connect(
@@ -1727,7 +1735,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     );
     let state: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
     let state = state.cached_info();
-    if drop_request {
+    if dropped == DroppedAck::Request {
         assert!(state.ack_floor.stream_sequence < ack.sequence);
         poll_until(
             "lost source ACK redelivers the committed effect",
@@ -1756,7 +1764,10 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     assert_eq!(business_effects(&effects).await, 1);
     assert_eq!(
         invoked.load(Ordering::SeqCst),
-        if drop_request { 2 } else { 1 }
+        match dropped {
+            DroppedAck::Request => 2,
+            DroppedAck::Reply => 1,
+        }
     );
     close(messaging).await;
     relay.join().await;

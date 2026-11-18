@@ -171,7 +171,9 @@ async fn handler_runs_in_the_trace_of_the_publication() {
 async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed() {
     let exporter = install_tracing();
     let fixture = Fixture::create(Topology::WithDurable).await;
-    let relay = AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, false).await;
+    let relay =
+        AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, DroppedAck::Reply)
+            .await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options_with_servers(

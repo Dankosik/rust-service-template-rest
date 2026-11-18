@@ -36,7 +36,8 @@ mod durable;
 mod probe;
 mod publish;
 use nats_test_support::{
-    AckDroppingRelay, AuthObservingRelay, eventually, is_stream_publish_ack, relay_target,
+    AckDroppingRelay, AuthObservingRelay, DroppedAck, eventually, is_stream_publish_ack,
+    relay_target,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);

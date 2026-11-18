@@ -1,5 +1,6 @@
-use std::{pin::Pin, time::Duration};
+use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +29,7 @@ pub struct JwtOptions {
     pub jwks_max_age: Duration,
 }
 
-pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type RefreshTask = BoxFuture<'static, ()>;
 
 pub async fn prepare_jwt(
     options: JwtOptions,

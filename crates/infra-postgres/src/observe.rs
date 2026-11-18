@@ -200,7 +200,7 @@ pub async fn observed<T>(
             "db.system.name" => "postgresql",
             "db.query.summary" => summary
         )
-        .record(started.elapsed().as_secs_f64()),
+        .record(started.elapsed()),
         Err(error) => {
             let error_type = match sqlstate(error) {
                 Some(code) => {
@@ -229,7 +229,7 @@ fn record_statement_error(
         "db.query.summary" => summary,
         "error.type" => error_type
     )
-    .record(started.elapsed().as_secs_f64());
+    .record(started.elapsed());
 }
 
 macro_rules! transaction_outcomes {
@@ -318,7 +318,7 @@ impl TransactionObservation {
             CONNECTION_WAIT_METRIC,
             "db.client.connection.pool.name" => "postgres"
         )
-        .record(self.started.elapsed().as_secs_f64());
+        .record(self.started.elapsed());
     }
 
     pub(crate) fn begin_commit(&mut self) {
@@ -358,9 +358,7 @@ impl Drop for TransactionObservation {
         };
         self.span
             .record("postgres.transaction.outcome", outcome.label());
-        outcome
-            .duration_histogram()
-            .record(self.started.elapsed().as_secs_f64());
+        outcome.duration_histogram().record(self.started.elapsed());
     }
 }
 

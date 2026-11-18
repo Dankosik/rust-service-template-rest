@@ -72,9 +72,10 @@ impl Producer {
         .await?;
         serialized_len += escaped_len(endpoint_id, &mut budget, |_| Ok(())).await?;
         if serialized_len > infra_jobs::MAX_PAYLOAD_BYTES {
-            return Err(OutboundError::Enqueue(EnqueueError::PayloadTooLarge {
+            return Err(EnqueueError::PayloadTooLarge {
                 bytes: serialized_len,
-            }));
+            }
+            .into());
         }
         Ok(())
     }
@@ -96,7 +97,7 @@ async fn escaped_len(
         }
         let (fragment, tail) = rest.split_at(end);
         admit(fragment)?;
-        len += json_payload_len(fragment).map_err(serialize_failed)? - 2;
+        len += json_payload_len(fragment).map_err(EnqueueError::Serialize)? - 2;
         *budget -= end;
         rest = tail;
     }
@@ -114,10 +115,6 @@ async fn yield_once() {
         Poll::Pending
     })
     .await;
-}
-
-const fn serialize_failed(error: serde_json::Error) -> OutboundError {
-    OutboundError::Enqueue(EnqueueError::Serialize(error))
 }
 
 #[derive(Debug, thiserror::Error)]

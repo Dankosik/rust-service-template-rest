@@ -133,7 +133,8 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
         let relay = if lose_dlq_ack {
             AckDroppingRelay::start(&fixture.dlq_stream).await
         } else {
-            AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, false).await
+            AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, DroppedAck::Reply)
+                .await
         };
         let cancel = CancellationToken::new();
         let messaging = Messaging::connect(

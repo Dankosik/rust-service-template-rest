@@ -244,7 +244,7 @@ impl MethodMetrics {
     }
 
     fn handled(&self, code: tonic::Code, elapsed: Duration) {
-        self.handling_seconds.record(elapsed.as_secs_f64());
+        self.handling_seconds.record(elapsed);
         self.handled[code as usize]
             .get_or_init(|| {
                 metrics::counter!(

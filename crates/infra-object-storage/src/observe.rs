@@ -244,7 +244,7 @@ impl OperationGuard {
         self.span.record("object_storage.outcome", outcome.label());
         self.histograms
             .get(self.operation, outcome)
-            .record(self.started.elapsed().as_secs_f64());
+            .record(self.started.elapsed());
     }
 }
 

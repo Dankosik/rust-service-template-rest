@@ -197,7 +197,7 @@ impl<'a> OperationGuard<'a> {
         self.span.record("cache.outcome", outcome.label());
         self.histograms
             .histogram(self.namespace, self.operation, outcome)
-            .record(self.started.elapsed().as_secs_f64());
+            .record(self.started.elapsed());
     }
 }
 
