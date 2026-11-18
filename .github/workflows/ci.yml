@@ -54,6 +54,7 @@ jobs:
       cargo_dependencies: ${{ steps.surfaces.outputs.cargo_dependencies }}
       dependency_policy: ${{ steps.surfaces.outputs.dependency_policy }}
       lint_config: ${{ steps.surfaces.outputs.lint_config }}
+      profiling: ${{ steps.surfaces.outputs.profiling }}
       openapi: ${{ steps.surfaces.outputs.openapi }}
       # template:begin grpc:ci-grpc-output
       grpc_schema: ${{ steps.surfaces.outputs.grpc_schema }}
@@ -388,11 +389,7 @@ jobs:
   # its cache step.
   quality-profiles:
     needs: [changes, secrets]
-    if: >-
-      !cancelled() && (
-        needs.changes.outputs.rust_source == 'true' ||
-        needs.changes.outputs.cargo_dependencies == 'true'
-      )
+    if: "!cancelled() && needs.changes.outputs.profiling == 'true'"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

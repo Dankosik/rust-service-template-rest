@@ -32,6 +32,7 @@ SURFACE_NAMES: tuple[str, ...] = (
     "cargo_dependencies",
     "dependency_policy",
     "lint_config",
+    "profiling",
     "openapi",
     "tool_manifest",
     "duplication",
@@ -198,6 +199,11 @@ def _run_service_hook(repo: Path, files: Sequence[str]) -> dict[int, list[str]]:
 
 def _count_surfaces(surfaces: dict[str, bool]) -> int:
     return sum(1 for name, active in surfaces.items() if name != "no_validation_required" and active)
+
+
+def _select_profiling(surfaces: dict[str, bool], files: Sequence[str]) -> None:
+    if surfaces["rust_source"] or surfaces["cargo_dependencies"] or "clippy.toml" in files:
+        surfaces["profiling"] = True
 
 
 def all_surfaces_report(repo: Path, *, post_merge: bool = False) -> ClassificationReport:
@@ -627,6 +633,8 @@ def classify_report(
     if post_merge and (surfaces["duplication"] or surfaces["architecture"]):
         surfaces["quality_tooling"] = True
 
+    _select_profiling(surfaces, clean_files)
+
     return ClassificationReport(
         surfaces=surfaces,
         classified=len(unclassified) == 0,
@@ -780,6 +788,7 @@ def classify_union_report(
     }
     if post_merge and (merged["duplication"] or merged["architecture"]):
         merged["quality_tooling"] = True
+    _select_profiling(merged, resolved_files)
 
     return ClassificationReport(
         surfaces=merged,
