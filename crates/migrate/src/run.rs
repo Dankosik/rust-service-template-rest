@@ -267,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unrepresentable_migration_deadline_is_refused_before_connecting() {
-        let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
+        let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=verify-full").unwrap();
         let options = RunOptions::defaults(&dsn, "test", Duration::MAX);
         let failure = run(&crate::MIGRATOR, &options).await.unwrap_err();
 

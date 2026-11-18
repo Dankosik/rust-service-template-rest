@@ -3052,6 +3052,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "metrics-process",
  "metrics-util",
+ "nix",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-proto",
@@ -3108,7 +3109,6 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
- "tokio-util",
  "tower",
  "tracing",
  "url",
@@ -5228,6 +5228,7 @@ dependencies = [
  "service-config",
  "service-failure",
  "similar 3.2.1",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tikv-jemallocator",
@@ -5241,6 +5242,7 @@ dependencies = [
  "tower",
  "tracing",
  "ureq",
+ "url",
  "utoipa",
 ]
 
@@ -5253,6 +5255,7 @@ dependencies = [
  "config",
  "derive_more",
  "jiff",
+ "nix",
  "rstest",
  "secrecy",
  "serde",
@@ -5601,8 +5604,6 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87a2bdd6e83f6b3ea525ca9fee568030508b58355a43d0b2c1674d5f79dcd65e"
 dependencies = [
  "atoi",
  "base64 0.22.1",

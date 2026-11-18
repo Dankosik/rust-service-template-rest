@@ -47,7 +47,12 @@ futures-util = { workspace = true, features = ["std"] }
 parking_lot = { workspace = true }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = [
+    "std",
+# template:begin oidc-jwt:authn-numeric-date-raw-value
+    "raw_value",
+# template:end oidc-jwt:authn-numeric-date-raw-value
+] }
 shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }

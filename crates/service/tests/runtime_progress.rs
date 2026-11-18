@@ -481,6 +481,7 @@ fn container_command(image: &str, name: &str, peers: &Peers, primary_failure: bo
     ]);
     for (key, value) in [
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         (
             "APP__RUNTIME__WORKER_THREADS",
             if primary_failure { "0" } else { "1" },

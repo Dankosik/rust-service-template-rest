@@ -9,6 +9,7 @@
 
 [app]
 env = "local"
+allow_insecure_development = true
 
 [http]
 addr = ":8080"
@@ -122,9 +123,9 @@ session_budgets = "startup"
 # template:end object-storage:local-config
 
 # template:begin service-auth:local-config
-# A gRPC listener verifying service tokens requires grpc.security = "tls",
-# grpc.certificate and a TLS private key. Supply the service signing key through
-# the environment or --secrets-dir:
+# This file opts in to running gRPC without service tokens. For JWTs, select
+# mode = "jwt" and configure grpc.security = "tls" with a certificate and TLS
+# private key. Supply the service signing key through the environment or --secrets-dir:
 #   APP__SERVICE_AUTH__PRIVATE_KEY="$(cat example.pem)"
 # [service_auth]
 # mode = "jwt"

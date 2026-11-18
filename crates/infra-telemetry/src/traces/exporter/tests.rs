@@ -1,89 +1,196 @@
-use super::super::tests::env;
+use super::super::tests::{env, options};
 use super::*;
 
 #[test]
-fn typed_endpoint_wins_and_refuses_ambient_credentials() {
-    let typed = Some("http://collector:4318");
-    let collector = Some(Endpoint::Typed("http://collector:4318"));
-    assert_eq!(resolve_endpoint(typed, env(&[])).unwrap(), collector);
-    for (pairs, refused) in [
+fn collector_paths_follow_the_selected_endpoint_source() {
+    let root = (OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector/base/");
+    let signal = (
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+        "https://collector/custom",
+    );
+    for (typed, pairs, expected) in [
+        ("", &[][..], None),
+        ("  ", &[root][..], Some("https://collector/base/v1/traces")),
         (
-            &[(OTEL_EXPORTER_OTLP_HEADERS, "a=b")][..],
-            OTEL_EXPORTER_OTLP_HEADERS,
+            "",
+            &[root, (signal.0, " ")][..],
+            Some("https://collector/base/v1/traces"),
+        ),
+        ("", &[root, signal][..], Some(signal.1)),
+        (
+            "",
+            &[(signal.0, "https://collector")][..],
+            Some("https://collector/"),
         ),
         (
-            &[(OTEL_EXPORTER_OTLP_TRACES_HEADERS, "a=b")][..],
-            OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+            "http://typed",
+            &[root, signal][..],
+            Some("http://typed/v1/traces"),
+        ),
+        (
+            "https://typed/custom",
+            &[][..],
+            Some("https://typed/custom"),
         ),
     ] {
-        std::assert_matches!(
-                resolve_endpoint(typed, env(pairs)),
-                Err(TracingError::AmbientCredential { name }) if name == refused
-            ,
-            "{pairs:?}"
-        );
+        let resolved =
+            CollectorConfig::resolve(&options(typed), &CollectorTrust::default(), &env(pairs))
+                .unwrap();
+        assert_eq!(resolved.as_ref().map(|c| c.url.as_str()), expected);
     }
-    for traces in ["", " "] {
-        assert_eq!(
-            resolve_endpoint(
-                typed,
-                env(&[
-                    (OTEL_EXPORTER_OTLP_TRACES_HEADERS, traces),
-                    (OTEL_EXPORTER_OTLP_HEADERS, "a=b"),
-                ])
-            )
-            .unwrap(),
-            collector
-        );
-    }
-    assert_eq!(
-        resolve_endpoint(typed, env(&[("OTEL_EXPORTER_OTLP_CERTIFICATE", "/ca.pem")])).unwrap(),
-        collector
-    );
-    assert_eq!(
-        resolve_endpoint(typed, env(&[(OTEL_EXPORTER_OTLP_ENDPOINT, "http://other")])).unwrap(),
-        collector
-    );
 }
 
 #[test]
-fn environment_endpoint_enables_export_and_nothing_disables_it() {
-    let root = (OTEL_EXPORTER_OTLP_ENDPOINT, "http://collector:4318");
-    assert_eq!(resolve_endpoint(None, env(&[])).unwrap(), None);
-    assert_eq!(
-        resolve_endpoint(None, env(&[root])).unwrap(),
-        Some(Endpoint::Environment)
-    );
-    assert_eq!(
-        resolve_endpoint(Some("  "), env(&[root])).unwrap(),
-        Some(Endpoint::Environment)
-    );
-    assert_eq!(
-        resolve_endpoint(None, env(&[root, (OTEL_EXPORTER_OTLP_HEADERS, "a=b")])).unwrap(),
-        Some(Endpoint::Environment)
-    );
-    assert_eq!(
-        resolve_endpoint(
+fn credentials_require_a_matching_explicit_https_collector() {
+    let standard = "https://collector";
+    let credential = "authorization=private-value";
+    let traces_headers = OTEL_EXPORTER_OTLP_TRACES_HEADERS;
+    let general_headers = OTEL_EXPORTER_OTLP_HEADERS;
+    let root = OTEL_EXPORTER_OTLP_ENDPOINT;
+    let signal = OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+    for (typed, typed_headers, pairs, name) in [
+        (
+            standard,
             None,
-            env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " "), root])
-        )
-        .unwrap(),
-        Some(Endpoint::EnvironmentRoot(
-            "http://collector:4318".to_owned()
-        ))
+            &[(general_headers, credential)][..],
+            general_headers,
+        ),
+        (
+            standard,
+            None,
+            &[(traces_headers, " "), (general_headers, credential)][..],
+            general_headers,
+        ),
+        ("", Some(credential), &[(root, standard)][..], TYPED_HEADERS),
+        ("", Some(credential), &[][..], TYPED_HEADERS),
+        (
+            "",
+            None,
+            &[(general_headers, credential)][..],
+            general_headers,
+        ),
+        ("http://collector", Some(credential), &[][..], TYPED_HEADERS),
+        (
+            "",
+            None,
+            &[(root, "http://collector"), (general_headers, credential)][..],
+            general_headers,
+        ),
+        (
+            "",
+            None,
+            &[
+                (root, standard),
+                (signal, "https://other/v1/traces"),
+                (general_headers, credential),
+            ][..],
+            general_headers,
+        ),
+    ] {
+        let mut opts = options(typed);
+        opts.otlp_headers = typed_headers.map(secrecy::SecretString::from);
+        let error = tracer_provider_for_test(&opts, pairs)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(name), "{error}");
+        assert!(!error.contains("private-value"));
+    }
+}
+
+fn tracer_provider_for_test(
+    options: &TracingOptions,
+    pairs: &[(&str, &str)],
+) -> Result<super::super::TracerProviderHandle, TracingError> {
+    super::super::tracer_provider(options, env(pairs), &CollectorTrust::from_env(env(pairs)))
+}
+
+#[test]
+fn typed_collector_requires_each_client_identity_file_to_have_a_matching_standard_destination() {
+    let options = options("https://collector");
+    let identity = "/private-identity-file";
+    let common = (OTEL_EXPORTER_OTLP_ENDPOINT, "https://other");
+    let signal = (
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+        "https://collector/v1/traces",
     );
-    assert_eq!(
-        resolve_endpoint(None, env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " ")])).unwrap(),
-        None
-    );
-    assert_eq!(
-        root_traces_url("http://collector:4318/"),
-        "http://collector:4318/v1/traces"
-    );
-    assert_eq!(
-        root_traces_url("http://collector:4318/otlp"),
-        "http://collector:4318/otlp/v1/traces"
-    );
+    for (pairs, expected) in [
+        (
+            &[(CLIENT_CERTIFICATE_VARS[0], identity)][..],
+            CLIENT_CERTIFICATE_VARS[0],
+        ),
+        (&[(CLIENT_KEY_VARS[1], identity)][..], CLIENT_KEY_VARS[1]),
+        (
+            &[common, (CLIENT_CERTIFICATE_VARS[0], identity)][..],
+            CLIENT_CERTIFICATE_VARS[0],
+        ),
+        (
+            &[
+                common,
+                signal,
+                (CLIENT_CERTIFICATE_VARS[0], identity),
+                (CLIENT_KEY_VARS[1], identity),
+            ][..],
+            CLIENT_KEY_VARS[1],
+        ),
+        (
+            &[
+                (OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector"),
+                (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, "https://other/traces"),
+                (CLIENT_KEY_VARS[1], identity),
+            ][..],
+            CLIENT_KEY_VARS[1],
+        ),
+    ] {
+        let error = tracer_provider_for_test(&options, pairs).unwrap_err();
+        std::assert_matches!(error, TracingError::UnboundCredential { name } if name == expected);
+        assert!(!error.to_string().contains(identity));
+    }
+}
+
+#[test]
+fn both_endpoint_sources_reject_malformed_or_secret_urls_without_echoing_them() {
+    for raw in [
+        "https://collector/path?private-marker",
+        "https://private-marker@collector",
+        "https://@collector/private-marker",
+        "https://collector/private-marker#fragment",
+        "https:///private-marker",
+        "https://collector:invalid/private-marker",
+        "https://collector\\other/private-marker",
+        "collector",
+    ] {
+        for (typed, pairs) in [
+            (raw, &[][..]),
+            ("", &[(OTEL_EXPORTER_OTLP_ENDPOINT, raw)][..]),
+        ] {
+            let error = tracer_provider_for_test(&options(typed), pairs).unwrap_err();
+            std::assert_matches!(error, TracingError::InvalidEndpoint { .. });
+            assert!(!format!("{error:?} {error}").contains("private-marker"));
+        }
+    }
+}
+
+#[test]
+fn blank_signal_headers_fall_back_and_occupied_signal_headers_override() {
+    for (signal, expected) in [
+        ("", "general"),
+        ("  ", "general"),
+        ("AUTHORIZATION=signal", "signal"),
+    ] {
+        let pairs = [
+            (OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector"),
+            (OTEL_EXPORTER_OTLP_HEADERS, "Authorization=general"),
+            (OTEL_EXPORTER_OTLP_TRACES_HEADERS, signal),
+        ];
+        let collector =
+            CollectorConfig::resolve(&options(""), &CollectorTrust::default(), &env(&pairs))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            collector.headers.get("authorization").map(String::as_str),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -117,7 +224,7 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
-    let headers = parse_headers("authorization=Basic%20x, x-tenant = t1 ,").unwrap();
+    let headers = parse_headers(TYPED_HEADERS, "authorization=Basic%20x, x-tenant = t1 ,").unwrap();
     assert_eq!(
         headers.get("authorization").map(String::as_str),
         Some("Basic%20x")
@@ -131,33 +238,19 @@ fn malformed_header_entries_fail_by_position() {
     for (raw, position) in [
         ("authorization: Bearer x", 1),
         ("a=b,=novalue", 2),
+        ("AUTHORIZATION=first,Authorization=second", 2),
+        ("Host=another-collector", 1),
         ("a=b,,bad name=x", 3),
         ("a=line\nbreak", 1),
         ("a=b,,auth=private%0A,auth=replacement", 3),
         ("auth=private%+A", 1),
         ("auth=private%00", 1),
     ] {
-        let err = parse_headers(raw).unwrap_err();
-        std::assert_matches!(err, TracingError::InvalidHeader { position: p } if p == position,
+        let err = parse_headers(TYPED_HEADERS, raw).unwrap_err();
+        std::assert_matches!(err, TracingError::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );
     }
-}
-
-#[test]
-fn collector_root_gets_the_traces_path() {
-    assert_eq!(
-        traces_url("http://collector:4318"),
-        "http://collector:4318/v1/traces"
-    );
-    assert_eq!(
-        traces_url("https://collector:4318/"),
-        "https://collector:4318/v1/traces"
-    );
-    assert_eq!(
-        traces_url("https://gateway.test/otlp/v1/traces"),
-        "https://gateway.test/otlp/v1/traces"
-    );
 }
 
 #[test]
@@ -165,11 +258,11 @@ fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
     use futures_util::FutureExt;
 
     let exporter = span_exporter(
-        &Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
+        "https://127.0.0.1:1/v1/traces",
         HashMap::new(),
         &CollectorTrust::default(),
         export_timeout(&|_: &str| None),
-        &|_: &str| None,
+        None,
     )
     .expect("https endpoint must build");
     let result = {
@@ -188,43 +281,26 @@ fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
 }
 
 #[test]
-fn gzip_compression_is_available_to_the_exporter() {
-    use opentelemetry_otlp::WithHttpConfig as _;
-
-    opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .with_compression(opentelemetry_otlp::Compression::Gzip)
-        .build()
-        .expect("gzip must be a supported compression");
-}
-
-#[test]
-fn compression_variables_select_gzip_or_none_and_refuse_the_rest() {
+fn compression_falls_back_and_remembers_only_ignored_variable_names() {
     let traces = OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
     let general = OTEL_EXPORTER_OTLP_COMPRESSION;
-
-    assert_eq!(compression(&env(&[])).unwrap(), None);
-    assert_eq!(
-        compression(&env(&[(general, "GZIP")])).unwrap(),
-        Some(opentelemetry_otlp::Compression::Gzip)
-    );
-    assert_eq!(
-        compression(&env(&[(traces, "none"), (general, "gzip")])).unwrap(),
-        None
-    );
-    assert_eq!(
-        compression(&env(&[(traces, ""), (general, "gzip")])).unwrap(),
-        Some(opentelemetry_otlp::Compression::Gzip)
-    );
-    for (pairs, refused) in [
-        (&[(general, "zstd")][..], general),
-        (&[(traces, "gzipp"), (general, "gzip")][..], traces),
+    let gzip = Some(opentelemetry_otlp::Compression::Gzip);
+    for (pairs, expected, ignored) in [
+        (&[][..], None, vec![]),
+        (&[(general, "GZIP")][..], gzip, vec![]),
+        (&[(traces, "none"), (general, "gzip")][..], None, vec![]),
+        (&[(traces, ""), (general, "gzip")][..], gzip, vec![]),
+        (
+            &[(traces, "unknown"), (general, "gzip")][..],
+            gzip,
+            vec![traces],
+        ),
+        (
+            &[(traces, "unknown"), (general, "zstd")][..],
+            None,
+            vec![traces, general],
+        ),
     ] {
-        std::assert_matches!(
-                compression(&env(pairs)),
-                Err(ExporterError::Compression { variable }) if variable == refused
-            ,
-            "{pairs:?}"
-        );
+        assert_eq!(compression(&env(pairs)), (expected, ignored));
     }
 }

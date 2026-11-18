@@ -19,6 +19,16 @@ automatically during deploys):
 - Declaring `env` makes `.railway/railway.ts` authoritative: `apply` deletes any
   service variable omitted from `env` unless wrapped in `preserve()`. Review
   `railway config plan` before applying.
+- Leave `APP__APP__ALLOW_INSECURE_DEVELOPMENT` unset on Railway. Its default
+  keeps hosted environments strict even when named `development`. Omitting
+  the key also keeps the environment readable by older binaries during rollback.
+  A binary that trusts the environment name alone needs a strict
+  `APP__APP__ENV` in its effective rollback configuration. If rollback would
+  restore a permissive label, deploy the verified older image with a strict
+  label and verified TLS.
+  For an existing local setup that relies on a development exception, set
+  `APP__APP__ALLOW_INSECURE_DEVELOPMENT=true` alongside `APP__APP__ENV=local`
+  or `development`. The shipped local TOML selects both.
 - `APP__HTTP__ADDR` binds `[::]:8080`, so one dual-stack listener serves both
   IPv4 and legacy IPv6-only Railway private DNS. The service never reads
   `PORT`; it is set to the same port only for Railway's health check.
@@ -28,6 +38,12 @@ automatically during deploys):
   key variables out of band (`preserve()`).
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
+- Use a hostname covered by the database certificate and `sslmode=verify-full`
+  in `APP__POSTGRES__DSN` for the service, worker, migration and operator
+  processes. For a private CA, package its public trust anchor in the derived
+  runtime image and set `sslrootcert` to its absolute path in the DSN. The
+  pre-deploy migrator runs in a separate container without the service's
+  mounted volumes. [Railway pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command)
 - With PostgreSQL retained, `/migrate` runs as `preDeployCommand` in the new
   image before cutover while the old deployment keeps serving. Because Railway
   sets no default pre-deploy timeout, keep `preDeployTimeoutSeconds` in

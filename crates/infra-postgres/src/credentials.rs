@@ -138,13 +138,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
         std::fs::write(&file, "first\n").unwrap();
+        assert_eq!(
+            Dsn::admit_with(
+                "postgres://app@127.0.0.1:1/app?sslmode=require",
+                Some(&file)
+            )
+            .unwrap_err(),
+            DsnError::ServerVerification,
+        );
         let dsn = Dsn::admit_with(
-            "postgres://app@127.0.0.1:1/app?sslmode=disable",
+            "postgres://app@127.0.0.1:1/app?sslmode=verify-full",
             Some(&file),
         )
         .unwrap();
         let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
         assert_eq!(password(&pool).as_deref(), Some("first"));
+        assert!(!format!("{:?}", pool.connect_options()).contains("first"));
         assert!(
             snapshotter
                 .snapshot()
@@ -161,6 +170,7 @@ mod tests {
         std::fs::write(&file, "second").unwrap();
         refresh.step(&pool, &file).await;
         assert_eq!(password(&pool).as_deref(), Some("second"));
+        assert!(!format!("{:#?}", pool.connect_options()).contains("second"));
 
         std::fs::remove_file(&file).unwrap();
         refresh.step(&pool, &file).await;

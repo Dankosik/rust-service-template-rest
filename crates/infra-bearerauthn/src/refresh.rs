@@ -11,9 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    EndpointUrl, JwtAlgorithm,
-    jwks::{KeySet, KeySetFailure, fetch_key_set},
-    provider::ProviderClient,
+    JwtAlgorithm,
+    jwks::{JwksSource, KeySet, KeySetFailure},
+    provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
 
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -74,7 +74,7 @@ impl KeyStore {
         metrics::describe_gauge!(
             ACQUISITION_METRIC,
             metrics::Unit::Seconds,
-            "Unix timestamp of the last successfully acquired usable JWKS set"
+            "Unix timestamp of the last successfully acquired JWKS set"
         );
         let last_acquisition = metrics::gauge!(ACQUISITION_METRIC);
         last_acquisition.set(acquisition_timestamp(SystemTime::now()));
@@ -155,10 +155,14 @@ impl KeyStore {
             Ok(_) => ("success", "success"),
             Err(failure) => {
                 let reason = failure.label();
-                if let KeySetFailure::Fetch(cause) = failure {
-                    warn!(reason, ?cause, "authn_jwks_refresh_failed");
-                } else {
-                    warn!(reason, "authn_jwks_refresh_failed");
+                match failure {
+                    KeySetFailure::Discovery(error) => {
+                        warn!(reason, cause = ?error.reason(), "authn_jwks_refresh_failed");
+                    }
+                    KeySetFailure::Fetch(cause) => {
+                        warn!(reason, ?cause, "authn_jwks_refresh_failed");
+                    }
+                    _ => warn!(reason, "authn_jwks_refresh_failed"),
                 }
                 ("failure", reason)
             }
@@ -196,7 +200,7 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
 pub(crate) fn run_refresh_worker(
     store: Arc<KeyStore>,
     provider: ProviderClient,
-    jwks_uri: EndpointUrl,
+    source: JwksSource,
     algorithms: Vec<JwtAlgorithm>,
     cancel: CancellationToken,
     jwks_max_age: Duration,
@@ -220,7 +224,7 @@ pub(crate) fn run_refresh_worker(
                 let replacement = tokio::select! {
                     biased;
                     () = cancel.cancelled() => break 'worker,
-                    replacement = fetch_key_set(&provider, &jwks_uri, &algorithms, None) => replacement,
+                    replacement = source.fetch(&provider, &algorithms, Instant::now() + PROVIDER_TIMEOUT) => replacement,
                 };
                 store.finish(ticket, replacement);
             }
@@ -346,7 +350,7 @@ mod tests {
         let worker = tokio::spawn(super::run_refresh_worker(
             store.clone(),
             provider,
-            endpoint,
+            super::JwksSource::Configured(endpoint),
             vec![crate::JwtAlgorithm::Rs256],
             cancel.clone(),
             Duration::from_hours(1),
@@ -416,7 +420,9 @@ mod tests {
         super::run_refresh_worker(
             store.clone(),
             provider,
-            crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
+            super::JwksSource::Configured(
+                crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
+            ),
             vec![crate::JwtAlgorithm::Rs256],
             cancel.clone(),
             jwks_max_age,

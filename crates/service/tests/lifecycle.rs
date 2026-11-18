@@ -317,6 +317,7 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 fn missing_grpc_verifier_lists_only_the_supported_modes() {
     let (code, stdout, stderr) = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
@@ -392,6 +393,7 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
     let dsn = format!("redis://{}", available_address());
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__CACHE__DSN", &dsn),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
@@ -433,6 +435,7 @@ fn a_cache_password_fifo_is_rejected_before_binding_the_listener() {
     nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
@@ -463,6 +466,7 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
         format!("postgres://service:startup-fixture@127.0.0.1:{port}/service?sslmode=disable");
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__POSTGRES__ENABLED", "true"),
         ("APP__POSTGRES__DSN", &dsn),
     ]);
@@ -518,7 +522,7 @@ fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
         ("APP__POSTGRES__ENABLED", "true"),
         (
             "APP__POSTGRES__DSN",
-            "postgres://service@127.0.0.1:1/service?sslmode=disable",
+            "postgres://service@127.0.0.1:1/service?sslmode=verify-full",
         ),
     ]);
     let (code, stdout, stderr) = service.wait_output();
@@ -528,6 +532,39 @@ fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
         "{stdout}"
     );
     assert!(!stdout.contains("http listener bound"), "{stdout}");
+}
+
+#[test]
+fn postgres_refuses_unverified_connections_without_opt_in_and_keeps_the_dsn_private() {
+    for (environment, query, reason) in [
+        (
+            "production",
+            "sslmode=require",
+            "requires sslmode=verify-full",
+        ),
+        (
+            "development",
+            "sslmode=disable",
+            "requires sslmode=verify-full",
+        ),
+        (
+            "production",
+            "sslmode=verify-full&private-marker=x",
+            "unsupported parameter",
+        ),
+    ] {
+        let dsn = format!("postgres://service:private-marker@127.0.0.1:1/service?{query}");
+        let (code, stdout, stderr) = Service::spawn(&[
+            ("APP__APP__ENV", environment),
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", &dsn),
+        ])
+        .wait_output();
+        assert_eq!(code, Some(1));
+        assert!(stdout.contains(reason), "{stdout}");
+        assert!(!stdout.contains("http listener bound"));
+        assert!(!stdout.contains("private-marker") && !stderr.contains("private-marker"));
+    }
 }
 // template:end postgres:service-postgres-lifecycle-admission
 
@@ -553,7 +590,9 @@ fn storage_env<'a>(
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
     let endpoint = format!("http://{}", available_address());
-    let service = Service::spawn(&storage_env("local", "local", &endpoint));
+    let mut config = storage_env("local", "local", &endpoint).to_vec();
+    config.push(("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"));
+    let service = Service::spawn(&config);
     let configured = service.await_record("object_storage_configured");
     assert_eq!(
         configured["object_storage.provider"], "local",
@@ -576,18 +615,20 @@ fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
 }
 
 #[test]
-fn production_emulator_provider_exits_before_the_listener() {
-    let (code, stderr) =
-        Service::spawn(&storage_env("production", "local", "http://127.0.0.1:7070")).wait();
-    assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(
-        stderr.contains("object_storage.provider"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("hunter2-object-storage"),
-        "stderr: {stderr}"
-    );
+fn the_emulator_provider_exits_before_the_listener_without_development_opt_in() {
+    for environment in ["production", "local"] {
+        let (code, stderr) =
+            Service::spawn(&storage_env(environment, "local", "http://127.0.0.1:7070")).wait();
+        assert_eq!(code, Some(1), "stderr: {stderr}");
+        assert!(
+            stderr.contains("object_storage.provider"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("hunter2-object-storage"),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -618,6 +659,99 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
 // template:end object-storage:service-object-storage-lifecycle-admission
 
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+#[ignore = "the database integration runner supplies a migrated PostgreSQL test database"]
+async fn restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job(
+    pool: sqlx::PgPool,
+) {
+    use infra_webhooks::protocol::KeyRing;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
+    let id = "historical-delivery";
+    sqlx::query(
+        "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
+         VALUES ('partner', $1, timestamptz '2000-01-01 00:00:00+00')",
+    )
+    .bind(id.as_bytes())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut dsn = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+    dsn.set_path(pool.connect_options().get_database().unwrap());
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", dsn.as_str()),
+        ("APP__POSTGRES__MAX_CONNECTIONS", "1"),
+        ("APP__HEALTH__REFRESH_INTERVAL", "100ms"),
+        (
+            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+            "v1",
+        ),
+        ("APP__INBOUND_WEBHOOKS__SECRETS__V1", KEY),
+    ]);
+    let api = service.await_addr("http listener bound");
+    let diagnostics = service.await_addr("diagnostics listener bound");
+    service.await_record("service_ready");
+    let metrics_url = format!("http://{diagnostics}/metrics");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, scrape) = get(&metrics_url).unwrap();
+            assert_eq!(status, 200);
+            let checks: u64 = scrape
+                .lines()
+                .find_map(|line| line.strip_prefix("readiness_checks_total{outcome=\"ok\"} "))
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(0);
+            let receipt_observer =
+                "postgres_maintenance_observer_enabled{population=\"webhook_receipts\"} 1";
+            let receipt_pass =
+                "postgres_cleanup_passes_total{cleanup=\"webhook_receipts\",outcome=\"completed\"}";
+            if checks >= 3 && (!scrape.contains(receipt_observer) || scrape.contains(receipt_pass))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("database readiness rounds and any initial receipt cleanup complete");
+
+    let body = b"freshly signed redelivery";
+    let timestamp = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let signature = KeyRing::from_encoded(KEY, None)
+        .unwrap()
+        .signatures(id.as_bytes(), timestamp, body)
+        .unwrap();
+    let response = agent()
+        .post(&format!("http://{api}/webhooks/partner"))
+        .header("webhook-id", id)
+        .header("webhook-timestamp", timestamp.to_string())
+        .header("webhook-signature", signature)
+        .send(body.as_slice())
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 204);
+    service.terminate();
+    assert_eq!(service.wait().0, Some(0));
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM webhook_receipts \
+                 WHERE received_at = timestamptz '2000-01-01 00:00:00+00'), \
+                (SELECT count(*) FROM background_jobs)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 0), "(original receipts, new processing jobs)");
+}
+
 #[test]
 fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admission() {
     let (code, stdout, stderr) = Service::spawn(&[

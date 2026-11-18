@@ -18,7 +18,13 @@ struct Echo;
 
 pub(super) fn register(services: &mut Services) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-    services.add(EchoServiceServer::new(Echo))
+    services.add(EchoServiceServer::new(Echo))?;
+    // template:begin grpc-authn:grpc-example-scope-requirements
+    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+        services.require_scopes(&format!("/example.v1.EchoService/{method}"), &[])?;
+    }
+    // template:end grpc-authn:grpc-example-scope-requirements
+    Ok(())
 }
 
 #[tonic::async_trait]

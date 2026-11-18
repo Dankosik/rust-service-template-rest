@@ -49,6 +49,23 @@ fn an_enabled_profile_carries_its_dsn() {
     };
     let config = admit_with(|v| input.admit(v)).unwrap().unwrap();
     assert_eq!(config.max_connections.get(), 4);
+    assert!(config.notifications);
+}
+
+#[test]
+fn pooled_processes_can_disable_notifications() {
+    let options = LoadOptions::default();
+    let variables = [
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+        ("APP__POSTGRES__NOTIFICATIONS", "false"),
+    ];
+    let service = load_from(&options, BUILD, env(&variables)).unwrap();
+    assert!(!service.postgres.as_ref().unwrap().notifications);
+    // template:begin jobs:worker-postgres-notifications-test
+    let worker = crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
+    assert!(!worker.postgres.as_ref().unwrap().notifications);
+    // template:end jobs:worker-postgres-notifications-test
 }
 
 #[rstest::rstest]
@@ -135,6 +152,7 @@ fn debug_output_redacts_the_dsn() {
         password_file: None,
         session_budgets: PostgresSessionBudgets::Startup,
         max_connections: NonZeroU32::MIN,
+        notifications: true,
     };
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
@@ -279,17 +297,24 @@ fn migration_ignores_only_the_replica_identity_within_app() {
         config: Some(write(
             &dir,
             "replica.toml",
-            "[app]\nenv = 'production'\ninstance_id = 27\n",
+            "[app]\nenv = 'local'\nallow_insecure_development = true\ninstance_id = 27\n",
         )),
         ..LoadOptions::default()
     };
     let migration = load_migration_from(&options, BUILD, env(&enabled)).unwrap();
-    assert_eq!(migration.app().env, "production");
+    assert_eq!(migration.app().env, "local");
+    assert!(migration.app().is_local_development());
     assert!(migration.app().instance_id.is_none());
     let service = load_from(&options, BUILD, env(&enabled)).unwrap_err();
     assert_matches!(service, Error::Deserialize(_), "{service}");
 
-    for key in ["env", "version", "commit", "instance_id_typo"] {
+    for key in [
+        "env",
+        "allow_insecure_development",
+        "version",
+        "commit",
+        "instance_id_typo",
+    ] {
         let options = LoadOptions {
             config: Some(write(
                 &dir,

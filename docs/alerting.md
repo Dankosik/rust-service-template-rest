@@ -324,6 +324,9 @@ of them. Raise the pool only within the database's connection budget.
 ### JobsQueueBacklog
 
 The oldest available job of a kind has waited over five minutes for a worker.
+For a pending job, the wait starts when the job becomes due. For an abandoned
+running job, it starts when the lease expires. Inspect the state and the last
+worker that claimed the job to distinguish new work from stalled recovery.
 Work for that kind is late. Check that workers run and claim
 (`jobs_attempts_total` rate, `jobs_worker_operation_failures_total`), then
 whether attempts of that kind got slower (`jobs_attempt_duration_seconds`).
@@ -351,6 +354,9 @@ For `webhooks.deliver`, start with the job ID and error in the worker's
 `job_failed` log. A payload decoding failure can exhaust the job before the
 dispatcher runs. When the dispatcher reports `webhook_delivery_finished` for
 that attempt, its endpoint and reason can help identify a retired receiver.
+Contact the partner outside the webhook channel on `endpoint_gone`, repeated
+5xx responses or `retry_after_exceeds_max_delay`. Reconcile the delivery ID
+with the receiver before redrive.
 See [Outbound webhook delivery](decisions/outbound-http-decisions.md#outbound-webhook-delivery).
 <!-- template:end webhooks:docs-alerting-webhook-delivery -->
 
@@ -416,6 +422,15 @@ to read an exact DLQ record without changing the broker. Redrive and
 retirement are available through the recovery controller for its own
 isolated broker sessions. Use your deployment's recovery procedure for
 other brokers.
+
+Before a redrive, identify every durable subscription matching the original
+subject. Redrive publishes a new stream record with the original logical
+`Message-Id`. A subscriber that already acknowledged the event can receive
+it again. For each subscriber with a side effect, verify that repeating the
+operation is safe or that its idempotency record still covers this event.
+Set the maximum redrive age within those protection windows. If any window
+has expired or cannot be verified, reconcile the effects already applied or
+repair the failed subscriber directly before considering a shared redrive.
 
 If the DLQ was sealed during delivery, the worker stops with the source
 sequence still unacknowledged. Provision a writable DLQ and follow the

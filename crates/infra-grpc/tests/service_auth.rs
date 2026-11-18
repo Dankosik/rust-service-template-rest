@@ -300,10 +300,19 @@ fn a_handler_requiring_a_caller_reports_a_missing_identity_as_internal() {
 async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let keys = Keys::new();
     let echo = Echo::default();
-    let (server, address) = serve(
-        echo_services(&echo),
-        Authentication::ServiceTokens(keys.verifier()),
-    );
+    #[allow(
+        unused_mut,
+        reason = "the bearer profile adds explicit empty scope rules"
+    )]
+    let mut services = echo_services(&echo);
+    // template:begin authn:grpc-service-auth-test-empty-scope-rules
+    for method in ["Unary", "ServerStream"] {
+        services
+            .require_scopes(&format!("{ECHO}/{method}"), &[])
+            .unwrap();
+    }
+    // template:end authn:grpc-service-auth-test-empty-scope-rules
+    let (server, address) = serve(services, Authentication::ServiceTokens(keys.verifier()));
 
     let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
     let admitted = client(address)
@@ -494,19 +503,25 @@ async fn service_token_authentication_requires_a_tls_listener() {
 
 // template:begin authn:grpc-service-auth-test-scopes-refused
 #[tokio::test]
-async fn a_scope_requirement_cannot_be_dropped_for_service_tokens() {
-    let mut services = echo_services(&Echo::default());
-    services
-        .require_scopes(&format!("{ECHO}/Unary"), &["echo.read"])
-        .unwrap();
+async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
+    let keys = Keys::new();
     let readiness = readiness();
-    let refused = infra_grpc::router(
-        services,
-        readiness.reader(),
-        Authentication::ServiceTokens(Keys::new().verifier()),
-        limits(),
-    );
-    assert_eq!(refused.err(), Some(Error::ScopesWithServiceTokens));
+    let path = format!("{ECHO}/Unary");
+    for delegate in [false, true] {
+        let mut services = echo_services(&Echo::default());
+        if delegate {
+            services.require_scopes_for_delegation(&path, &[]).unwrap();
+        } else {
+            services.require_scopes(&path, &["echo.read"]).unwrap();
+        }
+        let refused = infra_grpc::router(
+            services,
+            readiness.reader(),
+            Authentication::ServiceTokens(keys.verifier()),
+            limits(),
+        );
+        assert_eq!(refused.unwrap_err(), Error::ScopesWithServiceTokens);
+    }
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
 

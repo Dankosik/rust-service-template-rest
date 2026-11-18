@@ -59,9 +59,8 @@ impl JobId {
 }
 
 pub(crate) struct Attempt {
-    pub(crate) job_id: JobId,
+    pub(crate) fence: crate::attempt::ClaimFence,
     pub(crate) number: u16,
-    pub(crate) generation: i64,
     #[expect(
         clippy::struct_field_names,
         reason = "the name contrasts with the supervisor deadline every caller compares it to"
@@ -81,7 +80,7 @@ pub type TransactionalJob<K> = Job<K, ()>;
 impl<K: JobKind, P> Job<K, P> {
     #[must_use]
     pub const fn id(&self) -> JobId {
-        self.attempt.job_id
+        self.attempt.fence.job_id
     }
 
     #[must_use]
@@ -124,7 +123,7 @@ impl<K: JobKind, P> fmt::Debug for Job<K, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
-            .field("id", &self.attempt.job_id)
+            .field("id", &self.attempt.fence.job_id)
             .field("kind", &K::NAME)
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
@@ -309,10 +308,7 @@ impl KindsBuilder {
                     payload,
                     pool: (),
                 };
-                let fence = crate::attempt::ClaimFence {
-                    job_id: job.id(),
-                    generation: job.attempt.generation,
-                };
+                let fence = job.attempt.fence;
                 infra_postgres::in_tx_with_acquire_deadline(
                     &pool,
                     job.deadline(),
@@ -748,9 +744,12 @@ mod tests {
         let token = CancellationToken::new();
         let future = (registered.dispatch)(
             Attempt {
-                job_id: id,
+                fence: crate::attempt::ClaimFence {
+                    job_id: id,
+                    generation: 99,
+                    token: uuid::Uuid::nil(),
+                },
                 number: 3,
-                generation: 99,
                 attempt_deadline: deadline,
                 cancellation: token,
             },
@@ -764,9 +763,12 @@ mod tests {
 
         let err = (registered.dispatch)(
             Attempt {
-                job_id: id,
+                fence: crate::attempt::ClaimFence {
+                    job_id: id,
+                    generation: 99,
+                    token: uuid::Uuid::nil(),
+                },
                 number: 1,
-                generation: 99,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
             },
@@ -780,9 +782,12 @@ mod tests {
     async fn job_debug_omits_payload() {
         let job = Job {
             attempt: Attempt {
-                job_id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
+                fence: crate::attempt::ClaimFence {
+                    job_id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
+                    generation: 99,
+                    token: uuid::Uuid::nil(),
+                },
                 number: 4,
-                generation: 99,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
             },

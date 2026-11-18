@@ -9,7 +9,7 @@ use crate::{
     EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError, PreparationPhase,
     PreparationReason, ProviderFailure, Verifier,
     claims::ClaimPolicy,
-    jwks::{KEY_REJECTIONS_METRIC, fetch_key_set},
+    jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure},
     provider::{Document, ProviderClient},
     refresh::{KeyStore, run_refresh_worker},
 };
@@ -59,21 +59,24 @@ async fn prepare_with_provider(
     };
     let claim_policy =
         complete_startup_stage(startup_deadline, PreparationPhase::Options, claim_policy)?;
-    let jwks_uri = if let Some(jwks_uri) = options.jwks_uri {
-        jwks_uri
-    } else {
-        let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await;
-        complete_startup_stage(startup_deadline, PreparationPhase::Discovery, uri)?
+    let source = match options.jwks_uri {
+        Some(uri) => JwksSource::Configured(uri),
+        None => JwksSource::Discovery(options.issuer),
     };
-    let key_set = fetch_key_set(
-        &provider,
-        &jwks_uri,
-        &options.algorithms,
-        Some(startup_deadline),
-    )
-    .await
-    .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()));
-    let key_set = complete_startup_stage(startup_deadline, PreparationPhase::Jwks, key_set)?;
+    let key_set = source
+        .fetch(&provider, &options.algorithms, startup_deadline)
+        .await
+        .and_then(|keys| {
+            (!keys.is_empty())
+                .then_some(keys)
+                .ok_or(KeySetFailure::NoUsableKeys)
+        })
+        .map_err(PreparationError::from);
+    let phase = key_set
+        .as_ref()
+        .err()
+        .map_or(PreparationPhase::Jwks, PreparationError::phase);
+    let key_set = complete_startup_stage(startup_deadline, phase, key_set)?;
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
@@ -85,7 +88,7 @@ async fn prepare_with_provider(
     let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
         key_store,
         provider,
-        jwks_uri,
+        source,
         options.algorithms,
         cancel,
         options.jwks_max_age,
@@ -124,7 +127,7 @@ impl PreparationError {
     }
 }
 
-async fn discover_jwks_uri(
+pub(crate) async fn discover_jwks_uri(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
@@ -196,6 +199,7 @@ mod tests {
     use hyper::{body::Incoming, server::conn::http1, service::service_fn};
     use hyper_util::rt::TokioIo;
     use jsonwebtoken::Algorithm;
+    use tokio::sync::watch;
 
     use super::{Document, JwtAlgorithm, TokenProfile};
     use crate::{
@@ -245,7 +249,7 @@ mod tests {
         acceptor: tokio_rustls::TlsAcceptor,
         port: String,
         routes: Arc<[MetadataRoute]>,
-        requested: Arc<std::sync::Mutex<Vec<String>>>,
+        requested: watch::Sender<Vec<String>>,
     ) {
         let Ok(stream) = acceptor.accept(stream).await else {
             return;
@@ -253,7 +257,7 @@ mod tests {
         let service = service_fn(move |request: Request<Incoming>| {
             let port = port.clone();
             let routes = Arc::clone(&routes);
-            let requested = Arc::clone(&requested);
+            let requested = requested.clone();
             async move {
                 let target = request
                     .uri()
@@ -263,11 +267,20 @@ mod tests {
                     .to_owned();
                 let body = request.into_body().collect().await?.to_bytes();
                 assert!(body.is_empty());
-                let (status, body) = routes.iter().find(|(route, ..)| *route == target).map_or(
+                let mut route = None;
+                requested.send_modify(|paths| {
+                    let seen = paths.iter().filter(|path| path.as_str() == target).count();
+                    route = routes
+                        .iter()
+                        .filter(|(path, ..)| *path == target)
+                        .take(seen + 1)
+                        .last();
+                    paths.push(target);
+                });
+                let (status, body) = route.map_or(
                     (StatusCode::NOT_FOUND, Bytes::new()),
                     |(_, status, body)| (*status, Bytes::from(body.replace("PORT", &port))),
                 );
-                requested.lock().unwrap().push(target);
                 Ok::<_, hyper::Error>(
                     Response::builder()
                         .status(status)
@@ -283,32 +296,25 @@ mod tests {
 
     async fn metadata_server(
         routes: Vec<MetadataRoute>,
-    ) -> (
-        std::net::SocketAddr,
-        Vec<u8>,
-        Arc<std::sync::Mutex<Vec<String>>>,
-    ) {
+    ) -> (std::net::SocketAddr, Vec<u8>, watch::Receiver<Vec<String>>) {
         let (acceptor, root) = crate::provider::fixture_acceptor(FIXTURE_HOST);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let port = address.port().to_string();
         let routes: Arc<[MetadataRoute]> = Arc::from(routes);
-        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
-        tokio::spawn({
-            let requested = Arc::clone(&requested);
-            async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    tokio::spawn(serve_metadata_connection(
-                        stream,
-                        acceptor.clone(),
-                        port.clone(),
-                        Arc::clone(&routes),
-                        Arc::clone(&requested),
-                    ));
-                }
+        let (requested, requests) = watch::channel(Vec::new());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve_metadata_connection(
+                    stream,
+                    acceptor.clone(),
+                    port.clone(),
+                    Arc::clone(&routes),
+                    requested.clone(),
+                ));
             }
         });
-        (address, root, requested)
+        (address, root, requests)
     }
 
     async fn prepare(
@@ -322,7 +328,7 @@ mod tests {
             issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
             audiences: vec!["api".to_owned()],
             token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
+            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
             jwks_max_age: Duration::from_hours(1),
             jwks_uri: jwks_uri
                 .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
@@ -381,15 +387,16 @@ mod tests {
         .await;
         let _prepared = prepare(address, &root, None).await.unwrap();
         assert_eq!(
-            std::mem::take(&mut *requested.lock().unwrap()),
+            *requested.borrow(),
             [
                 "/tenant/.well-known/openid-configuration",
                 "/.well-known/oauth-authorization-server/tenant",
                 "/keys"
             ]
         );
+        let before_explicit = requested.borrow().len();
         let _prepared = prepare(address, &root, Some("/keys")).await.unwrap();
-        assert_eq!(*requested.lock().unwrap(), ["/keys"]);
+        assert_eq!(&requested.borrow()[before_explicit..], ["/keys"]);
     }
 
     #[tokio::test]
@@ -402,7 +409,189 @@ mod tests {
             error.reason(),
             PreparationReason::Fetch(ProviderFailure::Status(404))
         );
-        assert_eq!(requested.lock().unwrap().len(), 2);
+        assert_eq!(requested.borrow().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_empty_jwks_cannot_start_a_verifier() {
+        use crate::{PreparationPhase, PreparationReason};
+
+        let (address, root, _) =
+            metadata_server(vec![("/keys", StatusCode::OK, r#"{"keys":[]}"#.to_owned())]).await;
+        let error = prepare(address, &root, Some("/keys")).await.err().unwrap();
+        assert_eq!(error.phase(), PreparationPhase::Jwks);
+        assert_eq!(error.reason(), PreparationReason::NoUsableKeys);
+    }
+
+    #[tokio::test]
+    async fn periodic_discovery_moves_trust_while_the_previous_endpoint_still_serves_keys() {
+        use crate::{Failure, jwks::tests::ec_signing, refresh::REFRESH_INTERVAL};
+        use jsonwebtoken::{Algorithm::ES256, Header, encode};
+
+        ensure_crypto_provider();
+        let old = ec_signing();
+        let new = ec_signing();
+        let document =
+            |key| serde_json::json!({"keys": [jwk(key, ES256, Some("key"), true)]}).to_string();
+        let metadata = |issuer_path, path| {
+            serde_json::json!({
+                "issuer": format!("https://{FIXTURE_HOST}:PORT/{issuer_path}"),
+                "jwks_uri": format!("https://{FIXTURE_HOST}:PORT/{path}"),
+            })
+            .to_string()
+        };
+        let discovery = "/tenant/.well-known/openid-configuration";
+        let (address, root, mut requests) = metadata_server(vec![
+            (discovery, StatusCode::OK, metadata("tenant", "a")),
+            (discovery, StatusCode::OK, metadata("tenant", "b")),
+            (discovery, StatusCode::OK, metadata("other", "untrusted")),
+            (discovery, StatusCode::OK, metadata("tenant", "b")),
+            ("/a", StatusCode::OK, document(&old)),
+            ("/b", StatusCode::OK, document(&new)),
+            ("/b", StatusCode::SERVICE_UNAVAILABLE, String::new()),
+            ("/untrusted", StatusCode::OK, document(&old)),
+        ])
+        .await;
+        let (verifier, mut worker) = prepare(address, &root, None).await.unwrap();
+        let signed = |key| {
+            let mut header = Header::new(ES256);
+            header.kid = Some("key".to_owned());
+            let claims = serde_json::json!({
+                "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
+                "aud": "api", "sub": "subject", "exp": u64::MAX
+            });
+            format!("Bearer {}", encode(&header, &claims, key).unwrap())
+        };
+        let old = signed(&old);
+        let new = signed(&new);
+        let old = crate::parse_bearer([old.as_bytes()]).unwrap();
+        let new = crate::parse_bearer([new.as_bytes()]).unwrap();
+        verifier.verify(&old).await.unwrap();
+
+        tokio::time::pause();
+        assert!(futures_util::poll!(worker.as_mut()).is_pending());
+        tokio::time::advance(REFRESH_INTERVAL).await;
+        assert!(futures_util::poll!(worker.as_mut()).is_pending());
+        tokio::time::resume();
+        let task = tokio::spawn(worker);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            requests.wait_for(|paths| paths.iter().any(|path| path == "/b")),
+        )
+        .await
+        .expect("periodic discovery requests B without a token miss")
+        .unwrap();
+        verifier
+            .verify(&new)
+            .await
+            .expect("the scheduled refresh installs B");
+        assert_eq!(verifier.verify(&old).await.unwrap_err(), Failure::Invalid);
+        for failure in ["issuer mismatch", "unavailable key endpoint"] {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(31)).await;
+            tokio::time::resume();
+            assert_eq!(
+                verifier.verify(&old).await.unwrap_err(),
+                Failure::Invalid,
+                "{failure}"
+            );
+            verifier.verify(&new).await.unwrap();
+        }
+        assert_eq!(
+            *requests.borrow(),
+            [discovery, "/a", discovery, "/b", discovery, discovery, "/b"]
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(3600 - 50)).await;
+        tokio::time::resume();
+        assert_eq!(
+            verifier.verify(&new).await.unwrap_err(),
+            Failure::Unavailable
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn withdrawing_all_signing_keys_revokes_cached_and_unseen_tokens_until_keys_return() {
+        use crate::Failure;
+        use crate::jwks::tests::ec_signing;
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        ensure_crypto_provider();
+        let signing = ec_signing();
+        let replacement_signing = ec_signing();
+        let mut encryption = jwk(&ec_signing(), Algorithm::ES256, Some("encryption"), false);
+        encryption["use"] = "enc".into();
+        let key_document = |kid, signer: &EncodingKey| {
+            let mut key = jwk(signer, Algorithm::ES256, Some(kid), true);
+            key["use"] = "sig".into();
+            serde_json::json!({ "keys": [key, &encryption] }).to_string()
+        };
+        for withdrawn in [
+            serde_json::json!({"keys": []}),
+            serde_json::json!({"keys": [&encryption]}),
+        ] {
+            let (address, root, requested) = metadata_server(
+                [
+                    key_document("old", &signing),
+                    r#"{"keys":false}"#.to_owned(),
+                    r#"{"keys":[{}]}"#.to_owned(),
+                    withdrawn.to_string(),
+                    key_document("new", &replacement_signing),
+                ]
+                .into_iter()
+                .map(|body| ("/keys", StatusCode::OK, body))
+                .collect(),
+            )
+            .await;
+            let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let worker = tokio::spawn(worker);
+            let authorization = |signer: &EncodingKey, kid: &str, subject: &str| {
+                let mut header = Header::new(Algorithm::ES256);
+                header.kid = Some(kid.to_owned());
+                let claims = serde_json::json!({
+                    "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
+                    "aud": "api", "sub": subject,
+                    "exp": jsonwebtoken::get_current_timestamp() + 600,
+                });
+                format!("Bearer {}", encode(&header, &claims, signer).unwrap())
+            };
+            let cached = authorization(&signing, "old", "cached");
+            let unseen = authorization(&signing, "old", "unseen");
+            let replacement = authorization(&replacement_signing, "new", "replacement");
+            let cached = crate::parse_bearer([cached.as_bytes()]).unwrap();
+            let unseen = crate::parse_bearer([unseen.as_bytes()]).unwrap();
+            let replacement = crate::parse_bearer([replacement.as_bytes()]).unwrap();
+            verifier.verify(&cached).await.unwrap();
+
+            let refresh = || async {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::resume();
+                verifier.verify(&replacement).await
+            };
+            for response in ["malformed JWKS", "nonempty JWKS without usable keys"] {
+                assert_eq!(refresh().await.unwrap_err(), Failure::Invalid, "{response}");
+                let retained = authorization(&signing, "old", response);
+                let retained = crate::parse_bearer([retained.as_bytes()]).unwrap();
+                assert_eq!(
+                    verifier.verify(&retained).await.unwrap().subject(),
+                    Some(response)
+                );
+            }
+
+            assert_eq!(refresh().await.unwrap_err(), Failure::Invalid);
+            for token in [&cached, &unseen] {
+                assert_eq!(verifier.verify(token).await.unwrap_err(), Failure::Invalid);
+            }
+            assert_eq!(refresh().await.unwrap().subject(), Some("replacement"));
+            assert_eq!(
+                verifier.verify(&cached).await.unwrap_err(),
+                Failure::Invalid
+            );
+            assert_eq!(*requested.borrow(), ["/keys"; 5]);
+            worker.abort();
+        }
     }
 
     #[tokio::test]
@@ -505,7 +694,7 @@ mod tests {
             assert_eq!(error.phase(), PreparationPhase::Discovery);
             assert_eq!(error.reason(), expected);
             assert_eq!(
-                *requested.lock().unwrap(),
+                *requested.borrow(),
                 [
                     "/tenant/.well-known/openid-configuration",
                     "/.well-known/oauth-authorization-server/tenant"
