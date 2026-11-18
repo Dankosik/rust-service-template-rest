@@ -596,7 +596,11 @@ mod tests {
         let released_before_close = CancellationToken::new();
         let (release, held) = mpsc::channel();
         let held = Arc::new(Mutex::new(held));
-        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let mut dependencies = Dependencies::default();
+        let pool = dependencies
+            .postgres
+            .insert(PgPool::connect_lazy("postgres://localhost/unused").unwrap())
+            .clone();
         let handler = {
             let entered = entered.clone();
             let dropping = dropping.clone();
@@ -651,10 +655,7 @@ mod tests {
                 ..Serving::default()
             },
             background: Background::new(CancellationToken::new()),
-            dependencies: Dependencies {
-                postgres: Some(pool.clone()),
-                ..Dependencies::default()
-            },
+            dependencies,
             tracer_provider: None,
             logger: None,
         });
