@@ -518,6 +518,7 @@
       "crates/infra-grpc/tests/service_auth.rs",
       "crates/infra-outbound-grpc/src/service_auth.rs",
       "crates/service/src/bootstrap/service_auth.rs",
+      "crates/service/examples/service_auth_rotation.rs",
       "docs/decisions/service-authentication-decisions.md"
     ]
   }

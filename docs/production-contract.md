@@ -176,6 +176,100 @@ distinguish tokens usable at this resource. If positive caching is enabled,
 record the revocation delay the service accepts.
 <!-- template:end oidc-introspection:production-introspection-issuer-contract -->
 
+<!-- template:begin outbound-auth:production-keycloak-registration -->
+### Registering an outbound OAuth client with Keycloak
+
+Start with the HTTPS realm issuer supplied by the identity administrator. At
+provisioning, qualify the exact issuer and token endpoint that will be passed
+to the synchronous registration callback. The check requires only those URLs.
+
+```sh
+cargo run --locked -p infra-oauth2-client-credentials --example keycloak_preflight -- "$ISSUER" "$TOKEN_ENDPOINT"
+```
+
+Install the checked pair as `assertion_audience` and `token_url` after a
+successful exit. Repeat on changes to either value. An integration with async
+setup can instead call `Registration::prepare_keycloak(options).await` to run
+the same check before it creates a registration. Discovery must return the
+configured issuer exactly and the configured HTTPS token endpoint. The
+endpoint can have a different host from the issuer. On failure, correct the
+configuration or restore connectivity before installing it. Keep the current
+registration during a planned replacement until the new one passes. The
+resource origin and recipient scope are configured separately for each
+downstream service.
+[Keycloak OIDC endpoints](https://www.keycloak.org/securing-apps/oidc-layers)
+<!-- template:end outbound-auth:production-keycloak-registration -->
+
+<!-- template:begin service-auth:production-service-key-rotation -->
+### Rotating a caller's gRPC signing key
+
+Name the caller, every receiver that trusts it, and the TLS address of every
+serving replica, including old deployments still draining. Record the accepted
+time to revoke new calls and who can take a stale replica out of service.
+Keep private keys in their secret store. Use distinct key material and
+`kid` values for the old and replacement keys.
+
+1. For a planned rotation, publish both public keys under the caller's existing
+   issuer. Roll the receivers and confirm that each replica accepts a
+   correctly signed call using either key for the same authorized method.
+2. Switch the caller's signing key and `kid` together. Confirm every signer
+   has switched and the new key works on every receiver. Allow outstanding
+   old tokens to pass their latest expiry plus the receiver's clock allowance.
+   Then remove the old public key, roll the receivers again and confirm that
+   only the replacement key grants new calls.
+3. For emergency withdrawal, disable the old signer and remove its public key
+   from the authoritative trust registry immediately. Start the revocation
+   clock when withdrawal is ordered, before distributing the change. Roll
+   receivers from the revised registry and retire every old process. A replica
+   that has loaded the previous registry can still accept fresh signatures.
+   Isolate any replica that cannot be replaced within the service's budget.
+   Preserve the revoked key's exclusion across rollback.
+4. Rehearse with controlled keys. Address each replica directly, including any
+   old instance that can still serve during rollout. Count a replica as revoked
+   when it rejects a still-valid token under the withdrawn key with
+   `UNAUTHENTICATED` and accepts the same call under the replacement key.
+   Record both observations, replica identity, and elapsed monotonic time.
+   A timeout, connection failure or drained instance alone cannot establish
+   that the replacement enforces the new registry. Stop the fleet clock after
+   the last pair of observations and the retirement of all old processes.
+
+The result bounds admission of new RPCs. Already admitted streams have their
+own lifetime and drain policy. Record the deployment's measured result and
+accepted budget together, including configuration propagation, rollout overlap
+and draining.
+
+From the repository root, run the drill against three independent TLS receivers.
+
+```sh
+cargo run --release --locked --manifest-path crates/service/Cargo.toml --example service_auth_rotation
+```
+
+The receivers use loopback TLS and ephemeral signing keys. The drill verifies
+old-token reuse, overlap, caller cutover and retirement. Its sole synthetic caller accounts
+for every in-flight RPC. In the separate emergency trial the standby key is
+already trusted. The clock starts before launching the first replacement and
+ends after the final sweep of all three. The receipt gives cumulative upper
+bounds for each replica and the fleet. Repeat on the deployment platform to
+include secret distribution, scheduling and traffic cutover in its budget.
+
+On 2026-11-18, all three release-build trials on macOS arm64 passed the
+planned rotation. In each emergency trial a stale process still accepted a
+fresh old-key token while its replacement rejected those same bytes. Every
+replacement also accepted the new key. Observed time since withdrawal, rounded
+up to the next millisecond:
+
+| Trial | Replica 1 | Replica 2 | Replica 3 | Final fleet confirmation |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 542 ms | 1,081 ms | 1,620 ms | 1,621 ms |
+| 2 | 682 ms | 1,399 ms | 1,967 ms | 1,970 ms |
+| 3 | 537 ms | 1,075 ms | 1,624 ms | 1,626 ms |
+
+The local rollout replaced one receiver at a time with a prebuilt Rust 1.100.0
+binary, one runtime worker per receiver, a 300 ms readiness propagation delay
+and unary probe traffic only. Input changes were passed directly to child
+processes. A production revocation budget remains a service-owned decision.
+<!-- template:end service-auth:production-service-key-rotation -->
+
 ## Operation and recovery
 
 - SLI, SLO, and alert thresholds: Unresolved for service-specific routes and

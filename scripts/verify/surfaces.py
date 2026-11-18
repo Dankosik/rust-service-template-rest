@@ -582,7 +582,7 @@ def classify_report(
             # template:end grpc:classifier-grpc-initializer
 
             # template:begin service-auth:classifier-service-auth-initializer
-            if _matches(file, "crates/infra-serviceauth/*"):
+            if _matches(file, "crates/infra-serviceauth/*", "crates/service/examples/service_auth_rotation.rs"):
                 mark("module_initializer", "initializer_runtime")
             # template:end service-auth:classifier-service-auth-initializer
 

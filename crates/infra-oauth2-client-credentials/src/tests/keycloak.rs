@@ -14,7 +14,7 @@ use super::{
     AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
     exchange_target, service_target, token_context,
 };
-use crate::{Registration, ServiceTokenTarget, ServiceTokens, options::Admitted, token::Token};
+use crate::{Registration, ServiceTokenTarget, ServiceTokens, token::Token};
 
 const KEY_ID: &str = "key-1";
 const CATALOG: &str = "catalog";
@@ -224,10 +224,10 @@ impl Realm {
             "optionalClientScopes": [CATALOG_SCOPE, BILLING_SCOPE],
         }))
         .await;
-        self.registration(algorithm, key)
+        self.registration(algorithm, key).await
     }
 
-    fn registration(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
+    async fn registration(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
         let endpoint = self.token_endpoint(&self.name);
         let options = Options {
             token_url: endpoint.to_string(),
@@ -238,12 +238,9 @@ impl Realm {
             assertion_audience: self.issuer(),
             provider_concurrency: 32,
         };
-        let admitted = Admitted::try_new_for_test(options, endpoint).unwrap();
-        Registration::build(
-            admitted,
-            Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
-        )
-        .unwrap()
+        Registration::prepare_keycloak_for_test_http(options)
+            .await
+            .unwrap()
     }
 
     fn service_tokens(
@@ -424,7 +421,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let key = key_pair(algorithm);
     let registered = realm.caller(algorithm, &key).await;
 
-    let stranger = realm.registration(algorithm, &key_pair(algorithm));
+    let stranger = realm.registration(algorithm, &key_pair(algorithm)).await;
     assert_eq!(
         realm
             .service_tokens(&stranger, ServiceTokenTarget::default(), CATALOG)
