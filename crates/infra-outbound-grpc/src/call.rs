@@ -620,8 +620,12 @@ mod tests {
             .extensions_mut()
             .insert(tonic::GrpcMethod::new("test.v1.StreamService", "Watch"));
         let destination =
-            crate::observe::Destination::new(&"http://127.0.0.1:50051".parse().unwrap());
-        Call::start(crate::observe::Series::client(), &request, &destination)
+            crate::observe::Destination::from_uri(&"http://127.0.0.1:50051".parse().unwrap());
+        Call::start(
+            crate::observe::Series::client(),
+            &request,
+            destination.as_ref(),
+        )
     }
 
     #[test]

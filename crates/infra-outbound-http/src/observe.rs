@@ -39,15 +39,18 @@ pub struct UrlTemplate(pub &'static str);
 #[derive(Clone, Debug)]
 pub(crate) struct Server {
     address: SharedString,
+    port: u16,
     port_label: SharedString,
 }
 
 impl Server {
     pub(crate) fn new(origin: &Origin) -> Self {
-        let mut port = fmt::NumBuffer::new();
+        let port = origin.port();
+        let mut buffer = fmt::NumBuffer::new();
         Self {
             address: SharedString::from(origin.host_arc()),
-            port_label: SharedString::from(Arc::<str>::from(origin.port().format_into(&mut port))),
+            port,
+            port_label: SharedString::from(Arc::<str>::from(port.format_into(&mut buffer))),
         }
     }
 }
@@ -94,7 +97,6 @@ impl Attempt {
         method: &Method,
         template: Option<UrlTemplate>,
         server: &Server,
-        port: u16,
         stops: &'a RequestContext,
     ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
@@ -106,7 +108,7 @@ impl Attempt {
             http.request.method = method,
             url.template = template,
             server.address = &*server.address,
-            server.port = port,
+            server.port = server.port,
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             outbound.outcome = tracing::field::Empty,

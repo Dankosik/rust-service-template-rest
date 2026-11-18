@@ -224,7 +224,11 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
-    let headers = parse_headers(TYPED_HEADERS, "authorization=Basic%20x, x-tenant = t1 ,").unwrap();
+    let headers = parse_headers(Setting {
+        name: TYPED_HEADERS,
+        raw: OsStr::new("authorization=Basic%20x, x-tenant = t1 ,"),
+    })
+    .unwrap();
     assert_eq!(
         headers.get("authorization").map(String::as_str),
         Some("Basic%20x")
@@ -246,7 +250,11 @@ fn malformed_header_entries_fail_by_position() {
         ("auth=private%+A", 1),
         ("auth=private%00", 1),
     ] {
-        let err = parse_headers(TYPED_HEADERS, raw).unwrap_err();
+        let err = parse_headers(Setting {
+            name: TYPED_HEADERS,
+            raw: OsStr::new(raw),
+        })
+        .unwrap_err();
         std::assert_matches!(err, TracingError::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );

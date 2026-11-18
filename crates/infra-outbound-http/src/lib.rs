@@ -310,13 +310,8 @@ impl PreparedRequest<'_> {
             .map_err(Error::from)
             .map_err(ExchangeError::BeforeResponse)?;
         let template = request.extensions_mut().remove::<UrlTemplate>();
-        let mut attempt = observe::Attempt::start(
-            request.method(),
-            template,
-            &client.server,
-            client.origin.port(),
-            &stops,
-        );
+        let mut attempt =
+            observe::Attempt::start(request.method(), template, &client.server, &stops);
         if client.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }

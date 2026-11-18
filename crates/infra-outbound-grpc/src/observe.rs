@@ -27,25 +27,25 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SE
 static DESCRIBE: Once = Once::new();
 static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Destination {
-    address: Option<Arc<str>>,
+    address: Arc<str>,
     port: Option<u16>,
 }
 
 impl Destination {
-    pub(crate) fn new(uri: &http::Uri) -> Self {
-        let address: Option<Arc<str>> = uri
+    pub(crate) fn from_uri(uri: &http::Uri) -> Option<Self> {
+        let host = uri
             .host()
-            .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)
-            .map(|host| {
-                host.strip_prefix('[')
-                    .and_then(|inner| inner.strip_suffix(']'))
-                    .unwrap_or(host)
-                    .into()
-            });
-        let port = address.as_ref().and_then(|_| uri.port_u16());
-        Self { address, port }
+            .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)?;
+        let address = host
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(host);
+        Some(Self {
+            address: Arc::from(address),
+            port: uri.port_u16(),
+        })
     }
 }
 
@@ -60,7 +60,7 @@ impl Call {
     pub(crate) fn start<B>(
         series: &Series,
         request: &http::Request<B>,
-        destination: &Destination,
+        destination: Option<&Destination>,
     ) -> Self {
         let started = Instant::now();
         let metrics = series.resolve(request);
@@ -110,7 +110,7 @@ impl Drop for Call {
 fn make_client_span<B>(
     request: &http::Request<B>,
     metrics: &MethodMetrics,
-    destination: &Destination,
+    destination: Option<&Destination>,
 ) -> tracing::Span {
     let span = otel_trace_span!(
         "GRPC request",
@@ -127,8 +127,8 @@ fn make_client_span<B>(
             span.set_attribute("rpc.method_original", original.to_owned());
         }
     }
-    if let Some(address) = &destination.address {
-        span.set_attribute("server.address", Arc::clone(address));
+    if let Some(destination) = destination {
+        span.set_attribute("server.address", Arc::clone(&destination.address));
         if let Some(port) = destination.port {
             span.set_attribute("server.port", i64::from(port));
         }
@@ -335,8 +335,8 @@ mod tests {
             "/example.v1.EchoService/Unary",
             Some(("example.v1.EchoService", "Unary")),
         );
-        let destination = Destination::new(&"http://[::1]:50051".parse().unwrap());
-        Call::start(&series, &known, &destination).finish(tonic::Code::Unauthenticated);
+        let destination = Destination::from_uri(&"http://[::1]:50051".parse().unwrap());
+        Call::start(&series, &known, destination.as_ref()).finish(tonic::Code::Unauthenticated);
         drop(guard);
 
         let spans = exporter.get_finished_spans().unwrap();
@@ -367,21 +367,19 @@ mod tests {
 
     #[test]
     fn destination_strips_ipv6_brackets_and_caps_overlong_hosts() {
-        let ipv6 = Destination::new(&"https://[::1]:50051".parse().unwrap());
-        assert_eq!(ipv6.address.as_deref(), Some("::1"));
+        let ipv6 = Destination::from_uri(&"https://[::1]:50051".parse().unwrap()).unwrap();
+        assert_eq!(ipv6.address.as_ref(), "::1");
         assert_eq!(ipv6.port, Some(50051));
 
-        let named = Destination::new(&"https://grpc.example.test".parse().unwrap());
-        assert_eq!(named.address.as_deref(), Some("grpc.example.test"));
+        let named = Destination::from_uri(&"https://grpc.example.test".parse().unwrap()).unwrap();
+        assert_eq!(named.address.as_ref(), "grpc.example.test");
         assert_eq!(named.port, None);
 
         let overlong_uri: http::Uri =
             format!("https://{}.test:50051", "a".repeat(DIAGNOSTIC_BYTES))
                 .parse()
                 .unwrap();
-        let overlong = Destination::new(&overlong_uri);
-        assert!(overlong.address.is_none());
-        assert!(overlong.port.is_none());
+        assert!(Destination::from_uri(&overlong_uri).is_none());
     }
 
     #[test]
@@ -419,7 +417,7 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let series = Series::new();
-        let destination = Destination::new(&"http://127.0.0.1:50051".parse().unwrap());
+        let destination = Destination::from_uri(&"http://127.0.0.1:50051".parse().unwrap());
 
         let overlong: &'static str =
             Box::leak("x".repeat(CLIENT_COMPONENT_LIMIT + 1).into_boxed_str());
@@ -442,7 +440,7 @@ mod tests {
             drop(Call::start(
                 &series,
                 &test_request(&path, declared),
-                &destination,
+                destination.as_ref(),
             ));
         }
 
@@ -453,7 +451,7 @@ mod tests {
                 &format!("/{boundary}/{boundary}"),
                 Some((boundary, boundary)),
             ),
-            &destination,
+            destination.as_ref(),
         )
         .finish(tonic::Code::Ok);
 
@@ -465,7 +463,7 @@ mod tests {
                     &format!("/cap.Service/{method}"),
                     Some(("cap.Service", method)),
                 ),
-                &destination,
+                destination.as_ref(),
             )
             .finish(tonic::Code::Unavailable);
         }
