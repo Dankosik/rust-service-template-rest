@@ -68,9 +68,11 @@ async fn prepare_with_provider(
         .fetch(&provider, &options.algorithms, startup_deadline)
         .await
         .and_then(|keys| {
-            (!keys.is_empty())
-                .then_some(keys)
-                .ok_or(KeySetFailure::NoUsableKeys)
+            if keys.is_empty() {
+                Err(KeySetFailure::NoUsableKeys)
+            } else {
+                Ok(keys)
+            }
         })
         .map_err(PreparationError::from);
     let phase = key_set

@@ -193,7 +193,7 @@ impl JwtVerifier {
         keys.require_fresh(self.jwks_max_age)?;
         if let Some(remembered) = self.remembered.get(bytes) {
             if remembered.key_generation == keys.generation() {
-                let verified = remembered.verified.deliver(now()?);
+                let verified = remembered.verified.into_principal_checked_at(now()?);
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -503,7 +503,7 @@ mod tests {
             ),
             &[JwtAlgorithm::Es256],
         ));
-        verifier.key_store.permit_unknown_refresh_for_test();
+        verifier.key_store.expire_refresh_cooldown_for_test();
         let token = signed(&rotated, Algorithm::ES256, None, &serde_json::json!({}));
         let call = tokio::spawn({
             let verifier = Arc::clone(&verifier);
@@ -536,7 +536,7 @@ mod tests {
         use operation_context::OperationContext;
 
         let engine = verifier(rsa_key_set("old", None), &[JwtAlgorithm::Rs256]);
-        engine.key_store.permit_unknown_refresh_for_test();
+        engine.key_store.expire_refresh_cooldown_for_test();
         let keys = Arc::clone(&engine.key_store);
         let verifier = crate::Verifier::jwt(engine);
         let token = signed(
@@ -568,7 +568,7 @@ mod tests {
     async fn a_signing_key_rotated_under_the_same_kid_is_picked_up_on_demand() {
         let (installed, rotated) = (ec_signing(), ec_signing());
         let verifier = ec_verifier(&installed, "stable");
-        verifier.key_store.permit_unknown_refresh_for_test();
+        verifier.key_store.expire_refresh_cooldown_for_test();
         let token = ec_token(&rotated, "stable", &serde_json::json!({}));
         let mut call = std::pin::pin!(verify_at(&verifier, &token, 1_000));
         assert!(futures_util::poll!(call.as_mut()).is_pending());
@@ -827,7 +827,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unconfigured_algorithm_does_not_wait_for_refresh() {
         let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
-        verifier.key_store.permit_unknown_refresh_for_test();
+        verifier.key_store.expire_refresh_cooldown_for_test();
         let token = signed(
             &rsa_signing(),
             Algorithm::PS256,
@@ -844,7 +844,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_signature_miss_with_claims_that_would_be_refused_asks_for_no_refresh() {
         let verifier = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
-        verifier.key_store.permit_unknown_refresh_for_test();
+        verifier.key_store.expire_refresh_cooldown_for_test();
         for refused in [
             serde_json::json!({"exp": 1}),
             serde_json::json!({"iss": "https://other.example"}),
@@ -865,7 +865,7 @@ mod tests {
             rsa_key_set("fixture", None),
             &[JwtAlgorithm::Rs256],
         ));
-        verifier.key_store.permit_unknown_refresh_for_test();
+        verifier.key_store.expire_refresh_cooldown_for_test();
         let unknown = signed(
             &rsa_signing(),
             Algorithm::RS256,
@@ -1442,7 +1442,7 @@ mod tests {
     fn authentication_metrics_preserve_success_failure_timeout_and_cancellation_labels() {
         let diagnostics = Diagnostics::default();
         let engine = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
-        engine.key_store.permit_unknown_refresh_for_test();
+        engine.key_store.expire_refresh_cooldown_for_test();
         let token = signed(
             &rsa_signing(),
             Algorithm::RS256,
@@ -1824,7 +1824,7 @@ mod tests {
     async fn a_token_verified_after_a_refresh_is_remembered_under_the_refreshed_set() {
         let (installed, rotated) = (ec_signing(), ec_signing());
         let memo = Arc::new(ec_verifier(&installed, "old"));
-        memo.key_store.permit_unknown_refresh_for_test();
+        memo.key_store.expire_refresh_cooldown_for_test();
         let token = ec_token(&rotated, "new", &serde_json::json!({}));
         let call = tokio::spawn({
             let (memo, token) = (Arc::clone(&memo), token.clone());
