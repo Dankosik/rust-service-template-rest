@@ -8,7 +8,7 @@ use bytes::{BufMut as _, BytesMut};
 use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
 use serde::Serialize;
 use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
-use utoipa::{IntoResponses, PartialSchema, ToSchema};
+use utoipa::{IntoResponses, PartialSchema};
 
 use crate::problem::{Code, Problem, http_status};
 
@@ -26,28 +26,10 @@ pub trait ReplaySuccess: IntoResponses {
     fn capture(self) -> Result<ReplayableResponse, ReplayError>;
 }
 
-#[derive(Debug)]
-pub struct CreatedJson<T> {
-    pub body: T,
-    pub headers: HeaderMap,
-}
-
-impl<T: ToSchema> IntoResponses for CreatedJson<T> {
-    fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
-        created_response(JSON, T::schema())
-    }
-}
-
-impl<T: ToSchema + Serialize> ReplaySuccess for CreatedJson<T> {
-    fn schemas() -> Vec<(String, RefOr<Schema>)> {
-        let mut schemas = Vec::new();
-        T::schemas(&mut schemas);
-        schemas
-    }
-
-    fn capture(self) -> Result<ReplayableResponse, ReplayError> {
-        ReplayableResponse::json(StatusCode::CREATED, self.headers, &self.body)
-    }
+#[doc(hidden)]
+#[must_use]
+pub fn created_json_responses(schema: RefOr<Schema>) -> BTreeMap<String, RefOr<ApiResponse>> {
+    created_response(JSON, schema)
 }
 
 #[derive(Debug)]
@@ -221,11 +203,12 @@ fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
 mod tests {
     use axum::http::HeaderName;
     use http_body_util::BodyExt as _;
+    use utoipa::ToSchema;
 
     use super::*;
 
     #[test]
-    fn created_json_publishes_nested_references_for_objects_and_inline_arrays() {
+    fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
         #[derive(Serialize, ToSchema)]
         struct Address {
             street: String,
@@ -233,35 +216,43 @@ mod tests {
         #[derive(Serialize, ToSchema)]
         struct Customer {
             address: Address,
+            #[schema(no_recursion)]
+            children: Vec<Customer>,
         }
 
-        let document = |responses, schemas: Vec<(String, RefOr<Schema>)>| {
+        crate::created_json_response!(CreatedAddress(Box<Address>));
+        crate::created_json_response!(CreatedCustomer(Box<Customer>));
+        crate::created_json_response!(CreatedCustomers(Vec<Customer>));
+
+        fn document<R: ReplaySuccess>() -> serde_json::Value {
             serde_json::json!({
-                "responses": responses,
-                "components": {"schemas": schemas.into_iter().collect::<BTreeMap<_, _>>()},
+                "responses": R::responses(),
+                "components": {"schemas": R::schemas().into_iter().collect::<BTreeMap<_, _>>()},
             })
-        };
-        let customer = document(
-            CreatedJson::<Customer>::responses(),
-            CreatedJson::<Customer>::schemas(),
+        }
+
+        let root = "/responses/201/content/application~1json/schema";
+        assert_eq!(
+            document::<CreatedAddress>().pointer(root).unwrap()["$ref"],
+            "#/components/schemas/Address"
         );
-        let array = document(
-            CreatedJson::<Vec<Customer>>::responses(),
-            CreatedJson::<Vec<Customer>>::schemas(),
-        );
-        let schema = "/responses/201/content/application~1json/schema";
-        let customer_schema = customer.pointer(schema).unwrap();
-        let boxed_address = CreatedJson::<Box<Address>>::responses();
-        let boxed_customer = CreatedJson::<Box<Customer>>::responses();
-        assert_eq!(boxed_address, CreatedJson::<Address>::responses());
-        assert_eq!(boxed_customer, CreatedJson::<Customer>::responses());
-        let array_schema = &array.pointer(schema).unwrap()["items"];
-        for (document, schema) in [(&customer, customer_schema), (&array, array_schema)] {
-            let address_ref = schema["properties"]["address"]["$ref"].as_str().unwrap();
+        for (doc, path) in [
+            (document::<CreatedCustomer>(), root.to_owned()),
+            (document::<CreatedCustomers>(), format!("{root}/items")),
+        ] {
             assert_eq!(
-                document
-                    .pointer(address_ref.strip_prefix('#').unwrap())
-                    .unwrap()["properties"]["street"]["type"],
+                doc.pointer(&path).unwrap()["$ref"],
+                "#/components/schemas/Customer"
+            );
+            let props = &doc["components"]["schemas"]["Customer"]["properties"];
+            let child = props["children"]["items"]["$ref"].as_str().unwrap();
+            assert_eq!(
+                doc.pointer(child.strip_prefix('#').unwrap()).unwrap(),
+                &doc["components"]["schemas"]["Customer"]
+            );
+            let address = props["address"]["$ref"].as_str().unwrap();
+            assert_eq!(
+                doc.pointer(address.strip_prefix('#').unwrap()).unwrap()["properties"]["street"]["type"],
                 "string"
             );
         }

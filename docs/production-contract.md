@@ -133,6 +133,10 @@ unable to serve, and budget every downstream deadline inside
   Supply the absolute HTTP(S) URI of this policy when registering the operation
   (`idempotent_route!(handler, docs = "...")` or OpenAPI `externalDocs.url`).
   The service checks this at registration and returns that link on key errors.
+  When adopting typed command outcomes, declare a JSON creation response with
+  `created_json_response!(CreatedWidget(Widget))` and use `CreatedWidget` as
+  the command's `Success`. Give utoipa the concrete payload type, including
+  any container such as `Vec<Widget>`, so it can register referenced schemas.
   Before setting `FreshCommand::Terminal` to `TerminalProblem`, apply the
   migrations for stored 409 and 422 responses and deploy readers for those
   responses on every replica. Keep `Terminal = Infallible` on commands that

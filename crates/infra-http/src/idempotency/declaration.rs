@@ -302,8 +302,9 @@ fn supplement_success(
         };
         if let Some(declared) = &supplement.schema {
             let typed = actual.schema.as_ref()?;
-            if crate::contract::resolve_schema(typed, schemas)?
-                != crate::contract::resolve_schema(declared, schemas)?
+            if typed != declared
+                && crate::contract::resolve_schema(typed, schemas)?
+                    != crate::contract::resolve_schema(declared, schemas)?
             {
                 return None;
             }
@@ -776,6 +777,24 @@ mod tests {
         assert_eq!(
             prepare(&mut paths, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 409 conflicts with the idempotency response family"
+        );
+    }
+
+    #[test]
+    fn an_operation_can_describe_the_same_external_success_schema_as_its_command() {
+        let response: RefOr<Response> = serde_json::from_value(serde_json::json!({
+            "description": "created",
+            "content": {"application/json": {"schema": {"$ref": "urn:example:widget"}}}
+        }))
+        .unwrap();
+        let successes = BTreeMap::from([("201".to_owned(), response)]);
+        let mut operation = Operation::default();
+        operation.responses.responses.clone_from(&successes);
+        prepare_success_responses(&mut operation, "create", successes, &BTreeMap::new()).unwrap();
+        let documented = serde_json::to_value(operation.responses.responses).unwrap();
+        assert_eq!(
+            documented["201"]["content"]["application/json"]["schema"]["$ref"],
+            "urn:example:widget"
         );
     }
 

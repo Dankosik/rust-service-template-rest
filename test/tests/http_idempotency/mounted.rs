@@ -23,8 +23,7 @@ use infra_bearerauthn::{
 };
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::idempotency::{
-    CommandInput, CreatedJson, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback,
-    TerminalProblem, Tx,
+    CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalProblem, Tx,
 };
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
@@ -262,8 +261,10 @@ struct CreateWidget {
     handler_timeout: bool,
 }
 
+infra_http::created_json_response!(CreatedWidget(Widget));
+
 impl FreshCommand for CreateWidget {
-    type Success = CreatedJson<Widget>;
+    type Success = CreatedWidget;
     type Terminal = TerminalProblem;
 
     async fn execute(self, tx: &mut Tx<'_>) -> Result<Self::Success, Rollback<Self::Terminal>> {
@@ -279,7 +280,7 @@ impl FreshCommand for CreateWidget {
     }
 }
 
-fn created_response(widget: Widget) -> CreatedJson<Widget> {
+fn created_response(widget: Widget) -> CreatedWidget {
     let location = widget.location();
     let id = widget.id;
     let mut headers = axum::http::HeaderMap::new();
@@ -302,7 +303,7 @@ fn created_response(widget: Widget) -> CreatedJson<Widget> {
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
     headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
-    CreatedJson {
+    CreatedWidget {
         body: widget,
         headers,
     }
@@ -597,11 +598,7 @@ fn widget_contract_declares_protected_json_operations() {
             "#/components/schemas/NewWidget"
         );
         let success = &operation["responses"]["201"]["content"]["application/json"]["schema"];
-        if method == "post" {
-            assert_eq!(success["$ref"], "#/components/schemas/Widget");
-        } else {
-            assert_eq!(success, &document["components"]["schemas"]["Widget"]);
-        }
+        assert_eq!(success["$ref"], "#/components/schemas/Widget");
         assert_eq!(
             operation["responses"]["415"]["content"]["application/problem+json"]["schema"]["$ref"],
             "#/components/schemas/Problem"
