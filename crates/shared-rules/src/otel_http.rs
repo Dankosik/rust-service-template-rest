@@ -23,7 +23,11 @@ static STATUS_CODE_DIGITS: [[u8; 3]; 900] = {
     let decimal = b"0123456789";
     while index < digits.len() {
         let code = 100 + index;
-        digits[index] = [decimal[code / 100], decimal[code / 10 % 10], decimal[code % 10]];
+        digits[index] = [
+            decimal[code / 100],
+            decimal[code / 10 % 10],
+            decimal[code % 10],
+        ];
         index += 1;
     }
     digits
