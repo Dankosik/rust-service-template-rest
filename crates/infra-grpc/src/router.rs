@@ -252,9 +252,9 @@ async fn business_call(
         .remove::<infra_http_transport::ConnectionInfo>();
     // template:begin service-auth:grpc-router-verified-transport
     if matches!(state.authentication, Authentication::ServiceTokens(_))
-        && !connection
+        && connection
             .as_ref()
-            .is_some_and(|info| info.scheme() == "https")
+            .is_none_or(|info| info.scheme() != "https")
     {
         return tonic::Status::unauthenticated("service tokens require TLS").into_http();
     }
