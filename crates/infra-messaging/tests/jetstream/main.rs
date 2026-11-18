@@ -59,6 +59,12 @@ impl EventPayload for UnhandledEvent {
     const SCHEMA_VERSION: u16 = 1;
 }
 
+#[derive(Clone, Copy)]
+enum Topology {
+    StreamsOnly,
+    WithDurable,
+}
+
 struct Fixture {
     jetstream: jetstream::Context,
     stream: String,
@@ -72,23 +78,23 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create(with_consumer: bool) -> Self {
-        Self::create_with_source_limit(with_consumer, 10).await
+    async fn create(topology: Topology) -> Self {
+        Self::create_with_source_limit(topology, 10).await
     }
 
-    async fn create_with_source_limit(with_consumer: bool, max_messages: i64) -> Self {
-        Self::create_with_limits(with_consumer, max_messages, 10).await
+    async fn create_with_source_limit(topology: Topology, max_messages: i64) -> Self {
+        Self::create_with_limits(topology, max_messages, 10).await
     }
 
     async fn create_with_limits(
-        with_consumer: bool,
+        topology: Topology,
         source_max_messages: i64,
         dlq_max_messages: i64,
     ) -> Self {
         let client = async_nats::connect(nats_url())
             .await
             .expect("NATS_URL must point to the JetStream broker selected for this suite");
-        Self::create_with_client(client, with_consumer, source_max_messages, dlq_max_messages).await
+        Self::create_with_client(client, topology, source_max_messages, dlq_max_messages).await
     }
 
     async fn create_with_authenticated_admin(
@@ -109,7 +115,7 @@ impl Fixture {
             .expect("runner-owned authenticated broker accepts admin credentials");
         let fixture = tokio::time::timeout_at(
             deadline,
-            Self::create_with_client(client.clone(), false, 10, 10),
+            Self::create_with_client(client.clone(), Topology::StreamsOnly, 10, 10),
         )
         .await
         .expect("authenticated fixture topology admission stays bounded");
@@ -118,7 +124,7 @@ impl Fixture {
 
     async fn create_with_client(
         client: async_nats::Client,
-        with_consumer: bool,
+        topology: Topology,
         source_max_messages: i64,
         dlq_max_messages: i64,
     ) -> Self {
@@ -158,7 +164,7 @@ impl Fixture {
         let publication = registry
             .declare_publication(&route, 1024)
             .expect("fixture route is valid");
-        if with_consumer {
+        if matches!(topology, Topology::WithDurable) {
             let mut handled = registry.clone();
             handled.register(&route, |_, _| async { Ok(()) }).unwrap();
             created

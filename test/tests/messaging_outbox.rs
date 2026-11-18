@@ -21,7 +21,8 @@ use infra_jobs::{Engine, EnqueueError, Kinds};
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingOptions, Registry, Route,
+    ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingError, MessagingOptions,
+    Registry, Route,
 };
 use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
@@ -154,6 +155,14 @@ impl Fixture {
             dlq_subject,
             duplicate_window,
         }
+    }
+
+    fn connect_producer(&self) -> impl Future<Output = Result<Messaging, MessagingError>> {
+        Box::pin(Messaging::connect(
+            messaging_options(self),
+            Instant::now() + WAIT,
+            CancellationToken::new(),
+        ))
     }
 
     async fn remove_source(&self) {
@@ -482,13 +491,10 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     const REORDERED_JSON: &str = r#"{"status":"active","account_id":"42"}"#;
 
     let fixture = Fixture::create_with_window(false, Duration::from_secs(1)).await;
-    let messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("producer-only messaging admits the provisioned stream");
+    let messaging = fixture
+        .connect_producer()
+        .await
+        .expect("producer-only messaging admits the provisioned stream");
     let business = template_pool(&pool, 3).await;
     sqlx::query("CREATE TABLE business_effects (id text PRIMARY KEY)")
         .execute(&business)
@@ -702,13 +708,7 @@ async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(po
             "second order",
         ),
     ] {
-        let messaging = Box::pin(Messaging::connect(
-            messaging_options(&fixture),
-            Instant::now() + WAIT,
-            CancellationToken::new(),
-        ))
-        .await
-        .unwrap();
+        let messaging = fixture.connect_producer().await.unwrap();
         let workers = template_pool(&pool, 3).await;
         let run = start(
             &workers,
@@ -945,13 +945,10 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
         .execute(&jobs)
         .await
         .expect("ambiguous intent is made due for its same-ID retry");
-    let retry_messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("direct producer reconnects after the relay closes");
+    let retry_messaging = fixture
+        .connect_producer()
+        .await
+        .expect("direct producer reconnects after the relay closes");
     let retry_pool = template_pool(&pool, 3).await;
     let retry_run = start(
         &retry_pool,
@@ -980,13 +977,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
     let fixture = Fixture::create().await;
-    let messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .unwrap();
+    let messaging = fixture.connect_producer().await.unwrap();
     let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap();
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let original = source.cached_info().config.clone();
@@ -1344,13 +1335,10 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .await
         .unwrap();
     let fixture = Fixture::create().await;
-    let messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("producer-only messaging admits the fixture stream");
+    let messaging = fixture
+        .connect_producer()
+        .await
+        .expect("producer-only messaging admits the fixture stream");
     let jobs = template_pool(&pool, 3).await;
     let nested = |depth| format!("{}1.00 {}", "[".repeat(depth), "]".repeat(depth));
     let valid = nested(127);
@@ -1847,13 +1835,10 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     pool: PgPool,
 ) {
     let fixture = Fixture::create().await;
-    let messaging = Box::pin(Messaging::connect(
-        messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("producer-only messaging admits the fixture stream");
+    let messaging = fixture
+        .connect_producer()
+        .await
+        .expect("producer-only messaging admits the fixture stream");
     let shared_pool = template_pool(&pool, 6).await;
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL)")
         .execute(&shared_pool)

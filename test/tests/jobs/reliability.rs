@@ -9,7 +9,7 @@ use integration_tests::reading_counter::{
 };
 use tokio::sync::Notify;
 
-use super::commit_proxy::{CommitProxy, Fault};
+use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 fn operation(index: u128) -> Operation {
     Operation {
@@ -243,7 +243,7 @@ async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgP
             reading::publication(&mut infra_messaging::Registry::default(), reading::SUBJECT)
                 .unwrap();
         let prepared = PreparedRequest::try_new(operation(index), &publication).unwrap();
-        proxy.arm(fault);
+        proxy.arm(fault, Boundary::Commit(None));
         let result = reading::accept(&proxied, &prepared, &outbound, "reading").await;
         assert!(result.unwrap_err().commit_unknown());
         assert_eq!(proxy.fired(), Some(fault));
@@ -269,7 +269,7 @@ async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgP
 
     let (proxy, proxied) = proxied_pool(&pool).await;
     let operation = operation(30);
-    proxy.arm(Fault::ForwardThenDrop);
+    proxy.arm(Fault::ForwardThenDrop, Boundary::Commit(None));
     let effect = reading::apply_effect(&proxied, Channel::Outbox, &operation)
         .await
         .unwrap();

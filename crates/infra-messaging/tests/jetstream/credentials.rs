@@ -215,7 +215,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 async fn an_unusable_credentials_source_refuses_the_connection() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let dir = tempfile::tempdir().expect("temporary directory is created");
 

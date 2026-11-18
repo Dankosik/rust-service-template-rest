@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let mut source = fixture
         .jetstream
         .get_stream(&fixture.stream)
@@ -77,7 +77,7 @@ async fn handler_runs_in_the_trace_of_the_publication() {
     use tracing::Instrument as _;
 
     let exporter = install_tracing();
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -170,7 +170,7 @@ async fn handler_runs_in_the_trace_of_the_publication() {
 #[tokio::test]
 async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed() {
     let exporter = install_tracing();
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let relay = AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, false).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -243,7 +243,7 @@ async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed
 #[tokio::test]
 async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked() {
     let exporter = install_tracing();
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -370,7 +370,7 @@ fn exported_settlement(
 
 #[tokio::test]
 async fn handler_panic_is_retried_like_a_retryable_failure() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -419,7 +419,7 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
 
 #[tokio::test]
 async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
@@ -468,7 +468,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
 
 #[tokio::test]
 async fn aborting_one_consumer_leaves_the_resource_serving() {
-    let fixture = Fixture::create(true).await;
+    let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let startup_deadline = deadline();
     let startup_cancel = CancellationToken::new();
@@ -536,7 +536,7 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
     reason = "one broker scenario proves admission, one-slot refill and drain together"
 )]
 async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the_broker() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let consumer_options = ConsumerOptions {
         concurrency: const { std::num::NonZeroUsize::new(2).expect("2 is nonzero") },

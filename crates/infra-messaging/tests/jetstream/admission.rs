@@ -40,7 +40,7 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
     ];
     for (error_type, configure) in cases {
         for (consumer_mode, dead_letter) in [(false, false), (true, false), (true, true)] {
-            let fixture = Fixture::create(false).await;
+            let fixture = Fixture::create(Topology::StreamsOnly).await;
             let name = if dead_letter {
                 &fixture.dlq_stream
             } else {
@@ -112,7 +112,7 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
 // template:begin outbox:messaging-outbox-topology-tests
 #[tokio::test]
 async fn outbox_refuses_route_changing_subject_transforms() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let swapped = fixture
         .subject
@@ -195,7 +195,7 @@ async fn outbox_refuses_route_changing_subject_transforms() {
 
 #[tokio::test]
 async fn outbox_refuses_interest_retention_when_puback_does_not_imply_storage() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let mut config = source.cached_info().config.clone();
     config.retention = stream::RetentionPolicy::Interest;
@@ -224,7 +224,7 @@ async fn outbox_refuses_interest_retention_when_puback_does_not_imply_storage() 
 
 #[tokio::test]
 async fn outbox_capacity_refuses_new_publication_and_preserves_unread_messages() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     for (max_messages, max_bytes, max_messages_per_subject, expected) in [
         (
@@ -362,7 +362,7 @@ async fn verify_full_stream(fixture: &Fixture) {
 
 #[tokio::test]
 async fn an_explicit_dead_letter_stream_must_receive_the_dead_letter_subject() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let mut consumer = consumer_options(&fixture);
     consumer.dlq_subject = fixture.subject.clone();
     let (_guard, logged) = capture_logs();
@@ -388,7 +388,7 @@ async fn an_explicit_dead_letter_stream_must_receive_the_dead_letter_subject() {
 
 #[tokio::test]
 async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_stream() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     fixture
         .jetstream
         .delete_stream(&fixture.dlq_stream)
@@ -452,7 +452,7 @@ const TRANSFER_FRAMING_RESERVE_BYTES: usize = 16;
 #[tokio::test]
 async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_durable_creation() {
     for short in [true, false] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let required = 1024
             + 8192
             + TRANSFER_FRAMING_RESERVE_BYTES
@@ -540,7 +540,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
 #[tokio::test]
 async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer() {
     let exporter = install_tracing();
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let filter = format!("{}.events.>", fixture.subject);
     let registered_subject = format!("{}.events.known", fixture.subject);
     let subject = format!("{}.events.{}", fixture.subject, "x".repeat(256));
@@ -641,7 +641,7 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
 
 #[tokio::test]
 async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let server_limit = async_nats::connect(nats_url())
         .await
         .unwrap()
@@ -714,7 +714,7 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
 #[tokio::test]
 async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
     for (selected, excess) in [(true, 0), (true, 1), (false, 1)] {
-        let fixture = Fixture::create(false).await;
+        let fixture = Fixture::create(Topology::StreamsOnly).await;
         let mut config = fixture
             .jetstream
             .get_stream(&fixture.dlq_stream)
@@ -796,7 +796,7 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
 
 #[tokio::test]
 async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
-    let fixture = Fixture::create(false).await;
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
     let server_max_payload = async_nats::connect(nats_url())
         .await
