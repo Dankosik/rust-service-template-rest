@@ -22,22 +22,18 @@ pub struct Download {
     timer: JoinHandle<()>,
 }
 
-struct State {
-    waker: Option<Waker>,
-    status: Status,
-}
-
 #[expect(
     clippy::large_enum_variant,
     reason = "State already lives in one Arc allocation; inline custody avoids another allocation"
 )]
-enum Status {
+enum State {
     Open(Resources),
     Succeeded,
     Failed(ObjectStorageError),
 }
 
 struct Resources {
+    waker: Option<Waker>,
     context: CallContext,
     body: ByteStream,
     remaining: u64,
@@ -100,21 +96,22 @@ impl State {
         outcome: Outcome,
         discarded: Option<Result<Bytes, ByteStreamError>>,
     ) -> Option<Completion> {
-        if !matches!(self.status, Status::Open(_)) {
+        if !matches!(self, State::Open(_)) {
             return None;
         }
         let terminal = match &outcome {
-            Outcome::Success => Status::Succeeded,
-            Outcome::Failure(failure) => Status::Failed(failure.error),
-            Outcome::Cancelled => Status::Failed(ObjectStorageError::Unavailable),
+            Outcome::Success => State::Succeeded,
+            Outcome::Failure(failure) => State::Failed(failure.error),
+            Outcome::Cancelled => State::Failed(ObjectStorageError::Unavailable),
         };
-        let Status::Open(resources) = std::mem::replace(&mut self.status, terminal) else {
+        let State::Open(mut resources) = std::mem::replace(self, terminal) else {
             return None;
         };
+        let waker = resources.waker.take();
         Some(Completion {
             resources,
             outcome,
-            waker: self.waker.take(),
+            waker,
             discarded,
         })
     }
@@ -131,10 +128,10 @@ impl State {
     }
 
     fn unread_bytes(&self) -> Option<u64> {
-        match &self.status {
-            Status::Open(resources) => Some(resources.unread_bytes()),
-            Status::Succeeded => Some(0),
-            Status::Failed(_) => None,
+        match self {
+            State::Open(resources) => Some(resources.unread_bytes()),
+            State::Succeeded => Some(0),
+            State::Failed(_) => None,
         }
     }
 
@@ -142,10 +139,10 @@ impl State {
         &mut self,
         limit: usize,
     ) -> (Result<Vec<u8>, ObjectStorageError>, Option<Completion>) {
-        let resources = match &self.status {
-            Status::Open(resources) => resources,
-            Status::Succeeded => return (Ok(Vec::new()), None),
-            Status::Failed(error) => return (Err(*error), None),
+        let resources = match self {
+            State::Open(resources) => resources,
+            State::Succeeded => return (Ok(Vec::new()), None),
+            State::Failed(error) => return (Err(*error), None),
         };
         let failure = if let Some(stopped) = resources.context.stopped() {
             Failure::stopped(stopped)
@@ -167,15 +164,15 @@ impl State {
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
-        let resources = match &mut self.status {
-            Status::Open(resources) => resources,
-            Status::Succeeded => return (Poll::Ready(Ok(ReadStep::Chunk(None))), None),
-            Status::Failed(error) => return (Poll::Ready(Err(*error)), None),
+        let resources = match self {
+            State::Open(resources) => resources,
+            State::Succeeded => return (Poll::Ready(Ok(ReadStep::Chunk(None))), None),
+            State::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
             return self.close_failed(Failure::stopped(stopped), None);
         }
-        self.waker = Some(context.waker().clone());
+        resources.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -232,7 +229,7 @@ enum Termination {
 fn terminate(shared: &Mutex<State>, termination: Termination) {
     let completion = {
         let mut state = shared.lock();
-        let Status::Open(resources) = &state.status else {
+        let State::Open(resources) = &*state else {
             return;
         };
         let outcome = match termination {
@@ -258,17 +255,15 @@ impl Download {
         permit: OwnedSemaphorePermit,
         context: CallContext,
     ) -> Self {
-        let shared = Arc::new(Mutex::new(State {
+        let shared = Arc::new(Mutex::new(State::Open(Resources {
             waker: None,
-            status: Status::Open(Resources {
-                context: context.clone(),
-                body,
-                remaining: metadata.size,
-                final_chunk: None,
-                guard,
-                _permit: permit,
-            }),
-        }));
+            context: context.clone(),
+            body,
+            remaining: metadata.size,
+            final_chunk: None,
+            guard,
+            _permit: permit,
+        })));
         let exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
                 terminate(
@@ -364,7 +359,7 @@ impl http_body::Body for Download {
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(self.shared.lock().status, Status::Succeeded)
+        matches!(*self.shared.lock(), State::Succeeded)
     }
 
     fn size_hint(&self) -> SizeHint {

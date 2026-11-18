@@ -472,29 +472,21 @@ impl Drop for SupervisorExit {
     }
 }
 
-async fn reply_until<T>(
-    retired: &CancellationToken,
-    work: impl Future<Output = T>,
-    deadline: impl FnOnce() -> Deadline,
-) -> Result<T, ErrorType> {
-    tokio::select! {
-        biased;
-        () = retired.cancelled() => Err(ErrorType::Io),
-        result = work => Ok(result),
-        () = async { deadline().wait().await } => Err(ErrorType::Timeout),
-    }
-}
-
 async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
     accepts: fn(redis::Value) -> bool,
-    deadline: impl FnOnce() -> Deadline,
+    command_timeout: Duration,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
     let reply = tokio::task::unconstrained(connection.send_packed_command(command));
-    let result = reply_until(&generation.retired, reply, deadline).await?;
+    let result = tokio::select! {
+        biased;
+        () = generation.retired.cancelled() => return Err(ErrorType::Io),
+        result = reply => result,
+        () = async { Deadline::after(command_timeout).wait().await } => return Err(ErrorType::Timeout),
+    };
     Ok(result.and_then(reply_data).and_then(|value| {
         if accepts(value) {
             Ok(())
@@ -516,23 +508,18 @@ async fn ping_until(
         generation,
         &redis::Cmd::ping(),
         |value| matches!(value, redis::Value::SimpleString(pong) if pong == "PONG"),
-        || Deadline::after(command_timeout),
+        command_timeout,
     )
     .await
     .map_err(|error| (error, Disposition::Retire))?;
-    let disposition = if ping_keeps_generation(&reply) {
-        Disposition::Keep
-    } else {
-        Disposition::Retire
-    };
-    reply.map_err(|error| (error_type(&error), disposition))
-}
-
-fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
-    reply
-        .as_ref()
-        .err()
-        .is_none_or(|error| error.code() == Some("NOPERM"))
+    reply.map_err(|error| {
+        let disposition = if error.code() == Some("NOPERM") {
+            Disposition::Keep
+        } else {
+            Disposition::Retire
+        };
+        (error_type(&error), disposition)
+    })
 }
 
 async fn supervise(
@@ -843,7 +830,7 @@ impl<'a> Rotation<'a> {
             generation,
             &command,
             |value| matches!(value, redis::Value::Okay),
-            || Deadline::after(command_timeout),
+            command_timeout,
         )
         .await
         .and_then(|reply| reply.map_err(|error| error_type(&error)));

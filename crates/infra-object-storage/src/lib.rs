@@ -20,6 +20,7 @@ use aws_sdk_s3::config::{
     SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::operation::{RequestId, RequestIdExt};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
@@ -27,7 +28,7 @@ use aws_smithy_http_client::tls;
 use operation_context::OperationContext;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use self::call::{CallContext, call_policy, within, within_mutation};
+use self::call::{CallContext, Interrupted, call_policy, within, within_mutation};
 pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
@@ -331,11 +332,8 @@ impl ObjectStorage {
                 .config_override(self.operation_config(&context, call))
                 .send(),
         );
-        let result = within(&context, request)
-            .await
-            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
-        guard.answered_by(&result);
-        Self::check(&context, &mut guard)?;
+        let result =
+            Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
         let output = match result {
             Ok(output) => output,
             Err(sdk_error) => {
@@ -373,11 +371,8 @@ impl ObjectStorage {
             .config_override(self.operation_config(&context, call))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let result = within(&context, request)
-            .await
-            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
-        guard.answered_by(&result);
-        Self::check(&context, &mut guard)?;
+        let result =
+            Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
         let output = result.map_err(|sdk_error| guard.fail(&error::from_sdk(&sdk_error)))?;
         let metadata = ObjectMetadata::from_response_fields(
             output.content_length(),
@@ -511,6 +506,17 @@ impl ObjectStorage {
             )));
         }
         Ok((context, guard))
+    }
+
+    fn checked_read_reply<R: RequestId + RequestIdExt>(
+        result: Result<R, Interrupted>,
+        context: &CallContext,
+        guard: &mut OperationGuard,
+    ) -> Result<R, ObjectStorageError> {
+        let reply = result.map_err(|interrupted| guard.fail(&interrupted.into()))?;
+        guard.answered_by(&reply);
+        Self::check(context, guard)?;
+        Ok(reply)
     }
 
     fn check(context: &CallContext, guard: &mut OperationGuard) -> Result<(), ObjectStorageError> {
