@@ -267,9 +267,14 @@ class SurfacesTests(unittest.TestCase):
             "crates/service/tests/runtime_progress.rs",
             "scripts/profiles/runtime_progress.sh",
             "scripts/image/cargo_artifact.py",
-            "build/docker/runtime-progress.Dockerfile",
         ):
             self._assert_surfaces(self.source_fixture, rp_file, ("runtime_progress",))
+        self._assert_surfaces(
+            self.source_fixture,
+            "build/docker/runtime-progress.Dockerfile",
+            ("runtime_progress", "module_initializer"),
+            ("runtime_image", "initializer_source", "initializer_runtime", "initializer_artifacts"),
+        )
         self._assert_surfaces(
             self.source_fixture,
             "crates/health/tests/probes.rs",
@@ -277,6 +282,12 @@ class SurfacesTests(unittest.TestCase):
             ("runtime_progress",),
         )
         # template:end runtime-progress:test-surfaces-runtime-progress
+        for img_file in ("build/docker/Dockerfile", "build/docker/pgo-train.sh"):
+            self._assert_surfaces(
+                self.source_fixture,
+                img_file,
+                ("runtime_image", "module_initializer", "initializer_artifacts"),
+            )
 
         # template:begin grpc:test-surfaces-grpc
         for grpc_file in (
@@ -381,23 +392,34 @@ class SurfacesTests(unittest.TestCase):
             ("python", "agent_instructions", "module_initializer"),
             ("shell", "validation_system", "initializer_runtime"),
         )
+        self._assert_surfaces(
+            self.source_fixture,
+            "scripts/template/sync.py",
+            ("agent_instructions", "validation_system", "module_initializer", "initializer_source"),
+            ("rust_source", "template_engine", "initializer_runtime", "initializer_artifacts"),
+        )
+        self._assert_surfaces(
+            self.derived_fixture,
+            "scripts/template/sync.py",
+            ("agent_instructions", "validation_system"),
+            ("module_initializer", "initializer_source", "initializer_runtime", "initializer_artifacts"),
+        )
         for tmpl_file in (
             "scripts/template/state.py",
-            "scripts/template/sync.py",
             "scripts/template/init.py",
             "scripts/template/profiles.json",
         ):
             self._assert_surfaces(
                 self.source_fixture,
                 tmpl_file,
-                ("agent_instructions", "validation_system", "template_engine", "module_initializer", "initializer_runtime"),
+                ("agent_instructions", "validation_system", "template_engine", "module_initializer", "initializer_source", "initializer_runtime", "initializer_artifacts"),
                 ("rust_source",),
             )
             self._assert_surfaces(
                 self.derived_fixture,
                 tmpl_file,
                 ("agent_instructions", "validation_system", "template_engine"),
-                ("module_initializer", "initializer_runtime"),
+                ("module_initializer", "initializer_source", "initializer_runtime", "initializer_artifacts"),
             )
 
         for action_file in (
@@ -547,6 +569,7 @@ class SurfacesTests(unittest.TestCase):
             "migrations",
             "template_engine",
             "module_initializer",
+            "initializer_source",
             "initializer_runtime",
             "initializer_artifacts",
         ):
@@ -635,6 +658,16 @@ class SurfacesTests(unittest.TestCase):
         shutil.copy2(VERIFY_DIR / "surfaces.py", union_repo / "scripts/verify/surfaces.py")
         shutil.copy2(VERIFY_DIR / "changed_paths.py", union_repo / "scripts/verify/changed_paths.py")
         (union_repo / "scripts/legacy.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (union_repo / "make").mkdir()
+        (union_repo / "make/source.mk").touch()
+        (union_repo / "scripts/template").mkdir()
+        sync_path = "scripts/template/sync.py"
+        (union_repo / sync_path).touch()
+        # template:begin runtime-progress:test-surfaces-quota-union-fixture
+        (union_repo / "build/docker").mkdir(parents=True)
+        quota_path = "build/docker/runtime-progress.Dockerfile"
+        (union_repo / quota_path).touch()
+        # template:end runtime-progress:test-surfaces-quota-union-fixture
         _git(union_repo, "add", "-A")
         _git(union_repo, "commit", "-qm", "with-classifier")
         base_sha = _git(union_repo, "rev-parse", "HEAD")
@@ -645,6 +678,18 @@ class SurfacesTests(unittest.TestCase):
         self.assertTrue(union_report.classified)
         self.assertTrue(union_report.surfaces["shell"])
         self.assertTrue(union_report.surfaces["documentation"])
+        sync_union = surfaces.classify_union_report(union_repo, base_sha, [sync_path])
+        self.assertTrue(sync_union.surfaces["initializer_source"])
+        self.assertTrue(sync_union.surfaces["module_initializer"])
+        self.assertFalse(sync_union.surfaces["initializer_runtime"])
+        self.assertFalse(sync_union.surfaces["initializer_artifacts"])
+        # template:begin runtime-progress:test-surfaces-quota-union
+        quota_union = surfaces.classify_union_report(union_repo, base_sha, [quota_path])
+        self.assertTrue(quota_union.surfaces["runtime_progress"])
+        self.assertTrue(quota_union.surfaces["module_initializer"])
+        self.assertFalse(quota_union.surfaces["runtime_image"])
+        self.assertFalse(quota_union.surfaces["initializer_artifacts"])
+        # template:end runtime-progress:test-surfaces-quota-union
 
 
 class AffectedCratesTests(unittest.TestCase):
@@ -1044,6 +1089,29 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertEqual(t_res.returncode, 0, t_res.stderr)
         self.assertIn("  make quality-check-self-test\n", t_res.stdout)
         self.assertIn("  make template-quality-projections\n", t_res.stdout)
+
+        for ci_mode in ("github-actions", "none"):
+            with self.subTest(ci_mode=ci_mode):
+                sync_res = self._run_verify("--plan", "--files", "scripts/template/sync.py", REPOSITORY_CI=ci_mode)
+                self.assertEqual(sync_res.returncode, 0, sync_res.stderr)
+                commands = self._plan_section(sync_res.stdout, "commands")
+                self.assertIn("  make template-init-projections\n", commands)
+                source_section = "ci-owned" if ci_mode == "github-actions" else "commands"
+                self.assertIn(
+                    "  make template-init-source-checks\n",
+                    self._plan_section(sync_res.stdout, source_section),
+                )
+                for unrelated in ("template-init-check", "template-init-artifacts", "template-quality-projections"):
+                    self.assertNotIn(unrelated, sync_res.stdout)
+
+        # template:begin runtime-progress:test-runner-runtime-progress
+        rp_res = self._run_verify("--plan", "--files", "build/docker/runtime-progress.Dockerfile")
+        self.assertEqual(rp_res.returncode, 0, rp_res.stderr)
+        self.assertIn("  make runtime-progress-proof", self._plan_section(rp_res.stdout, "ci-owned"))
+        self.assertIn("  make template-init-projections\n", self._plan_section(rp_res.stdout, "commands"))
+        for unrelated in ("dockerfile-check", "runtime-image-build", "template-init-artifacts"):
+            self.assertNotIn(unrelated, rp_res.stdout)
+        # template:end runtime-progress:test-runner-runtime-progress
         (self.fixture / "make/source.mk").unlink()
 
         # Cargo.lock routes workspace lint, build, test, deny, unused-deps, native-transport-regressions
@@ -1090,11 +1158,6 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertIn("  make grpc-check", self._plan_section(grpc_none.stdout, "commands"))
         self.assertIn("  make grpc-generator-deny", self._plan_section(grpc_none.stdout, "commands"))
         # template:end grpc:test-runner-grpc
-
-        # template:begin runtime-progress:test-runner-runtime-progress
-        rp_res = self._run_verify("--plan", "--files", "build/docker/runtime-progress.Dockerfile")
-        self.assertIn("  make runtime-progress-proof", self._plan_section(rp_res.stdout, "ci-owned"))
-        # template:end runtime-progress:test-runner-runtime-progress
 
         bad_ci = self._run_verify("--plan", "--files", "README.md", REPOSITORY_CI="gitlab")
         self.assertEqual(bad_ci.returncode, 2)

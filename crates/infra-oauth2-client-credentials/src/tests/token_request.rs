@@ -53,7 +53,7 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
             "refresh_token": "private-refresh",
         }),
     );
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let (service_tokens, driver) = registration.service_tokens(token_target(
         &["write", "read+all", "write"],
         Some("https://api.example/é?a=b&c=d"),
@@ -113,7 +113,7 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
 #[tokio::test]
 async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
     let fixture = Fixture::new().await;
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     let bindings = ["catalog", "billing"].map(|audience| {
         let target = token_target(&[], Some(audience));
         let (service, driver) = registration.service_tokens(target.clone());
@@ -638,7 +638,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    let registration = fixture.build(Options {
+    let registration = prepare_registration(Options {
         provider_concurrency: 1,
         ..fixture.options()
     });

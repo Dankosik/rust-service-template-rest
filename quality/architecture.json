@@ -149,6 +149,10 @@
       "rule": "http-inbound-contract-dependencies",
       "allow_roles": ["health", "bearer", "http-transport"],
       "allow_members": {
+        "crates/infra-object-storage/Cargo.toml": {
+          "reason": "File routes bind streaming storage operations to the HTTP request and response lifetimes and render pre-header failures.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
         "crates/service-failure/Cargo.toml": {
           "reason": "HTTP projects shared failure codes into Problem responses.",
           "authority": "docs/repo-architecture.md#global-invariants"

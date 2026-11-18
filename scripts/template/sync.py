@@ -527,7 +527,7 @@ def _admit_make(snapshot: Path, target: Path) -> None:
     service = target / "make/service.mk"
     _regular_file(service, "make/service.mk")
     service_rules = _make_rules(service)
-    if any("%" in rule or rule in standard for rule in service_rules):
+    if any("%" in rule or rule in standard or rule == "template-init" for rule in service_rules):
         raise Refusal("make/service.mk overrides or patterns a portable standard target")
     root_make = target / "Makefile"
     _regular_file(root_make, "Makefile")
@@ -642,13 +642,32 @@ def _plan_scopes(
     return tuple(unique.values())
 
 
-def _stage_target(target: Path, destination: Path) -> None:
-    def _ignore(_root: str, names: list[str]) -> set[str]:
-        return {
-            name
-            for name in names
-            if name in {".git", "__pycache__"} or name.endswith((".pyc", ".pyo", ".pyd"))
-        }
+def _stage_target(target: Path, destination: Path, scopes: Sequence[Scope]) -> None:
+    adapter_parents = {Path(path).parent for pack in ADAPTERS.values() for path, _ in pack.role_dirs}
+    for relative in adapter_parents | {Path(".agents/adapters")}:
+        path = target / relative
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise Refusal(f"unsafe target harness directory: {relative}")
+    inputs = (
+        *scopes,
+        Scope("template.lock", False),
+        Scope(".agents/skills/", True),
+        Scope(".agents/roles/", True),
+        Scope(".agents/role-classes/", True),
+    )
+    directories = {target / scope.relative for scope in inputs if scope.directory}
+    included: set[Path] = set()
+    for scope in inputs:
+        path = target / scope.relative
+        included.add(path)
+        included.update(path.parents)
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        path = Path(directory)
+        ignored = {name for name in names if name == ".git" or is_bytecode_path(name)}
+        if path not in directories and directories.isdisjoint(path.parents):
+            ignored.update(name for name in names if path / name not in included)
+        return ignored
 
     try:
         shutil.copytree(target, destination, symlinks=True, ignore=_ignore)
@@ -700,13 +719,14 @@ def _render(
     target: Path,
     stage: Path,
     manifest: Sequence[Scope],
+    plan_scopes: Sequence[Scope],
     selected: set[str],
     harness: str,
     retired: Sequence[Scope] = (),
 ) -> None:
     source_names = {entry.name for entry in (snapshot / ".agents/skills").iterdir() if entry.is_dir() and not entry.is_symlink()}
     reserved = _service_skills(target, source_names)
-    _stage_target(target, stage)
+    _stage_target(target, stage, plan_scopes)
     _remove_unselected_from_stage(stage, selected)
     for scope in retired:
         candidate = stage / scope.relative.rstrip("/")
@@ -780,7 +800,7 @@ def _run(arguments: argparse.Namespace) -> int:
         _target_dirty(target, plan_scopes, reserved)
 
         stage = work / "target"
-        _render(snapshot, target, stage, chosen_manifest, selected, harness, retired_scopes)
+        _render(snapshot, target, stage, chosen_manifest, plan_scopes, selected, harness, retired_scopes)
         writes, removals, directory_modes = _build_plan(target, stage, plan_scopes)
         _check_ignored_destinations(
             target,
@@ -807,7 +827,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 _prune_empty_dirs(target / "scripts")
                 verify_plan(target, writes, removals)
             verify_stage = work / "verify"
-            _render(snapshot, target, verify_stage, chosen_manifest, selected, harness, retired_scopes)
+            _render(snapshot, target, verify_stage, chosen_manifest, plan_scopes, selected, harness, retired_scopes)
             final_writes, final_removals, final_modes = _build_plan(target, verify_stage, plan_scopes)
             if final_writes or final_removals or final_modes:
                 raise ToolFailure("admitted sync plan did not reach selected parity")

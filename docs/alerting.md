@@ -14,22 +14,52 @@ only with that profile.
 
 ## Install
 
-1. Load the file through `rule_files` or a `PrometheusRule`, next to
-   `env/monitoring/postgres-maintenance.rules.yml` when the PostgreSQL profile is kept.
-2. Replace the scrape-job selector `job=~"service|jobs-worker"`, and the
-   `absent(up{job="service"})` dead-man check, with your scrape job names:
-   `sd 'service\|jobs-worker' 'orders-api|orders-worker' env/monitoring/service.rules.yml`.
-3. Point `runbook_url` at this page in your repository.
-4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
-   Burn-rate alerts share their name across windows and differ by
-   `long_window`, so inhibit the slower window while a faster one fires:
+<!-- template:begin postgres:docs-alerting-maintenance-inventory -->
+Before loading `env/monitoring/postgres-maintenance.rules.yml`, replace
+its example `pg:expected` rows with the actual database, scrape job,
+instance and population for each expected writer. Add the matching
+`database` label to the scrape targets. Set each
+`pg:writer_set_changed_timestamp_seconds` to the Unix time in seconds of
+the last change to that database's writers for the population.
+<!-- template:end postgres:docs-alerting-maintenance-inventory -->
 
-```yaml
-inhibit_rules:
-  - source_matchers: [severity="page"]
-    target_matchers: [severity="ticket"]
-    equal: [alertname, job]
-```
+1. Update the shared scrape-job selector and the exact API job selector in
+   `ServiceDown`. For example, if your scrape jobs are named `orders-api`
+   and `orders-worker`, run these from the repository root.
+
+   ```sh
+   sd -F 'job=~"service|jobs-worker"' 'job=~"orders-api|orders-worker"' env/monitoring/service.rules.yml
+   sd -F 'job="service"' 'job="orders-api"' env/monitoring/service.rules.yml env/monitoring/tests/service-rules.yml
+   sd -F 'job="jobs-worker"' 'job="orders-worker"' env/monitoring/tests/service-rules.yml
+   ```
+
+   For an API-only installation, use `job=~"orders-api"` as the first
+   replacement. If the worker must always be in service discovery, add
+   `or absent(up{job="orders-worker"})` to the `ServiceDown` expression.
+   In that case include a reachable worker in normal fixtures and cover its
+   disappearance with only the API present.
+2. Point `runbook_url` at this page in your repository.
+3. Check the configured files with `make monitoring-rules`, then load them
+   through `rule_files` or a `PrometheusRule`.
+4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
+   The example inhibits burn-rate tickets while a page for the same alert
+   and job fires. Within each severity, it inhibits the 6-hour page while the
+   1-hour page fires and the 3-day ticket while the 1-day ticket fires.
+   If jobs share a name across environments in one Alertmanager, include
+   the environment labels in `equal`.
+
+   ```yaml
+   inhibit_rules:
+     - source_matchers: ['severity="page"', 'long_window=~"1h|6h"']
+       target_matchers: ['severity="ticket"', 'long_window=~"1d|3d"']
+       equal: [alertname, job]
+     - source_matchers: ['severity="page"', 'long_window="1h"']
+       target_matchers: ['severity="page"', 'long_window="6h"']
+       equal: [alertname, job]
+     - source_matchers: ['severity="ticket"', 'long_window="1d"']
+       target_matchers: ['severity="ticket"', 'long_window="3d"']
+       equal: [alertname, job]
+   ```
 
 ## Objectives
 
@@ -65,8 +95,20 @@ within minutes of a fault and reset promptly after recovery.
   `http_route!~`. The gRPC latency SLI counts only `grpc_type="unary"`, because a
   streaming call stays open for its whole lifetime; exclude a slow-by-design
   unary method via `grpc_method!~`.
-- **Low traffic.** Below ~1 req/min, use ticket windows only or gate page rules
-  on minimum request rate (`and sum by(job) (rate(...[1h])) > 1`).
+- **Low traffic.** For jobs averaging fewer than one request per minute, use
+  ticket windows or require a minimum request rate for pages. Append this
+  gate to each HTTP page expression to require more than one request per
+  minute on average over the last hour. Keep the metric and selectors
+  aligned with the SLI denominator, including any scrape job or route changes.
+
+  ```promql
+  and on(job) (
+    sum by(job) (
+      rate(http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}[1h])
+    ) > (1 / 60)
+  )
+  ```
+
 - **Labels.** Recording rules aggregate `by(job)`; add `http_route` only for
   routes that genuinely require an independent SLO. The template ships no
   Grafana JSON model because series in `service.rules.yml` (`job:slo_*`,
@@ -76,29 +118,73 @@ within minutes of a fault and reset promptly after recovery.
 
 ## Runbooks
 
+<!-- template:begin worker:docs-alerting-dead-letter-recency -->
+When upgrading, deploy the worker version that emits the event timestamps
+to all replicas before replacing the dead-letter rules. Keep the previous
+rules active during the worker rollout.
+
+The dead-letter alerts use the last event's Unix timestamp to determine
+recency. The first scrape after a recent event can open a ticket even when
+Prometheus has no earlier sample for that series. When a counter for an old
+event reappears after a scrape gap, its event timestamp keeps it outside
+the alert window.
+
+<!-- template:end worker:docs-alerting-dead-letter-recency -->
 ### HTTPErrorBudgetBurn
 
-Clients receive 5xx answers faster than the objective allows. In the
-`http_request` log, `termination="load_shed"` identifies a 503 sent after the
-request waited `http.admission_wait` for a permit. Check
-`http_server_shed_requests_total` and `http_server_admission_wait_seconds`
-for the frequency and duration of those waits. For an admitted webhook with
-`problem_code="service_unavailable"`, correlate by `request_id` with the
-`webhook_receipt_unavailable` warning to find the failed receipt stage.
+The service records 5xx outcomes faster than the objective allows. Break them
+down by route and status for the alerting job. Replace `service` with the
+alert's `job` label.
+
+```promql
+sum by(http_route, http_response_status_code) (
+  rate(http_server_request_duration_seconds_count{job="service",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}[5m])
+)
+```
+
+Match the metric's `http_route` to the `route` field in the `http_request`
+access log. Use `request_id` to find related log events for that request.
+`termination="load_shed"` identifies a 503 sent after the request waited
+`http.admission_wait` for a permit. Check `http_server_shed_requests_total`
+and `http_server_admission_wait_seconds` for the frequency and duration
+of those waits.
 
 `problem_code="gateway_timeout"` identifies an exhausted request budget.
 Expiry during a tracked request-body read returns `408 request_timeout` and
 does not count here. An access log with `termination="server_shutdown"`
 records a forced shutdown before the response head as 503 for the SLO.
-The client received no HTTP status. Correlate by `http_route`.
+The client received no HTTP status.
 
-```promql
-sum by(http_route, http_response_status_code) (
-  rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
-```
+Roll back a fresh deployment first. Add replicas for load shedding. If the
+request failed on a dependency, compare the adapter's signals for the
+affected instances during the same period.
 
-Roll back a fresh deployment first; add replicas for shedding; for a failed
-dependency, follow its own alert.
+<!-- template:begin postgres:docs-alerting-http-postgres -->
+- For PostgreSQL, compare pool waits with `PostgresPoolSaturated` and inspect
+  `readiness_probe_checks_total{probe="postgres"}` by `outcome` for probe
+  failures or timeouts.
+<!-- template:end postgres:docs-alerting-http-postgres -->
+<!-- template:begin inbound-webhooks:docs-alerting-http-inbound-webhooks -->
+- For an admitted webhook with `problem_code="service_unavailable"`, find
+  the `webhook_receipt_unavailable` warning by `request_id` to identify the
+  failed receipt stage.
+<!-- template:end inbound-webhooks:docs-alerting-http-inbound-webhooks -->
+<!-- template:begin authn:docs-alerting-http-authentication -->
+- For `problem_code="authentication_unavailable"`, break down
+  `authn_token_verifications_total{outcome="failure"}` by `mode` and `reason`.
+  If verification failed on a provider call, check
+  `authn_provider_request_duration_seconds_count` by `operation` and `outcome`.
+<!-- template:end authn:docs-alerting-http-authentication -->
+<!-- template:begin outbound-auth:docs-alerting-http-outbound-auth -->
+- For an outbound OAuth token acquisition, check
+  `oauth2_token_acquisitions_total` by `grant` and `outcome` to distinguish
+  successful acquisitions from failures and cancellations.
+<!-- template:end outbound-auth:docs-alerting-http-outbound-auth -->
+<!-- template:begin object-storage:docs-alerting-http-object-storage -->
+- For S3, check `object_storage_operation_duration_seconds_count` by
+  `operation` and `outcome`. Look for `object_storage_operation_failed`
+  and its `error.type` in the related logs.
+<!-- template:end object-storage:docs-alerting-http-object-storage -->
 
 ### HTTPLatencyBudgetBurn
 
@@ -139,10 +225,13 @@ stop the process before it serves.
 
 ### ServiceTargetDown
 
-One instance has not answered a scrape for 15 minutes while the job still runs
-elsewhere. Capacity is reduced; clients are fine unless the SLO alerts fire.
-Check whether the instance is wedged (no logs) or the metrics listener alone is
-unreachable (network policy, port).
+One instance has not answered a scrape for 15 minutes. Check
+`sum by(job) (up)` for the alert's job and whether `ServiceDown` is active
+for that same job. If no target for the job answers, follow the
+[`ServiceDown` runbook](#servicedown). If another target answers, check its
+readiness and the SLO alerts to assess client impact. Check the affected
+instance's process logs and whether its metrics listener is reachable on
+the configured port.
 
 ### ServiceRestarting
 
@@ -169,12 +258,20 @@ timeout and inspect `readiness_probe_checks_total` by probe and outcome.
 ### RuntimeSchedulerLagging
 
 More than 1% of the 100 ms runtime progress samples ran over 100 ms late for
-15 minutes: tasks wait that long for a worker, and request latency follows.
-`tokio_busy_ratio` near 1 means the workers are saturated; add replicas or
-raise `runtime.worker_threads` up to the CPU allocation. A low ratio with late
-samples means workers are held off the CPU: a blocking call inside a task, or
-the container's CPU limit throttling the process.
-`runtime_scheduler_lag_max_seconds` gives the longest single stall.
+15 minutes. Check `runtime_scheduler_lag_max_seconds` for the longest
+single stall and compare it with worker occupancy for the affected instance.
+
+```promql
+tokio_busy_ratio / on(job, instance) tokio_workers_count
+```
+
+`tokio_busy_ratio` expresses total busy time in worker equivalents. A value
+of 1 with four workers means 25% average occupancy. A normalized value near
+1 means the workers spent most of the interval busy. Busy time includes
+time spent blocked inside a task. Compare process CPU usage and container
+CPU throttling with the lag before deciding whether to add CPU capacity or
+investigate blocked or long-running tasks. Low average occupancy can hide a
+stall on one worker.
 
 A build with `RUSTFLAGS="--cfg tokio_unstable"` adds per-poll and queue detail
 (`tokio_mean_poll_duration`, `tokio_budget_forced_yield_count`,
@@ -242,10 +339,11 @@ none since it started. Its queue gauges keep their last values, so
 
 ### JobsDeadLettered
 
-Jobs failed permanently or exhausted their attempts, and stay failed until an
-operator acts. Read the failure in the `jobs-worker` logs, fix the cause, then
-inspect and recover retained jobs with the operator commands `jobs-worker --help`
-lists (`failed`, `inspect`, `redrive`, `discard`).
+Jobs of the reported kind failed permanently or exhausted their attempts
+recently, as recorded by `jobs_last_terminal_attempt_timestamp_seconds`.
+Read the failure in the `jobs-worker` logs, fix the cause, then inspect and
+recover retained jobs with the operator commands `jobs-worker --help` lists
+(`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
 <!-- template:begin webhooks:docs-alerting-webhook-delivery -->
@@ -300,9 +398,10 @@ bytes in order:
 
 ### MessagingDeadLettered
 
-The adapter attempted to move an event to the dead-letter stream. A
-`rejected` publication leaves the event in the source stream for redelivery.
-An `ambiguous` publication also leaves it for redelivery, and the DLQ may
+The adapter recently attempted to move an event to the dead-letter stream,
+as recorded by `messaging_last_dead_letter_timestamp_seconds`. A `rejected`
+publication leaves the event in the source stream for redelivery. An
+`ambiguous` publication also leaves it for redelivery, and the DLQ may
 already contain a copy. Fix the handler or the producer. Use `inspect` in
 the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs)
 to read an exact DLQ record without changing the broker. Redrive and

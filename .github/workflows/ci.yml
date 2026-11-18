@@ -60,7 +60,6 @@ jobs:
       # template:end grpc:ci-grpc-output
       tool_manifest: ${{ steps.surfaces.outputs.tool_manifest }}
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
-      dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
       shell: ${{ steps.surfaces.outputs.shell }}
       python: ${{ steps.surfaces.outputs.python }}
       runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
@@ -80,12 +79,14 @@ jobs:
       documentation: ${{ steps.surfaces.outputs.documentation }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
       template_engine: ${{ steps.surfaces.outputs.template_engine }}
+      # template:begin source-template:ci-initializer-outputs
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
+      initializer_source: ${{ steps.surfaces.outputs.initializer_source }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
-      initializer_artifacts: ${{ steps.surfaces.outputs.initializer_artifacts }}
       artifact_graphs: ${{ steps.surfaces.outputs.artifact_graphs }}
       artifact_matrix: ${{ steps.surfaces.outputs.artifact_matrix }}
+      # template:end source-template:ci-initializer-outputs
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
       quality_tooling: ${{ steps.surfaces.outputs.quality_tooling }}
@@ -101,7 +102,9 @@ jobs:
         uses: ./.github/actions/resolve-changes # zizmor: ignore[self-repository]
         with:
           github_token: ${{ github.token }}
+          # template:begin source-template:ci-plan-initializer
           plan_initializer: "true"
+          # template:end source-template:ci-plan-initializer
 
   # template:begin grpc:ci-grpc-job
   grpc:
@@ -117,15 +120,6 @@ jobs:
           persist-credentials: false
       - name: Install pinned toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Restore generator cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target/grpc-codegen
-          key: grpc-codegen-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'tools/grpc-codegen/Cargo.lock') }}
       - name: Check schema and committed generation
         env:
           BASE_SHA: ${{ needs.changes.outputs.base_sha }}
@@ -181,6 +175,15 @@ jobs:
             needs.changes.outputs.architecture == 'true' ||
             needs.changes.outputs.quality_tooling == 'true' ||
             needs.changes.outputs.template_engine == 'true' }}
+      NEEDS_TYPOS: >-
+        ${{ needs.changes.outputs.documentation != 'true' && (
+            needs.changes.outputs.rust_source == 'true' ||
+            needs.changes.outputs.cargo_dependencies == 'true' ||
+            needs.changes.outputs.lint_config == 'true' ||
+            needs.changes.outputs.openapi == 'true' ||
+            needs.changes.outputs.migrations == 'true' ||
+            needs.changes.outputs.agent_instructions == 'true'
+        ) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -223,24 +226,12 @@ jobs:
         with:
           tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Install pinned typos
-        if: >-
-          needs.changes.outputs.rust_source == 'true' ||
-          needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true' ||
-          needs.changes.outputs.openapi == 'true' ||
-          needs.changes.outputs.migrations == 'true' ||
-          needs.changes.outputs.agent_instructions == 'true'
+        if: env.NEEDS_TYPOS == 'true'
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: typos@${{ env.TYPOS_VERSION }}
       - name: Typos
-        if: >-
-          needs.changes.outputs.rust_source == 'true' ||
-          needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true' ||
-          needs.changes.outputs.openapi == 'true' ||
-          needs.changes.outputs.migrations == 'true' ||
-          needs.changes.outputs.agent_instructions == 'true'
+        if: env.NEEDS_TYPOS == 'true'
         run: make typos
       - name: Format
         if: >-
@@ -372,7 +363,7 @@ jobs:
           command -v python3
           command -v npx
       - name: Readability checker self-test
-        if: needs.changes.outputs.quality_tooling == 'true'
+        if: needs.changes.outputs.quality_tooling == 'true' || needs.changes.outputs.template_engine == 'true'
         run: make quality-check-self-test
       - name: Rust duplication
         if: needs.changes.outputs.duplication == 'true'
@@ -380,16 +371,15 @@ jobs:
       - name: Declared architecture
         if: needs.changes.outputs.architecture == 'true'
         run: make architecture-check
+      # template:begin source-template:ci-quality-profile-projections
       - name: Readability profile projections
         if: needs.changes.outputs.quality_tooling == 'true' || needs.changes.outputs.template_engine == 'true'
         env:
           # The two webhook projections compile their tests over this job's
           # dependencies; each projection writes its sources before it builds.
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          if [ -f make/source.mk ]; then
-            make template-quality-projections
-          fi
+        run: make template-quality-projections
+      # template:end source-template:ci-quality-profile-projections
 
   # Quality checks that need no workspace build of their own run beside
   # `quality`; `required` demands each one its surfaces select.
@@ -445,11 +435,8 @@ jobs:
         # The affected-crate planner and the verify self-test read the
         # workspace through cargo; nothing here compiles it.
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Fetch locked Cargo packages
-        run: cargo fetch --locked
       - name: Validation routing
-        # Four independent self-tests over private fixtures, run side by side.
-        run: make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+        run: make -j2 --output-sync=target validation-lock-self-test verify-check
 
   security:
     needs: [changes, secrets]
@@ -618,7 +605,6 @@ jobs:
         if: needs.changes.outputs.runtime_image == 'true'
         env:
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
-          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: make dockerfile-check
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
@@ -648,7 +634,6 @@ jobs:
           VCS_REF: ${{ github.sha }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
-          VALIDATION_BUILDER_EXCLUSIVE: "1"
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/image-proof-source"
@@ -690,6 +675,7 @@ jobs:
           if-no-files-found: error
           overwrite: false
 
+  # template:begin source-template:ci-image-derived-job
   image-derived:
     needs: changes
     if: needs.changes.outputs.artifact_graphs != '' && needs.changes.outputs.post_merge == 'true'
@@ -741,6 +727,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
+  # template:end source-template:ci-image-derived-job
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
@@ -894,9 +881,14 @@ jobs:
         run: env REQUIRE_DOCKER=1 make test-integration-oauth
   # template:end outbound-auth:ci-oauth-integration-job
 
+  # template:begin source-template:ci-initializer-jobs
   initializer:
     needs: changes
-    if: needs.changes.outputs.initializer_runtime == 'true' && needs.changes.outputs.post_merge == 'true'
+    if: >-
+      needs.changes.outputs.post_merge == 'true' && (
+        needs.changes.outputs.initializer_source == 'true' ||
+        needs.changes.outputs.initializer_runtime == 'true'
+      )
     name: initializer (${{ matrix.part }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -942,7 +934,7 @@ jobs:
         if: matrix.part == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: bash ./scripts/template/check_init.sh --source-checks
+        run: make template-init-source-checks
       - name: Runtime graphs
         if: matrix.part != 'source'
         env:
@@ -972,6 +964,7 @@ jobs:
           persist-credentials: false
       - name: Canonical projections
         run: make template-init-projections
+  # template:end source-template:ci-initializer-jobs
 
   docs:
     needs: [changes, secrets]
@@ -1009,7 +1002,9 @@ jobs:
       - secrets
       - delivery
       - image-source
+      # template:begin source-template:ci-required-image-derived-need
       - image-derived
+      # template:end source-template:ci-required-image-derived-need
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
       # template:end runtime-progress:ci-required-runtime-progress-need
@@ -1019,8 +1014,10 @@ jobs:
       # template:begin outbound-auth:ci-required-oauth-integration-need
       - oauth-integration
       # template:end outbound-auth:ci-required-oauth-integration-need
+      # template:begin source-template:ci-required-initializer-needs
       - initializer
       - initializer-projections
+      # template:end source-template:ci-required-initializer-needs
       - docs
     runs-on: ubuntu-latest
     timeout-minutes: 2

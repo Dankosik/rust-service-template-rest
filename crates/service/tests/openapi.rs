@@ -231,6 +231,10 @@ fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_c
         operation["responses"].get("409").is_none(),
         "authenticated webhook replays must not declare a conflict response"
     );
+    assert!(
+        operation["responses"].get("415").is_none(),
+        "the signed binary webhook accepts arbitrary media types"
+    );
 }
 // template:end inbound-webhooks:service-webhooks-contract-test
 

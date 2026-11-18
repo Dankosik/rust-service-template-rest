@@ -77,6 +77,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     ))
     .await
     .expect("smaller receiving resource is admitted");
+    let (_capture, logged) = capture_logs();
     std::assert_matches!(
         messaging
             .producer()
@@ -86,6 +87,13 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
             EnvelopeError::PayloadTooLarge
         )))
     );
+    assert!(logged.lock().unwrap().iter().any(|fields| {
+        fields.contains(&("message", "messaging_publish_failed".to_owned()))
+            && fields.contains(&("outcome", "rejected".to_owned()))
+            && fields.iter().any(|(name, value)| {
+                *name == "reason" && value.contains("payload exceeds configured maximum")
+            })
+    }));
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     assert_eq!(source.info().await.unwrap().state.messages, 0);
     close(messaging).await;

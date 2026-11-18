@@ -1,3 +1,9 @@
+/// RFC 9110 §5.6.2
+#[must_use]
+pub fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
 /// RFC 9110 §8.3.1
 #[must_use]
 pub fn is_json_content_type(content_type: &str) -> bool {

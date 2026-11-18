@@ -19,6 +19,12 @@ conditions.
 
 ## Provider protocol divergences
 
+The upload boundary validates the RFC 9110 media-type grammar and retains the
+caller’s original header bytes. The workspace's `mime` 0.3.17 parser rejects
+valid tab-separated parameters and accepts an empty subtype. Reopen this
+choice when a workspace parser handles the accepted and refused inputs in
+`content_type.rs` without changing their wire representation.
+
 | Rule | External provider constraint | Reopen condition |
 | --- | --- | --- |
 | CRC64NVME on Amazon uploads, R2 byte uploads only, and never on Railway/`s3_compatible` | Amazon supports CRC64NVME full-object checksums and streaming trailers; Cloudflare R2 supports full-object CRC64NVME but rejects trailers; Railway Buckets (Tigris) and generic gateways support only SHA-256 or unverified uploads. | Conformance run proves R2 trailers or Railway CRC64NVME acceptance. |

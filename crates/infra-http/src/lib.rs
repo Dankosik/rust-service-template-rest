@@ -1,6 +1,9 @@
 mod body;
 mod contract;
 pub mod extract;
+// template:begin object-storage:http-object-storage-module
+pub mod object_storage;
+// template:end object-storage:http-object-storage-module
 pub mod problem;
 // template:begin authn:infra-http-authn-module
 pub mod authn;

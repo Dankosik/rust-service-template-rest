@@ -218,3 +218,9 @@ pub struct CacheNamespace {
     name: &'static str,
     histograms: Arc<NamespaceHistograms>,
 }
+
+#[derive(Clone, Debug)]
+pub struct CacheLookup {
+    namespace: Option<CacheNamespace>,
+    source_reserve: Duration,
+}

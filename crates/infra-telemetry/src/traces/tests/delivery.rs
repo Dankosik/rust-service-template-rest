@@ -17,6 +17,9 @@ use prost::Message as _;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 
+use crate::logging::tests::capture;
+use crate::{LoggerShutdown, LoggingFormat};
+
 use super::*;
 
 // template:begin grpc:telemetry-tls-delivery-tests
@@ -220,41 +223,44 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
-fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
+fn unusable_trust_material_logs_the_exporter_build_stage_without_configuration_values() {
+    const ENDPOINT: &str = "https://127.0.0.1:1/private-collector";
+    const HEADER_VALUE: &str = "private-header";
+
     let files = tempfile::tempdir().expect("directory for trust files");
     let file = |variable, name: &str| TrustFile {
         variable,
         path: files.path().join(name),
     };
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
-    for (trust, expected) in [
+    for (trust, stage) in [
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
                 ..CollectorTrust::default()
             },
-            "read the file OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE names",
+            "trust_file_read",
         ),
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "the file OTEL_EXPORTER_OTLP_CERTIFICATE names holds no certificate",
+            "trust_file_pem",
         ),
         (
             CollectorTrust {
                 client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE is set without OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            "client_identity_incomplete",
         ),
         (
             CollectorTrust {
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "OTEL_EXPORTER_OTLP_CLIENT_KEY is set without OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "client_identity_incomplete",
         ),
         (
             CollectorTrust {
@@ -262,21 +268,33 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "the client certificate and key files are not a usable PEM identity",
+            "client_identity_pem",
         ),
     ] {
-        let error = span_exporter(
-            &Endpoint::Typed("https://127.0.0.1:1"),
-            HashMap::new(),
-            &trust,
-            export_timeout(&|_: &str| None),
-            &|_: &str| None,
-        )
-        .expect_err("unusable trust material prevents construction");
-        assert!(error.to_string().starts_with(expected));
-        let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| None, &trust)
+        let mut options = options(ENDPOINT);
+        options.otlp_headers = Some(SecretString::from(format!("authorization={HEADER_VALUE}")));
+        let handle = tracer_provider(&options, |_| None, &trust)
             .expect("unusable trust material is not a startup failure");
-        assert_eq!(handle.exporter_state, ExporterState::Degraded, "{expected}");
+        assert_eq!(handle.exporter_state.as_str(), "degraded");
+        let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", Some(&handle));
+        tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
+        std::assert_matches!(
+            guard.shutdown(std::time::Instant::now() + WAIT),
+            LoggerShutdown::Completed(_)
+        );
+
+        let records = buffer.records();
+        let record: serde_json::Value = serde_json::from_str(&records).expect("one startup record");
+        assert_eq!(record["level"], "WARN");
+        assert_eq!(record["reason"], "exporter_build");
+        assert_eq!(record["stage"], stage);
+        assert_eq!(
+            record["message"],
+            "trace exporter degraded; spans are recorded but not exported"
+        );
+        for value in ["absent.pem", "text.pem", ENDPOINT, HEADER_VALUE] {
+            assert!(!records.contains(value), "{records}");
+        }
     }
 }
 

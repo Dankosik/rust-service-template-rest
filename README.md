@@ -130,6 +130,13 @@ configured.
 - `OUTBOUND_AUTH=oauth2-client-credentials`: OAuth2 machine authentication with
   a private key and RFC 8693 token exchange
   ([`infra-oauth2-client-credentials`](crates/infra-oauth2-client-credentials)).
+  To call a provider as the service, pass `http_resource: Some(Box::new(prepare))`
+  in the `ServiceRegistration` given to `service::run_with`. In `prepare`,
+  pass the OAuth registration and target to `background.service_tokens` and return the adapter
+  with its authenticated transport. Keep response limits, timeouts and provider
+  error mapping in that adapter. In the handler, extract `Extension<MyAdapter>`
+  and `RequestContext`, then bind the transport with `.with_context(ctx.operation())`
+  once for all calls in that request. The process drives and joins token refresh.
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
 - `GRPC=enabled`: tonic gRPC on a separate listener and an outbound client
@@ -156,14 +163,16 @@ configured.
   ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
-- `CACHE=redis`: an optional Valkey cache. Each feature reserves time for
-  its source of truth and owns fallback on a miss or an unavailable cache.
+- `CACHE=redis`: an optional Valkey cache. Bind a source-specific time reserve
+  at startup with `CacheLookup` and let the feature read from its source when
+  lookup returns no value.
   Configure entry sizes and grant the read commands before rolling out the
   [cache profile](docs/decisions/cache-decisions.md).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->
-- `OBJECT_STORAGE=s3`: Amazon S3, Cloudflare R2 or Railway Buckets
-  ([`infra-object-storage`](crates/infra-object-storage)).
+- `OBJECT_STORAGE=s3` supports Amazon S3, Cloudflare R2 and Railway Buckets.
+  File routes use the [HTTP upload and download helpers](crates/infra-http/src/object_storage.rs)
+  with the configured [storage client](crates/infra-object-storage).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
 
 ## Run it

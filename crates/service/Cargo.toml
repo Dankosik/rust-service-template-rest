@@ -60,6 +60,9 @@ infra-object-storage = { workspace = true }
 # template:begin outbound-http:service-outbound-http-dependency
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:service-outbound-http-dependency
+# template:begin outbound-auth:service-outbound-oauth-dependency
+infra-oauth2-client-credentials = { workspace = true }
+# template:end outbound-auth:service-outbound-oauth-dependency
 # template:begin webhooks-common:service-webhooks-dependency
 infra-webhooks = { workspace = true }
 # template:end webhooks-common:service-webhooks-dependency
@@ -94,6 +97,10 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+# template:begin outbound-auth:service-outbound-oauth-test-key
+infra-oauth2-client-credentials = { workspace = true, features = ["test-support"] }
+tls-test-support = { workspace = true }
+# template:end outbound-auth:service-outbound-oauth-test-key
 service-config = { workspace = true, features = ["test-support"] }
 tower = { workspace = true, features = ["util"] }
 similar = { workspace = true, features = ["text"] }
@@ -125,7 +132,9 @@ infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:service-service-auth-test-dependency
 rstest = { workspace = true }
 nix = { workspace = true, features = ["signal", "fs"] }
+# template:begin service-test-tempfile:service-tempfile-dev-dependency
 tempfile = { workspace = true, features = ["getrandom"] }
+# template:end service-test-tempfile:service-tempfile-dev-dependency
 tokio = { workspace = true, features = [
     "test-util", "io-util",
     # template:begin runtime-progress:service-runtime-progress-tokio-features

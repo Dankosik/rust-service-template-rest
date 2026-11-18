@@ -99,6 +99,28 @@ impl<T: EventPayload> Route<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PublicationPolicy {
+    pub max_payload_bytes: usize,
+}
+
+impl PublicationPolicy {
+    pub fn declare<T: EventPayload + 'static>(
+        self,
+        registry: &mut Registry,
+        route: &Route<T>,
+    ) -> Result<PublicationRoute<T>, RegistryError> {
+        registry.declare_publication(route, self.max_payload_bytes)
+    }
+
+    #[must_use]
+    pub fn capped_at(self, max_payload_bytes: usize) -> Self {
+        Self {
+            max_payload_bytes: self.max_payload_bytes.min(max_payload_bytes),
+        }
+    }
+}
+
 pub struct PublicationRoute<T> {
     route: Route<T>,
     max_payload_bytes: usize,

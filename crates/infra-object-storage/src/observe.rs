@@ -131,6 +131,7 @@ impl OperationGuard {
             rpc.method = method,
             cloud.region = cloud_region,
             object_storage.outcome = tracing::field::Empty,
+            object_storage.timeout_source = tracing::field::Empty,
             aws.request_id = tracing::field::Empty,
             aws.extended_request_id = tracing::field::Empty,
             error.type = tracing::field::Empty,
@@ -174,7 +175,7 @@ impl OperationGuard {
             ObjectStorageError::Rejected => Outcome::Rejected,
             ObjectStorageError::Integrity => Outcome::Integrity,
         };
-        self.record_failure(outcome, failure.error_type.as_str());
+        self.record_failure(outcome, failure);
         failure.error
     }
 
@@ -191,12 +192,17 @@ impl OperationGuard {
                 MutationFailure::Rejected => Outcome::Rejected,
             },
         };
-        self.record_failure(outcome, failure.error_type.as_str());
+        self.record_failure(outcome, failure);
         failure.error
     }
 
-    fn record_failure(&mut self, outcome: Outcome, error_type: &str) {
+    fn record_failure<E>(&mut self, outcome: Outcome, failure: &Failure<E>) {
+        let error_type = failure.error_type.as_str();
+        let timeout_source = failure.timeout_source;
         self.span.record("error.type", error_type);
+        if let Some(source) = timeout_source {
+            self.span.record("object_storage.timeout_source", source);
+        }
         self.span.record("otel.status_code", "ERROR");
         self.finish(outcome);
         let operation = self.operation.label();
@@ -207,6 +213,7 @@ impl OperationGuard {
                         $level,
                         object_storage.operation = operation,
                         object_storage.outcome = outcome.label(),
+                        object_storage.timeout_source = timeout_source,
                         error.type = error_type,
                         aws.request_id = self.request_id.as_deref(),
                         aws.extended_request_id = self.extended_request_id.as_deref(),

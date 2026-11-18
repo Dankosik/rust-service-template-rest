@@ -17,5 +17,5 @@ pub mod grpc;
 
 pub use credentials::{ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens};
 pub use error::{AcquisitionError, ConfigurationError, Error, Rejection};
-pub use http_client::AuthenticatedClient;
+pub use http_client::{AuthenticatedClient, RequestClient};
 pub use options::{Algorithm, Options, TokenTarget};

@@ -98,10 +98,8 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_tls_fixture_output(source: Path, target: Path) -> None:
-    # The canonical tls-fixtures marker retains rcgen with its shared fixture.
-    # Read that projected owner rather than duplicating the profile predicate.
     manifest = tomllib.loads((target / "Cargo.toml").read_text(encoding="utf-8"))
-    shared_selected = "rcgen" in manifest["workspace"]["dependencies"]
+    shared_selected = "tls-test-support" in manifest["workspace"]["dependencies"]
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
 
 
@@ -287,6 +285,11 @@ def check(source: Path) -> None:
         # Commit only selected instruction drift. The unrelated-to-instruction
         # portable tooling remains dirty throughout instructions-only adoption.
         commit_paths(target, "committed portable instruction drift", "AGENTS.md")
+        cargo_artifacts = target / "target"
+        cargo_artifacts.mkdir(exist_ok=True)
+        local_pipes = (cargo_artifacts / "build-pipe", target / ".env.local-pipe", target / "docs/service-pipe")
+        for pipe in local_pipes:
+            os.mkfifo(pipe)
         check_drift = sync(source, target, "--check", instructions_only=True)
         if check_drift.returncode != 1:
             raise AssertionError(f"instructions-only check should report drift, got {check_drift.returncode}: {check_drift.stderr}")
@@ -335,6 +338,8 @@ def check(source: Path) -> None:
         full_parity = sync(source, target, "--check")
         if full_parity.returncode:
             raise AssertionError(f"committed full parity failed: {full_parity.stderr}")
+        if not all(pipe.is_fifo() for pipe in local_pipes):
+            raise AssertionError("portable sync removed service-local files")
 
         for invalid, diagnostic in (
             (b'{"env":{},"env":{}}', ".claude/settings.json: JSON object has a duplicate key"),
@@ -373,6 +378,7 @@ def check(source: Path) -> None:
 
         make_cases = (
             ("space-target", b"\n build: ; @:\n", "overrides"),
+            ("reserved-initializer", b"\ntemplate-init: ; @:\n", "overrides"),
             ("paren-eval", b"\nOVERRIDE := $(eval build: ; @:)\n", "evaluation"),
             ("brace-eval", b"\nOVERRIDE := ${eval build: ; @:}\n", "evaluation"),
             ("computed-target", b"\nTARGET := build\n$(TARGET): ; @:\n", "nonstatic target"),

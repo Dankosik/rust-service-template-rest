@@ -317,6 +317,7 @@
   "outbound-auth": {
     "remove_when_unselected": [
       "crates/infra-oauth2-client-credentials/",
+      "crates/service/src/bootstrap/outbound_tests.rs",
       "docs/decisions/outbound-machine-authentication-decisions.md"
     ]
   },
@@ -416,10 +417,14 @@
   "worker": {
     "remove_when_unselected": [
       "crates/config/src/worker.rs",
+      "crates/json-payload/",
       "crates/jobs-worker/"
     ]
   },
   "service-secrets": {
+    "remove_when_unselected": []
+  },
+  "service-test-tempfile": {
     "remove_when_unselected": []
   },
   "integration": {
@@ -488,6 +493,8 @@
     "remove_when_unselected": [
       "vendor/aws-smithy-http-client/",
       "crates/infra-object-storage/",
+      "crates/infra-http/src/object_storage.rs",
+      "crates/infra-http/src/object_storage/",
       "crates/config/src/object_storage.rs",
       "crates/config/src/object_storage/",
       "crates/service/src/bootstrap/object_storage.rs",

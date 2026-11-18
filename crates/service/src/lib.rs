@@ -1,7 +1,7 @@
 pub mod api;
 
 mod bootstrap;
-pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration};
+pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration, run_with};
 mod state;
 pub use state::AppState;
 // template:begin grpc:service-registration-module
@@ -11,16 +11,38 @@ pub use bootstrap::GrpcRegistration;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+pub type HttpResource<C> = Box<
+    dyn FnOnce(
+        &service_config::Config,
+        &mut BackgroundRegistration<'_>,
+    ) -> Result<C, Box<dyn std::error::Error + Send + Sync>>,
+>;
+
+#[derive(derive_more::Debug)]
+#[debug("ServiceRegistration {{ .. }}")]
+pub struct ServiceRegistration<C = ()> {
+    pub http_resource: Option<HttpResource<C>>,
+    // template:begin grpc:service-grpc-registration-field
+    pub grpc: Option<GrpcRegistration>,
+    // template:end grpc:service-grpc-registration-field
+}
+
+impl<C> Default for ServiceRegistration<C> {
+    fn default() -> Self {
+        Self {
+            http_resource: None,
+            // template:begin grpc:service-default-grpc-registration
+            grpc: None,
+            // template:end grpc:service-default-grpc-registration
+        }
+    }
+}
+
 pub fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    bootstrap::run(
-        args,
-        // template:begin grpc:service-run-registration-argument
-        None,
-        // template:end grpc:service-run-registration-argument
-    )
+    run_with(args, ServiceRegistration::<()>::default())
 }
 
 // template:begin grpc:service-run-with-grpc
@@ -28,7 +50,13 @@ pub fn run_with_grpc<I>(args: I, registration: GrpcRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    bootstrap::run(args, Some(registration))
+    run_with(
+        args,
+        ServiceRegistration {
+            grpc: Some(registration),
+            ..ServiceRegistration::<()>::default()
+        },
+    )
 }
 // template:end grpc:service-run-with-grpc
 

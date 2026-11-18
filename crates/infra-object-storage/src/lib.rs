@@ -37,7 +37,7 @@ pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
-pub use self::put_body::PutBody;
+pub use self::put_body::{PutBody, PutOutcomes};
 use self::response_limit::ResponseLimit;
 
 const STALL_GRACE: Duration = Duration::from_secs(5);
@@ -226,7 +226,7 @@ impl ObjectStorage {
         &self,
         parent: &OperationContext,
         key: &ObjectKey,
-        body: PutBody,
+        mut body: PutBody,
         options: PutOptions,
     ) -> Result<(), MutationError> {
         let (context, mut guard) = self.begin_mutation(parent, Operation::Put)?;
@@ -237,6 +237,7 @@ impl ObjectStorage {
             )));
         }
         let _permit = self.admit_mutation(&mut guard)?;
+        let outcomes = body.outcomes.take();
         let body = within(&context, body.normalize_empty_stream())
             .await
             .map_err(|interrupted| {
@@ -277,11 +278,19 @@ impl ObjectStorage {
             .config_override(call_config)
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let result = within_mutation(&context, request).await;
+        let mut dispatched = None;
+        let result = within_mutation(&context, async {
+            if let Some(outcomes) = &outcomes {
+                outcomes.dispatched();
+                dispatched = Some(outcomes);
+            }
+            request.await
+        })
+        .await;
         if let Ok((answer, _)) = &result {
             guard.answered_by(answer);
         }
-        match result {
+        let outcome = match result {
             Ok((Ok(_), _)) => {
                 guard.succeed();
                 Ok(())
@@ -300,7 +309,13 @@ impl ObjectStorage {
             Err(interrupted) => {
                 Err(guard.fail_mutation(&Failure::mutation_interrupted(interrupted)))
             }
+        };
+        if let Some(dispatched) = dispatched
+            && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
+        {
+            dispatched.settled();
         }
+        outcome
     }
 
     pub async fn get(

@@ -90,7 +90,6 @@ struct ActiveStream<B: Body> {
     deadline: Option<Deadline>,
     fallback: Option<opentelemetry::Context>,
     waker: Option<Waker>,
-    map_error: fn(&B::Error) -> tonic::Code,
 }
 
 enum StreamStage<B: Body> {
@@ -157,19 +156,12 @@ impl<B: Body> ServerState<B> {
     }
 
     fn inspect_frame(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
-        let StreamStage::Active(active) = &self.stage else {
-            return None;
-        };
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
                 ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown)
             }
-            Poll::Ready(Some(Err(error))) => ServerOutcome {
-                code: (active.map_error)(error),
-                failure: None,
-            },
-            Poll::Ready(None) => ServerOutcome::unknown(),
+            Poll::Ready(Some(Err(_)) | None) => ServerOutcome::unknown(),
             Poll::Pending => return None,
         };
         self.transition(StreamStage::Closed, outcome)
@@ -214,16 +206,7 @@ where
     } else {
         ServerOutcome::from_response(&response)
     };
-    response.map(|body| {
-        ResponseBody::start(
-            body,
-            call,
-            fallback,
-            custody,
-            |_error| tonic::Code::Unknown,
-            initial,
-        )
-    })
+    response.map(|body| ResponseBody::start(body, call, fallback, custody, initial))
 }
 
 impl<B> ResponseBody<B>
@@ -235,7 +218,6 @@ where
         call: Call,
         fallback: Option<opentelemetry::Context>,
         custody: ServerCustody,
-        map_error: fn(&B::Error) -> tonic::Code,
         initial: Option<ServerOutcome>,
     ) -> Self {
         let body_ended = body.is_end_stream();
@@ -248,7 +230,6 @@ where
                 deadline: custody.deadline,
                 fallback,
                 waker: None,
-                map_error,
             }),
         };
         let finalizer = if let Some(outcome) = initial {
@@ -482,14 +463,27 @@ mod tests {
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        ResponseBody::start(
-            body,
-            server_call(),
-            None,
-            custody,
-            tonic::Status::code,
-            None,
-        )
+        ResponseBody::start(body, server_call(), None, custody, None)
+    }
+
+    #[tokio::test]
+    async fn body_read_error_reaches_the_reader_and_counts_as_unknown() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let frames = futures_util::stream::iter([Err::<Frame<Bytes>, _>(
+            tonic::Status::unavailable("body read failed"),
+        )]);
+        let mut body = start_response(
+            http_body_util::StreamBody::new(frames),
+            ServerCustody::default(),
+        );
+        let error = body.frame().await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "body read failed");
+        assert!(body.frame().await.is_none());
+        let rendered = handle.render();
+        assert!(rendered.contains("grpc_code=\"Unknown\"} 1"), "{rendered}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -807,7 +801,6 @@ mod tests {
             call,
             Some(fallback),
             ServerCustody::default(),
-            tonic::Status::code,
             None,
         );
         let ambient = opentelemetry::Context::current()

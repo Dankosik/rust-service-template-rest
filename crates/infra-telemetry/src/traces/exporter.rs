@@ -12,7 +12,7 @@ use opentelemetry_otlp::{
     WithHttpConfig,
 };
 
-use super::{EndpointSource, TracingError};
+use super::{EndpointSource, ExporterBuildStage, TracingError};
 
 pub(super) const CERTIFICATE_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
@@ -171,6 +171,22 @@ pub(super) enum ExporterError {
     ClientThreadPanicked,
     #[error("{variable} is neither `gzip` nor `none`")]
     Compression { variable: &'static str },
+}
+
+impl ExporterError {
+    pub(super) const fn stage(&self) -> ExporterBuildStage {
+        ExporterBuildStage(match self {
+            Self::Build(_) => "sdk_build",
+            Self::Read { .. } => "trust_file_read",
+            Self::Pem { .. } | Self::NoCertificate { .. } => "trust_file_pem",
+            Self::Identity(_) => "client_identity_pem",
+            Self::IncompleteIdentity { .. } => "client_identity_incomplete",
+            Self::Client(_) => "http_client_build",
+            Self::ClientThread(_) => "http_client_thread_start",
+            Self::ClientThreadPanicked => "http_client_thread_panic",
+            Self::Compression { .. } => "compression_config",
+        })
+    }
 }
 
 pub(super) fn span_exporter(
