@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # check=error=true
 
 # Production image for the service binary. Measurements and the reasons for
@@ -27,7 +27,7 @@
 # - CARGO_INCREMENTAL=0, fixed /src, stripping and SOURCE_DATE_EPOCH bounded
 #   the historical byte-equality experiment documented in delivery policy.
 #   Locked resolution is not a future binary/image equality guarantee: APT
-#   inputs, this frontend tag and tool/package availability can change.
+#   inputs and tool/package availability can change.
 # - JEMALLOC_SYS_WITH_MALLOC_CONF bakes `thp:never` into the allocator: on a
 #   host whose transparent huge pages are `always`, khugepaged refills the
 #   pages jemalloc returned (docs/backend-library-selection.md).
@@ -71,6 +71,31 @@ RUN set -eu; \
     install_tool cargo-chef "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}" "${chef_sha}"; \
     install_tool cargo-auditable "https://github.com/rust-secure-code/cargo-auditable/releases/download/v${CARGO_AUDITABLE_VERSION}" "${auditable_sha}"; \
     cargo chef --version
+
+FROM chef AS rust-notices-tool
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/*
+COPY tools/versions.env /tmp/versions.env
+RUN set -eu; \
+    . /tmp/versions.env; \
+    arch=$(uname -m); \
+    case "${arch}" in \
+      x86_64) checksum=${CARGO_ABOUT_X86_64_SHA256} ;; \
+      aarch64) checksum=${CARGO_ABOUT_AARCH64_SHA256} ;; \
+      *) echo "no pinned cargo-about for ${arch}" >&2; exit 1 ;; \
+    esac; \
+    package="cargo-about-${CARGO_ABOUT_VERSION}-${arch}-unknown-linux-musl"; \
+    curl -fsSLo /tmp/cargo-about.tar.gz "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/${package}.tar.gz"; \
+    echo "${checksum}  /tmp/cargo-about.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/cargo-about.tar.gz -C "${CARGO_HOME}/bin" --strip-components=1 "${package}/cargo-about"; \
+    rm /tmp/cargo-about.tar.gz
+
+FROM rust-notices-tool AS rust-notices
+COPY . .
+RUN mkdir /out \
+ && test -f LICENSE && test ! -L LICENSE \
+ && python3 build/docker/rust-notices.py "$(rustc --print host-tuple)" /out/THIRD-PARTY-RUST.txt \
+ && cp LICENSE /out/LICENSE
 
 FROM chef AS planner
 COPY . .
@@ -210,6 +235,7 @@ LABEL org.opencontainers.image.version="${APP_VERSION}" \
       service.build.pgo="${PGO}"
 ARG SERVICE_BIN=service
 COPY --from=service-build "/out/${SERVICE_BIN}" /service
+COPY --from=rust-notices --chmod=0444 /out/LICENSE /out/THIRD-PARTY-RUST.txt /usr/share/licenses/service/
 # template:begin postgres:docker-migrator-runtime
 COPY --from=migrate-build /out/migrate /migrate
 # template:end postgres:docker-migrator-runtime
