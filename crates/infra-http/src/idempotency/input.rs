@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 
 use super::identity::request_fingerprint;
 use crate::Problem;
-use crate::extract::{Path, Query, decode_json, require_json_content_type};
+use crate::extract::{Path, decode_json, decode_query, require_json_content_type};
 
 pub struct CommandInput {
     parts: Parts,
@@ -105,11 +105,13 @@ impl CommandInput {
             .map_err(Box::new)
     }
 
-    pub async fn query<T: DeserializeOwned + Send>(&mut self) -> Result<T, Box<Problem>> {
-        Query::from_request_parts(&mut self.parts, &())
-            .await
-            .map(|Query(value)| value)
-            .map_err(Box::new)
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "query decoding starts when callers poll the returned future"
+    )]
+    pub async fn query<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
+        decode_query(self.raw_query().unwrap_or_default()).map_err(Box::new)
     }
 
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
