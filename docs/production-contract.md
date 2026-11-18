@@ -155,6 +155,26 @@ replacement token as a positive control. Record the remaining access window
 and the provider and resource revocation policies. If the incident requires
 immediate denial at the resource, invoke its access-token revocation or
 isolation procedure and verify it there.
+
+On 2026-11-18 the isolated Keycloak 26.8.0 drill kept one ES256 client, its
+service account and its catalog scope. Both keys obtained fresh access tokens
+during overlap. Measured from the start of the admin request that removed the
+old JWK, Keycloak acknowledged the update within 4 ms and rejected the first
+fresh old-key assertion with `invalid_client` within 8 ms. The new key
+continued issuing tokens.
+
+The original catalog bearer had a client-specific 20 s lifetime. Its last
+active introspection request began 19.875 s after withdrawal. The first
+inactive reply arrived by 20.155 s. Catalog still accepted a freshly issued
+new-key token at that point. These times bracket what this recipient observed
+with 250 ms between probes. Client-key withdrawal closed issuance while the
+previously issued access token remained usable until around its own expiry.
+Repeat for each deployment's token lifetime, resource validation policy and
+cache settings.
+
+```sh
+ALLOW_HEAVY=1 REQUIRE_DOCKER=1 RUST_TEST_NOCAPTURE=1 make test-integration-oauth
+```
 <!-- template:end outbound-auth:production-keycloak-registration -->
 
 <!-- template:begin service-auth:production-service-key-rotation -->
@@ -261,6 +281,25 @@ the containment and restoration budgets separately.
 ```sh
 cargo run --release --locked --manifest-path crates/service/Cargo.toml --example service_auth_rotation -- --cold
 ```
+
+On 2026-11-18 three release-build trials on macOS arm64 started with only
+the old key trusted. The local operator sent `SIGKILL` to the three owned
+receivers. At containment all three processes had exited, old calls on
+established channels returned `UNAVAILABLE` and every direct TCP endpoint
+refused connections. At restoration three healthy TLS replacements rejected
+fresh old-key calls with `UNAUTHENTICATED` and accepted new-key calls.
+
+| Trial | Contained, 0 of 3 serving | Restored, 3 of 3 serving |
+| --- | ---: | ---: |
+| 1 | 13 ms | 692 ms |
+| 2 | 14 ms | 695 ms |
+| 3 | 12 ms | 691 ms |
+
+Both columns are cumulative upper bounds from withdrawal, rounded up to the
+next millisecond. Replacement signing material was generated only after
+containment. Recovery included starting three prebuilt receivers, readiness,
+TLS and direct unary probes. Production traffic switching, an external
+secret manager and operator response time were outside this loopback drill.
 <!-- template:end service-auth:production-service-key-rotation -->
 
 ## Operation and recovery
