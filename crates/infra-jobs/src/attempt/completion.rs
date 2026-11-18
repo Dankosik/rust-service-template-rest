@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use infra_postgres::observed;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tokio::time::Instant;
@@ -85,7 +85,7 @@ impl CompletionGroup {
         let (reply, response) = oneshot::channel();
         let registration = std::mem::DropGuard::new(fence, |fence| {
             let retired = {
-                let mut queued = self.lock_queue();
+                let mut queued = self.queued.lock();
                 queued
                     .iter()
                     .position(|entry| entry.fence == fence)
@@ -99,12 +99,8 @@ impl CompletionGroup {
             slots: Arc::clone(slots),
             reply,
         };
-        self.lock_queue().push(queued);
+        self.queued.lock().push(queued);
         (registration, response)
-    }
-
-    fn lock_queue(&self) -> MutexGuard<'_, Vec<QueuedCompletion>> {
-        self.queued.lock()
     }
 
     async fn writer_or_reply(
@@ -193,7 +189,7 @@ pub(super) async fn complete_batched(
         WriteTurn::Write(writer) => writer,
         WriteTurn::Reply(reply) => return reply,
     };
-    let batch = CompletionBatch::new(std::mem::take(&mut *group.lock_queue()));
+    let batch = CompletionBatch::new(std::mem::take(&mut *group.queued.lock()));
     write_batch(shared, batch, supervisor_deadline).await;
     drop(writer);
     response.await.unwrap_or(Err(Unacknowledged))
@@ -366,7 +362,7 @@ mod tests {
             assert_eq!(capacity.available_permits(), 1);
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 1.0);
             assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 1.0);
-            assert_eq!(group.lock_queue().len(), 1);
+            assert_eq!(group.queued.lock().len(), 1);
             std::assert_matches!(
                 first_reply.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed)
@@ -379,7 +375,7 @@ mod tests {
             assert_eq!(capacity.available_permits(), 2);
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
             assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
-            assert!(group.lock_queue().is_empty());
+            assert!(group.queued.lock().is_empty());
         });
     }
 
@@ -431,7 +427,7 @@ mod tests {
                         responses.push(response);
                         observers.push(wake);
                     }
-                    let mut batch = CompletionBatch::new(std::mem::take(&mut *group.lock_queue()));
+                    let mut batch = CompletionBatch::new(std::mem::take(&mut *group.queued.lock()));
                     drop(registrations);
                     assert_eq!(capacity.available_permits(), 0, "batch retains admission");
                     assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 4.0);

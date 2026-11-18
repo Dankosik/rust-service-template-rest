@@ -2,7 +2,7 @@ use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 
-use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
+use super::{AttemptId, ClaimFence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 use crate::kind::{
     Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
@@ -91,13 +91,6 @@ impl Written {
             Self::Applied
         } else {
             Self::Unchanged
-        }
-    }
-
-    pub(super) const fn persistence(self) -> Persistence {
-        match self {
-            Self::Applied => Persistence::Applied,
-            Self::Unchanged => Persistence::Unchanged,
         }
     }
 }
@@ -267,6 +260,21 @@ pub(super) fn map_outcome(
     let number = attempt.number;
     let exhausted = number >= policy.max_attempts;
     let retry_budget_spent = exhausted && !is_outbox;
+    let retry_or_exhaust = |spent: bool, text: &str, cause, floor_micros| {
+        let summary = sanitize_summary(text);
+        if spent {
+            return Transition::Fail {
+                reason: FailureReason::Exhausted,
+                summary,
+            };
+        }
+        Transition::Retry {
+            summary,
+            base_micros: retry_base_micros(number, is_outbox),
+            floor_micros,
+            cause,
+        }
+    };
     match ended {
         Ended::Success(completion) => Transition::Complete(completion),
         Ended::Cancelled => Transition::Release,
@@ -280,40 +288,23 @@ pub(super) fn map_outcome(
                 summary: sanitize_summary(&error.summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
-                number,
                 retry_budget_spent,
                 &error.summary,
                 RetryCause::Failure,
                 floor_micros,
-                is_outbox,
             ),
-            Disposition::Retry => retry_or_exhaust(
-                number,
-                retry_budget_spent,
-                &error.summary,
-                RetryCause::Failure,
-                0,
-                is_outbox,
-            ),
+            Disposition::Retry => {
+                retry_or_exhaust(retry_budget_spent, &error.summary, RetryCause::Failure, 0)
+            }
         },
-        Ended::Panic => retry_or_exhaust(
-            number,
-            exhausted,
-            "handler panicked",
-            RetryCause::Failure,
-            0,
-            is_outbox,
-        ),
+        Ended::Panic => retry_or_exhaust(exhausted, "handler panicked", RetryCause::Failure, 0),
         Ended::Payload(error) => retry_or_exhaust(
-            number,
             exhausted,
             &payload_summary(attempt.kind, &error),
             RetryCause::Failure,
             0,
-            is_outbox,
         ),
         Ended::Timeout => retry_or_exhaust(
-            number,
             retry_budget_spent,
             &format!(
                 "attempt timed out after {}",
@@ -322,7 +313,6 @@ pub(super) fn map_outcome(
             ),
             RetryCause::Timeout,
             0,
-            is_outbox,
         ),
     }
 }
@@ -333,21 +323,7 @@ pub(super) enum RetryCause {
     Timeout,
 }
 
-fn retry_or_exhaust(
-    number: u16,
-    exhausted: bool,
-    text: &str,
-    cause: RetryCause,
-    floor_micros: i64,
-    is_outbox: bool,
-) -> Transition {
-    let summary = sanitize_summary(text);
-    if exhausted {
-        return Transition::Fail {
-            reason: FailureReason::Exhausted,
-            summary,
-        };
-    }
+fn retry_base_micros(number: u16, is_outbox: bool) -> i64 {
     let base_seconds = if is_outbox {
         2_i64
             .saturating_pow(u32::from(number.max(1)))
@@ -355,12 +331,7 @@ fn retry_or_exhaust(
     } else {
         i64::from(number).pow(4)
     };
-    Transition::Retry {
-        summary,
-        base_micros: base_seconds * 1_000_000,
-        floor_micros,
-        cause,
-    }
+    base_seconds * 1_000_000
 }
 
 fn payload_summary(kind: &str, error: &serde_json::Error) -> String {

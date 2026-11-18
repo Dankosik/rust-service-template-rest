@@ -77,7 +77,7 @@ pub struct Job<K, P = PgPool> {
 
 pub type TransactionalJob<K> = Job<K, ()>;
 
-impl<K: JobKind, P> Job<K, P> {
+impl<K, P> Job<K, P> {
     #[must_use]
     pub const fn id(&self) -> JobId {
         self.attempt.fence.job_id
@@ -112,7 +112,7 @@ impl<K: JobKind, P> Job<K, P> {
     }
 }
 
-impl<K: JobKind> Job<K> {
+impl<K> Job<K> {
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
         &self.pool
