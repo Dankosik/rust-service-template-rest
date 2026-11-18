@@ -19,13 +19,14 @@ use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
+use tower::Layer as _;
 use tracing::Instrument as _;
 
 use crate::call::{ServerCustody, attach_server, deadline_status, server_stopped};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
-use crate::services::{CallType, Methods, REFLECTION_PATHS};
+use crate::services::{CallType, ListenerLayer, Methods, REFLECTION_PATHS};
 use crate::status::internal_status;
 use crate::{Error, Failure, Services};
 
@@ -178,6 +179,7 @@ pub fn router(
     Ok(Application {
         router: native_router(
             business,
+            services.listener_layer,
             readiness,
             services.names,
             methods,
@@ -204,6 +206,7 @@ fn semaphore(limit: Option<NonZeroU32>) -> Option<Arc<Semaphore>> {
 
 fn native_router(
     router: axum::Router,
+    listener_layer: Option<ListenerLayer>,
     readiness: ::health::ReadinessReader,
     names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
@@ -216,12 +219,19 @@ fn native_router(
     )]
     let health =
         axum::Router::new().route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
-    router
-        .merge(health.layer(axum::middleware::from_fn_with_state(
-            (methods, request_timeout),
-            health_call,
-        )))
-        .layer(axum::middleware::from_fn(native_grpc))
+    let router = router.merge(health.layer(axum::middleware::from_fn_with_state(
+        (methods, request_timeout),
+        health_call,
+    )));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the native gRPC listener delegates every route and its tonic fallback through this layer"
+    )]
+    let router = match listener_layer {
+        Some(layer) => axum::Router::new().fallback_service(layer.layer(router)),
+        None => router,
+    };
+    router.layer(axum::middleware::from_fn(native_grpc))
 }
 
 async fn native_grpc(request: Request, next: Next) -> Response {

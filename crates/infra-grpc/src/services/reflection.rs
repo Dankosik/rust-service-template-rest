@@ -20,11 +20,11 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
     let mut files: HashMap<String, Bytes> = HashMap::default();
     for encoded in sets {
         let set = EncodedFileDescriptorSet::decode(Bytes::from_static(encoded))
-            .map_err(|_| Error::InvalidFileDescriptorSet)?;
+            .map_err(Error::InspectReflectionFile)?;
         for file in set.file {
-            let descriptor = FileDescriptorProto::decode(file.clone())
-                .map_err(|_| Error::InvalidFileDescriptorSet)?;
-            let name = descriptor.name.ok_or(Error::InvalidFileDescriptorSet)?;
+            let descriptor =
+                FileDescriptorProto::decode(file.clone()).map_err(Error::InspectReflectionFile)?;
+            let name = descriptor.name.ok_or(Error::MissingReflectionFileName)?;
             if let Some(first) = files.get(&name) {
                 if file != first && definition(file)? != definition(first.clone())? {
                     return Err(Error::ConflictingFileDescription(name));
@@ -39,7 +39,7 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
 
 fn definition(file: Bytes) -> Result<DynamicMessage, Error> {
     let mut descriptor = DynamicMessage::decode(FileDescriptorProto::default().descriptor(), file)
-        .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        .map_err(Error::InspectReflectionFile)?;
     descriptor.clear_field_by_name("source_code_info");
     Ok(descriptor)
 }
@@ -72,6 +72,17 @@ mod tests {
     }
 
     #[test]
+    fn reflection_identifies_a_decoded_file_without_a_name() {
+        let mut services = Services::new();
+        services.describe(descriptor_set(&[])).unwrap();
+        services.add_reflection().unwrap();
+        std::assert_matches!(
+            services.attach_reflection(),
+            Err(Error::MissingReflectionFileName)
+        );
+    }
+
+    #[test]
     fn reflection_rejects_conflicting_options_on_a_shared_import() {
         const NAME: &[u8] = b"\x0a\x0cshared.proto";
         const OPTION_ENABLED: &[u8] = b"\x42\x09\x0a\x01x\x50\x01\x80\xb5\x18\x01";
@@ -80,22 +91,24 @@ mod tests {
         const SOURCE_INFO: &[u8] = b"\x4a\x02\x0a\x00";
 
         let original = descriptor_set(&[NAME, OPTION_ENABLED]);
-        for (duplicate, expected) in [
-            (original, Ok(())),
+        for (duplicate, conflicting) in [
+            (original, false),
             (
                 descriptor_set(&[SOURCE_INFO, REORDERED_OPTIONS, NAME]),
-                Ok(()),
+                false,
             ),
-            (
-                descriptor_set(&[NAME, OPTION_DISABLED]),
-                Err(Error::ConflictingFileDescription("shared.proto".to_owned())),
-            ),
+            (descriptor_set(&[NAME, OPTION_DISABLED]), true),
         ] {
             let mut services = Services::new();
             services.describe(original).unwrap();
             services.describe(duplicate).unwrap();
             services.add_reflection().unwrap();
-            assert_eq!(services.attach_reflection(), expected);
+            let result = services.attach_reflection();
+            if conflicting {
+                std::assert_matches!(result, Err(Error::ConflictingFileDescription(name)) if name == "shared.proto");
+            } else {
+                result.unwrap();
+            }
         }
     }
 }

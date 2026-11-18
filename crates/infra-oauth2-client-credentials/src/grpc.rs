@@ -77,15 +77,26 @@ impl Service<Request<Body>> for AuthenticatedClient {
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
         if let Some(context) = &self.context {
             if request.extensions().get::<OperationContext>().is_some() {
-                let status = self.resource.prepare_call(request).refuse(Status::internal(
-                    "request operation context conflicts with client context",
-                ));
+                let status = self.resource.refuse_call(
+                    &request,
+                    Status::internal("request operation context conflicts with client context"),
+                );
                 return Box::pin(std::future::ready(Err(status)));
             }
             request.extensions_mut().insert(context.clone());
         }
         let subject = take_request_subject(&mut request);
-        let mut prepared = self.resource.prepare_call(request);
+        let mut prepared = match self.resource.prepare_call(request) {
+            Ok(prepared) => prepared,
+            Err(status) => {
+                let status = match status.code() {
+                    Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
+                    Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
+                    _ => status,
+                };
+                return Box::pin(std::future::ready(Err(status)));
+            }
+        };
         let context = prepared.opening_context().clone();
         let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
             Ok(grant) => grant,

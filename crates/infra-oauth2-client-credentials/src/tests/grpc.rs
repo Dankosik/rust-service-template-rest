@@ -3,6 +3,7 @@ use std::{
     convert::Infallible,
     future::poll_fn,
     net::SocketAddr,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -173,13 +174,18 @@ impl Resource {
     }
 
     fn channel(&self, timeout: ClientTimeout) -> Client {
-        Client::with_timeout_policy(
+        self.channel_with_limit(timeout, None)
+    }
+
+    fn channel_with_limit(&self, timeout: ClientTimeout, limit: Option<NonZeroUsize>) -> Client {
+        Client::with_opening_limit(
             &format!("https://{}", self.address),
             ClientSecurity::Tls(ClientTlsMaterial {
                 ca_certificate_pem: Some(self.root_pem.clone()),
                 identity: None,
             }),
             timeout,
+            limit,
         )
         .unwrap()
     }
@@ -436,6 +442,49 @@ async fn caller_authorization_and_competing_bound_contexts_fail_before_io() {
     );
     assert!(tokens.token_requests().is_empty());
     assert_eq!(resource.calls(), 0);
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn oauth_opening_limit_refuses_before_acquiring_credentials_or_dispatching() {
+    const WAIT: Duration = Duration::from_secs(5);
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let gate = tokens.block_tokens();
+    let channel = resource.channel_with_limit(
+        ClientTimeout::FullRpc(Duration::from_secs(20)),
+        Some(NonZeroUsize::MIN),
+    );
+    let mut first =
+        EchoServiceClient::new(resource.credentials(&tokens).grpc(channel.clone()).unwrap());
+    let mut other = EchoServiceClient::new(resource.credentials(&tokens).grpc(channel).unwrap());
+    let mut opening = Box::pin(first.unary(UnaryRequest::default()));
+    tokio::time::timeout(WAIT, async {
+        tokio::select! {
+            () = tokens.token_received() => {}
+            result = &mut opening => panic!("the provider must hold the opening: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+
+    let error = tokio::time::timeout(WAIT, other.unary(UnaryRequest::default()))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(resource.calls(), 0);
+
+    gate.add_permits(2);
+    tokio::time::timeout(WAIT, opening).await.unwrap().unwrap();
+    tokio::time::timeout(WAIT, other.unary(UnaryRequest::default()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(resource.calls(), 2);
     resource.finish().await;
     tokens.finish().await;
 }
