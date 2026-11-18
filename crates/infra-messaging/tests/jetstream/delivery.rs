@@ -164,6 +164,79 @@ async fn handler_runs_in_the_trace_of_the_publication() {
 }
 
 #[tokio::test]
+async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed() {
+    let exporter = install_tracing();
+    let fixture = Fixture::create(true).await;
+    let relay = AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, false).await;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options_with_servers(
+            &fixture,
+            vec![relay.url.clone()],
+            Some(consumer_options(&fixture)),
+            1024,
+        ),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("consumer connects through the settlement relay");
+    let mut registry = fixture.registry.clone();
+    registry
+        .register(&fixture.route, |_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(registry, deadline(), &cancel)
+        .await
+        .expect("operator-provisioned durable consumer is admitted")
+        .start(&cancel);
+    let prepared = fixture
+        .publication
+        .prepare(&event("event-lost-source-ack-reply"))
+        .expect("fixture event is prepared");
+    messaging
+        .producer()
+        .publish(&prepared, &context(deadline(), &cancel))
+        .await
+        .expect("fixture event publication is acknowledged");
+
+    relay.wait_for_drop().await;
+    wait_for_source_ack(&fixture).await;
+    let process_name = format!("process {}", fixture.subject);
+    let process = eventually(
+        Duration::from_secs(8),
+        "processing span must close after the ACK reply times out",
+        async || exported_spans(exporter, &process_name).into_iter().next(),
+    )
+    .await;
+    assert_eq!(attribute(&process, "outcome").as_deref(), Some("success"));
+    assert_eq!(attribute(&process, "error.type"), None);
+    assert_eq!(process.status, opentelemetry::trace::Status::Unset);
+
+    let settlement = exported_settlement(exporter, "ack", &process);
+    assert_eq!(
+        attribute(&settlement, "outcome").as_deref(),
+        Some("unconfirmed")
+    );
+    assert_eq!(
+        attribute(&settlement, "error.type").as_deref(),
+        Some("timeout")
+    );
+    assert!(matches!(
+        settlement.status,
+        opentelemetry::trace::Status::Error { .. }
+    ));
+
+    handle
+        .finish(deadline())
+        .await
+        .expect("bounded consumer drain must join its pull task");
+    close(messaging).await;
+    relay.join().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked() {
     let exporter = install_tracing();
     let fixture = Fixture::create(true).await;
@@ -248,8 +321,46 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
             (Some("success".to_owned()), None, false),
         ]
     );
+    for (operation, process, outcome) in [
+        ("nak", &deliveries[0], "submitted"),
+        ("ack", &deliveries[1], "confirmed"),
+    ] {
+        let settlement = exported_settlement(exporter, operation, process);
+        assert_eq!(attribute(&settlement, "outcome").as_deref(), Some(outcome));
+        assert_eq!(attribute(&settlement, "error.type"), None);
+        assert_eq!(settlement.status, opentelemetry::trace::Status::Unset);
+    }
     close(messaging).await;
     fixture.cleanup().await;
+}
+
+fn exported_settlement(
+    exporter: &opentelemetry_sdk::trace::InMemorySpanExporter,
+    operation: &str,
+    process: &opentelemetry_sdk::trace::SpanData,
+) -> opentelemetry_sdk::trace::SpanData {
+    let mut spans = exported_spans(exporter, operation)
+        .into_iter()
+        .filter(|span| span.parent_span_id == process.span_context.span_id());
+    let span = spans.next().expect("process span has a settlement child");
+    assert!(spans.next().is_none(), "process span settles once");
+    assert_eq!(
+        span.span_context.trace_id(),
+        process.span_context.trace_id()
+    );
+    assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Client);
+    for key in ["messaging.system", "messaging.system.name"] {
+        assert_eq!(attribute(&span, key).as_deref(), Some("nats"), "{key}");
+    }
+    assert_eq!(
+        attribute(&span, "messaging.operation.type").as_deref(),
+        Some("settle")
+    );
+    assert_eq!(
+        attribute(&span, "messaging.operation.name").as_deref(),
+        Some(operation)
+    );
+    span
 }
 
 #[tokio::test]

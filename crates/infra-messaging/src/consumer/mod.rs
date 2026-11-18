@@ -22,7 +22,7 @@ use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
 use crate::messaging::{PUBLICATION_WINDOW_BYTES, Shared};
 use crate::registry::Registry;
-use crate::topology::{ConsumerAdmission, bind_durable, same_durable_contract};
+use crate::topology::{ConsumerAdmission, bind_durable, durable_contract_error_type};
 use crate::wire;
 
 const ACK_WAIT: Duration = HANDLER_TIMEOUT
@@ -127,10 +127,23 @@ pub enum ConsumerError {
     RetainedMessageTooLarge,
     #[error("messaging source sequence {sequence} exceeds the dead-letter publication size limit")]
     DeadLetterTooLarge { sequence: u64 },
+    #[error(
+        "messaging source sequence {sequence} cannot be transferred to a sealed dead-letter stream"
+    )]
+    DeadLetterStreamSealed { sequence: u64 },
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
     #[error("messaging consumer task exited unexpectedly")]
     TaskEnded,
+}
+
+impl ConsumerError {
+    const fn requires_delivery_drain(&self) -> bool {
+        matches!(
+            self,
+            Self::DeadLetterTooLarge { .. } | Self::DeadLetterStreamSealed { .. }
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -277,7 +290,7 @@ impl Consumer {
             () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
             result = async {
                 let result = self.consume(&mut deliveries, &stop, &force).await;
-                if matches!(result, Err(ConsumerError::DeadLetterTooLarge { .. })) {
+                if result.as_ref().is_err_and(ConsumerError::requires_delivery_drain) {
                     while deliveries.join_next().await.is_some() {}
                 }
                 result
@@ -433,7 +446,7 @@ impl Consumer {
                         }
                     }
                 }
-                Err(error @ ConsumerError::DeadLetterTooLarge { .. }) => {
+                Err(error) if error.requires_delivery_drain() => {
                     let _ = tokio::time::timeout(
                         BROKER_OPERATION_BUDGET,
                         release(messages, slots, stop),
@@ -455,16 +468,24 @@ impl Consumer {
             .await
             .unwrap_or_else(|_| Err(ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut)));
         let limits = match result {
-            Ok(info)
-                if info.created == self.pull.cached_info().created
-                    && same_durable_contract(&self.pull.cached_info().config, &info.config) =>
-            {
-                Ok(PullLimits::for_durable(
-                    &info.config,
-                    self.pull_delivery_bytes,
-                ))
+            Ok(info) => {
+                let bound = self.pull.cached_info();
+                if let Some(error_type) = durable_contract_error_type(&bound.config, &info.config) {
+                    tracing::warn!(
+                        operation = "consumer_info",
+                        error.type = error_type,
+                        "messaging_durable_configuration_changed"
+                    );
+                    Ok(None)
+                } else if info.created == bound.created {
+                    Ok(PullLimits::for_durable(
+                        &info.config,
+                        self.pull_delivery_bytes,
+                    ))
+                } else {
+                    Ok(None)
+                }
             }
-            Ok(_) => Ok(None),
             Err(error)
                 if matches!(
                     error.kind(),

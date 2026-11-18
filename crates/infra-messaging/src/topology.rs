@@ -8,7 +8,7 @@ use async_nats::jetstream::context::{
 };
 use async_nats::jetstream::stream::{
     Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, PersistenceMode,
-    StorageType, Stream,
+    RetentionPolicy, StorageType, Stream,
 };
 use async_nats::jetstream::{Context, ErrorCode};
 use sha2::{Digest as _, Sha256};
@@ -239,6 +239,12 @@ fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
     if matches!(config.persist_mode, Some(PersistenceMode::Async)) {
         return Err(Refusal::StreamAsyncPersistence);
     }
+    if config.retention == RetentionPolicy::Interest {
+        return Err(Refusal::StreamInterestRetention);
+    }
+    if config.sealed {
+        return Err(Refusal::StreamSealed);
+    }
     Ok(())
 }
 
@@ -352,20 +358,29 @@ pub(crate) async fn bind_durable(
         },
     };
     let expected = config.into_consumer_config();
-    if !same_durable_contract(&expected, &pull.cached_info().config) {
-        tracing::warn!(operation = "bind_consumer", error.type = "durable_configuration", expected_contract = expected.metadata.get(DURABLE_CONTRACT).map(String::as_str), reason = %MessagingError::Topology, "messaging_admission_failed");
+    if let Some(error_type) = durable_contract_error_type(&expected, &pull.cached_info().config) {
+        tracing::warn!(operation = "bind_consumer", error.type = error_type, expected_contract = expected.metadata.get(DURABLE_CONTRACT).map(String::as_str), reason = %MessagingError::Topology, "messaging_admission_failed");
         return Err(MessagingError::Topology);
     }
     Ok(pull)
 }
 
-pub(crate) fn same_durable_contract(expected: &ConsumerConfig, actual: &ConsumerConfig) -> bool {
+pub(crate) fn durable_contract_error_type(
+    expected: &ConsumerConfig,
+    actual: &ConsumerConfig,
+) -> Option<&'static str> {
     fn filters(config: &ConsumerConfig) -> impl Iterator<Item = &str> {
         std::iter::once(config.filter_subject.as_str())
             .filter(|filter| !filter.is_empty())
             .chain(config.filter_subjects.iter().map(String::as_str))
     }
-    expected.durable_name == actual.durable_name
+    if !actual.inactive_threshold.is_zero() {
+        return Some("durable_inactive_threshold");
+    }
+    if actual.memory_storage {
+        return Some("durable_memory_storage");
+    }
+    let compatible = expected.durable_name == actual.durable_name
         && expected
             .metadata
             .get(DURABLE_CONTRACT)
@@ -378,7 +393,8 @@ pub(crate) fn same_durable_contract(expected: &ConsumerConfig, actual: &Consumer
         && expected.max_deliver == actual.max_deliver
         && expected.replay_policy == actual.replay_policy
         && expected.backoff == actual.backoff
-        && expected.headers_only == actual.headers_only
+        && expected.headers_only == actual.headers_only;
+    (!compatible).then_some("durable_configuration")
 }
 
 fn topology_failure(
@@ -415,6 +431,8 @@ pub(crate) enum Refusal {
     StreamMemoryStorage,
     StreamAsyncPersistence,
     StreamNoAck,
+    StreamInterestRetention,
+    StreamSealed,
     DeadLetterBoundsUnavailable,
     DeadLetterHeaderSize,
 }
@@ -433,6 +451,8 @@ impl Refusal {
             Self::StreamMemoryStorage => "stream_memory_storage",
             Self::StreamAsyncPersistence => "stream_async_persistence",
             Self::StreamNoAck => "stream_no_ack",
+            Self::StreamInterestRetention => "stream_interest_retention",
+            Self::StreamSealed => "stream_sealed",
             Self::DeadLetterBoundsUnavailable => "dead_letter_bounds_unavailable",
             Self::DeadLetterHeaderSize => "dead_letter_header_bytes",
         }
@@ -452,7 +472,9 @@ impl Refusal {
             | Self::DeadLetterSubjectMismatch
             | Self::StreamMemoryStorage
             | Self::StreamAsyncPersistence
-            | Self::StreamNoAck => MessagingError::Topology,
+            | Self::StreamNoAck
+            | Self::StreamInterestRetention
+            | Self::StreamSealed => MessagingError::Topology,
         }
     }
 }
