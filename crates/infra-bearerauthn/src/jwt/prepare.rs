@@ -340,7 +340,7 @@ mod tests {
             issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
             audiences: vec!["api".to_owned()],
             token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256],
+            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
             jwks_max_age: Duration::from_hours(1),
             jwks_uri: jwks_uri
                 .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
@@ -435,76 +435,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_published_empty_jwks_revokes_cached_and_unseen_tokens_until_keys_return() {
+    async fn withdrawing_all_signing_keys_revokes_cached_and_unseen_tokens_until_keys_return() {
         use crate::Failure;
-        use jsonwebtoken::{Header, encode};
+        use crate::jwks::tests::ec_signing;
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         ensure_crypto_provider();
-        let signing = rsa_signing();
-        let key_document = |kid| {
-            let key = jwk(&signing, Algorithm::RS256, Some(kid), true);
-            serde_json::json!({ "keys": [key] }).to_string()
+        let signing = ec_signing();
+        let replacement_signing = ec_signing();
+        let mut encryption = jwk(&ec_signing(), Algorithm::ES256, Some("encryption"), false);
+        encryption["use"] = "enc".into();
+        let key_document = |kid, signer: &EncodingKey| {
+            let mut key = jwk(signer, Algorithm::ES256, Some(kid), true);
+            key["use"] = "sig".into();
+            serde_json::json!({ "keys": [key, &encryption] }).to_string()
         };
-        let (address, root, requested) = metadata_server(
-            [
-                key_document("old"),
-                r#"{"keys":false}"#.to_owned(),
-                r#"{"keys":[{}]}"#.to_owned(),
-                r#"{"keys":[]}"#.to_owned(),
-                key_document("new"),
-            ]
-            .into_iter()
-            .map(|body| ("/keys", StatusCode::OK, body))
-            .collect(),
-        )
-        .await;
-        let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
-        let worker = tokio::spawn(worker);
-        let authorization = |kid: &str, subject: &str| {
-            let mut header = Header::new(Algorithm::RS256);
-            header.kid = Some(kid.to_owned());
-            let claims = serde_json::json!({
-                "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
-                "aud": "api", "sub": subject,
-                "exp": jsonwebtoken::get_current_timestamp() + 600,
-            });
-            format!("Bearer {}", encode(&header, &claims, &signing).unwrap())
-        };
-        let cached = authorization("old", "cached");
-        let unseen = authorization("old", "unseen");
-        let replacement = authorization("new", "replacement");
-        let cached = crate::parse_bearer([cached.as_bytes()]).unwrap();
-        let unseen = crate::parse_bearer([unseen.as_bytes()]).unwrap();
-        let replacement = crate::parse_bearer([replacement.as_bytes()]).unwrap();
-        verifier.verify(&cached).await.unwrap();
+        for withdrawn in [
+            serde_json::json!({"keys": []}),
+            serde_json::json!({"keys": [&encryption]}),
+        ] {
+            let (address, root, requested) = metadata_server(
+                [
+                    key_document("old", &signing),
+                    r#"{"keys":false}"#.to_owned(),
+                    r#"{"keys":[{}]}"#.to_owned(),
+                    withdrawn.to_string(),
+                    key_document("new", &replacement_signing),
+                ]
+                .into_iter()
+                .map(|body| ("/keys", StatusCode::OK, body))
+                .collect(),
+            )
+            .await;
+            let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let worker = tokio::spawn(worker);
+            let authorization = |signer: &EncodingKey, kid: &str, subject: &str| {
+                let mut header = Header::new(Algorithm::ES256);
+                header.kid = Some(kid.to_owned());
+                let claims = serde_json::json!({
+                    "iss": format!("https://{FIXTURE_HOST}:{}/tenant", address.port()),
+                    "aud": "api", "sub": subject,
+                    "exp": jsonwebtoken::get_current_timestamp() + 600,
+                });
+                format!("Bearer {}", encode(&header, &claims, signer).unwrap())
+            };
+            let cached = authorization(&signing, "old", "cached");
+            let unseen = authorization(&signing, "old", "unseen");
+            let replacement = authorization(&replacement_signing, "new", "replacement");
+            let cached = crate::parse_bearer([cached.as_bytes()]).unwrap();
+            let unseen = crate::parse_bearer([unseen.as_bytes()]).unwrap();
+            let replacement = crate::parse_bearer([replacement.as_bytes()]).unwrap();
+            verifier.verify(&cached).await.unwrap();
 
-        let refresh = || async {
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(31)).await;
-            tokio::time::resume();
-            verifier.verify(&replacement).await
-        };
-        for response in ["malformed JWKS", "nonempty JWKS without usable keys"] {
-            assert_eq!(refresh().await.unwrap_err(), Failure::Invalid, "{response}");
-            let retained = authorization("old", response);
-            let retained = crate::parse_bearer([retained.as_bytes()]).unwrap();
+            let refresh = || async {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::resume();
+                verifier.verify(&replacement).await
+            };
+            for response in ["malformed JWKS", "nonempty JWKS without usable keys"] {
+                assert_eq!(refresh().await.unwrap_err(), Failure::Invalid, "{response}");
+                let retained = authorization(&signing, "old", response);
+                let retained = crate::parse_bearer([retained.as_bytes()]).unwrap();
+                assert_eq!(
+                    verifier.verify(&retained).await.unwrap().subject(),
+                    Some(response)
+                );
+            }
+
+            assert_eq!(refresh().await.unwrap_err(), Failure::Invalid);
+            for token in [&cached, &unseen] {
+                assert_eq!(verifier.verify(token).await.unwrap_err(), Failure::Invalid);
+            }
+            assert_eq!(refresh().await.unwrap().subject(), Some("replacement"));
             assert_eq!(
-                verifier.verify(&retained).await.unwrap().subject(),
-                Some(response)
+                verifier.verify(&cached).await.unwrap_err(),
+                Failure::Invalid
             );
+            assert_eq!(*requested.lock().unwrap(), ["/keys"; 5]);
+            worker.abort();
         }
-
-        assert_eq!(refresh().await.unwrap_err(), Failure::Invalid);
-        for token in [&cached, &unseen] {
-            assert_eq!(verifier.verify(token).await.unwrap_err(), Failure::Invalid);
-        }
-        assert_eq!(refresh().await.unwrap().subject(), Some("replacement"));
-        assert_eq!(
-            verifier.verify(&cached).await.unwrap_err(),
-            Failure::Invalid
-        );
-        assert_eq!(*requested.lock().unwrap(), ["/keys"; 5]);
-        worker.abort();
     }
 
     #[tokio::test]

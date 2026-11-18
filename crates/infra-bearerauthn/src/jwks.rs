@@ -132,6 +132,7 @@ struct RawJwks {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum KeyRejection {
     MalformedEntry,
+    EncryptionOnly,
     IncompatibleUsage,
     UnsupportedFamily,
     AlgorithmBinding,
@@ -142,6 +143,7 @@ impl KeyRejection {
     fn label(self) -> &'static str {
         match self {
             Self::MalformedEntry => "malformed_entry",
+            Self::EncryptionOnly => "encryption_only",
             Self::IncompatibleUsage => "incompatible_usage",
             Self::UnsupportedFamily => "unsupported_family",
             Self::AlgorithmBinding => "algorithm_binding",
@@ -153,13 +155,18 @@ impl KeyRejection {
 fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
-    let published_empty = raw.keys.is_empty();
     let mut rejected = BTreeMap::<KeyRejection, u64>::new();
     let mut keys = Vec::new();
     for value in raw.keys {
-        let key = serde_json::from_value::<Jwk>(value)
+        let key = Jwk::deserialize(&value)
             .map_err(|_| KeyRejection::MalformedEntry)
-            .and_then(|jwk| admit_key(jwk, configured));
+            .and_then(|jwk| {
+                admit_key(
+                    jwk,
+                    value.get("alg").and_then(serde_json::Value::as_str),
+                    configured,
+                )
+            });
         match key {
             Ok(key) => keys.push(key),
             Err(reason) => *rejected.entry(reason).or_default() += 1,
@@ -171,6 +178,10 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
             *rejected.entry(KeyRejection::AlgorithmBinding).or_default() += conflicts;
         }
     }
+    let no_usable_keys = keys.is_empty()
+        && rejected
+            .keys()
+            .any(|reason| *reason != KeyRejection::EncryptionOnly);
     for (reason, count) in rejected {
         tracing::debug!(
             reason = reason.label(),
@@ -179,7 +190,7 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
-    if keys.is_empty() && !published_empty {
+    if no_usable_keys {
         return Err(KeySetFailure::NoUsableKeys);
     }
     Ok(KeySet {
@@ -212,7 +223,14 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
     rejected
 }
 
-fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
+fn admit_key(
+    jwk: Jwk,
+    algorithm: Option<&str>,
+    configured: &[JwtAlgorithm],
+) -> Result<JwtKey, KeyRejection> {
+    if is_encryption_only(&jwk, algorithm) {
+        return Err(KeyRejection::EncryptionOnly);
+    }
     if !permits_signature_verification(&jwk) {
         return Err(KeyRejection::IncompatibleUsage);
     }
@@ -242,6 +260,81 @@ fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejecti
         algorithm,
         public_key,
     })
+}
+
+fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
+    let encryption_use = match jwk.common.public_key_use {
+        Some(PublicKeyUse::Encryption) => true,
+        None => false,
+        _ => return false,
+    };
+    let operations = jwk.common.key_operations.as_deref();
+    if let Some(ops) = operations
+        && (ops.is_empty()
+            || ops.iter().enumerate().any(|(i, op)| {
+                !matches!(
+                    op,
+                    KeyOperations::Encrypt
+                        | KeyOperations::Decrypt
+                        | KeyOperations::WrapKey
+                        | KeyOperations::UnwrapKey
+                        | KeyOperations::DeriveKey
+                        | KeyOperations::DeriveBits
+                ) || ops[..i].contains(op)
+            }))
+    {
+        return false;
+    }
+    if !encryption_use && operations.is_none() && algorithm.is_none() {
+        return false;
+    }
+
+    if matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
+        return matches!(
+            algorithm,
+            None | Some("RSA1_5" | "RSA-OAEP" | "RSA-OAEP-256" | "RSA-OAEP-384" | "RSA-OAEP-512")
+        ) && key_material(&jwk.algorithm)
+            .and_then(|key| key.parse(JwtAlgorithm::Rs256))
+            .is_some();
+    }
+    matches!(
+        algorithm,
+        None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
+    ) && has_key_agreement_material(&jwk.algorithm)
+}
+
+fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {
+    match parameters {
+        AlgorithmParameters::EllipticCurve(ec) => {
+            let verifier = match ec.curve {
+                EllipticCurve::P256 => &signature::ECDSA_P256_SHA256_FIXED,
+                EllipticCurve::P384 => &signature::ECDSA_P384_SHA384_FIXED,
+                EllipticCurve::P521 => &signature::ECDSA_P521_SHA512_FIXED,
+                _ => return false,
+            };
+            ec.x.len() == ec.y.len()
+                && jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).is_ok_and(|key| {
+                    key.try_get_as_bytes()
+                        .is_ok_and(|point| ParsedPublicKey::new(verifier, point).is_ok())
+                })
+        }
+        AlgorithmParameters::Other(key)
+            if key.fields.get("kty").and_then(serde_json::Value::as_str) == Some("OKP") =>
+        {
+            let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
+                Some("X25519") => 32,
+                Some("X448") => 56,
+                _ => return false,
+            };
+            let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let mut bytes = [0_u8; 56];
+            URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
+                && bytes[..length].iter().any(|&byte| byte != 0)
+        }
+        _ => false,
+    }
 }
 
 fn permits_signature_verification(jwk: &Jwk) -> bool {
@@ -569,6 +662,74 @@ pub(crate) mod tests {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
                 admitted,
                 "{key_use:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encryption_only_publications_require_unambiguous_key_metadata() {
+        ensure_crypto_provider();
+        let rsa = jwk(&rsa_signing(), Algorithm::RS256, Some("enc"), false);
+        for (metadata, withdrawn) in [
+            (serde_json::json!({"key_ops":["wrapKey"]}), true),
+            (serde_json::json!({"key_ops":["wrapKey","wrapKey"]}), false),
+            (serde_json::json!({"alg":"RSA-OAEP-256"}), true),
+            (serde_json::json!({"use":"enc","key_ops":["verify"]}), false),
+            (serde_json::json!({"use":"sig","alg":"RSA-OAEP"}), false),
+            (serde_json::json!({"use":"enc","n":"","e":""}), false),
+        ] {
+            let mut key = rsa.clone();
+            key.as_object_mut()
+                .unwrap()
+                .extend(metadata.as_object().unwrap().clone());
+            let bytes = serde_json::to_vec(&serde_json::json!({"keys":[key]})).unwrap();
+            let result = parse_key_set(&bytes, &[JwtAlgorithm::Rs256]);
+            assert_eq!(
+                result.map(|set| set.is_empty()),
+                if withdrawn {
+                    Ok(true)
+                } else {
+                    Err(KeySetFailure::NoUsableKeys)
+                },
+                "{metadata}"
+            );
+        }
+        let keys = serde_json::json!({"keys": [
+            {"use":"enc","kty":"RSA"},
+            {"use":"enc","kty":"RSA","n":rsa["n"],"e":rsa["e"]}
+        ]});
+        assert_eq!(
+            parse_key_set(&serde_json::to_vec(&keys).unwrap(), &[JwtAlgorithm::Rs256]).err(),
+            Some(KeySetFailure::NoUsableKeys)
+        );
+    }
+
+    #[test]
+    fn only_valid_key_agreement_material_can_withdraw_signing_keys() {
+        ensure_crypto_provider();
+        let ec = jwk(&ec_signing(), Algorithm::ES256, Some("agreement"), false);
+        let x25519 =
+            serde_json::json!({"kty":"OKP","crv":"X25519", "x":URL_SAFE_NO_PAD.encode([9_u8; 32])});
+        for (mut key, algorithm, expected) in [
+            (ec.clone(), "ECDH-ES", Ok(true)),
+            (x25519, "ECDH-ES+A128KW", Ok(true)),
+            (
+                serde_json::json!({"use":"enc", "kty":"EC","crv":"P-256","x":ec["x"],"y":ec["y"]}),
+                "ES512",
+                Err(KeySetFailure::NoUsableKeys),
+            ),
+            (
+                serde_json::json!({"kty":"OKP","crv":"X25519","x":"!"}),
+                "ECDH-ES",
+                Err(KeySetFailure::NoUsableKeys),
+            ),
+        ] {
+            key["alg"] = algorithm.into();
+            let bytes = serde_json::to_vec(&serde_json::json!({"keys":[key]})).unwrap();
+            assert_eq!(
+                parse_key_set(&bytes, &[JwtAlgorithm::Es256]).map(|set| set.is_empty()),
+                expected,
+                "{key}"
             );
         }
     }
