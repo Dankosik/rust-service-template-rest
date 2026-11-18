@@ -2,6 +2,7 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
 use futures_util::FutureExt as _;
@@ -16,7 +17,12 @@ use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
 type ErasedHandler = Arc<
-    dyn Fn(InboundEnvelope, OperationContext) -> Result<HandlerFuture, serde_json::Error>
+    dyn Fn(
+            String,
+            time::UtcDateTime,
+            Bytes,
+            OperationContext,
+        ) -> Result<HandlerFuture, serde_json::Error>
         + Send
         + Sync,
 >;
@@ -302,11 +308,10 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(move |envelope, context| {
-            let occurred_at = envelope.occurred_at.to_utc();
-            let payload = serde_json::from_slice::<T>(&envelope.payload)?;
+        entry.handler = Some(Arc::new(move |id, occurred_at, encoded, context| {
+            let payload = serde_json::from_slice::<T>(&encoded)?;
             let event = Event {
-                id: envelope.message_id,
+                id,
                 occurred_at,
                 payload,
             };
@@ -372,7 +377,13 @@ impl Registry {
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let run = handler(envelope, context).map_err(|_| DispatchError::Undecodable)?;
+        let run = handler(
+            envelope.message_id,
+            envelope.occurred_at.to_utc(),
+            envelope.payload,
+            context,
+        )
+        .map_err(|_| DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
@@ -380,7 +391,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
     struct Created {
