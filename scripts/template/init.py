@@ -263,7 +263,6 @@ _PROFILE_SECTION_ORDER = (
     "service-auth",
     "service-test-tls",
     "test-metrics",
-    "test-metrics-util",
     "jobs-reference",
     "config-url",
     "tls-fixtures",
@@ -479,7 +478,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
     if inputs.outbound_http == "bounded":
         selected.add("request-budget")
     if inputs.http_idempotency == "postgres":
-        selected.update(("http-idempotency", "request-budget"))
+        selected.update(("http-idempotency", "request-budget", "test-metrics"))
         if inputs.authn == "oidc-introspection":
             selected.add("http-idempotency-mounted")
     if inputs.authn == "oidc-introspection" and (
@@ -487,8 +486,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or (inputs.database == "postgres" and inputs.grpc == "enabled")
     ):
         selected.add("test-introspection-fixtures")
-    if inputs.http_idempotency == "postgres" or inputs.inbound_webhooks == "standard-webhooks":
-        selected.update(("test-metrics", "test-metrics-util"))
     if inputs.jobs == "postgres":
         selected.update(("jobs", "test-metrics"))
         if inputs.http_idempotency == "postgres":
