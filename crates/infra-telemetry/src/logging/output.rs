@@ -852,7 +852,7 @@ mod tests {
     }
 
     struct CountingWriter {
-        sizes: Arc<Mutex<Vec<usize>>>,
+        sizes: mpsc::Sender<usize>,
         bytes: Arc<Mutex<Vec<u8>>>,
         first_write: Option<(SyncSender<()>, Receiver<()>)>,
     }
@@ -865,7 +865,7 @@ mod tests {
                     .recv_timeout(TEST_TIMEOUT)
                     .expect("release blocked test writer");
             }
-            self.sizes.lock().expect("sizes mutex").push(bytes.len());
+            self.sizes.send(bytes.len()).expect("report sink write");
             self.bytes
                 .lock()
                 .expect("test output mutex")
@@ -879,14 +879,14 @@ mod tests {
     }
 
     struct Counted {
-        sizes: Arc<Mutex<Vec<usize>>>,
+        sizes: Receiver<usize>,
         bytes: Arc<Mutex<Vec<u8>>>,
     }
 
     type TestGate = Option<(Receiver<()>, SyncSender<()>)>;
 
     fn counting(block_first: bool) -> (CountingWriter, Counted, TestGate) {
-        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let (sizes_tx, sizes) = mpsc::channel();
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let (writer_gate, test_gate) = if block_first {
             let (entered_tx, entered) = mpsc::sync_channel(1);
@@ -897,7 +897,7 @@ mod tests {
         };
         (
             CountingWriter {
-                sizes: Arc::clone(&sizes),
+                sizes: sizes_tx,
                 bytes: Arc::clone(&bytes),
                 first_write: writer_gate,
             },
@@ -942,7 +942,7 @@ mod tests {
             .flatten()
             .collect::<Vec<u8>>();
         assert_eq!(*counted.bytes.lock().expect("test output mutex"), expected);
-        let sizes = counted.sizes.lock().expect("sizes mutex");
+        let sizes: Vec<_> = counted.sizes.try_iter().collect();
         assert!(
             sizes.iter().all(|&size| size <= MAX_BATCH_BYTES),
             "{sizes:?}"
@@ -956,21 +956,21 @@ mod tests {
     }
 
     #[test]
+    #[warn(clippy::let_underscore_must_use)]
     fn records_further_apart_than_the_window_are_written_one_by_one() {
         let (writer, counted, _) = counting(false);
         let (output, guard) = start(writer).expect("start writer");
-        let pause = mpsc::channel::<()>();
         for index in 0..3 {
             output.submit(record(format!("{index}\n").as_bytes()));
-            while counted.sizes.lock().expect("sizes mutex").len() <= index {
-                let _ = pause.1.recv_timeout(Duration::from_millis(1));
-            }
-            let _ = pause.1.recv_timeout(BATCH_WINDOW * 5);
+            assert_eq!(counted.sizes.recv_timeout(TEST_TIMEOUT), Ok(2));
+            assert_eq!(
+                counted.sizes.recv_timeout(BATCH_WINDOW * 5),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
         }
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
         std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
-        assert_eq!(*counted.sizes.lock().expect("sizes mutex"), [2, 2, 2]);
-        drop(pause.0);
+        assert_eq!(counted.sizes.try_iter().count(), 0);
     }
 
     #[test]

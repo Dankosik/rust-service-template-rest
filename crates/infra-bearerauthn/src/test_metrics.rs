@@ -156,6 +156,7 @@ impl Diagnostics {
     }
 }
 
+#[warn(clippy::significant_drop_tightening)]
 impl<S> Layer<S> for Diagnostics
 where
     S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
@@ -184,8 +185,7 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let extensions = span.extensions();
-        let Some(entry) = extensions.get::<SpanEntry>() else {
+        let Some(entry) = span.extensions().get::<SpanEntry>().cloned() else {
             return;
         };
         let mut fields = Fields::default();

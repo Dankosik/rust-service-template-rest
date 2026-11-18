@@ -379,11 +379,18 @@ async fn get_stream(
 }
 
 fn get_stream_failure(error: &GetStreamError, role: &'static str) -> MessagingError {
-    let broker = match error.kind() {
-        GetStreamErrorKind::JetStream(broker) => Some(broker),
-        _ => None,
-    };
+    let broker = stream_broker_error(error);
     topology_failure("get_stream", Some(role), error, broker.as_ref())
+}
+
+#[warn(clippy::wildcard_enum_match_arm)]
+fn stream_broker_error(error: &GetStreamError) -> Option<async_nats::jetstream::Error> {
+    match error.kind() {
+        GetStreamErrorKind::JetStream(broker) => Some(broker),
+        GetStreamErrorKind::EmptyName
+        | GetStreamErrorKind::Request
+        | GetStreamErrorKind::InvalidStreamName => None,
+    }
 }
 
 async fn stream_name_for_subject(
@@ -677,15 +684,21 @@ fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<Messaging
             _ => {}
         }
     }
-    error
-        .downcast_ref::<async_nats::jetstream::Error>()
+    let stream_error = error
+        .downcast_ref::<GetStreamError>()
+        .and_then(stream_broker_error);
+    stream_error
+        .as_ref()
+        .or_else(|| error.downcast_ref::<async_nats::jetstream::Error>())
         .is_some_and(is_auth_refusal)
         .then_some(MessagingError::Authentication)
 }
 
 #[cfg(test)]
 mod tests {
-    use async_nats::jetstream::context::{RequestError, RequestErrorKind};
+    use async_nats::jetstream::context::{
+        GetStreamError, GetStreamErrorKind, RequestError, RequestErrorKind,
+    };
 
     use super::classify_topology;
     use crate::error::MessagingError;
@@ -711,6 +724,20 @@ mod tests {
                 MessagingError::TimedOut { .. },
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn stream_lookup_preserves_broker_authentication_refusals() {
+        for code in [401, 403, 404] {
+            let broker = serde_json::from_value(serde_json::json!({ "code": code })).unwrap();
+            let error = GetStreamError::new(GetStreamErrorKind::JetStream(broker));
+            let failure = classify_topology(&error);
+            if code == 404 {
+                std::assert_matches!(failure, MessagingError::Topology);
+            } else {
+                std::assert_matches!(failure, MessagingError::Authentication);
+            }
         }
     }
 

@@ -409,7 +409,8 @@ async fn relay(
                     if fault == Fault::ForwardThenCorruptReady {
                         assert_eq!(backend[ready + 5], b'I', "the server completed COMMIT");
                         backend[ready + 5] = b'?';
-                        let _ = client.write_all(&backend).await;
+                        client.write_all(&backend).await.expect("forward the corrupted commit acknowledgement");
+                        *lock(&arming) = Arming::Fired(fault);
                     }
                     if fault == Fault::ForwardThenSilence {
                         drop(went_silent);
@@ -512,7 +513,10 @@ impl Frontend {
         if !matches {
             return None;
         }
-        *arming = Arming::Fired(armed.fault);
+        *arming = match armed.fault {
+            Fault::ForwardThenCorruptReady => Arming::Idle,
+            fault => Arming::Fired(fault),
+        };
         Some(armed.fault)
     }
 

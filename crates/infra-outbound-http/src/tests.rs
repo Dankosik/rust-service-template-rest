@@ -179,34 +179,46 @@ async fn largest_header_count_limit_admits_that_many_response_headers() {
 
 #[tokio::test]
 async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
-    const HEAD_BYTES: usize = 512 * 1024;
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("head fixture listener");
-    let address = listener.local_addr().expect("head fixture address");
-    let acceptor = fixture_acceptor(&material);
-    let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(3), async move {
-            let (socket, _) = listener.accept().await.expect("head fixture accepts");
-            let mut stream = acceptor.accept(socket).await.expect("head TLS handshake");
-            read_request_headers(&mut stream).await;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
-                "a".repeat(HEAD_BYTES)
-            );
-            let _ = stream.write_all(head.as_bytes()).await;
-        })
-        .await
-        .expect("head fixture completes within its budget");
-    });
-    std::assert_matches!(
-        fixture_client(address, &material)
+    for (length, admitted) in [(1024, true), (512 * 1024, false)] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("head fixture listener");
+        let address = listener.local_addr().expect("head fixture address");
+        let acceptor = fixture_acceptor(&material);
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), async move {
+                let (socket, _) = listener.accept().await.expect("head fixture accepts");
+                let mut stream = acceptor.accept(socket).await.expect("head TLS handshake");
+                read_request_headers(&mut stream).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
+                    "a".repeat(length)
+                );
+                stream.write_all(head.as_bytes()).await?;
+                stream.flush().await
+            })
+            .await
+            .expect("head fixture completes within its budget")
+        });
+        let result = fixture_client(address, &material)
             .execute(request(), deadline())
-            .await,
-        Err(Error::Transport { .. })
-    );
-    server.await.expect("head fixture joins");
+            .await;
+        let written = server.await.expect("head fixture joins");
+        if admitted {
+            written.expect("small response head was sent");
+            let response = result.expect("small response head is admitted");
+            assert_eq!(response.headers()["x-large"].as_bytes().len(), length);
+        } else {
+            std::assert_matches!(
+                result,
+                Err(Error::Transport { ref source }) if source.source()
+                    .and_then(|cause| cause.downcast_ref::<hyper::Error>())
+                    .is_some_and(hyper::Error::is_parse),
+                "expected the HTTP parser to reject the oversized head, write: {written:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

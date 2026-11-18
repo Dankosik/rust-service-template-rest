@@ -28,6 +28,7 @@ struct Service {
     clippy::disallowed_types,
     reason = "process lifecycle fixture spawns and polls the compiled service binary synchronously"
 )]
+#[warn(clippy::let_underscore_must_use)]
 impl Service {
     fn command(env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
@@ -92,9 +93,11 @@ impl Service {
             .expect("join stdout reader");
         let stdout = self.lines.try_iter().collect::<Vec<_>>().join("\n");
         let mut stderr = String::new();
-        if let Some(mut pipe) = self.child.stderr.take() {
-            let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
-        }
+        std::io::Read::read_to_string(
+            &mut self.child.stderr.take().expect("piped service stderr"),
+            &mut stderr,
+        )
+        .expect("read service stderr as UTF-8");
         (status.code(), stdout, stderr)
     }
 }
