@@ -108,12 +108,13 @@ fn optional_actor(raw: Option<JsonObject<RawAct<'_>>>) -> Result<Option<Actor>, 
 
 impl Values<'_> {
     fn contains_any(&self, accepted: &[String]) -> bool {
-        match self {
-            Self::One(value) => accepted.iter().any(|accepted| accepted == value),
-            Self::Many(values) => values
-                .iter()
-                .any(|value| accepted.iter().any(|accepted| accepted == value)),
-        }
+        let values = match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values.as_slice(),
+        };
+        values
+            .iter()
+            .any(|value| accepted.iter().any(|candidate| candidate == value))
     }
 }
 
@@ -154,6 +155,22 @@ enum ScopeClaim<'a> {
     Missing,
     Null,
     Value(Values<'a>),
+}
+
+impl<'a> ScopeClaim<'a> {
+    fn resolve(
+        self,
+        profile: TokenProfile,
+        scp: Option<Values<'a>>,
+    ) -> Result<Option<Values<'a>>, VerificationError> {
+        match self {
+            Self::Null | Self::Value(Values::Many(_)) if profile == TokenProfile::Rfc9068 => Err(
+                VerificationError::invalid(VerificationReason::MalformedClaims),
+            ),
+            Self::Missing | Self::Null => Ok(scp),
+            Self::Value(scope) => Ok(Some(scope)),
+        }
+    }
 }
 
 impl<'de: 'a, 'a> Deserialize<'de> for ScopeClaim<'a> {
@@ -203,7 +220,10 @@ pub(crate) struct VerifiedClaims {
 }
 
 impl VerifiedClaims {
-    pub(crate) fn deliver(self, now: Duration) -> Result<Principal, VerificationError> {
+    pub(crate) fn into_principal_checked_at(
+        self,
+        now: Duration,
+    ) -> Result<Principal, VerificationError> {
         check_lifetime(self.identity.expiry_from_epoch(), self.not_before, now)?;
         Ok(self.identity)
     }
@@ -221,15 +241,7 @@ pub(crate) fn validate_jwt_claims(
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
     let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
         .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let scope = match claims.scope {
-        ScopeClaim::Null | ScopeClaim::Value(Values::Many(_))
-            if token_profile == TokenProfile::Rfc9068 =>
-        {
-            return Err(invalid(VerificationReason::MalformedClaims));
-        }
-        ScopeClaim::Missing | ScopeClaim::Null => claims.scp,
-        ScopeClaim::Value(scope) => Some(scope),
-    };
+    let scope = claims.scope.resolve(token_profile, claims.scp)?;
     let (Some(issuer), Some(audience), Some(NumericDate(expiry))) =
         (claims.iss, claims.aud, claims.exp)
     else {

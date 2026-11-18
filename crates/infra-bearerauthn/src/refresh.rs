@@ -183,7 +183,7 @@ impl KeyStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn permit_unknown_refresh_for_test(&self) {
+    pub(crate) fn expire_refresh_cooldown_for_test(&self) {
         self.state.send_modify(|state| {
             state.cooldown_started_at = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
         });
@@ -511,7 +511,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiters_share_one_fetch_and_see_its_keys() {
         let store = KeyStore::new(key_set("old"));
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let first = spawn_refresh(&store);
         tokio::task::yield_now().await;
         let second = spawn_refresh(&store);
@@ -546,7 +546,7 @@ mod tests {
         let store =
             metrics::with_local_recorder(diagnostics.recorder(), || KeyStore::new(key_set("old")));
         let initial = diagnostics.acquisitions();
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let first = spawn_refresh(&store);
         tokio::task::yield_now().await;
         let second = spawn_refresh(&store);
@@ -563,7 +563,7 @@ mod tests {
     async fn a_failed_fetch_offers_no_newer_set_to_its_waiter_or_during_its_cooldown() {
         let store = KeyStore::new(key_set("old"));
         assert_eq!(spawn_refresh(&store).await.unwrap(), None);
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
         store.finish(
@@ -579,7 +579,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_waiter_gets_its_fetch_set_when_a_later_fetch_fails_before_it_is_polled() {
         let store = KeyStore::new(key_set("old"));
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
         store.finish(1, Ok(key_set("new")));
@@ -595,7 +595,7 @@ mod tests {
     async fn a_set_installed_after_the_token_was_checked_is_the_answer_without_a_fetch() {
         let store = KeyStore::new(key_set("old"));
         let checked = store.current();
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let rotation = spawn_refresh(&store);
         tokio::task::yield_now().await;
         store.finish(1, Ok(key_set("new")));
@@ -627,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn stopping_releases_current_and_future_waiters() {
         let store = KeyStore::new(key_set("old"));
-        store.permit_unknown_refresh_for_test();
+        store.expire_refresh_cooldown_for_test();
         let waiter = spawn_refresh(&store);
         tokio::task::yield_now().await;
         store.stop();

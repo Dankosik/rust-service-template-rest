@@ -229,10 +229,10 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
 
 fn admit_key(
     jwk: Jwk,
-    algorithm: Option<&str>,
+    raw_alg: Option<&str>,
     configured: &[JwtAlgorithm],
 ) -> Result<JwtKey, KeyRejection> {
-    if is_encryption_only(&jwk, algorithm) {
+    if is_encryption_only(&jwk, raw_alg) {
         return Err(KeyRejection::EncryptionOnly);
     }
     if !permits_signature_verification(&jwk) {
@@ -266,7 +266,7 @@ fn admit_key(
     })
 }
 
-fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
+fn is_encryption_only(jwk: &Jwk, raw_alg: Option<&str>) -> bool {
     let encryption_use = match jwk.common.public_key_use {
         Some(PublicKeyUse::Encryption) => true,
         None => false,
@@ -276,20 +276,20 @@ fn is_encryption_only(jwk: &Jwk, algorithm: Option<&str>) -> bool {
     if operations.is_some_and(|ops| !has_only_encryption_operations(ops)) {
         return false;
     }
-    if !encryption_use && operations.is_none() && algorithm.is_none() {
+    if !encryption_use && operations.is_none() && raw_alg.is_none() {
         return false;
     }
 
     if matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
         return matches!(
-            algorithm,
+            raw_alg,
             None | Some("RSA1_5" | "RSA-OAEP" | "RSA-OAEP-256" | "RSA-OAEP-384" | "RSA-OAEP-512")
         ) && JwtAlgorithm::Rs256
             .parse_public_key(&jwk.algorithm)
             .is_some();
     }
     matches!(
-        algorithm,
+        raw_alg,
         None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
     ) && has_key_agreement_material(&jwk.algorithm)
 }

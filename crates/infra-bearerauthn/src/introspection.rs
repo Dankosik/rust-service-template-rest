@@ -207,7 +207,7 @@ impl IntrospectionVerifier {
             return self
                 .introspect(token.to_secret(), &|| context.stopped(), &now)
                 .await?
-                .deliver(Duration::from_secs(now()?));
+                .into_principal_checked_at(Duration::from_secs(now()?));
         };
         let key = token_digest(token);
         loop {
@@ -237,7 +237,7 @@ impl IntrospectionVerifier {
                 })
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.deliver(Duration::from_secs(now()?));
+                return value.into_principal_checked_at(Duration::from_secs(now()?));
             }
         }
     }
@@ -439,7 +439,6 @@ mod tests {
         endpoint: EndpointUrl,
         provider: ProviderClient,
         state: FixtureState,
-        gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
         cancel: CancellationToken,
         task: JoinHandle<()>,
     }
@@ -449,7 +448,6 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
-            let gate = Arc::new(Mutex::new(None::<Arc<Semaphore>>));
             let state = FixtureState {
                 calls: Arc::new(AtomicUsize::new(0)),
                 received: Arc::new(Semaphore::new(0)),
@@ -458,7 +456,7 @@ mod tests {
                     StatusCode::OK,
                     Bytes::from(active_response("subject", unix_seconds() + 600)),
                 ))),
-                gate: Arc::clone(&gate),
+                gate: Arc::new(Mutex::new(None)),
             };
             let cancel = CancellationToken::new();
             let task = tokio::spawn(run_fixture_server(
@@ -481,7 +479,6 @@ mod tests {
                 )
                 .unwrap(),
                 state,
-                gate,
                 cancel,
                 task,
             }
@@ -497,7 +494,7 @@ mod tests {
 
         fn block_responses(&self) -> Arc<Semaphore> {
             let gate = Arc::new(Semaphore::new(0));
-            *self.gate.lock().unwrap() = Some(gate.clone());
+            *self.state.gate.lock().unwrap() = Some(gate.clone());
             gate
         }
 
@@ -526,9 +523,7 @@ mod tests {
         }
 
         fn prepared(&self, cache: Option<IntrospectionCacheOptions>) -> crate::Verifier {
-            crate::Verifier::introspection(
-                IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap(),
-            )
+            crate::Verifier::introspection(self.verifier(cache))
         }
 
         fn calls(&self) -> usize {
@@ -686,7 +681,7 @@ mod tests {
         tokio::time::resume();
         drop(call);
         gate.add_permits(1);
-        *fixture.gate.lock().unwrap() = None;
+        *fixture.state.gate.lock().unwrap() = None;
         verifier.verify(&token).await.unwrap();
         assert_eq!(fixture.calls(), 2);
         fixture.finish().await;
@@ -870,7 +865,7 @@ mod tests {
                 second.as_ref().map(crate::Principal::fields)
             );
             assert_eq!(fixture.calls(), before + 1);
-            *fixture.gate.lock().unwrap() = None;
+            *fixture.state.gate.lock().unwrap() = None;
             assert_eq!(verify(&verifier, b"Bearer shared").await.err(), expected);
             assert_eq!(fixture.calls(), before + if retained { 1 } else { 2 });
             if !retained {
@@ -1367,7 +1362,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(fixture.calls(), before + 1);
-            *fixture.gate.lock().unwrap() = None;
+            *fixture.state.gate.lock().unwrap() = None;
         }
         fixture.finish().await;
     }
