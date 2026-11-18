@@ -329,15 +329,14 @@ impl TransactionObservation {
         self.phase = TransactionPhase::Finished(outcome);
     }
 
-    pub(crate) fn fail(&mut self, error: TxError) -> TxError {
+    pub(crate) fn record_failure(&mut self, error: &TxError) {
         let source = error.driver();
         match sqlstate(source) {
             Some(code) => self.span.record("error.type", code.as_ref()),
             None => self.span.record("error.type", failure_cause(source)),
         };
         self.span.record("otel.status_code", "ERROR");
-        self.end(TransactionOutcome::of(&error));
-        error
+        self.end(TransactionOutcome::of(error));
     }
 }
 

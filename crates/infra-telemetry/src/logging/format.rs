@@ -283,6 +283,22 @@ impl Scratch {
         self.add_field(field.key, start);
     }
 
+    fn write_body(&mut self, line: &mut Bytes, event_fields: usize, format: LoggingFormat) {
+        let values = self.values.as_slice();
+        let (event, spans) = self.fields.split_at_mut(event_fields);
+        event.sort_unstable_by_key(|field| (field.key, field.start));
+        spans.sort_unstable_by_key(|field| (field.key, field.start));
+        let header = line.len();
+        let mut truncated = self.truncated;
+        if !write_all_fields(line, values, event, spans, truncated, format) && !truncated {
+            truncated = true;
+            line.rewind(header);
+            write_all_fields(line, values, event, spans, truncated, format);
+        }
+        line.limit = MAX_RECORD_BYTES;
+        line.append(record_tail(format, truncated));
+    }
+
     fn compact_into(&self, cache: &mut SpanFields) -> bool {
         if self.values.failed {
             return false;
@@ -541,14 +557,7 @@ impl FormatLayer {
         if line.failed {
             return Err(DropReason::Oversize);
         }
-        write_body(
-            line,
-            scratch.values.as_slice(),
-            scratch.fields.as_mut_slice(),
-            event_fields,
-            scratch.truncated,
-            self.format,
-        );
+        scratch.write_body(line, event_fields, self.format);
         if line.failed {
             Err(DropReason::Oversize)
         } else {
@@ -664,28 +673,6 @@ where
             Err(reason) => self.output.record_drop(reason),
         }
     }
-}
-
-fn write_body(
-    line: &mut Bytes,
-    values: &[u8],
-    fields: &mut [Entry],
-    event_fields: usize,
-    truncated: bool,
-    format: LoggingFormat,
-) {
-    let (event, spans) = fields.split_at_mut(event_fields);
-    event.sort_unstable_by_key(|field| (field.key, field.start));
-    spans.sort_unstable_by_key(|field| (field.key, field.start));
-    let header = line.len();
-    let mut truncated = truncated;
-    if !write_all_fields(line, values, event, spans, truncated, format) && !truncated {
-        truncated = true;
-        line.rewind(header);
-        write_all_fields(line, values, event, spans, truncated, format);
-    }
-    line.limit = MAX_RECORD_BYTES;
-    line.append(record_tail(format, truncated));
 }
 
 fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {

@@ -578,7 +578,9 @@ where
         .await;
         observed.waited();
         let connection = acquired
-            .map_err(|err| mode.acquisition_failure(observed.fail(TxError::Acquire(err))))?;
+            .map_err(TxError::Acquire)
+            .inspect_err(|error| observed.record_failure(error))
+            .map_err(|error| mode.acquisition_failure(error))?;
         let mut guard = DiscardOnDrop {
             connection,
             discard: true,
@@ -587,7 +589,8 @@ where
             None => guard.connection.begin().await,
             Some(statement) => guard.connection.begin_with(statement).await,
         }
-        .map_err(|err| observed.fail(TxError::Begin(err)))?;
+        .map_err(TxError::Begin)
+        .inspect_err(|error| observed.record_failure(error))?;
         guard.discard = false;
 
         let mut handle = Tx {
@@ -609,7 +612,9 @@ where
         if !(options.read_only || handle.proven_alive) {
             let proof = (&mut handle).execute("SELECT 1").await;
             handle.mode.check_expiry(&mut observed)?;
-            proof.map_err(|err| observed.fail(TxError::CommitFailed(err)))?;
+            proof
+                .map_err(TxError::CommitFailed)
+                .inspect_err(|error| observed.record_failure(error))?;
         }
         if let Some(budget) = handle.mode.operation_deadline()
             && budget.remaining_ms().await.is_none()
@@ -620,7 +625,8 @@ where
         observed.begin_commit();
         tx.commit()
             .await
-            .map_err(|err| observed.fail(classify_commit(err)))?;
+            .map_err(classify_commit)
+            .inspect_err(|error| observed.record_failure(error))?;
         observed.end(TransactionOutcome::Committed);
         dispatch_notifications(pool, guard, notifications);
         Ok(value)

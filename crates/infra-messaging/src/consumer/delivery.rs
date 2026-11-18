@@ -257,7 +257,7 @@ impl DeliveryHandler {
         record_span_outcome(
             &tracing::Span::current(),
             label,
-            outcome != Outcome::Success,
+            (outcome != Outcome::Success).then_some(label),
         );
         match outcome {
             Outcome::Success => {}
@@ -423,7 +423,7 @@ async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subje
         .await
         {
             Ok(Ok(_)) => {
-                record_span_outcome(&span, "confirmed", false);
+                record_span_outcome(&span, "confirmed", None);
                 return;
             }
             Ok(Err(error)) if error.kind() == async_nats::RequestErrorKind::TimedOut => "timeout",
@@ -433,7 +433,7 @@ async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subje
     } else {
         "missing_reply"
     };
-    record_settlement_failure(&span, "unconfirmed", error_type);
+    record_span_outcome(&span, "unconfirmed", Some(error_type));
     span.in_scope(|| {
         tracing::warn!(
             messaging.destination.template = filter_subject,
@@ -454,13 +454,13 @@ pub(super) async fn redeliver_after(source: &Message, delay: Duration, filter_su
     .await
     {
         Ok(Ok(())) => {
-            record_span_outcome(&span, "submitted", false);
+            record_span_outcome(&span, "submitted", None);
             return;
         }
         Ok(Err(_)) => "client_error",
         Err(_) => "timeout",
     };
-    record_settlement_failure(&span, "failed", error_type);
+    record_span_outcome(&span, "failed", Some(error_type));
     span.in_scope(|| {
         tracing::warn!(
             messaging.destination.template = filter_subject,
@@ -484,16 +484,6 @@ fn settlement_span(filter_subject: &str, operation: &'static str) -> tracing::Sp
         error.type = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     )
-}
-
-fn record_settlement_failure(
-    span: &tracing::Span,
-    outcome: &'static str,
-    error_type: &'static str,
-) {
-    span.record("outcome", outcome);
-    span.record("error.type", error_type);
-    span.record("otel.status_code", "ERROR");
 }
 
 pub(super) fn describe_metrics() {

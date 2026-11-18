@@ -94,7 +94,7 @@ impl Producer {
             Err(PublishError::Ambiguous) => PublishOutcome::Ambiguous,
         };
         let label = outcome.label();
-        record_span_outcome(&span, label, result.is_err());
+        record_span_outcome(&span, label, result.is_err().then_some(label));
         if let Err(error) = &result {
             span.in_scope(|| {
                 tracing::warn!(
