@@ -343,16 +343,16 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Ending {
+        Eof,
+        Overflow,
+        Trailers,
+        SourceError,
+    }
+
     #[test]
     fn finite_stream_results_survive_budget_yields_and_source_pending() {
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Ending {
-            Eof,
-            Overflow,
-            Trailers,
-            SourceError,
-        }
-
         for (len, payload, ending) in [
             (0, b"".as_slice(), Ending::Eof),
             (4, b"abcd".as_slice(), Ending::Eof),
