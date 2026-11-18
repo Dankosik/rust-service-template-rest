@@ -40,7 +40,9 @@ use tower::{Service as _, service_fn};
 use secrecy::SecretString;
 
 use super::{Fixture, acquisition_deadline, prepare_registration, token_context};
-use crate::{AcquisitionError, OnBehalfOf, Rejection, ServiceTokens, TokenTarget};
+use crate::{
+    AcquisitionError, ExchangeTokenTarget, OnBehalfOf, Rejection, ServiceTokenTarget, ServiceTokens,
+};
 
 #[derive(Clone)]
 struct Peer {
@@ -118,6 +120,14 @@ struct Resource {
 }
 
 impl Resource {
+    fn origin(&self) -> http::Uri {
+        format!("https://{}", self.address).parse().unwrap()
+    }
+
+    fn credentials(&self, tokens: &Fixture) -> ServiceTokens {
+        tokens.service_tokens_with(tokens.options(), &[], self.origin())
+    }
+
     async fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -346,7 +356,7 @@ fn rpc<T>(message: T, after: Duration) -> Request<T> {
 async fn plaintext_cannot_be_bound_to_oauth_credentials() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let channel = Client::try_new(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
@@ -369,9 +379,21 @@ async fn plaintext_cannot_be_bound_to_oauth_credentials() {
 async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
     let tokens = Fixture::new().await;
     let mut resource = Resource::new().await;
+    let other = Resource::new().await;
+    let credentials = resource.credentials(&tokens);
+    assert_eq!(
+        credentials
+            .grpc(other.channel(ClientTimeout::FullRpc(Duration::from_secs(10))))
+            .unwrap_err()
+            .key,
+        "resource_origin"
+    );
+    assert_eq!(other.calls(), 0);
+    assert!(tokens.token_requests().is_empty());
+    other.finish().await;
     resource.root_pem = tls_test_support::new_issuer().pem();
     let error = resource
-        .client(&tokens.service_tokens(&[], None))
+        .client(&credentials)
         .unary(rpc(UnaryRequest::default(), Duration::from_secs(10)))
         .await
         .unwrap_err();
@@ -386,7 +408,7 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
 async fn caller_authorization_and_competing_bound_contexts_fail_before_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let transport = resource.transport(&tokens.service_tokens(&[], None));
+    let transport = resource.transport(&resource.credentials(&tokens));
     let mut client = EchoServiceClient::new(transport.clone());
     for (cancelled, expected) in [(false, Code::Internal), (true, Code::Cancelled)] {
         let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
@@ -423,7 +445,7 @@ async fn token_acquisition_spends_the_bound_deadline_without_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let gate = tokens.block_tokens();
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let parent = OperationContext::with_timeout(Duration::from_secs(1));
     let transport = resource.transport(&credentials).with_context(&parent);
     let mut client = EchoServiceClient::new(transport);
@@ -463,7 +485,7 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
     ] {
         tokens.token_json(status, &body);
         let error = resource
-            .client(&tokens.service_tokens(&[], None))
+            .client(&resource.credentials(&tokens))
             .unary(rpc(
                 UnaryRequest {
                     message: "failure".to_owned(),
@@ -488,7 +510,7 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
 async fn a_cancelled_acquisition_is_cancelled_with_typed_source() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let gate = tokens.block_tokens();
     let parent = OperationContext::unbounded();
     let transport = resource.transport(&credentials).with_context(&parent);
@@ -519,7 +541,8 @@ async fn dropping_registration_stops_a_bound_grpc_call_during_token_acquisition(
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let registration = prepare_registration(tokens.options());
-    let (credentials, _driver) = registration.service_tokens(TokenTarget::default());
+    let (credentials, _driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     let transport = resource
         .transport(&credentials)
         .with_context(&OperationContext::unbounded());
@@ -553,12 +576,14 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
         provider_concurrency: 1,
         ..tokens.options()
     });
-    let (credentials, driver) = registration.service_tokens(TokenTarget::default());
+    let (credentials, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     tokens.drive(driver);
     let http = registration
-        .exchange_tokens(TokenTarget::default(), 1)
+        .exchange_tokens(ExchangeTokenTarget::default(), tokens.resource_origin(), 1)
         .unwrap()
-        .http(tokens.resource_client());
+        .http(tokens.resource_client())
+        .unwrap();
     let gate = tokens.block_tokens();
     let mut exchange = Box::pin(http.execute(
         tokens.on_behalf_of_request("active"),
@@ -593,7 +618,7 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
 async fn one_cached_bearer_is_sent_and_reused() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let context = OperationContext::with_timeout(Duration::from_secs(10));
     let transport = resource.transport(&credentials).with_context(&context);
     let mut client = EchoServiceClient::new(transport);
@@ -631,7 +656,8 @@ async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let registration = prepare_registration(tokens.options());
-    let (credentials, driver) = registration.service_tokens(TokenTarget::default());
+    let (credentials, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     let mut client = resource.client(&credentials);
     client
         .unary(rpc(
@@ -678,7 +704,7 @@ async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
         &serde_json::json!({"access_token": "cached", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
-    let mut client = resource.client(&tokens.service_tokens(&[], None));
+    let mut client = resource.client(&resource.credentials(&tokens));
     for message in ["warm", "reused"] {
         client
             .unary(rpc(
@@ -716,7 +742,7 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
     let gate = tokens.block_tokens();
     let context = OperationContext::with_timeout(Duration::from_secs(10));
     let transport = resource
-        .transport(&tokens.service_tokens(&[], None))
+        .transport(&resource.credentials(&tokens))
         .with_context(&context);
     let mut client = EchoServiceClient::new(transport);
     let mut call = Box::pin(client.unary(rpc(
@@ -750,7 +776,7 @@ async fn token_wait_is_subtracted_from_the_propagated_grpc_timeout() {
 async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let mut client = resource.client(&tokens.service_tokens(&[], None));
+    let mut client = resource.client(&resource.credentials(&tokens));
     let mut elapsed = Vec::new();
     for _ in 0..4 {
         let started = Instant::now();
@@ -796,7 +822,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         ("unauthenticated", Code::Unauthenticated, 1),
         ("permission-denied", Code::PermissionDenied, 0),
     ] {
-        let credentials = tokens.service_tokens(&[], None);
+        let credentials = resource.credentials(&tokens);
         let before_tokens = tokens.token_requests().len();
         warm_and_age(&credentials).await;
         let before_calls = resource.calls();
@@ -832,7 +858,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
 async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     warm_and_age(&credentials).await;
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
     let mut client = credentials.grpc(channel).unwrap();
@@ -887,7 +913,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let mut client = resource.client(&credentials);
     warm_and_age(&credentials).await;
     let mut delayed = Box::pin(client.unary(rpc(
@@ -950,7 +976,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
             0,
         ),
     ] {
-        let credentials = tokens.service_tokens(&[], None);
+        let credentials = resource.credentials(&tokens);
         let before_tokens = tokens.token_requests().len();
         let before_calls = resource.calls();
         warm_and_age(&credentials).await;
@@ -995,7 +1021,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let mut request = rpc(
         UnaryRequest {
             message: "one".to_owned(),
@@ -1021,7 +1047,7 @@ async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
 async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let credentials = tokens.service_tokens(&[], None);
+    let credentials = resource.credentials(&tokens);
     let message = || UnaryRequest {
         message: "one".to_owned(),
     };
@@ -1036,7 +1062,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
     let registration = prepare_registration(tokens.options());
     let exchange = registration
-        .exchange_tokens(TokenTarget::default(), 1)
+        .exchange_tokens(ExchangeTokenTarget::default(), resource.origin(), 1)
         .unwrap();
     let mut client = EchoServiceClient::new(exchange.grpc(channel).unwrap());
     for subject in [None, Some("")] {
@@ -1089,7 +1115,7 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
         ] {
             let tokens = Fixture::new().await;
             let resource = Resource::new().await;
-            let credentials = tokens.service_tokens(&[], None);
+            let credentials = resource.credentials(&tokens);
             if cached {
                 credentials
                     .service_token(acquisition_deadline(&token_context()))
@@ -1181,8 +1207,8 @@ async fn resource_opening_ceiling_starts_before_credentials_without_caller_metad
         let tokens = Fixture::new().await;
         let resource = Resource::new().await;
         let gate = tokens.block_tokens();
-        let mut client = tokens
-            .service_tokens(&[], None)
+        let mut client = resource
+            .credentials(&tokens)
             .grpc(resource.channel(policy))
             .unwrap();
         let mut call = client.call(

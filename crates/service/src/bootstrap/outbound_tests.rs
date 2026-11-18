@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
-use infra_oauth2_client_credentials::{Algorithm, Options, Registration, TokenTarget};
+use infra_oauth2_client_credentials::{Algorithm, Options, Registration, ServiceTokenTarget};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -15,7 +15,7 @@ use super::*;
 enum Resource {
     Http(Arc<infra_oauth2_client_credentials::AuthenticatedClient>),
     // template:begin outbound-auth-grpc:service-test-grpc-resource
-    Grpc(infra_oauth2_client_credentials::grpc::AuthenticatedClient),
+    Grpc(Arc<infra_oauth2_client_credentials::grpc::AuthenticatedClient>),
     // template:end outbound-auth-grpc:service-test-grpc-resource
 }
 
@@ -44,7 +44,7 @@ async fn resource(Extension(resource): Extension<Resource>, context: RequestCont
             )
         }
         // template:begin outbound-auth-grpc:service-test-grpc-call
-        Resource::Grpc(client) => grpc_unavailable(client, context).await,
+        Resource::Grpc(client) => grpc_unavailable(&client, context).await,
         // template:end outbound-auth-grpc:service-test-grpc-call
     };
     if resource_unavailable {
@@ -70,12 +70,12 @@ fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
         },
     )
     .unwrap();
-    Resource::Http(Arc::new(tokens.http(transport)))
+    Resource::Http(Arc::new(tokens.http(transport).unwrap()))
 }
 
 // template:begin outbound-auth-grpc:service-test-build-grpc-resource
 async fn grpc_unavailable(
-    client: infra_oauth2_client_credentials::grpc::AuthenticatedClient,
+    client: &infra_oauth2_client_credentials::grpc::AuthenticatedClient,
     context: RequestContext,
 ) -> bool {
     use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
@@ -97,7 +97,7 @@ fn grpc(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
         Duration::from_secs(5),
     )
     .unwrap();
-    Resource::Grpc(tokens.grpc(transport).unwrap())
+    Resource::Grpc(Arc::new(tokens.grpc(transport).unwrap()))
 }
 // template:end outbound-auth-grpc:service-test-build-grpc-resource
 
@@ -173,7 +173,11 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
                     peer_addr,
                 ))?);
                 let lifetime = Arc::downgrade(&registration);
-                let tokens = background.service_tokens(registration, TokenTarget::default());
+                let tokens = background.service_tokens(
+                    registration,
+                    ServiceTokenTarget::default(),
+                    "https://127.0.0.1:0".parse().unwrap(),
+                );
                 let resource = build(&tokens);
                 installed.send((lifetime, tokens)).unwrap();
                 Ok(resource)

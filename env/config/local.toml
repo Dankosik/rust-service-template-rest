@@ -9,6 +9,7 @@
 
 [app]
 env = "local"
+allow_insecure_development = true
 
 [http]
 addr = ":8080"
@@ -122,8 +123,9 @@ session_budgets = "startup"
 # template:end object-storage:local-config
 
 # template:begin service-auth:local-config
-# Service tokens are inert until mode = "jwt"; a local environment may run
-# gRPC without them. The signing key is environment-only:
+# This file opts in to running gRPC without service tokens. For JWTs, select
+# mode = "jwt" and configure grpc.security = "tls" with a certificate and TLS
+# private key. Supply the service signing key through the environment or --secrets-dir:
 #   APP__SERVICE_AUTH__PRIVATE_KEY="$(cat example.pem)"
 # [service_auth]
 # mode = "jwt"

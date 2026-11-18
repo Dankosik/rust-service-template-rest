@@ -38,27 +38,32 @@ pub struct Options {
 }
 
 #[derive(Clone, Default, derive_more::Debug)]
-#[debug("TokenTarget([REDACTED])")]
-pub struct TokenTarget {
+#[debug("ServiceTokenTarget([REDACTED])")]
+pub struct ServiceTokenTarget {
+    pub(crate) scope: Option<String>,
+}
+
+impl ServiceTokenTarget {
+    pub fn try_new(scopes: &[String]) -> Result<Self, ConfigurationError> {
+        Ok(Self {
+            scope: scope_parameter(scopes)?,
+        })
+    }
+}
+
+#[derive(Clone, Default, derive_more::Debug)]
+#[debug("ExchangeTokenTarget([REDACTED])")]
+pub struct ExchangeTokenTarget {
     pub(crate) scope: Option<String>,
     pub(crate) audience: Option<String>,
 }
 
-impl TokenTarget {
-    /// RFC 6749 §3.3
+impl ExchangeTokenTarget {
     pub fn try_new(
         scopes: &[String],
         audience: Option<String>,
     ) -> Result<Self, ConfigurationError> {
-        if !scopes
-            .iter()
-            .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
-        {
-            return Err(ConfigurationError {
-                key: "scopes",
-                reason: "must contain RFC 6749 scope tokens",
-            });
-        }
+        let scope = scope_parameter(scopes)?;
         if audience
             .as_ref()
             .is_some_and(|audience| audience.trim().is_empty())
@@ -68,39 +73,33 @@ impl TokenTarget {
                 reason: "must be nonempty when configured",
             });
         }
-        Ok(Self {
-            scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
-            audience,
-        })
+        Ok(Self { scope, audience })
     }
 }
 
+fn scope_parameter(scopes: &[String]) -> Result<Option<String>, ConfigurationError> {
+    if !scopes
+        .iter()
+        .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
+    {
+        return Err(ConfigurationError {
+            key: "scopes",
+            reason: "must contain RFC 6749 scope tokens",
+        });
+    }
+    Ok((!scopes.is_empty()).then(|| scopes.join(" ")))
+}
+
 pub(crate) struct Admitted {
-    options: Options,
-    endpoint: Url,
+    pub(crate) options: Options,
+    pub(crate) issuer: Url,
+    pub(crate) endpoint: Url,
     permits: usize,
 }
 
 impl Admitted {
-    pub(crate) fn endpoint(&self) -> &Url {
-        &self.endpoint
-    }
-
     pub(crate) fn into_parts(self) -> (Options, Url, usize) {
         (self.options, self.endpoint, self.permits)
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn try_new_for_test(
-        options: Options,
-        endpoint: Url,
-    ) -> Result<Self, ConfigurationError> {
-        let permits = admitted_provider_concurrency(options.provider_concurrency)?;
-        Ok(Self {
-            options,
-            endpoint,
-            permits,
-        })
     }
 }
 
@@ -114,35 +113,27 @@ fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError
         })
 }
 
-fn assertion_issuer(raw: &str) -> Result<Url, ConfigurationError> {
-    let invalid_issuer = ConfigurationError {
-        key: "assertion_audience",
-        reason: "must be an HTTPS issuer URL without userinfo, a query, or a fragment",
-    };
+pub(crate) fn strict_provider_url(raw: &str) -> Option<Url> {
     if uri::has_whitespace_or_control(raw) || uri::authority_has_userinfo(raw) {
-        return Err(invalid_issuer);
+        return None;
     }
     let invalid_syntax = Cell::new(false);
-    let issuer = Url::options()
+    let url = Url::options()
         .syntax_violation_callback(Some(&|_| invalid_syntax.set(true)))
         .parse(raw)
-        .map_err(|_| invalid_issuer)?;
-    if invalid_syntax.get()
-        || issuer.scheme() != "https"
-        || issuer.host().is_none()
-        || !issuer.username().is_empty()
-        || issuer.password().is_some()
-        || issuer.query().is_some()
-        || issuer.fragment().is_some()
-    {
-        return Err(invalid_issuer);
-    }
-    Ok(issuer)
+        .ok()?;
+    (!invalid_syntax.get()
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
 }
 
 pub(crate) fn admit_options(
     options: Options,
-    scheme: &str,
+    endpoint_scheme: &str,
+    issuer_scheme: &str,
 ) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
@@ -152,14 +143,38 @@ pub(crate) fn admit_options(
     if options.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    let issuer = assertion_issuer(&options.assertion_audience)?;
+    let issuer = assertion_issuer(&options.assertion_audience, issuer_scheme)?;
     if options.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    if uri::has_whitespace_or_control(&options.token_url) {
+    let endpoint = token_endpoint(&options.token_url, endpoint_scheme, &issuer)?;
+    Ok(Admitted {
+        options,
+        issuer,
+        endpoint,
+        permits,
+    })
+}
+
+pub(crate) fn assertion_issuer(raw: &str, scheme: &str) -> Result<Url, ConfigurationError> {
+    strict_provider_url(raw)
+        .filter(|issuer| issuer.scheme() == scheme && issuer.query().is_none())
+        .ok_or(ConfigurationError {
+            key: "assertion_audience",
+            reason: "must be an HTTPS issuer URL without userinfo, a query, or a fragment",
+        })
+}
+
+pub(crate) fn token_endpoint(
+    raw: &str,
+    scheme: &str,
+    issuer: &Url,
+) -> Result<Url, ConfigurationError> {
+    let error = |key, reason| Err(ConfigurationError { key, reason });
+    if uri::has_whitespace_or_control(raw) {
         return error("token_url", "must not contain whitespace or controls");
     }
-    let Ok(endpoint) = Url::parse(&options.token_url) else {
+    let Ok(endpoint) = Url::parse(raw) else {
         return error("token_url", "must be a valid HTTPS URL");
     };
     if endpoint.scheme() != scheme {
@@ -177,19 +192,15 @@ pub(crate) fn admit_options(
     }
     if !endpoint.username().is_empty()
         || endpoint.password().is_some()
-        || uri::authority_has_userinfo(&options.token_url)
+        || uri::authority_has_userinfo(raw)
     {
         return error("token_url", "must not include userinfo");
     }
     if endpoint.fragment().is_some() {
         return error("token_url", "must not include a fragment");
     }
-    if issuer == endpoint {
+    if issuer == &endpoint {
         return error("assertion_audience", "must differ from the token endpoint");
     }
-    Ok(Admitted {
-        options,
-        endpoint,
-        permits,
-    })
+    Ok(endpoint)
 }

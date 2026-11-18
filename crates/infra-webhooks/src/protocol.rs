@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use foldhash::HashMap;
 use http::{HeaderMap, HeaderValue};
 
 pub(crate) const WEBHOOK_ID: &str = "webhook-id";
@@ -40,6 +41,43 @@ impl SigningKey {
 pub struct KeyRing {
     active: SigningKey,
     previous: Option<SigningKey>,
+}
+
+#[derive(Default, derive_more::Debug)]
+#[debug("EndpointKeyOwners([REDACTED])")]
+pub struct EndpointKeyOwners<'a> {
+    owners: HashMap<Box<[u8]>, &'a str>,
+}
+
+impl<'a> EndpointKeyOwners<'a> {
+    pub fn register(&mut self, endpoint: &'a str, keys: &KeyRing) -> Result<(), SharedEndpointKey> {
+        let identities = [Some(&keys.active), keys.previous.as_ref()]
+            .map(|key| key.map(|key| hmac::sign(&key.0, b"webhook endpoint key ownership")));
+        for identity in identities.iter().flatten() {
+            if let Some(&owner) = self.owners.get(identity.as_ref())
+                && owner != endpoint
+            {
+                return Err(SharedEndpointKey {
+                    first: owner.to_owned(),
+                    second: endpoint.to_owned(),
+                });
+            }
+        }
+        self.owners.extend(
+            identities
+                .into_iter()
+                .flatten()
+                .map(|identity| (Box::<[u8]>::from(identity.as_ref()), endpoint)),
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("webhook endpoints {first} and {second} share an HMAC signing key")]
+pub struct SharedEndpointKey {
+    first: String,
+    second: String,
 }
 
 impl KeyRing {

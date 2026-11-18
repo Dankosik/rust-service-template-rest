@@ -293,7 +293,7 @@ def classify_report(
             mark("openapi", "runtime_image", "validation_system")
             if source_only:
                 mark("cargo_dependencies", "module_initializer")
-        elif _matches(file, "vendor/sqlx-core/*"):
+        elif _matches(file, "vendor/sqlx-core/*", "vendor/sqlx-postgres/*"):
             mark("rust_source", "cargo_dependencies", "runtime_image")
             if database == "postgres":
                 mark("db_integration")
@@ -471,6 +471,7 @@ def classify_report(
             ".dockerignore", "build/docker/*", "scripts/image/build.sh", "scripts/image/check.sh",
             "scripts/image/inventory.py", "scripts/image/scan.sh", "scripts/image/cargo_artifact.py",
             "scripts/service/runtime-image.sh", "scripts/service/runtime-binaries.json", "Cargo.toml",
+            "deny.toml", "tools/versions.env", "LICENSE",
         ):
             mark("runtime_image")
 
@@ -508,7 +509,7 @@ def classify_report(
 
         if _matches(
             file,
-            ".editorconfig", ".gitattributes", ".gitignore", ".gitkeep", "*/.gitkeep", "LICENSE",
+            ".editorconfig", ".gitattributes", ".gitignore", ".gitkeep", "*/.gitkeep",
             ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/*",
         ):
             mark("no_validation_required")
@@ -573,14 +574,15 @@ def classify_report(
                 file,
                 "api/proto/*", "crates/infra-grpc/*", "crates/infra-outbound-grpc/*",
                 "crates/grpc-contracts/*", "crates/shared-rules/src/grpc.rs",
-                "crates/service/examples/grpc.rs", "tools/grpc-codegen/*", "buf.yaml",
+                "crates/service/examples/grpc.rs", "crates/service/examples/grpc_oidc.rs",
+                "crates/service/examples/support/echo.rs", "tools/grpc-codegen/*", "buf.yaml",
                 "scripts/profiles/grpc_generate.sh", "scripts/profiles/grpc_check.sh",
             ):
                 mark("module_initializer", "initializer_runtime")
             # template:end grpc:classifier-grpc-initializer
 
             # template:begin service-auth:classifier-service-auth-initializer
-            if _matches(file, "crates/infra-serviceauth/*"):
+            if _matches(file, "crates/infra-serviceauth/*", "crates/service/examples/service_auth_rotation.rs"):
                 mark("module_initializer", "initializer_runtime")
             # template:end service-auth:classifier-service-auth-initializer
 
@@ -590,7 +592,7 @@ def classify_report(
                 ".jscpd.json", "ruff.toml", "quality/*.json",
                 "scripts/checks/*", ".dockerignore", "build/docker/*", "README.md",
                 "SECURITY.md", ".gitleaks.toml", ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/*",
-                ".github/dependabot.yml", ".github/workflows/cd.yml",
+                ".github/dependabot.yml", ".github/workflows/cd.yml", ".github/workflows/published-image-scan.yml",
                 ".github/actions/publish-image/action.yml", ".github/actions/rust-toolchain/action.yml",
                 "scripts/verify/*", "scripts/image/*",
                 "scripts/profiles/migration_history.sh", "scripts/profiles/migration_validate.sh",

@@ -4,17 +4,20 @@ use tokio::time::Instant;
 
 use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
-use crate::kind::{Disposition, JobError, MAX_ATTEMPTS, MAX_ERROR_SUMMARY_BYTES, Policy};
+use crate::kind::{
+    Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
+    saturating_micros,
+};
 use crate::state::FailureReason;
 
-const OUTBOX_MAX_RETRY_BASE_MICROS: f64 = 54_000_000.0;
+const OUTBOX_MAX_RETRY_BASE_SECONDS: i64 = 54;
 
 #[derive(Debug)]
 pub(super) enum Transition {
     Complete,
     Retry {
         summary: String,
-        base_micros: f64,
+        base_micros: i64,
         floor_micros: i64,
         cause: RetryCause,
     },
@@ -52,8 +55,8 @@ impl Transition {
 pub(super) enum Write<'a> {
     Retry {
         summary: &'a str,
-        base_micros: f64,
-        floor_micros: i64,
+        minimum_micros: i64,
+        jitter_micros: i64,
     },
     Snooze {
         delay_micros: i64,
@@ -106,13 +109,19 @@ pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
         Transition::Retry {
             summary,
             base_micros,
-            floor_micros,
+            floor_micros: floor,
             ..
-        } => Write::Retry {
-            summary,
-            base_micros: *base_micros,
-            floor_micros: *floor_micros,
-        },
+        } => {
+            let minimum_micros = (base_micros - base_micros / 10).max(*floor);
+            let jitter_micros = (base_micros / 5)
+                .max(floor / 10)
+                .min(saturating_micros(MAX_DELAY) - minimum_micros);
+            Write::Retry {
+                summary,
+                minimum_micros,
+                jitter_micros,
+            }
+        }
         Transition::Snooze { delay_micros, .. } => Write::Snooze {
             delay_micros: *delay_micros,
         },
@@ -153,29 +162,34 @@ async fn execute(
     fence: ClaimFence,
     write: Write<'_>,
 ) -> Result<u64, sqlx::Error> {
-    let ClaimFence { job_id, generation } = fence;
+    let ClaimFence {
+        job_id,
+        generation,
+        token,
+    } = fence;
     let id = job_id.0;
     let (statement_summary, query) = match write {
         Write::Retry {
             summary,
-            base_micros,
-            floor_micros,
+            minimum_micros,
+            jitter_micros,
         } => (
             "retry job",
             sqlx::query!(
                 "UPDATE background_jobs \
                  SET state = 'pending', not_before = statement_timestamp() + \
-                     GREATEST($3::double precision * (0.9 + 0.2 * random()), $4::bigint) * interval '1 microsecond', \
+                     ($3::bigint + $4::bigint * random()) * interval '1 microsecond', \
                      claim_expires_at = NULL, error_summary = $5, \
                      errors = (CASE WHEN jsonb_array_length(errors) >= $6 THEN errors - 0 ELSE errors END) \
                          || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $5::text) \
-                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                 WHERE id = $1 AND claim_generation = $2 AND claim_token = $7 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
-                base_micros,
-                floor_micros,
+                minimum_micros,
+                jitter_micros,
                 summary,
                 i32::from(MAX_ATTEMPTS),
+                token,
             ),
         ),
         Write::Snooze { delay_micros } => {
@@ -190,10 +204,11 @@ async fn execute(
                     "UPDATE background_jobs \
                      SET state = 'pending', not_before = statement_timestamp() + $3, claim_expires_at = NULL, \
                          attempts = attempts - 1 \
-                     WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                     WHERE id = $1 AND claim_generation = $2 AND claim_token = $4 AND claim_expires_at IS NOT NULL",
                     id,
                     generation,
                     delay,
+                    token,
                 ),
             )
         }
@@ -202,9 +217,10 @@ async fn execute(
             sqlx::query!(
                 "UPDATE background_jobs \
                  SET state = 'pending', claim_expires_at = NULL, attempts = attempts - 1 \
-                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                 WHERE id = $1 AND claim_generation = $2 AND claim_token = $3 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
+                token,
             ),
         ),
         Write::Fail { reason, summary } => (
@@ -215,12 +231,13 @@ async fn execute(
                      claim_expires_at = NULL, error_summary = $4, \
                      errors = (CASE WHEN jsonb_array_length(errors) >= $5 THEN errors - 0 ELSE errors END) \
                          || jsonb_build_object('attempt', attempts, 'at', statement_timestamp(), 'error', $4::text) \
-                 WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+                 WHERE id = $1 AND claim_generation = $2 AND claim_token = $6 AND claim_expires_at IS NOT NULL",
                 id,
                 generation,
                 reason.as_str(),
                 summary,
                 i32::from(MAX_ATTEMPTS),
+                token,
             ),
         ),
     };
@@ -329,14 +346,16 @@ fn retry_or_exhaust(
             summary,
         };
     }
-    let base_micros = if is_outbox {
-        (2_f64.powi(i32::from(number.max(1))) * 1_000_000.0).min(OUTBOX_MAX_RETRY_BASE_MICROS)
+    let base_seconds = if is_outbox {
+        2_i64
+            .saturating_pow(u32::from(number.max(1)))
+            .min(OUTBOX_MAX_RETRY_BASE_SECONDS)
     } else {
-        f64::from(number).powi(4) * 1_000_000.0
+        i64::from(number).pow(4)
     };
     Transition::Retry {
         summary,
-        base_micros,
+        base_micros: base_seconds * 1_000_000,
         floor_micros,
         cause,
     }
@@ -395,7 +414,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
     fn dispositions_preserve_cap_and_snooze() {
         std::assert_matches!(
             outcome(Ended::Success(crate::kind::Completion::Pending), 25),
@@ -420,7 +438,7 @@ mod tests {
                 cause: RetryCause::Failure,
                 floor_micros: 2_000_001,
                 ..
-            } if base_micros == 1_000_000.0
+            } if base_micros == 1_000_000
         );
         std::assert_matches!(
             outcome(
@@ -434,7 +452,7 @@ mod tests {
                 cause: RetryCause::Failure,
                 floor_micros: 2_000_000,
                 ..
-            } if base_micros == 81_000_000.0
+            } if base_micros == 81_000_000
         );
         std::assert_matches!(
             outcome(
@@ -509,11 +527,10 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "the view copies the exact binding")]
     fn the_write_view_carries_each_statement_binding() {
         let retry = Transition::Retry {
             summary: "retry me".to_owned(),
-            base_micros: 81_000_000.0,
+            base_micros: 81_000_000,
             floor_micros: 2_000_000,
             cause: RetryCause::Failure,
         };
@@ -521,9 +538,9 @@ mod tests {
             write_of(&retry),
             Some(Write::Retry {
                 summary,
-                base_micros,
-                floor_micros,
-            }) if summary == "retry me" && base_micros == 81_000_000.0 && floor_micros == 2_000_000
+                minimum_micros: 72_900_000,
+                jitter_micros: 16_200_000,
+            }) if summary == "retry me"
         );
         let snooze = Transition::Snooze {
             delay_micros: 7,
@@ -541,6 +558,22 @@ mod tests {
                 summary,
             }) if summary == "done"
         );
+    }
+
+    #[test]
+    fn simultaneous_retry_after_responses_keep_a_spread_above_the_requested_floor() {
+        let maximum = saturating_micros(MAX_DELAY);
+        for (floor, width) in [(60_000_000, 6_000_000), (maximum - 1, 1), (maximum, 0)] {
+            let error =
+                JobError::retry_after_at_least("busy", Duration::from_micros(floor.unsigned_abs()))
+                    .unwrap();
+            let transition = outcome(Ended::Error(error), 1);
+            std::assert_matches!(
+                write_of(&transition),
+                Some(Write::Retry { minimum_micros, jitter_micros, .. })
+                    if minimum_micros == floor && jitter_micros == width
+            );
+        }
     }
 
     #[test]

@@ -237,7 +237,7 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         OLDEST_AVAILABLE_AGE_METRIC,
         Unit::Seconds,
-        "Age in seconds of the oldest available job in one per-process sample."
+        "Seconds since the oldest due pending job or expired running lease became available."
     );
     metrics::describe_gauge!(
         OBSERVATION_TIMESTAMP_METRIC,
@@ -283,7 +283,7 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                             scheduled.count AS \"scheduled!\", \
                             running.count AS \"running!\", \
                             failed.count AS \"failed!\", \
-                            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - available.oldest), 0)::double precision \
+                            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - LEAST(available.oldest, expired.oldest)), 0)::double precision \
                                 AS \"oldest_available_seconds!\", \
                             EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" \
                      FROM sampled \
@@ -325,6 +325,17 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                             LIMIT $2 \
                          ) AS capped \
                      ) AS running \
+                     LEFT JOIN LATERAL ( \
+                         SELECT job.claim_expires_at AS oldest \
+                         FROM background_jobs AS job \
+                         WHERE job.kind = registered.kind \
+                           AND job.state = 'running' \
+                           AND job.claim_expires_at <= sampled.observed_at \
+                           AND NOT EXISTS (SELECT 1 FROM background_jobs prior \
+                                           WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') \
+                         ORDER BY job.claim_expires_at \
+                         LIMIT 1 \
+                     ) AS expired ON true \
                      CROSS JOIN LATERAL ( \
                          SELECT count(*) AS count \
                          FROM ( \

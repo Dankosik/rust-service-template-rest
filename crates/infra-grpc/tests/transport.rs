@@ -103,7 +103,13 @@ const UNSCOPED: &str = "unscoped";
 // template:begin authn:grpc-transport-test-unary-path
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 const ORDERS_READ: &str = "orders.read";
+const STREAM_PATHS: [&str; 3] = [
+    "/example.v1.EchoService/ClientStream",
+    SERVER_STREAM_PATH,
+    "/example.v1.EchoService/BidiStream",
+];
 // template:end authn:grpc-transport-test-unary-path
+const SERVER_STREAM_PATH: &str = "/example.v1.EchoService/ServerStream";
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -476,7 +482,10 @@ impl Fixture {
         Self::open(false, None).await
     }
 
-    async fn with_descriptor_set(contract: &prost_types::FileDescriptorSet) -> Self {
+    async fn with_descriptor_set(
+        contract: &prost_types::FileDescriptorSet,
+        omitted_method: Option<&str>,
+    ) -> Self {
         use prost::Message as _;
 
         Self::open_with_at(
@@ -486,6 +495,7 @@ impl Fixture {
             connection_limits(),
             loopback(),
             Box::leak(contract.encode_to_vec().into_boxed_slice()),
+            omitted_method,
         )
         .await
     }
@@ -502,6 +512,7 @@ impl Fixture {
             connection_limits(),
             address,
             grpc_contracts::FILE_DESCRIPTOR_SET,
+            None,
         )
         .await
     }
@@ -526,6 +537,7 @@ impl Fixture {
             connection_limits(),
             loopback(),
             grpc_contracts::FILE_DESCRIPTOR_SET,
+            None,
         )
         .await
     }
@@ -537,6 +549,11 @@ impl Fixture {
         connections: ConnectionLimits,
         address: SocketAddr,
         descriptor_set: &'static [u8],
+        #[allow(
+            unused_variables,
+            reason = "the bearer fixture registers the described methods"
+        )]
+        omitted_method: Option<&str>,
     ) -> Self {
         #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
         let authentication = infra_grpc::Authentication::None;
@@ -544,15 +561,7 @@ impl Fixture {
         let (verifier, bearer) = BearerFixture::start().await;
         let authentication = infra_grpc::Authentication::Bearer(verifier.clone());
         // template:end authn:grpc-transport-test-auth-fixture
-        let readiness = Readiness::new(
-            Vec::new(),
-            RefreshPolicy::try_new(
-                Duration::from_mins(1),
-                Duration::from_secs(1),
-                NonZeroU32::MIN,
-            )
-            .unwrap(),
-        );
+        let readiness = readiness();
         let control = readiness.control();
         let prepared = readiness.prepare().await.unwrap();
         let pending_activation = if seed {
@@ -576,6 +585,11 @@ impl Fixture {
         services
             .require_scopes_for_delegation(UNARY_PATH, &[ORDERS_READ])
             .expect("unary scopes register once");
+        for path in STREAM_PATHS {
+            if Some(path) != omitted_method {
+                services.require_scopes(path, &[]).unwrap();
+            }
+        }
         // template:end authn:grpc-transport-test-scope-requirement
         let app = infra_grpc::router(services, control.reader(), authentication, limits)
             .expect("router builds");
@@ -595,7 +609,9 @@ impl Fixture {
             }
         });
         let listener = BoundListener::bind(address).expect("listener binds");
-        let bound = app.serve(listener, server_options(connections), tls);
+        let bound = app
+            .serve(listener, server_options(connections), tls)
+            .unwrap();
         let address = bound.local_addr();
         Self {
             server: Some(bound),
@@ -658,6 +674,18 @@ fn described() -> Services {
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .expect("the committed contract decodes");
     services
+}
+
+fn readiness() -> Readiness {
+    Readiness::new(
+        Vec::new(),
+        RefreshPolicy::try_new(
+            Duration::from_mins(1),
+            Duration::from_secs(1),
+            NonZeroU32::MIN,
+        )
+        .unwrap(),
+    )
 }
 
 fn loopback() -> SocketAddr {
@@ -915,6 +943,17 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
     assert_eq!(reason(&malformed), "AUTHENTICATION_MALFORMED");
     assert!(fixture.echo.calls.lock().is_empty());
 
+    let mut reflection = ServerReflectionClient::new(plaintext_client(fixture.address));
+    let reflection_status = timeout(
+        WAIT,
+        reflection.server_reflection_info(tonic::codegen::tokio_stream::empty()),
+    )
+    .await
+    .expect("reflection rejects requests without a bearer")
+    .unwrap_err();
+    assert_eq!(reflection_status.code(), Code::Unauthenticated);
+    drop(reflection);
+
     let mut health = fixture.health();
     let check = timeout(
         WAIT,
@@ -976,6 +1015,18 @@ async fn verify_grpc_order_reads(fixture: &Fixture) {
     assert!(fixture.echo.calls.lock().is_empty());
     assert_eq!(fixture.echo.orders.reads(), 0);
 
+    let missing_bearer = timeout(
+        WAIT,
+        echo.server_stream(Request::new(ServerStreamRequest {
+            message: "denied".to_owned(),
+        })),
+    )
+    .await
+    .expect("server stream without a bearer")
+    .unwrap_err();
+    assert_eq!(missing_bearer.code(), Code::Unauthenticated);
+    assert!(fixture.echo.calls.lock().is_empty());
+
     let delegated = timeout(WAIT, echo.unary(request(unary("order-42"))))
         .await
         .expect("scoped unary")
@@ -990,7 +1041,7 @@ async fn verify_grpc_order_reads(fixture: &Fixture) {
     );
     assert!(!fixture.echo.calls.lock()[0].had_authorization);
 
-    let mut undeclared = timeout(
+    let mut admitted = timeout(
         WAIT,
         echo.server_stream(unscoped(ServerStreamRequest {
             message: "admitted".to_owned(),
@@ -1001,7 +1052,7 @@ async fn verify_grpc_order_reads(fixture: &Fixture) {
     .unwrap()
     .into_inner();
     assert_eq!(
-        timeout(WAIT, undeclared.message())
+        timeout(WAIT, admitted.message())
             .await
             .expect("server item")
             .unwrap()
@@ -1182,6 +1233,30 @@ fn a_handler_requiring_a_principal_reports_a_missing_identity_as_internal() {
     assert_eq!(reason(&status), "INTERNAL_ERROR");
 }
 
+#[tokio::test]
+async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_rule() {
+    let (verifier, fixture) = BearerFixture::start().await;
+    let mut services = described();
+    services.add(EchoServiceServer::new(Echo::new())).unwrap();
+    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
+        if path != SERVER_STREAM_PATH {
+            services.require_scopes(path, &[]).unwrap();
+        }
+    }
+
+    assert_eq!(
+        infra_grpc::router(
+            services,
+            readiness().control().reader(),
+            infra_grpc::Authentication::Bearer(verifier),
+            limits(),
+        )
+        .unwrap_err(),
+        Error::MissingScopeRequirement(SERVER_STREAM_PATH.to_owned())
+    );
+    fixture.stop().await;
+}
+
 #[test]
 fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
     let mut services = described();
@@ -1312,20 +1387,14 @@ fn opening_app_waiting(
     capacity: u32,
     max_admission_wait: Duration,
 ) -> infra_grpc::Application {
-    let readiness = Readiness::new(
-        Vec::new(),
-        RefreshPolicy::try_new(
-            Duration::from_mins(1),
-            Duration::from_secs(1),
-            NonZeroU32::MIN,
-        )
-        .unwrap(),
-    );
     let mut services = described();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
+        services.require_scopes(path, &[]).unwrap();
+    }
     infra_grpc::router(
         services,
-        readiness.control().reader(),
+        readiness().control().reader(),
         infra_grpc::Authentication::Bearer(verifier),
         Limits {
             max_in_flight: NonZeroU32::new(capacity),
@@ -2025,6 +2094,7 @@ async fn one_connection_serves_concurrent_rpcs_and_capacity_returns_after_it_clo
         },
         loopback(),
         grpc_contracts::FILE_DESCRIPTOR_SET,
+        None,
     )
     .await;
     let mut first = fixture.echo_client();
@@ -3007,7 +3077,7 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
         .clone();
     unregistered.name = Some("Unregistered".to_owned());
     file.service.push(unregistered);
-    let fixture = Fixture::with_descriptor_set(&contract).await;
+    let fixture = Fixture::with_descriptor_set(&contract, None).await;
     let expected_names = [
         ECHO_SERVICE,
         "grpc.health.v1.Health",
@@ -3111,7 +3181,7 @@ async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
     let original_count = echo.method.len();
     echo.method.retain(|method| method.name() != "ServerStream");
     assert_eq!(echo.method.len() + 1, original_count);
-    let fixture = Fixture::with_descriptor_set(&contract).await;
+    let fixture = Fixture::with_descriptor_set(&contract, Some(SERVER_STREAM_PATH)).await;
     let mut client = fixture.echo_client();
 
     let omitted = timeout(

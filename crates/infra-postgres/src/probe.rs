@@ -1,16 +1,28 @@
 use health::{Probe, ProbeError};
-use sqlx::Connection;
 use sqlx::postgres::PgPool;
+use sqlx::{Connection, PgConnection};
 
 #[derive(Clone, Debug)]
 pub struct PostgresProbe {
     pool: PgPool,
+    require_writable: bool,
 }
 
 impl PostgresProbe {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            require_writable: false,
+        }
+    }
+
+    #[must_use]
+    pub fn writable_primary(pool: PgPool) -> Self {
+        Self {
+            pool,
+            require_writable: true,
+        }
     }
 }
 
@@ -24,8 +36,37 @@ impl Probe for PostgresProbe {
         let mut conn = crate::pool::acquire_probe(&self.pool)
             .await
             .map_err(|err| probe_error(&err))?;
-        conn.ping().await.map_err(|err| probe_error(&err))
+        if !self.require_writable {
+            return conn.ping().await.map_err(|err| probe_error(&err));
+        }
+        let session = session_properties(&mut conn)
+            .await
+            .map_err(|err| probe_error(&err))?;
+        if !session.writable {
+            return Err(ProbeError::from_static(
+                "the PostgreSQL session is not writable",
+            ));
+        }
+        Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct SessionProperties {
+    pub server_encoding: String,
+    pub writable: bool,
+    pub read_committed: bool,
+}
+
+pub async fn session_properties(conn: &mut PgConnection) -> Result<SessionProperties, sqlx::Error> {
+    sqlx::query_as!(
+        SessionProperties,
+        "SELECT current_setting('server_encoding') AS \"server_encoding!\", \
+     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", \
+     current_setting('default_transaction_isolation') = 'read committed' AS \"read_committed!\""
+    )
+    .fetch_one(conn)
+    .await
 }
 
 fn probe_error(err: &sqlx::Error) -> ProbeError {

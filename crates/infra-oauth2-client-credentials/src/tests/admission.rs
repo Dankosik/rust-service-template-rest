@@ -123,7 +123,11 @@ async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
     let registration = prepare_registration(fixture.options());
     for capacity in [0, 65_537] {
         let error = registration
-            .exchange_tokens(TokenTarget::default(), capacity)
+            .exchange_tokens(
+                ExchangeTokenTarget::default(),
+                fixture.resource_origin(),
+                capacity,
+            )
             .unwrap_err();
         assert_eq!(error.key, "exchange_cache_capacity");
     }
@@ -133,14 +137,14 @@ async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
 #[test]
 fn token_targets_require_valid_scope_tokens_and_a_nonempty_configured_audience() {
     assert_eq!(
-        TokenTarget::try_new(&["bad scope".to_owned()], None)
+        ServiceTokenTarget::try_new(&["bad scope".to_owned()])
             .unwrap_err()
             .key,
         "scopes"
     );
     for audience in ["", " "] {
         assert_eq!(
-            TokenTarget::try_new(&[], Some(audience.to_owned()))
+            ExchangeTokenTarget::try_new(&[], Some(audience.to_owned()))
                 .unwrap_err()
                 .key,
             "audience"

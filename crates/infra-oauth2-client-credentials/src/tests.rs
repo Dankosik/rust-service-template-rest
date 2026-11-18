@@ -30,8 +30,8 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokens, OnBehalfOf, Options,
-    RefreshDriver, Registration, Rejection, ServiceTokens, TokenTarget,
+    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokenTarget, ExchangeTokens,
+    OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceTokenTarget, ServiceTokens,
     credentials::{Cached, acquisition_deadline},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
@@ -46,6 +46,7 @@ mod grpc;
 mod keycloak;
 
 mod admission;
+mod discovery;
 mod exchange;
 mod http_client;
 mod refresh;
@@ -61,6 +62,7 @@ const EXCHANGE_CAPACITY: u32 = 1024;
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
+    method: String,
     target: String,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
@@ -150,18 +152,22 @@ impl Fixture {
         }
     }
 
-    fn service_tokens(&self, scopes: &[&str], audience: Option<&str>) -> ServiceTokens {
-        self.service_tokens_with(self.options(), scopes, audience)
+    fn resource_origin(&self) -> http::Uri {
+        self.origin.as_str().parse().unwrap()
+    }
+
+    fn service_tokens(&self, scopes: &[&str]) -> ServiceTokens {
+        self.service_tokens_with(self.options(), scopes, self.resource_origin())
     }
 
     fn service_tokens_with(
         &self,
         options: Options,
         scopes: &[&str],
-        audience: Option<&str>,
+        origin: http::Uri,
     ) -> ServiceTokens {
         let registration = prepare_registration(options);
-        let (tokens, driver) = registration.service_tokens(token_target(scopes, audience));
+        let (tokens, driver) = registration.service_tokens(service_target(scopes), origin);
         self.drive(driver);
         self.registrations.lock().unwrap().push(registration);
         tokens
@@ -185,7 +191,11 @@ impl Fixture {
     ) -> ExchangeTokens {
         let registration = prepare_registration(options);
         let tokens = registration
-            .exchange_tokens(token_target(scopes, audience), capacity)
+            .exchange_tokens(
+                exchange_target(scopes, audience),
+                self.resource_origin(),
+                capacity,
+            )
             .unwrap();
         self.registrations.lock().unwrap().push(registration);
         tokens
@@ -206,12 +216,15 @@ impl Fixture {
     }
 
     fn service_client(&self) -> AuthenticatedClient {
-        self.service_tokens(&[], None).http(self.resource_client())
+        self.service_tokens(&[])
+            .http(self.resource_client())
+            .unwrap()
     }
 
     fn exchange_client(&self) -> AuthenticatedClient {
         self.exchange_tokens(&[], None, EXCHANGE_CAPACITY)
             .http(self.resource_client())
+            .unwrap()
     }
 
     async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
@@ -306,12 +319,20 @@ impl Fixture {
     }
 }
 
-fn token_target(scopes: &[&str], audience: Option<&str>) -> TokenTarget {
+fn service_target(scopes: &[&str]) -> ServiceTokenTarget {
     let scopes = scopes
         .iter()
-        .map(|scope| (*scope).to_owned())
+        .map(|&scope| scope.to_owned())
         .collect::<Vec<_>>();
-    TokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
+    ServiceTokenTarget::try_new(&scopes).unwrap()
+}
+
+fn exchange_target(scopes: &[&str], audience: Option<&str>) -> ExchangeTokenTarget {
+    let scopes = scopes
+        .iter()
+        .map(|&scope| scope.to_owned())
+        .collect::<Vec<_>>();
+    ExchangeTokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {
@@ -393,13 +414,9 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
     };
     let head = std::str::from_utf8(&request[..header_end]).unwrap();
     let mut lines = head.split("\r\n");
-    let target = lines
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .to_owned();
+    let mut request_line = lines.next().unwrap().split_whitespace();
+    let method = request_line.next().unwrap().to_owned();
+    let target = request_line.next().unwrap().to_owned();
     let headers = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
@@ -413,6 +430,7 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
         request.extend_from_slice(&chunk[..read]);
     }
     CapturedRequest {
+        method,
         target,
         headers,
         body: request[header_end..header_end + body_bytes].to_vec(),

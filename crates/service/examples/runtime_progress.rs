@@ -541,7 +541,13 @@ fn register(
         cpu,
         storage,
         counts,
-    }))
+    }))?;
+    // template:begin grpc-authn:runtime-progress-scope-requirements
+    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+        services.require_scopes(&format!("/example.v1.EchoService/{method}"), &[])?;
+    }
+    // template:end grpc-authn:runtime-progress-scope-requirements
+    Ok(())
 }
 
 fn main() -> Result<ExitCode, &'static infra_messaging::RegistryError> {

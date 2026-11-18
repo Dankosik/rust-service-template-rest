@@ -38,7 +38,7 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     let exchange_tokens = fixture.exchange_tokens(&[], None, 1);
-    let client = exchange_tokens.http(fixture.resource_client());
+    let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let cache = exchange_tokens.cache();
     for subject in ["alice", "bob"] {
         fixture
@@ -67,7 +67,7 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     let exchange_tokens = fixture.exchange_tokens(&[], None, SUBJECTS);
-    let client = exchange_tokens.http(fixture.resource_client());
+    let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let cache = exchange_tokens.cache();
     for _ in 0..2 {
         for subject in 0..SUBJECTS {
@@ -91,7 +91,7 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
     const PAYLOAD_TARGET: usize = 16 * 1024 * 1024;
     let fixture = Fixture::new().await;
     let exchange_tokens = fixture.exchange_tokens(&[], None, EXCHANGE_CAPACITY);
-    let client = exchange_tokens.http(fixture.resource_client());
+    let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let prefix = "x".repeat(512 * 1024 - 16);
     for index in 0..33 {
         fixture.token_json(
@@ -223,7 +223,8 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
             None,
             EXCHANGE_CAPACITY,
         )
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
@@ -253,20 +254,28 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
         ..fixture.options()
     });
     let exchange_tokens = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap();
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     fixture.drive(driver);
-    let client = exchange_tokens.http(fixture.resource_client());
+    let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     fixture
         .send_request(&client, fixture.on_behalf_of_request("cached"))
         .await
         .unwrap();
     let gate = fixture.block_tokens();
-    let service_client = service_tokens.http(fixture.resource_client());
+    let service_client = service_tokens.http(fixture.resource_client()).unwrap();
     let mut service = Box::pin(fixture.send(&service_client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut service => panic!("service must be gated: {result:?}"), }
-    let other_binding = exchange_tokens.clone().http(fixture.resource_client());
+    let other_binding = exchange_tokens
+        .clone()
+        .http(fixture.resource_client())
+        .unwrap();
     let mut exchange =
         Box::pin(fixture.send_request(&other_binding, fixture.on_behalf_of_request("active")));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
@@ -322,12 +331,17 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
         ..fixture.options()
     });
     let exchange_tokens = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap();
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     fixture.drive(driver);
-    let client = exchange_tokens.http(fixture.resource_client());
-    let service_client = service_tokens.http(fixture.resource_client());
+    let client = exchange_tokens.http(fixture.resource_client()).unwrap();
+    let service_client = service_tokens.http(fixture.resource_client()).unwrap();
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
@@ -385,7 +399,8 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
             None,
             EXCHANGE_CAPACITY,
         )
-        .http(resource);
+        .http(resource)
+        .unwrap();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
         fixture.on_behalf_of_request("subject"),
@@ -458,7 +473,8 @@ async fn a_failed_exchange_is_not_cached() {
             None,
             EXCHANGE_CAPACITY,
         )
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     for _ in 0..2 {
         let result = fixture
             .send_request(&client, fixture.on_behalf_of_request("subject"))

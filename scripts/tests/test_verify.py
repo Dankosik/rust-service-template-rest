@@ -288,6 +288,8 @@ class SurfacesTests(unittest.TestCase):
                 img_file,
                 ("runtime_image", "module_initializer", "initializer_artifacts"),
             )
+        for img_input in ("deny.toml", "tools/versions.env", "LICENSE"):
+            self._assert_surfaces(self.source_fixture, img_input, ("runtime_image", "initializer_artifacts"))
 
         # template:begin grpc:test-surfaces-grpc
         for grpc_file in (
@@ -1051,6 +1053,10 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertIn("dependency_automation:", res.stdout)
 
         res = self._run_verify("--plan", "--files", "LICENSE")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("  make dockerfile-check\n", res.stdout)
+
+        res = self._run_verify("--plan", "--files", ".editorconfig")
         self.assertEqual(res.returncode, 0)
         self.assertIn("  none\n", res.stdout)
 

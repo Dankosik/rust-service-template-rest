@@ -45,6 +45,9 @@ impl AuthenticatedClient {
                 reason: "must use TLS to carry OAuth2 bearer tokens",
             });
         }
+        if !resource.matches_origin(tokens.resource_origin()) {
+            return Err(ConfigurationError::resource_origin());
+        }
         Ok(Self {
             tokens,
             resource,

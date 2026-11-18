@@ -1,7 +1,10 @@
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use bytes::Bytes;
-use http::{Method, Request, StatusCode, header};
+use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
 use infra_outbound_http::Client;
 use jsonwebtoken::jwk::Jwk;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
@@ -12,12 +15,15 @@ use uuid::Uuid;
 
 use super::{
     AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
-    token_context,
+    exchange_target, service_target, token_context,
 };
-use crate::{Registration, ServiceTokens, TokenTarget, options::Admitted};
+use crate::{Registration, ServiceTokenTarget, ServiceTokens, token::Token};
 
 const KEY_ID: &str = "key-1";
-const TARGET: &str = "target";
+const CATALOG: &str = "catalog";
+const CATALOG_SCOPE: &str = "catalog-audience";
+const BILLING: &str = "billing";
+const BILLING_SCOPE: &str = "billing-audience";
 const UPSTREAM: &str = "upstream";
 const UPSTREAM_SECRET: &str = "upstream-fixture-secret";
 
@@ -35,6 +41,10 @@ struct Claims {
     iss: String,
     sub: String,
     azp: String,
+    iat: u64,
+    exp: u64,
+    #[serde(default)]
+    scope: String,
     #[serde(default)]
     aud: serde_json::Value,
 }
@@ -73,9 +83,27 @@ impl Realm {
                 &serde_json::json!({"realm": realm.name, "enabled": true}),
             )
             .await;
-        realm
-            .client(&serde_json::json!({"clientId": TARGET, "publicClient": false}))
-            .await;
+        for (recipient, scope) in [(CATALOG, CATALOG_SCOPE), (BILLING, BILLING_SCOPE)] {
+            realm
+                .client(&serde_json::json!({
+                    "clientId": recipient,
+                    "protocol": "openid-connect",
+                    "publicClient": false,
+                    "standardFlowEnabled": false,
+                    "secret": format!("{recipient}-fixture-secret"),
+                }))
+                .await;
+            realm
+                .admin_post(
+                    &format!("/admin/realms/{}/client-scopes", realm.name),
+                    &serde_json::json!({
+                        "name": scope,
+                        "protocol": "openid-connect",
+                        "protocolMappers": [audience_mapper(recipient)],
+                    }),
+                )
+                .await;
+        }
         realm
             .client(&serde_json::json!({
                 "clientId": UPSTREAM,
@@ -114,90 +142,171 @@ impl Realm {
     }
 
     async fn token(&self, realm: &str, fields: &[(&str, &str)]) -> String {
+        let token = self.form_post(self.token_endpoint(realm), fields).await;
+        token["access_token"].as_str().unwrap().to_owned()
+    }
+
+    async fn accepts_token(&self, recipient: &str, token: &Token) -> bool {
+        let endpoint = self
+            .origin
+            .join(&format!(
+                "/realms/{}/protocol/openid-connect/token/introspect",
+                self.name
+            ))
+            .unwrap();
+        let secret = format!("{recipient}-fixture-secret");
+        let result = self
+            .form_post(
+                endpoint,
+                &[
+                    ("client_id", recipient),
+                    ("client_secret", &secret),
+                    ("token", access_token(token)),
+                ],
+            )
+            .await;
+        result["active"].as_bool().unwrap()
+    }
+
+    async fn form_post(&self, endpoint: Url, fields: &[(&str, &str)]) -> serde_json::Value {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(fields)
             .finish();
         let response = self
             .send(
-                Request::post(self.token_endpoint(realm).as_str())
+                Request::post(endpoint.as_str())
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(Bytes::from(body))
                     .unwrap(),
             )
             .await;
-        assert_eq!(response.status(), StatusCode::OK, "{:?}", response.body());
-        let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
-        body["access_token"].as_str().unwrap().to_owned()
-    }
-
-    async fn admin_post(&self, path: &str, body: &serde_json::Value) {
-        let response = self
-            .send(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(self.origin.join(path).unwrap().as_str())
-                    .header(header::AUTHORIZATION, format!("Bearer {}", self.admin))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Bytes::from(serde_json::to_vec(body).unwrap()))
-                    .unwrap(),
-            )
-            .await;
         assert_eq!(
             response.status(),
-            StatusCode::CREATED,
-            "{path}: {:?}",
-            response.body()
+            StatusCode::OK,
+            "POST {}",
+            endpoint.path()
         );
+        serde_json::from_slice(response.body()).unwrap_or_else(|_| panic!("invalid form response"))
     }
 
-    async fn client(&self, representation: &serde_json::Value) {
+    async fn admin_request(
+        &self,
+        method: &Method,
+        path: &str,
+        body: Bytes,
+        expected_status: StatusCode,
+    ) -> http::Response<Bytes> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.admin)).unwrap();
+        authorization.set_sensitive(true);
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(self.origin.join(path).unwrap().as_str())
+            .header(header::AUTHORIZATION, authorization)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap();
+        let response = self.send(request).await;
+        assert_eq!(response.status(), expected_status, "{method} {path}");
+        response
+    }
+
+    async fn admin_post(&self, path: &str, body: &serde_json::Value) -> http::Response<Bytes> {
+        self.admin_request(
+            &Method::POST,
+            path,
+            Bytes::from(serde_json::to_vec(body).unwrap()),
+            StatusCode::CREATED,
+        )
+        .await
+    }
+
+    async fn client(&self, representation: &serde_json::Value) -> http::Response<Bytes> {
         self.admin_post(
             &format!("/admin/realms/{}/clients", self.name),
             representation,
         )
-        .await;
+        .await
     }
 
-    async fn caller(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
+    async fn caller(
+        &self,
+        algorithm: Algorithm,
+        key: &KeyPair,
+        access_token_lifespan: Option<u64>,
+    ) -> (Registration, String) {
         let client_id = caller(algorithm);
-        self.client(&serde_json::json!({
+        let mut client = serde_json::json!({
             "clientId": client_id,
+            "protocol": "openid-connect",
             "publicClient": false,
             "serviceAccountsEnabled": true,
             "standardFlowEnabled": false,
+            "fullScopeAllowed": false,
             "clientAuthenticatorType": "client-jwt",
             "attributes": {
                 "use.jwks.string": "true",
-                "jwks.string": serde_json::json!({"keys": [public_jwk(algorithm, key)]}).to_string(),
+                "jwks.string": serde_json::json!({"keys": [public_jwk(algorithm, key, KEY_ID)]}).to_string(),
                 "standard.token.exchange.enabled": "true",
             },
-            "protocolMappers": [audience_mapper(TARGET)],
-        }))
-        .await;
-        self.registration(algorithm, key)
+            "defaultClientScopes": ["basic"],
+            "optionalClientScopes": [CATALOG_SCOPE, BILLING_SCOPE],
+        });
+        if let Some(lifespan) = access_token_lifespan {
+            client["attributes"]["access.token.lifespan"] = lifespan.to_string().into();
+        }
+        let response = self.client(&client).await;
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        let location = self.origin.join(location).unwrap();
+        let id = Uuid::parse_str(location.path_segments().unwrap().next_back().unwrap()).unwrap();
+        let path = format!("/admin/realms/{}/clients/{id}", self.name);
+        (self.registration(algorithm, key, KEY_ID).await, path)
     }
 
-    fn registration(&self, algorithm: Algorithm, key: &KeyPair) -> Registration {
+    async fn replace_client_jwks(&self, path: &str, keys: &[Jwk]) -> Instant {
+        let response = self
+            .admin_request(&Method::GET, path, Bytes::new(), StatusCode::OK)
+            .await;
+        let mut client: serde_json::Value = serde_json::from_slice(response.body())
+            .unwrap_or_else(|_| panic!("invalid client representation"));
+        let jwks = &mut client["attributes"]["jwks.string"];
+        assert!(jwks.is_string(), "registered client is missing its JWK Set");
+        *jwks = serde_json::json!({"keys": keys}).to_string().into();
+        let body = Bytes::from(serde_json::to_vec(&client).unwrap());
+
+        let update_started = Instant::now();
+        self.admin_request(&Method::PUT, path, body, StatusCode::NO_CONTENT)
+            .await;
+        update_started
+    }
+
+    async fn registration(
+        &self,
+        algorithm: Algorithm,
+        key: &KeyPair,
+        key_id: &str,
+    ) -> Registration {
         let endpoint = self.token_endpoint(&self.name);
         let options = Options {
             token_url: endpoint.to_string(),
             client_id: caller(algorithm),
             private_key: SecretString::from(key.serialize_pem()),
-            key_id: KEY_ID.to_owned(),
+            key_id: key_id.to_owned(),
             algorithm,
             assertion_audience: self.issuer(),
             provider_concurrency: 32,
         };
-        let admitted = Admitted::try_new_for_test(options, endpoint).unwrap();
-        Registration::build(
-            admitted,
-            Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
-        )
-        .unwrap()
+        Registration::prepare_keycloak_for_test_http(options)
+            .await
+            .unwrap()
     }
 
-    fn service_tokens(&self, registration: &Registration, target: TokenTarget) -> ServiceTokens {
-        let (tokens, driver) = registration.service_tokens(target);
+    fn service_tokens(
+        &self,
+        registration: &Registration,
+        target: ServiceTokenTarget,
+        recipient: &str,
+    ) -> ServiceTokens {
+        let (tokens, driver) = registration.service_tokens(target, resource_origin(recipient));
         let mut shutdown = self.driver_shutdown.subscribe();
         self.drivers
             .lock()
@@ -206,6 +315,46 @@ impl Realm {
                 let _ = shutdown.changed().await;
             })));
         tokens
+    }
+
+    async fn fresh_catalog_token(
+        &self,
+        registration: &Registration,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        self.service_tokens(registration, service_target(&[CATALOG_SCOPE]), CATALOG)
+            .service_token(acquisition_deadline(&token_context()))
+            .await
+    }
+
+    async fn observe_catalog_expiry(
+        &self,
+        token: &Token,
+        issued_lifespan: u64,
+        mut last_active_started: Instant,
+    ) -> (Instant, Instant) {
+        let deadline = token.requested_at + Duration::from_secs(issued_lifespan + 5);
+        let first_inactive_received = tokio::time::timeout_at(deadline, async {
+            loop {
+                let probe_started = Instant::now();
+                if !self.accepts_token(CATALOG, token).await {
+                    break Instant::now();
+                }
+                last_active_started = probe_started;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .expect("the original bearer token must become inactive near its expiration");
+        let earliest_expiry = token.requested_at + Duration::from_secs(issued_lifespan - 1);
+        assert!(
+            first_inactive_received >= earliest_expiry,
+            "the original bearer token became inactive before its expiration"
+        );
+        assert!(
+            first_inactive_received.duration_since(last_active_started) <= Duration::from_secs(1),
+            "the final active probe and first inactive reply must bracket expiry within one second"
+        );
+        (last_active_started, first_inactive_received)
     }
 
     async fn subject_token(&self) -> SecretString {
@@ -242,6 +391,10 @@ fn caller(algorithm: Algorithm) -> String {
     format!("caller-{algorithm:?}").to_lowercase()
 }
 
+fn resource_origin(recipient: &str) -> Uri {
+    format!("https://{recipient}.example").parse().unwrap()
+}
+
 fn key_pair(algorithm: Algorithm) -> KeyPair {
     KeyPair::generate_for(match algorithm {
         Algorithm::Rs256 | Algorithm::Ps256 => &PKCS_RSA_SHA256,
@@ -250,7 +403,7 @@ fn key_pair(algorithm: Algorithm) -> KeyPair {
     .unwrap()
 }
 
-fn public_jwk(algorithm: Algorithm, key: &KeyPair) -> Jwk {
+fn public_jwk(algorithm: Algorithm, key: &KeyPair, key_id: &str) -> Jwk {
     let pem = key.serialize_pem();
     let encoding = match algorithm {
         Algorithm::Rs256 | Algorithm::Ps256 => {
@@ -260,7 +413,7 @@ fn public_jwk(algorithm: Algorithm, key: &KeyPair) -> Jwk {
     }
     .unwrap();
     let mut jwk = Jwk::from_encoding_key(&encoding, algorithm.into()).unwrap();
-    jwk.common.key_id = Some(KEY_ID.to_owned());
+    jwk.common.key_id = Some(key_id.to_owned());
     jwk.common.public_key_use = Some(jsonwebtoken::jwk::PublicKeyUse::Signature);
     jwk
 }
@@ -277,9 +430,17 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-fn claims(token: &crate::token::Token) -> Claims {
-    let bearer = token.header.to_str().unwrap();
-    jsonwebtoken::dangerous::insecure_decode::<Claims>(bearer.strip_prefix("Bearer ").unwrap())
+fn access_token(token: &Token) -> &str {
+    token
+        .header
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+}
+
+fn claims(token: &Token) -> Claims {
+    jsonwebtoken::dangerous::insecure_decode::<Claims>(access_token(token))
         .unwrap()
         .claims
 }
@@ -289,29 +450,39 @@ fn audiences(claims: &Claims) -> Vec<&str> {
         serde_json::Value::String(audience) => vec![audience.as_str()],
         serde_json::Value::Array(audiences) => audiences
             .iter()
-            .filter_map(|value| value.as_str())
+            .map(|value| value.as_str().unwrap())
             .collect(),
         _ => Vec::new(),
     }
 }
 
 #[tokio::test]
-async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token() {
+async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges_a_subject() {
     let realm = Realm::create().await;
     for algorithm in Algorithm::ALL {
         let key = key_pair(algorithm);
-        let registration = realm.caller(algorithm, &key).await;
-        let tokens = realm.service_tokens(&registration, super::token_target(&[], Some(TARGET)));
+        let (registration, _) = realm.caller(algorithm, &key, None).await;
+        let catalog =
+            realm.service_tokens(&registration, service_target(&[CATALOG_SCOPE]), CATALOG);
+        let billing =
+            realm.service_tokens(&registration, service_target(&[BILLING_SCOPE]), BILLING);
 
-        let service = tokens
-            .service_token(acquisition_deadline(&token_context()))
-            .await
-            .unwrap();
-        let service = claims(&service);
-        assert_eq!(service.iss, realm.issuer());
-        assert_eq!(service.azp, caller(algorithm));
-        *tokens.cached() = super::Cached::default();
-        tokens
+        for (tokens, intended, other) in
+            [(&catalog, CATALOG, BILLING), (&billing, BILLING, CATALOG)]
+        {
+            let service = tokens
+                .service_token(acquisition_deadline(&token_context()))
+                .await
+                .unwrap();
+            let claims = claims(&service);
+            assert_eq!(claims.iss, realm.issuer());
+            assert_eq!(claims.azp, caller(algorithm));
+            assert_eq!(audiences(&claims), [intended]);
+            assert!(realm.accepts_token(intended, &service).await);
+            assert!(!realm.accepts_token(other, &service).await);
+        }
+        *catalog.cached() = super::Cached::default();
+        catalog
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
@@ -323,7 +494,11 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         .unwrap()
         .claims;
         let exchanged = registration
-            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .exchange_tokens(
+                exchange_target(&[CATALOG_SCOPE, BILLING_SCOPE], Some(CATALOG)),
+                resource_origin(CATALOG),
+                1024,
+            )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await
@@ -331,8 +506,118 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         let exchanged = claims(&exchanged);
         assert_eq!(exchanged.sub, subject_claims.sub);
         assert_eq!(exchanged.azp, caller(algorithm));
-        assert_eq!(audiences(&exchanged), [TARGET]);
+        assert_eq!(audiences(&exchanged), [CATALOG]);
     }
+    realm.finish().await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::print_stdout,
+    reason = "the integration drill reports non-secret key retirement and token expiry observations"
+)]
+async fn retiring_a_client_key_preserves_issued_access_until_expiry() {
+    const REPLACEMENT_KEY_ID: &str = "key-2";
+    const LIFESPAN_SECONDS: u64 = 20;
+
+    let realm = Realm::create().await;
+    let algorithm = Algorithm::Es256;
+    let old_key = key_pair(algorithm);
+    let new_key = key_pair(algorithm);
+    let old_jwk = public_jwk(algorithm, &old_key, KEY_ID);
+    let new_jwk = public_jwk(algorithm, &new_key, REPLACEMENT_KEY_ID);
+    assert!(
+        old_jwk.algorithm != new_jwk.algorithm,
+        "key material must differ"
+    );
+
+    let (old_registration, client_path) = realm
+        .caller(algorithm, &old_key, Some(LIFESPAN_SECONDS))
+        .await;
+    let new_registration = realm
+        .registration(algorithm, &new_key, REPLACEMENT_KEY_ID)
+        .await;
+    let issued_with_old_key = realm.fresh_catalog_token(&old_registration).await.unwrap();
+    let issued_claims = claims(&issued_with_old_key);
+    assert_eq!(issued_claims.iss, realm.issuer());
+    assert_eq!(issued_claims.azp, caller(algorithm));
+    assert_eq!(audiences(&issued_claims), [CATALOG]);
+    let mut issued_scopes = issued_claims.scope.split_ascii_whitespace();
+    assert!(issued_scopes.any(|scope| scope == CATALOG_SCOPE));
+    let issued_lifespan = issued_claims.exp.checked_sub(issued_claims.iat).unwrap();
+    assert_eq!(issued_lifespan, LIFESPAN_SECONDS);
+    assert!(realm.accepts_token(CATALOG, &issued_with_old_key).await);
+    assert!(!realm.accepts_token(BILLING, &issued_with_old_key).await);
+
+    realm
+        .replace_client_jwks(&client_path, &[old_jwk, new_jwk.clone()])
+        .await;
+    for registration in [&old_registration, &new_registration] {
+        let token = realm.fresh_catalog_token(registration).await.unwrap();
+        assert!(
+            realm.accepts_token(CATALOG, &token).await,
+            "both keys must work during overlap"
+        );
+    }
+
+    let withdrawal_started = realm.replace_client_jwks(&client_path, &[new_jwk]).await;
+    let withdrawal_ack_ms = withdrawal_started.elapsed().as_nanos().div_ceil(1_000_000);
+    assert_eq!(
+        realm
+            .fresh_catalog_token(&old_registration)
+            .await
+            .unwrap_err(),
+        AcquisitionError::Rejected(Rejection::InvalidClient)
+    );
+    let old_key_rejected_ms = withdrawal_started.elapsed().as_nanos().div_ceil(1_000_000);
+    let first_post_withdrawal_probe_started = Instant::now();
+    assert!(
+        realm.accepts_token(CATALOG, &issued_with_old_key).await,
+        "the original bearer token must stay active after the old key stops issuing tokens"
+    );
+    let post_withdrawal_active_ms = first_post_withdrawal_probe_started
+        .duration_since(withdrawal_started)
+        .as_millis();
+    let new_token = realm.fresh_catalog_token(&new_registration).await.unwrap();
+    assert!(realm.accepts_token(CATALOG, &new_token).await);
+    let (last_active_started, first_inactive_received) = realm
+        .observe_catalog_expiry(
+            &issued_with_old_key,
+            issued_lifespan,
+            first_post_withdrawal_probe_started,
+        )
+        .await;
+
+    let live_control = realm.fresh_catalog_token(&new_registration).await.unwrap();
+    assert!(realm.accepts_token(CATALOG, &live_control).await);
+    assert!(!realm.accepts_token(BILLING, &live_control).await);
+    let control_claims = claims(&live_control);
+    assert_eq!(control_claims.iss, issued_claims.iss);
+    assert_eq!(control_claims.sub, issued_claims.sub);
+    assert_eq!(control_claims.azp, issued_claims.azp);
+    assert_eq!(audiences(&control_claims), [CATALOG]);
+    assert!(
+        control_claims.scope == issued_claims.scope,
+        "requested scope must remain stable across client key rotation"
+    );
+
+    let last_active_probe_start_ms = last_active_started
+        .duration_since(withdrawal_started)
+        .as_millis();
+    let first_inactive_reply_ms = first_inactive_received
+        .duration_since(withdrawal_started)
+        .as_nanos()
+        .div_ceil(1_000_000);
+    println!(
+        "keycloak_client_key_retirement caller={} recipient={CATALOG} scope={CATALOG_SCOPE} \
+         overlap=both_keys_accepted old_key_after_withdrawal=invalid_client new_key_after_withdrawal=accepted \
+         iat={} exp={} ttl_seconds={issued_lifespan} withdrawal_ack_ms={withdrawal_ack_ms} \
+         old_key_rejected_ms={old_key_rejected_ms} post_withdrawal_active_ms={post_withdrawal_active_ms} \
+         last_active_probe_start_ms={last_active_probe_start_ms} first_inactive_reply_ms={first_inactive_reply_ms} \
+         later_new_token_active=true",
+        issued_claims.azp, issued_claims.iat, issued_claims.exp,
+    );
+
     realm.finish().await;
 }
 
@@ -341,12 +626,14 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let realm = Realm::create().await;
     let algorithm = Algorithm::Es256;
     let key = key_pair(algorithm);
-    let registered = realm.caller(algorithm, &key).await;
+    let (registered, _) = realm.caller(algorithm, &key, None).await;
 
-    let stranger = realm.registration(algorithm, &key_pair(algorithm));
+    let stranger = realm
+        .registration(algorithm, &key_pair(algorithm), KEY_ID)
+        .await;
     assert_eq!(
         realm
-            .service_tokens(&stranger, TokenTarget::default())
+            .service_tokens(&stranger, ServiceTokenTarget::default(), CATALOG)
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
@@ -355,18 +642,21 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
 
     assert_eq!(
         realm
-            .service_tokens(&registered, super::token_target(&["not-a-scope"], None))
+            .service_tokens(&registered, service_target(&["not-a-scope"]), CATALOG)
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
-    // RFC 8693 §2.2.2
     let subject = SecretString::from("not-a-token");
     assert_eq!(
         registered
-            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .exchange_tokens(
+                exchange_target(&[CATALOG_SCOPE], Some(CATALOG)),
+                resource_origin(CATALOG),
+                1024,
+            )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await

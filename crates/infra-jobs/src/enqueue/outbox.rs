@@ -1,6 +1,6 @@
 use infra_postgres::{Tx, observed};
 
-use super::{EnqueueError, encode_payload, is_valid_unique_key, wake_workers};
+use super::{EnqueueError, encode_payload, is_valid_unique_key, notify_workers_after_commit};
 use crate::{Handler, JobId, JobKind, KindError, Kinds, KindsBuilder, Policy, trace_context};
 
 pub const KIND: &str = "publish_domain_event";
@@ -54,6 +54,10 @@ async fn admit<T: JobKind>(
         return Ok(Admission::InvalidOrder);
     }
     let payload = encode_payload(intent)?;
+    if contains_decoded_nul(&payload) {
+        return Err(EnqueueError::PayloadContainsNul);
+    }
+    serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     let (aggregate_key, version) = order.unzip();
     if !allow_insert {
         return compare_receipt(tx, &payload, aggregate_key, version).await;
@@ -95,13 +99,32 @@ async fn admit<T: JobKind>(
     )
     .await?;
     if inserted.rows_affected() == 1 {
-        wake_workers(tx, KIND).await?;
+        notify_workers_after_commit(tx, KIND);
         return Ok(Admission::Created);
     }
     match compare_receipt(tx, &payload, aggregate_key, version).await? {
         Admission::MissingReceipt => Ok(Admission::OrderConflict),
         other => Ok(other),
     }
+}
+
+fn contains_decoded_nul(payload: &str) -> bool {
+    if !payload.contains(r"\u0000") {
+        return false;
+    }
+    let payload = payload.as_bytes();
+    let mut index = 0;
+    while index < payload.len() {
+        if payload[index] == b'\\' {
+            if payload.get(index + 1..index + 6) == Some(b"u0000") {
+                return true;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    false
 }
 
 async fn compare_receipt(

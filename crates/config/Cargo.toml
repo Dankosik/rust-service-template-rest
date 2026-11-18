@@ -30,6 +30,9 @@ url = { workspace = true, features = ["std"] }
 # template:end config-url:config-url-dependency
 shared-rules = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true, features = ["getrandom"] }

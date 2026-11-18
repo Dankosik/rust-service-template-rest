@@ -16,6 +16,7 @@
   "postgres": {
     "remove_when_none": [
       "vendor/sqlx-core/",
+      "vendor/sqlx-postgres/",
       "crates/infra-postgres/",
       "crates/migrate/",
       "docs/decisions/postgres-decisions.md",
@@ -272,6 +273,7 @@
       "crates/infra-outbound-grpc/",
       "crates/infra-telemetry/src/traces/tests/delivery/",
       "crates/service/examples/grpc.rs",
+      "crates/service/examples/support/echo.rs",
       "crates/service/src/bootstrap/grpc.rs",
       "crates/shared-rules/src/grpc.rs",
       "docs/decisions/grpc-decisions.md",
@@ -303,6 +305,7 @@
   },
   "grpc-jwt": {
     "remove_when_unselected": [
+      "crates/service/examples/grpc_oidc.rs",
       "crates/service/tests/grpc_process.rs"
     ]
   },
@@ -328,6 +331,9 @@
       "docs/decisions/outbound-http-decisions.md",
       "test/tests/outbound_http.rs"
     ]
+  },
+  "service-test-tls": {
+    "remove_when_unselected": []
   },
   "tls-fixtures": {
     "remove_when_unselected": [
@@ -372,7 +378,8 @@
       "migrations/20261002150002_index_failed_background_jobs.sql",
       "migrations/20261112120000_preserve_background_job_payload_text.sql",
       "migrations/20261117120000_allow_text_only_background_job_payload.sql",
-      "migrations/20261118120000_create_outbox_event_receipts.sql",
+      "migrations/20261118120000_add_background_job_claim_token.sql",
+      "migrations/20261118120010_create_outbox_event_receipts.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/"
@@ -442,7 +449,7 @@
   },
   "outbox": {
     "remove_when_unselected": [
-      "migrations/20261118120001_backfill_outbox_event_receipts.sql",
+      "migrations/20261118120011_backfill_outbox_event_receipts.sql",
       "migrations/20261118120100_requeue_exhausted_outbox_jobs.sql",
       "migrations/20261118140000_index_unconfirmed_outbox_jobs.sql",
       "migrations/20261118140001_index_ordered_outbox_jobs.sql",
@@ -520,6 +527,7 @@
       "crates/infra-grpc/tests/service_auth.rs",
       "crates/infra-outbound-grpc/src/service_auth.rs",
       "crates/service/src/bootstrap/service_auth.rs",
+      "crates/service/examples/service_auth_rotation.rs",
       "docs/decisions/service-authentication-decisions.md"
     ]
   }

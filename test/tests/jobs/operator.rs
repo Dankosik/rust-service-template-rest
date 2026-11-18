@@ -263,6 +263,8 @@ async fn run_operator(url: &str, args: &[&str], code: i32) -> Value {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("APP__POSTGRES__ENABLED", "true")
+        .env("APP__APP__ENV", "local")
+        .env("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")
         .env("APP__POSTGRES__DSN", url)
         .env("APP__POSTGRES__MAX_CONNECTIONS", "1")
         .stdout(Stdio::piped())

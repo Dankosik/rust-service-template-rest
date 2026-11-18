@@ -16,8 +16,8 @@ use super::{
 };
 
 pub(super) const HISTORICAL_SCHEMA: i64 = 20_261_117_120_000;
-const RECEIPT_SCHEMA: i64 = 20_261_118_120_000;
-const RECEIPT_BACKFILL: i64 = 20_261_118_120_001;
+const RECEIPT_SCHEMA: i64 = 20_261_118_120_010;
+const RECEIPT_BACKFILL: i64 = 20_261_118_120_011;
 const SUBJECT: &str = "test.outbox.upgrade";
 const BODY: &[u8] = br#"{"value":"legacy\nbytes"}"#;
 const LOGICAL_ID: &str = "logical-id";

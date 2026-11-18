@@ -79,17 +79,26 @@ struct BusinessState {
 }
 
 #[derive(Clone, Debug)]
-pub struct Application(axum::Router);
+pub struct Application {
+    router: axum::Router,
+    // template:begin service-auth:grpc-app-tls-requirement
+    requires_tls: bool,
+    // template:end service-auth:grpc-app-tls-requirement
+}
 
 impl Application {
-    #[must_use]
     pub fn serve(
         self,
         listener: infra_http_transport::BoundListener,
         options: infra_http_transport::Http2Options,
         tls: Option<infra_http_transport::TlsOptions>,
-    ) -> infra_http_transport::Server {
-        listener.serve_h2(self.0, options, tls)
+    ) -> Result<infra_http_transport::Server, Error> {
+        // template:begin service-auth:grpc-app-tls-check
+        if self.requires_tls && tls.is_none() {
+            return Err(Error::ServiceTokensRequireTls);
+        }
+        // template:end service-auth:grpc-app-tls-check
+        Ok(listener.serve_h2(self.router, options, tls))
     }
 }
 
@@ -102,11 +111,11 @@ where
     type Future = <axum::Router as tower::Service<http::Request<B>>>::Future;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        tower::Service::<http::Request<B>>::poll_ready(&mut self.0, cx)
+        tower::Service::<http::Request<B>>::poll_ready(&mut self.router, cx)
     }
 
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
-        tower::Service::call(&mut self.0, request)
+        tower::Service::call(&mut self.router, request)
     }
 }
 
@@ -121,17 +130,24 @@ pub fn router(
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
     // template:begin service-auth:grpc-router-caller-rules
-    if matches!(authentication, Authentication::ServiceTokens(_))
-        || !services.caller_rules.is_empty()
-    {
+    let requires_tls = matches!(authentication, Authentication::ServiceTokens(_));
+    if requires_tls {
         services.validate_caller_rules()?;
+    } else if !services.caller_rules.is_empty() {
+        return Err(Error::CallerRulesRequireServiceTokens);
     }
     // template:end service-auth:grpc-router-caller-rules
     // template:begin authn:grpc-router-authenticate
     if matches!(authentication, Authentication::None) {
         return Err(Error::UnauthenticatedBusinessCalls);
     }
-    if !services.scopes.is_empty() && !matches!(authentication, Authentication::Bearer(_)) {
+    if matches!(authentication, Authentication::Bearer(_)) {
+        services.prepare_scope_requirements()?;
+    } else if services
+        .scopes
+        .values()
+        .any(|rule| rule.delegate || !rule.scopes.is_empty())
+    {
         return Err(Error::ScopesWithServiceTokens);
     }
     // template:end authn:grpc-router-authenticate
@@ -159,13 +175,18 @@ pub fn router(
         .routes()
         .into_axum_router()
         .layer(axum::middleware::from_fn_with_state(state, business_call));
-    Ok(Application(native_router(
-        business,
-        readiness,
-        services.names,
-        methods,
-        limits.request_timeout,
-    )))
+    Ok(Application {
+        router: native_router(
+            business,
+            readiness,
+            services.names,
+            methods,
+            limits.request_timeout,
+        ),
+        // template:begin service-auth:grpc-app-tls-init
+        requires_tls,
+        // template:end service-auth:grpc-app-tls-init
+    })
 }
 
 #[must_use]
@@ -235,6 +256,15 @@ async fn business_call(
     let connection = request
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
+    // template:begin service-auth:grpc-router-verified-transport
+    if matches!(state.authentication, Authentication::ServiceTokens(_))
+        && connection
+            .as_ref()
+            .is_none_or(|info| info.scheme() != "https")
+    {
+        return tonic::Status::unauthenticated("service tokens require TLS").into_http();
+    }
+    // template:end service-auth:grpc-router-verified-transport
     sanitize_extensions(request.extensions_mut());
 
     let path = request.uri().path();

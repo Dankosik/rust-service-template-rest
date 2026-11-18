@@ -22,10 +22,7 @@ use tokio_util::{
     sync::{CancellationToken, DropGuard},
     task::TaskTracker,
 };
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{method, path, query_param},
-};
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
@@ -151,13 +148,19 @@ async fn job_is(pool: &PgPool, id: &str, state: &str, attempts: i16) {
     .await;
 }
 
-async fn truncated_gone_peer(
-    declared_length: usize,
-) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
+async fn status_peer(
+    response_head: &'static str,
+    body_bytes: usize,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
+    let (release, released) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("fixture accepts connection");
         let mut received = Vec::new();
@@ -170,17 +173,20 @@ async fn truncated_gone_peer(
             assert!(read > 0, "fixture receives complete status request");
             received.extend_from_slice(&chunk[..read]);
         }
-        let response = format!(
-            "HTTP/1.1 410 Gone\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+        assert!(
+            received.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
+            "queued path and query reach the admitted receiver"
         );
+        let mut response =
+            format!("HTTP/1.1 {response_head}\r\nConnection: close\r\n\r\n").into_bytes();
+        response.resize(response.len() + body_bytes, b'x');
         stream
-            .write_all(response.as_bytes())
+            .write_all(&response)
             .await
             .expect("fixture writes response");
-        stream.shutdown().await.expect("fixture closes response");
-        received
+        let _ = released.await;
     });
-    (address, peer)
+    (address, release, peer)
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -244,40 +250,60 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn queued_delivery_observes_status_and_response_body_limits(pool: PgPool) {
-    for (status, truncated_length, body_bytes, expected_state, expected_summary) in [
-        (401, None, 0, "pending", Some("response_status")),
-        (404, None, 0, "pending", Some("response_status")),
-        (410, None, 0, "failed", Some("endpoint_gone")),
-        (410, Some(1), 0, "failed", Some("endpoint_gone")),
-        (410, Some(65_537), 0, "failed", Some("endpoint_gone")),
-        (204, None, 0, "completed", None),
-        (200, None, 65_536, "completed", None),
-        (200, None, 65_537, "pending", Some("response_too_large")),
+async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_floor(pool: PgPool) {
+    for (head, body_bytes, expected_state, summary, floor_seconds) in [
+        (
+            "401 Unauthorized\r\nContent-Length: 0",
+            0,
+            "pending",
+            Some("response_status"),
+            None,
+        ),
+        (
+            "404 Not Found\r\nContent-Length: 0",
+            0,
+            "pending",
+            Some("response_status"),
+            None,
+        ),
+        (
+            "410 Gone\r\nContent-Length: 1",
+            0,
+            "failed",
+            Some("endpoint_gone"),
+            None,
+        ),
+        (
+            "200 OK\r\nContent-Length: 65537",
+            65_537,
+            "completed",
+            None,
+            None,
+        ),
+        ("204 No Content", 0, "completed", None, None),
+        (
+            "503 Service Unavailable\r\nRetry-After: 172800\r\nContent-Length: 1",
+            0,
+            "pending",
+            Some("response_status"),
+            Some(172_800_i64),
+        ),
+        (
+            "429 Too Many Requests\r\nRetry-After: 3153600000\r\nContent-Length: 0",
+            0,
+            "pending",
+            Some("response_status"),
+            Some(3_153_600_000),
+        ),
+        (
+            "429 Too Many Requests\r\nRetry-After: 18446744073709551616\r\nContent-Length: 0",
+            0,
+            "failed",
+            Some("retry_after_exceeds_max_delay"),
+            None,
+        ),
     ] {
-        let mut mock_server = None;
-        let mut truncated_peer = None;
-        let address = if let Some(declared_length) = truncated_length {
-            let (addr, peer) = truncated_gone_peer(declared_length).await;
-            truncated_peer = Some(peer);
-            addr
-        } else {
-            let server = MockServer::start().await;
-            let mut response = ResponseTemplate::new(status);
-            if body_bytes > 0 {
-                response = response.set_body_bytes(vec![0; body_bytes]);
-            }
-            Mock::given(method("POST"))
-                .and(path("/events"))
-                .and(query_param("source", "queue"))
-                .respond_with(response)
-                .expect(1)
-                .mount(&server)
-                .await;
-            let addr = *server.address();
-            mock_server = Some(server);
-            addr
-        };
+        let (address, release, peer) = status_peer(head, body_bytes).await;
         let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
         let running = RunningDispatcher::start(
@@ -288,42 +314,36 @@ async fn queued_delivery_observes_status_and_response_body_limits(pool: PgPool) 
 
         job_is(&pool, &id, expected_state, 1).await;
         let row = sqlx::query(
-            "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
+            "SELECT failure_reason, error_summary, not_before >= (errors -> -1 ->> 'at')::timestamptz \
+                 + $2::bigint * interval '1 second' AS floor_met \
+             FROM background_jobs WHERE id::text = $1",
         )
         .bind(&id)
+        .bind(floor_seconds)
         .fetch_one(&pool)
         .await
         .expect("delivery disposition");
         assert_eq!(
-            row.try_get::<Option<String>, _>("failure_reason")
-                .expect("reason")
-                .as_deref(),
-            (status == 410).then_some("permanent")
+            row.get::<Option<&str>, _>("failure_reason"),
+            (expected_state == "failed").then_some("permanent"),
+            "{head}"
         );
         assert_eq!(
-            row.try_get::<Option<String>, _>("error_summary")
-                .expect("summary")
-                .as_deref(),
-            expected_summary
+            row.get::<Option<&str>, _>("error_summary"),
+            summary,
+            "{head}"
         );
-        if let Some(peer) = truncated_peer {
-            let request = super::bounded("fixture peer joins", peer)
-                .await
-                .expect("fixture succeeds");
-            assert!(
-                request.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
-                "queued path and query reach the admitted receiver"
-            );
-        } else if let Some(server) = mock_server {
-            let requests = server
-                .received_requests()
-                .await
-                .expect("wiremock records requests");
-            assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].url.path(), "/events");
-            assert_eq!(requests[0].url.query(), Some("source=queue"));
-            server.verify().await;
-        }
+        assert_eq!(
+            row.get::<Option<bool>, _>("floor_met"),
+            floor_seconds.map(|_| true),
+            "{head}"
+        );
+        release
+            .send(())
+            .expect("release peer after durable outcome");
+        super::bounded("fixture peer joins", peer)
+            .await
+            .expect("fixture succeeds");
         running.stop().await;
         if expected_state == "pending" {
             sqlx::query(

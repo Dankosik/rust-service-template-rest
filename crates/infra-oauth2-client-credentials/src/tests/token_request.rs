@@ -54,13 +54,14 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
         }),
     );
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(token_target(
-        &["write", "read+all", "write"],
-        Some("https://api.example/é?a=b&c=d"),
-    ));
+    let (service_tokens, driver) = registration.service_tokens(
+        service_target(&["write", "read+all", "write"]),
+        fixture.resource_origin(),
+    );
     fixture.drive(driver);
     let response = service_tokens
         .http(fixture.resource_client())
+        .unwrap()
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -70,8 +71,7 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
     assert!(token.header("authorization").is_none());
     assert_token_form(
         &token.body,
-        "grant_type=client_credentials&scope=write+read%2Ball+write\
-         &audience=https%3A%2F%2Fapi.example%2F%C3%A9%3Fa%3Db%26c%3Dd",
+        "grant_type=client_credentials&scope=write+read%2Ball+write",
     );
     assert_eq!(
         fixture.resource_requests()[0].header("authorization"),
@@ -81,11 +81,13 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     registration
         .exchange_tokens(
-            token_target(&["read"], Some("https://api.example/é")),
+            exchange_target(&["read"], Some("https://api.example/é?a=b&c=d")),
+            fixture.resource_origin(),
             EXCHANGE_CAPACITY,
         )
         .unwrap()
         .http(fixture.resource_client())
+        .unwrap()
         .execute(
             fixture.on_behalf_of_request("subject+/="),
             deadline(Duration::from_secs(10)),
@@ -101,7 +103,7 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
          &subject_token=subject%2B%2F%3D\
          &subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
          &requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
-         &scope=read&audience=https%3A%2F%2Fapi.example%2F%C3%A9",
+         &scope=read&audience=https%3A%2F%2Fapi.example%2F%C3%A9%3Fa%3Db%26c%3Dd",
     );
     assert_eq!(
         fixture.resource_requests()[1].header("authorization"),
@@ -114,19 +116,24 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
 async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let bindings = ["catalog", "billing"].map(|audience| {
-        let target = token_target(&[], Some(audience));
-        let (service, driver) = registration.service_tokens(target.clone());
-        fixture.drive(driver);
-        let exchange = registration
-            .exchange_tokens(target, EXCHANGE_CAPACITY)
-            .unwrap();
-        (
-            audience,
-            service.http(fixture.resource_client()),
-            exchange.http(fixture.resource_client()),
-        )
-    });
+    let bindings =
+        [("catalog", "catalog-scope"), ("billing", "billing-scope")].map(|(audience, scope)| {
+            let (service, driver) =
+                registration.service_tokens(service_target(&[scope]), fixture.resource_origin());
+            fixture.drive(driver);
+            let exchange = registration
+                .exchange_tokens(
+                    exchange_target(&[], Some(audience)),
+                    fixture.resource_origin(),
+                    EXCHANGE_CAPACITY,
+                )
+                .unwrap();
+            (
+                audience,
+                service.http(fixture.resource_client()).unwrap(),
+                exchange.http(fixture.resource_client()).unwrap(),
+            )
+        });
 
     for (audience, service, exchange) in &bindings {
         for (grant, client, request) in [
@@ -142,12 +149,16 @@ async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
             fixture.send_request(client, request).await.unwrap();
         }
     }
-    let audiences: Vec<_> = fixture
-        .token_requests()
-        .iter()
-        .map(|request| form_value(&form_pairs(&request.body), "audience").to_owned())
-        .collect();
-    assert_eq!(audiences, ["catalog", "catalog", "billing", "billing"]);
+    let tokens = fixture.token_requests();
+    assert_eq!(tokens.len(), 4);
+    for (request, key, value) in [
+        (&tokens[0], "scope", "catalog-scope"),
+        (&tokens[1], "audience", "catalog"),
+        (&tokens[2], "scope", "billing-scope"),
+        (&tokens[3], "audience", "billing"),
+    ] {
+        assert_eq!(form_value(&form_pairs(&request.body), key), value);
+    }
     let resources = fixture.resource_requests();
     let headers: Vec<_> = resources
         .iter()
@@ -166,7 +177,7 @@ async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
 }
 
 #[tokio::test]
-async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
+async fn absent_scope_is_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
         .service_client()
@@ -335,7 +346,8 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     .unwrap();
     let client = fixture
         .exchange_tokens(&[], None, EXCHANGE_CAPACITY)
-        .http(resource);
+        .http(resource)
+        .unwrap();
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == infra_outbound_http::REQUEST_DURATION_METRIC
             && key
@@ -642,13 +654,19 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         provider_concurrency: 1,
         ..fixture.options()
     });
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     fixture.drive(driver);
-    let dropped_client = service_tokens.http(fixture.resource_client());
+    let dropped_client = service_tokens.http(fixture.resource_client()).unwrap();
     let exchange_client = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap()
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
     tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
     captured.drain(&snapshotter);

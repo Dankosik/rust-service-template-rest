@@ -21,21 +21,24 @@ pub enum LoggingFormat {
     Text,
 }
 
-#[derive(Debug)]
 pub struct LoggingOptions<'a> {
     pub level: &'a str,
     pub format: LoggingFormat,
     pub tracer_provider: Option<&'a TracerProviderHandle>,
 }
 
+impl std::fmt::Debug for LoggingOptions<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoggingOptions")
+            .field("format", &self.format)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
-    #[error("log.level {directive:?} is not a valid filter directive: {source}")]
-    Directive {
-        directive: String,
-        #[source]
-        source: tracing_subscriber::filter::ParseError,
-    },
+    #[error("log.level is not a valid tracing filter directive")]
+    Directive,
     #[error("a global tracing subscriber is already installed")]
     AlreadyInstalled,
     #[error("a global `log` logger is already installed")]
@@ -116,10 +119,7 @@ type DirectiveFilters = (
 );
 
 fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> {
-    let filter = EnvFilter::try_new(directive).map_err(|source| LoggingError::Directive {
-        directive: directive.to_owned(),
-        source,
-    })?;
+    let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
     Ok(match static_targets(directive) {
         Some(targets) => (Some(WithInfoSpans(targets)), None),
         None => (None, Some(WithInfoSpans(filter))),

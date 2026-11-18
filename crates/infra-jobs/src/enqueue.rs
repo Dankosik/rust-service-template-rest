@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::io::{self, Write};
 use std::time::Duration;
 
 use infra_postgres::{Tx, observed};
-use tokio::time::Instant;
 
 use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
@@ -43,6 +40,8 @@ pub enum EnqueueError {
     // template:begin outbox:jobs-outbox-enqueue-error
     #[error("publish_domain_event requires the dedicated outbox enqueue operation")]
     OutboxKind,
+    #[error("payload contains a decoded NUL character")]
+    PayloadContainsNul,
     // template:end outbox:jobs-outbox-enqueue-error
     #[error("job kind {0:?} is not a valid kind name")]
     InvalidKind(&'static str),
@@ -52,8 +51,6 @@ pub enum EnqueueError {
     InvalidUniqueKey,
     #[error(transparent)]
     InvalidDelay(#[from] InvalidDelay),
-    #[error("payload contains a decoded NUL character")]
-    PayloadContainsNul,
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
     #[error("payload does not decode back as its job kind")]
@@ -122,25 +119,17 @@ pub async fn enqueue<K: JobKind>(
         return Ok(Enqueued::Duplicate);
     }
     if prepared.delay_micros == 0 {
-        wake_workers(tx, K::NAME).await?;
+        notify_workers_after_commit(tx, K::NAME);
     }
     Ok(Enqueued::Created(id))
 }
 
-async fn wake_workers(tx: &mut Tx<'_>, kind: &'static str) -> Result<(), sqlx::Error> {
-    if take_wake_slot(kind, Instant::now()) {
-        observed(
-            "wake job workers",
-            sqlx::query!(
-                "SELECT pg_notify($1, $2)",
-                crate::listener::WAKE_CHANNEL,
-                kind
-            )
-            .execute(&mut *tx),
-        )
-        .await?;
-    }
-    Ok(())
+fn notify_workers_after_commit(tx: &mut Tx<'_>, kind: &'static str) {
+    tx.notify_after_commit(
+        crate::listener::WAKE_CHANNEL,
+        kind,
+        crate::claim::CLAIM_COOLDOWN,
+    );
 }
 
 pub async fn compare_live_payload<K: JobKind>(
@@ -188,38 +177,6 @@ pub async fn compare_live_payload<K: JobKind>(
     } else {
         LivePayloadComparison::Different
     })
-}
-
-const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
-
-fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
-    #[cfg(not(feature = "hotpath"))]
-    static LAST: parking_lot::Mutex<BTreeMap<&'static str, Instant>> =
-        parking_lot::Mutex::new(BTreeMap::new());
-    #[cfg(feature = "hotpath")]
-    static LAST: std::sync::LazyLock<
-        hotpath::wrap::std::sync::Mutex<BTreeMap<&'static str, Instant>>,
-    > = std::sync::LazyLock::new(|| {
-        hotpath::mutex!(
-            std::sync::Mutex::new(BTreeMap::new()),
-            label = { "jobs-wake" }
-        )
-    });
-    #[cfg(not(feature = "hotpath"))]
-    let mut last = LAST.lock();
-    #[cfg(feature = "hotpath")]
-    let mut last = LAST
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match last.entry(kind) {
-        Entry::Occupied(entry) if now.saturating_duration_since(*entry.get()) < WAKE_INTERVAL => {
-            false
-        }
-        entry => {
-            entry.and_modify(|at| *at = now).or_insert(now);
-            true
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -279,16 +236,16 @@ fn prepare<'a, K: JobKind>(
         return Err(EnqueueError::InvalidUniqueKey);
     }
     let delay_micros = checked_delay_micros(options.delay)?;
+    let payload = encode_payload(payload)?;
+    serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
-        payload: encode_payload(payload)?,
+        payload,
         unique_key: options.unique_key,
         delay_micros,
     })
 }
 
-fn encode_payload<K: serde::Serialize + serde::de::DeserializeOwned>(
-    payload: &K,
-) -> Result<String, EnqueueError> {
+fn encode_payload(payload: &impl serde::Serialize) -> Result<String, EnqueueError> {
     let mut writer = PayloadWriter::default();
     json_payload::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
     if writer.total > MAX_PAYLOAD_BYTES {
@@ -296,40 +253,16 @@ fn encode_payload<K: serde::Serialize + serde::de::DeserializeOwned>(
             bytes: writer.total,
         });
     }
-    let payload = String::from_utf8(writer.retained).map_err(|error| {
+    String::from_utf8(writer.retained).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             error,
         )))
-    })?;
-    if contains_decoded_nul(&payload) {
-        return Err(EnqueueError::PayloadContainsNul);
-    }
-    serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    Ok(payload)
+    })
 }
 
 fn is_valid_unique_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_UNIQUE_KEY_BYTES && !key.chars().any(char::is_control)
-}
-
-fn contains_decoded_nul(payload: &str) -> bool {
-    if !payload.contains(r"\u0000") {
-        return false;
-    }
-    let payload = payload.as_bytes();
-    let mut index = 0;
-    while index < payload.len() {
-        if payload[index] == b'\\' {
-            if payload.get(index + 1..index + 6) == Some(b"u0000") {
-                return true;
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -341,7 +274,7 @@ mod tests {
 
     use super::{
         EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
-        WAKE_INTERVAL, contains_decoded_nul, prepare, take_wake_slot,
+        prepare,
     };
     use crate::JobKind;
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
@@ -376,23 +309,6 @@ mod tests {
 
     impl JobKind for BadKind {
         const NAME: &'static str = "Bad Name";
-    }
-
-    #[derive(Deserialize)]
-    struct Duplicate;
-
-    impl Serialize for Duplicate {
-        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            use serde::ser::SerializeMap as _;
-            let mut map = serializer.serialize_map(Some(2))?;
-            map.serialize_entry("key", "\0")?;
-            map.serialize_entry("key", "later value")?;
-            map.end()
-        }
-    }
-
-    impl JobKind for Duplicate {
-        const NAME: &'static str = "duplicate";
     }
 
     #[derive(Deserialize)]
@@ -650,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_payload_serializes_once_with_size_before_nul_and_late_error_first() {
+    fn streamed_payload_serializes_once_and_late_errors_precede_the_size_check() {
         for failure in [
             StreamFailure::None,
             StreamFailure::Custom,
@@ -665,7 +581,7 @@ mod tests {
             match failure {
                 StreamFailure::Custom => {
                     let EnqueueError::Serialize(error) = err else {
-                        panic!("late serialization failure must precede size and NUL");
+                        panic!("late serialization failure must precede size");
                     };
                     assert_eq!(error.to_string(), "late refusal");
                 }
@@ -707,54 +623,6 @@ mod tests {
         assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
         assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
         assert_eq!(writer.total, chunk.len());
-    }
-
-    #[test]
-    fn payload_rejects_decoded_nul_but_keeps_literal_backslash_u0000() {
-        std::assert_matches!(
-            prepare(&Duplicate, EnqueueOptions::default()),
-            Err(EnqueueError::PayloadContainsNul)
-        );
-        std::assert_matches!(
-            prepare(&Raw("\0".to_owned()), EnqueueOptions::default()),
-            Err(EnqueueError::PayloadContainsNul)
-        );
-        std::assert_matches!(
-            prepare(
-                &Keyed(BTreeMap::from([("\0".to_owned(), "value".to_owned())])),
-                EnqueueOptions::default(),
-            ),
-            Err(EnqueueError::PayloadContainsNul)
-        );
-        assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
-    }
-
-    #[test]
-    fn a_backslash_consumes_the_byte_after_it_when_looking_for_a_decoded_nul() {
-        for (text, decoded) in [
-            (r"\u0000", true),
-            (r"x\u0000", true),
-            (r"\\u0000", false),
-            (r"\\\u0000", true),
-            (r"\n\u0000", true),
-            (r"\u000", false),
-            (r"abc\", false),
-            (r"\u0000\", true),
-            (r"\\u0000\", false),
-            ("", false),
-        ] {
-            assert_eq!(contains_decoded_nul(text), decoded, "{text}");
-        }
-    }
-
-    #[test]
-    fn wake_slot_is_debounced_per_kind() {
-        let now = tokio::time::Instant::now();
-        assert!(take_wake_slot("wake.first", now));
-        assert!(!take_wake_slot("wake.first", now + WAKE_INTERVAL / 2));
-        assert!(take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
-        assert!(!take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
-        assert!(take_wake_slot("wake.first", now + WAKE_INTERVAL));
     }
 
     #[test]

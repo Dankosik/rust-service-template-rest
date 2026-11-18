@@ -17,8 +17,7 @@ use prost::Message as _;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 
-use crate::logging::tests::capture;
-use crate::{LoggerShutdown, LoggingFormat};
+use std::collections::HashMap;
 
 use super::*;
 
@@ -159,12 +158,9 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
 }
 
 #[test]
-fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
+fn a_finished_span_reaches_an_anonymous_http_collector() {
     let collector = Collector::start(exchange);
-    let mut options = options(&format!("http://{}", collector.addr));
-    options.otlp_headers = Some(SecretString::from(
-        "x-tenant=t%201+2,x-once=%250A,x-bad-escape=%0A%ZZ,x-bad-utf8=%0A%FF",
-    ));
+    let options = options(&format!("http://{}", collector.addr));
     let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
@@ -173,6 +169,7 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
             endpoint_source: EndpointSource::Typed,
             has_certificate_file: false,
             has_client_certificate: false,
+            ignored_compression: vec![],
         }
     );
 
@@ -189,10 +186,7 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
         request.header("content-type"),
         Some("application/x-protobuf")
     );
-    assert_eq!(request.header("x-tenant"), Some("t 1+2"));
-    assert_eq!(request.header("x-once"), Some("%0A"));
-    assert_eq!(request.header("x-bad-escape"), Some("%0A%ZZ"));
-    assert_eq!(request.header("x-bad-utf8"), Some("%0A%FF"));
+    assert_eq!(request.header("authorization"), None);
     let export = request.export();
     assert_eq!(request.span_names(), ["delivered span"]);
     let [resource_spans] = export.resource_spans.as_slice() else {
@@ -223,7 +217,7 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
-fn unusable_trust_material_logs_the_exporter_build_stage_without_configuration_values() {
+fn unusable_trust_material_stops_startup_without_echoing_configuration_values() {
     const ENDPOINT: &str = "https://127.0.0.1:1/private-collector";
     const HEADER_VALUE: &str = "private-header";
 
@@ -233,34 +227,53 @@ fn unusable_trust_material_logs_the_exporter_build_stage_without_configuration_v
         path: files.path().join(name),
     };
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
-    for (trust, stage) in [
+    std::fs::write(files.path().join("large.pem"), vec![0; 1024 * 1024 + 1])
+        .expect("write an oversized file");
+    #[cfg(unix)]
+    std::fs::create_dir(files.path().join("directory.pem")).expect("create a directory");
+    for (trust, diagnostic) in [
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
                 ..CollectorTrust::default()
             },
-            "trust_file_read",
+            "could not read the OTLP trust file",
+        ),
+        (
+            CollectorTrust {
+                certificate: Some(file(CERTIFICATE_VARS[0], "large.pem")),
+                ..CollectorTrust::default()
+            },
+            "exceeds the 1048576-byte limit",
+        ),
+        #[cfg(unix)]
+        (
+            CollectorTrust {
+                certificate: Some(file(CERTIFICATE_VARS[0], "directory.pem")),
+                ..CollectorTrust::default()
+            },
+            "must select a regular OTLP trust file",
         ),
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "trust_file_pem",
+            "must select a usable PEM certificate bundle",
         ),
         (
             CollectorTrust {
                 client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "client_identity_incomplete",
+            "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "client_identity_incomplete",
+            "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
@@ -268,31 +281,34 @@ fn unusable_trust_material_logs_the_exporter_build_stage_without_configuration_v
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "client_identity_pem",
+            "usable PEM identity",
         ),
     ] {
         let mut options = options(ENDPOINT);
         options.otlp_headers = Some(SecretString::from(format!("authorization={HEADER_VALUE}")));
-        let handle = tracer_provider(&options, |_| None, &trust)
-            .expect("unusable trust material is not a startup failure");
-        assert_eq!(handle.exporter_state.as_str(), "degraded");
-        let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", Some(&handle));
-        tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
-        std::assert_matches!(
-            guard.shutdown(std::time::Instant::now() + WAIT),
-            LoggerShutdown::Completed(_)
-        );
-
-        let records = buffer.records();
-        let record: serde_json::Value = serde_json::from_str(&records).expect("one startup record");
-        assert_eq!(record["level"], "WARN");
-        assert_eq!(record["reason"], "exporter_build");
-        assert_eq!(record["stage"], stage);
-        assert_eq!(
-            record["message"],
-            "trace exporter degraded; spans are recorded but not exported"
-        );
-        for value in ["absent.pem", "text.pem", ENDPOINT, HEADER_VALUE] {
+        let error = tracer_provider(
+            &options,
+            env(&[(
+                opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                ENDPOINT,
+            )]),
+            &trust,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(diagnostic), "{message}");
+        if let Some(certificate) = &trust.certificate {
+            assert!(message.contains(certificate.variable), "{message}");
+        }
+        let records = format!("{error:?} {message}");
+        for value in [
+            "absent.pem",
+            "directory.pem",
+            "large.pem",
+            "text.pem",
+            ENDPOINT,
+            HEADER_VALUE,
+        ] {
             assert!(!records.contains(value), "{records}");
         }
     }
@@ -303,6 +319,38 @@ fn runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("test runtime")
+}
+
+#[test]
+fn ignored_compression_is_reported_after_logging_starts_without_disabling_export() {
+    use crate::logging::{LoggingFormat, tests::capture};
+    let variable = opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
+    let collector = Collector::start(exchange);
+    let handle = tracer_provider(
+        &options(&format!("http://{}", collector.addr)),
+        env(&[
+            (variable, "private-compression-value"),
+            (opentelemetry_otlp::OTEL_EXPORTER_OTLP_COMPRESSION, "gzip"),
+        ]),
+        &CollectorTrust::default(),
+    )
+    .unwrap();
+    let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
+    tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
+    std::assert_matches!(
+        guard.shutdown(std::time::Instant::now() + WAIT),
+        crate::logging::LoggerShutdown::Completed(_)
+    );
+    let records = buffer.records();
+    let record: serde_json::Value = serde_json::from_str(&records).unwrap();
+    assert_eq!(record["level"], "WARN");
+    assert_eq!(record["variable"], variable);
+    assert!(!records.contains("private-compression-value"));
+    handle.tracer().start("still exported").end();
+    assert_eq!(shutdown(handle), ProviderShutdown::Completed);
+    let request = collector.received();
+    assert_eq!(request.header("content-encoding"), Some("gzip"));
+    assert!(request.body.starts_with(&[0x1f, 0x8b]));
 }
 
 fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
@@ -370,11 +418,11 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             ("200 OK", Vec::new()),
         ]);
         let exporter = span_exporter(
-            &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
+            &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
             export_timeout(&|_: &str| None),
-            &|_: &str| None,
+            None,
         )
         .unwrap();
         let handle = batch_handle(exporter);
@@ -445,11 +493,11 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
     for allowance in [Duration::ZERO, SHUTDOWN_JOIN_SLACK] {
         let (collector, release, thread) = scripted_collector(vec![("200 OK", Vec::new())]);
         let exporter = span_exporter(
-            &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
+            &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
             export_timeout(&|_: &str| None),
-            &|_: &str| None,
+            None,
         )
         .unwrap();
         let handle = batch_handle(exporter);
@@ -503,6 +551,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
     const STATUS_BODY: &[u8] = b"status_body_secret";
     const URL_SECRET: &str = "collector_url_secret";
     const HEADER_SECRET: &str = "collector_header_secret";
+
     let partial = partial_success_response(MESSAGE);
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
         for level in ["debug", "trace"] {
@@ -527,17 +576,14 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                         tracing::info!("ordinary_event");
                         let exporter = ObservedExporter {
                             inner: span_exporter(
-                                &Endpoint::Typed(&format!(
-                                    "http://{}/v1/traces?token={URL_SECRET}",
-                                    collector.addr
-                                )),
+                                &format!("http://{}/{URL_SECRET}/v1/traces", collector.addr),
                                 HashMap::from([(
                                     "authorization".to_owned(),
                                     HEADER_SECRET.to_owned(),
                                 )]),
                                 &CollectorTrust::default(),
                                 export_timeout(&|_: &str| None),
-                                &|_: &str| None,
+                                None,
                             )
                             .unwrap(),
                             timeout: export_timeout(&|_: &str| None),

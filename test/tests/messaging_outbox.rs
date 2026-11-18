@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
 use std::time::SystemTime;
@@ -19,6 +19,7 @@ use async_nats::jetstream::{self, consumer, stream};
 use domain_events::{Event, EventPayload};
 use infra_jobs::{Engine, EnqueueError, Kinds};
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
+use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
     ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
@@ -248,10 +249,10 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
     }
 }
 
-fn consumer_options(fixture: &Fixture) -> MessagingOptions {
+fn consumer_options(fixture: &Fixture, durable: &str) -> MessagingOptions {
     let mut options = messaging_options(fixture);
     options.consumer = Some(ConsumerOptions {
-        durable_name: fixture.durable.clone(),
+        durable_name: durable.to_owned(),
         filter_subject: fixture.subject.clone(),
         dlq_subject: fixture.dlq_subject.clone(),
         dlq_stream: Some(fixture.dlq_stream.clone()),
@@ -1163,6 +1164,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
         sqlx::query(
             "UPDATE background_jobs SET state='running', attempts=25,
              claim_generation=nextval('background_jobs_claim_generation'),
+             claim_token=gen_random_uuid(),
              claim_expires_at=now() - interval '1 second' WHERE unique_key=$1",
         )
         .bind(event_key(interrupted.message_id()))
@@ -1445,7 +1447,7 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
 async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(pool: PgPool) {
     let fixture = Fixture::create_with_consumer(true).await;
     let messaging = Box::pin(Messaging::connect(
-        consumer_options(&fixture),
+        consumer_options(&fixture, &fixture.durable),
         Instant::now() + WAIT,
         CancellationToken::new(),
     ))
@@ -1572,6 +1574,111 @@ async fn business_effects(pool: &PgPool) -> i64 {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_effect_once(
+    pool: PgPool,
+) {
+    let fixture = Fixture::create().await;
+    create_effect_store(&pool).await;
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let first_registry = effect_registry(&fixture, &pool, &invocations);
+    let mut second_registry = fixture.registry.clone();
+    let reject_once = AtomicBool::new(true);
+    let (accepted, mut recovered) = tokio::sync::mpsc::channel(1);
+    second_registry
+        .register(&fixture.route, move |event, _| {
+            std::future::ready(if reject_once.swap(false, Ordering::Relaxed) {
+                Err(HandlerError::Permanent)
+            } else {
+                accepted.try_send(event.id).unwrap();
+                Ok(())
+            })
+        })
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let subscribe = async |durable: &str, registry: Registry| {
+        let messaging = Box::pin(Messaging::connect(
+            consumer_options(&fixture, durable),
+            Instant::now() + WAIT,
+            cancel.clone(),
+        ))
+        .await
+        .unwrap();
+        let worker = messaging
+            .consumer(registry, Instant::now() + WAIT, &cancel)
+            .await
+            .unwrap()
+            .start(&cancel);
+        (messaging, worker)
+    };
+    let second_name = format!("{}_recovery", fixture.durable);
+    let first = subscribe(&fixture.durable, first_registry).await;
+    let second = subscribe(&second_name, second_registry).await;
+    let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let durables: [consumer::PullConsumer; 2] = [
+        source.get_consumer(&fixture.durable).await.unwrap(),
+        source.get_consumer(&second_name).await.unwrap(),
+    ];
+    let wait_for_both_acks = async |sequence: u64| {
+        for durable in &durables {
+            poll_until(
+                "subscriber acknowledged the source record",
+                WAIT,
+                POLL,
+                async || {
+                    let info = durable.get_info().await.unwrap();
+                    (info.ack_floor.stream_sequence == sequence).then_some(())
+                },
+            )
+            .await;
+        }
+    };
+
+    let original = prepared(&fixture, "fanout-event", "original");
+    let publisher = first.0.producer();
+    let ack = publisher
+        .publish(&original, &OperationContext::with_timeout(WAIT))
+        .await
+        .unwrap();
+    wait_for_both_acks(ack.sequence).await;
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(business_effects(&pool).await, 1);
+
+    let dlq = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .unwrap();
+    let stored = dlq
+        .get_last_raw_message_by_subject(&fixture.dlq_subject)
+        .await
+        .unwrap();
+    let redrive = restore_dead_letter(DeadLetterRecord {
+        headers: stored.headers,
+        payload: stored.payload,
+        stream: fixture.dlq_stream.clone(),
+        stream_sequence: stored.sequence,
+        stored_at: stored.time,
+    })
+    .unwrap();
+    let replay = publisher
+        .publish(&redrive, &OperationContext::with_timeout(WAIT))
+        .await
+        .unwrap();
+    assert!(replay.sequence > ack.sequence);
+    wait_for_both_acks(replay.sequence).await;
+    assert_eq!(recovered.try_recv().unwrap(), original.message_id());
+    assert_eq!(invocations.load(Ordering::SeqCst), 2);
+    assert_eq!(business_effects(&pool).await, 1);
+
+    for (messaging, mut worker) in [first, second] {
+        worker.finish(Instant::now() + CLOSE_BUDGET).await.unwrap();
+        close(messaging).await;
+    }
+    fixture.cleanup().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_source_ack_request_redelivers_a_committed_effect_without_applying_it_again(
     pool: PgPool,
 ) {
@@ -1587,7 +1694,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     let fixture = Fixture::create_with_consumer(false).await;
     let relay =
         AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, drop_request).await;
-    let mut options = consumer_options(&fixture);
+    let mut options = consumer_options(&fixture, &fixture.durable);
     options.servers = vec![relay.url.clone()];
     let messaging = Box::pin(Messaging::connect(
         options,

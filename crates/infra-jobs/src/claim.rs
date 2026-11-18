@@ -10,7 +10,7 @@ use tokio::sync::{MutexGuard, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use crate::attempt::{self, AttemptId};
+use crate::attempt::{self, AttemptId, ClaimFence};
 use crate::engine::{
     CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
     observe_failure, observe_recovery,
@@ -31,7 +31,7 @@ pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
 pub(crate) struct Claimed {
     pub(crate) registered: Arc<Registered>,
     pub(crate) attempt: AttemptId,
-    pub(crate) generation: i64,
+    pub(crate) fence: ClaimFence,
     pub(crate) payload: Result<Vec<u8>, crate::JobError>,
     pub(crate) trace: Carrier,
     pub(crate) slot: OwnedSemaphorePermit,
@@ -335,13 +335,14 @@ async fn claim(
                                         'attempt', picked.attempts, 'at', statement_timestamp(), \
                                         'error', $7::text) \
                                ELSE job.errors END, \
-                 claim_generation = nextval('background_jobs_claim_generation') \
+                 claim_generation = nextval('background_jobs_claim_generation'), \
+                 claim_token = gen_random_uuid() \
              FROM picked \
              WHERE job.id = picked.id \
                 AND ((job.state = 'pending' AND job.not_before <= statement_timestamp()) \
                      OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
              RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
-                       job.claim_generation, \
+                       job.claim_generation, job.claim_token AS \"claim_token!\", \
                        CASE WHEN job.state <> 'running' THEN NULL \
                             WHEN picked.recover_at_exhaustion THEN outbox_verified_payload( \
                                 job.id, job.unique_key, job.predecessor_job_id, job.payload_text, job.payload) \
@@ -454,7 +455,7 @@ fn dispatch_known(
             Drawn::Running {
                 registered,
                 attempt,
-                generation,
+                fence,
                 payload,
                 trace,
                 lease_offset,
@@ -487,7 +488,7 @@ fn dispatch_known(
                 let claimed = Claimed {
                     registered,
                     attempt,
-                    generation,
+                    fence,
                     payload,
                     trace,
                     slot,
@@ -515,7 +516,7 @@ enum Drawn {
     Running {
         registered: Arc<Registered>,
         attempt: AttemptId,
-        generation: i64,
+        fence: ClaimFence,
         payload: Result<Vec<u8>, crate::JobError>,
         trace: Carrier,
         lease_offset: Duration,
@@ -533,6 +534,7 @@ struct ClaimRow {
     exhausted: bool,
     attempts: i16,
     claim_generation: i64,
+    claim_token: uuid::Uuid,
     payload: Option<String>,
     trace_parent: Option<String>,
     trace_state: Option<String>,
@@ -567,8 +569,12 @@ impl ClaimRow {
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),
             registered: Arc::clone(registered),
+            fence: ClaimFence {
+                job_id: attempt.job_id,
+                generation: self.claim_generation,
+                token: self.claim_token,
+            },
             attempt,
-            generation: self.claim_generation,
             payload,
             trace: Carrier::from_stored(self.trace_parent, self.trace_state),
             queue_wait_seconds: self.queue_wait_seconds,

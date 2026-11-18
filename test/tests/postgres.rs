@@ -154,7 +154,7 @@ async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
     url.set_host(Some("[::1]")).unwrap();
     url.set_port(Some(listener.local_addr().unwrap().port()))
         .unwrap();
-    let dsn = Dsn::admit(url.as_str()).unwrap();
+    let dsn = Dsn::admit_for_environment(url.as_str(), None, true).unwrap();
     let work = async {
         let connected = template_pool(&dsn, 1).await;
         let result = sqlx::query_scalar::<_, String>("SELECT current_database()")
@@ -241,7 +241,7 @@ async fn dsn_at(pool: &PgPool, address: SocketAddr) -> Dsn {
         .expect("the relay address is a host");
     url.set_port(Some(address.port()))
         .expect("the relay URL accepts a port");
-    Dsn::admit(url.as_str()).expect("the relayed DSN is admitted")
+    Dsn::admit_for_environment(url.as_str(), None, true).expect("the relayed DSN is admitted")
 }
 
 async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPool) {
@@ -851,7 +851,8 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     let mut url = url_for(&pool, DATABASE_URL).await;
     url.set_username(&role).unwrap();
     url.set_password(None).unwrap();
-    let rotating = Dsn::admit_with(url.as_str(), Some(&file)).expect("the file is the password");
+    let rotating = Dsn::admit_for_environment(url.as_str(), Some(&file), true)
+        .expect("the file is the password");
     let ours = template_pool(&rotating, 1).await;
     let cancel = CancellationToken::new();
     let refresh = tokio::spawn(refresh_password_periodically(
@@ -1926,7 +1927,7 @@ async fn a_no_transaction_restore_keeps_a_nonzero_lock_budget(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn an_unreachable_target_fails_in_the_connect_stage(pool: PgPool) {
     let _ = pool;
-    let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
+    let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=verify-full").unwrap();
     let err = migrate::run(&fixture("widgets").await, &options(&dsn))
         .await
         .unwrap_err();

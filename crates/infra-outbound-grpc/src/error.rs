@@ -14,6 +14,12 @@ pub enum ClientError {
     InvalidDestination,
     #[error("gRPC client destination must use https with TLS and http with plaintext")]
     DestinationSecurityMismatch,
+    // template:begin service-auth:grpc-service-token-client-errors
+    #[error("gRPC service tokens require a TLS destination")]
+    ServiceTokensRequireTls,
+    #[error("gRPC destination differs from the configured service token receiver origin")]
+    ServiceTokenOriginMismatch,
+    // template:end service-auth:grpc-service-token-client-errors
     #[error(transparent)]
     Tls(#[from] TlsMaterialError),
     #[error(

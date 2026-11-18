@@ -1,4 +1,26 @@
 #[must_use]
+pub fn http_origin_port(scheme: &str, authority: &str, host: &str) -> Option<u16> {
+    let default = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    if host.is_empty() || authority.contains('@') {
+        return None;
+    }
+    match authority.strip_prefix(host)? {
+        "" | ":" => Some(default),
+        suffix => {
+            let digits = suffix.strip_prefix(':')?;
+            if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse().ok()
+        }
+    }
+}
+
+#[must_use]
 pub fn authority_has_userinfo(url: &str) -> bool {
     let Some((scheme, after_scheme)) = url.split_once(':') else {
         return false;
