@@ -832,6 +832,7 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 }
 
 #[sqlx::test(migrations = false)]
+#[warn(clippy::let_underscore_must_use)]
 async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let database = dsn.database();
@@ -902,9 +903,10 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     cancel.cancel();
     refresh.await.unwrap();
     ours.close().await;
-    let _ = sqlx::query(AssertSqlSafe(format!("DROP ROLE {role:?}")))
+    sqlx::query(AssertSqlSafe(format!("DROP ROLE {role:?}")))
         .execute(&pool)
-        .await;
+        .await
+        .expect("remove the password rotation role");
 }
 
 #[expect(

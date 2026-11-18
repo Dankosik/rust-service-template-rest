@@ -157,7 +157,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             });
         }
     }
-    let _ = conn.close().await;
+    drop(tokio::time::timeout_at(deadline_at, conn.close()).await);
     Ok(report)
 }
 

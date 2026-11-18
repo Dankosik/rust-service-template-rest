@@ -233,12 +233,16 @@ impl Peers {
         })
     }
 
-    async fn finish(self) {
+    async fn finish(self, evidence: &Evidence) {
         self.stop.cancel();
         for mut task in self.tasks {
-            if timeout(Duration::from_secs(3), &mut task).await.is_err() {
-                task.abort();
-                let _ = task.await;
+            match timeout(Duration::from_secs(3), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => evidence.task_error(format!("peer task failed: {error}")),
+                Err(_) => {
+                    task.abort();
+                    evidence.task_error(format!("peer shutdown exceeded 3s: {:?}", task.await));
+                }
             }
         }
     }
@@ -257,9 +261,19 @@ async fn serve_peer(
         tokio::select! {
             biased;
             () = stop.cancelled() => break,
-            Some(_) = connections.join_next(), if !connections.is_empty() => {},
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    evidence.task_error(format!("peer connection task failed: {error}"));
+                }
+            },
             accepted = listener.accept(), if connections.len() < 16 => {
-                let Ok((stream, _)) = accepted else { break };
+                let stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        evidence.task_error(format!("peer accept failed: {error}"));
+                        break;
+                    }
+                };
                 let tls = tls.clone();
                 let discovery = discovery.clone();
                 let jwks = jwks.clone();
@@ -278,7 +292,14 @@ async fn serve_peer(
             }
         }
     }
-    connections.shutdown().await;
+    connections.abort_all();
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            evidence.task_error(format!("peer connection task failed: {error}"));
+        }
+    }
 }
 
 async fn read_http<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(String, Vec<u8>)> {
@@ -978,7 +999,7 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
         return Err("cancellation witness started with active CPU work".into());
     }
     let owned = client.clone();
-    let mut call = tokio::spawn(async move { owned.rpc("cpu").await });
+    let call = tokio::spawn(async move { owned.rpc("cpu").await });
     let witness = async {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -997,8 +1018,17 @@ async fn cancel_active_waiter(client: &Client, evidence: &Evidence) -> Result<()
     }
     .await;
     call.abort();
-    let _ = (&mut call).await;
-    evidence.record(json!({"event": "cpu_waiter_aborted", "active_observed": witness.is_ok()}));
+    match call.await {
+        Err(error) if error.is_cancelled() => {
+            evidence
+                .record(json!({"event": "cpu_waiter_aborted", "active_observed": witness.is_ok()}));
+        }
+        joined => {
+            return Err(format!(
+                "CPU waiter ended before abort took effect: {joined:?}, active witness: {witness:?}"
+            ));
+        }
+    }
     witness?;
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut cancellation_seen = false;
@@ -2263,7 +2293,7 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
             Err(_) => failures.push("driver panicked; partial evidence retained".into()),
         }
         cleanup_containers(&prefix, &evidence, &mut failures).await;
-        peers.finish().await;
+        peers.finish(&evidence).await;
     } else if let Err(error) = peers {
         failures.push(error);
     }

@@ -586,14 +586,15 @@ pub(crate) async fn reject_with_budget(
     status.into_http()
 }
 
+#[warn(clippy::arithmetic_side_effects)]
 async fn drain_rejected(request: Request, drain: Duration) {
     let mut body = request.into_body();
     let _ = tokio::time::timeout(drain, async {
-        let mut read = 0;
+        let mut remaining = REJECT_DRAIN_BYTES;
         while let Some(Ok(frame)) = body.frame().await {
             tokio::task::consume_budget().await;
-            read += frame.data_ref().map_or(0, Bytes::len);
-            if read > REJECT_DRAIN_BYTES {
+            remaining = remaining.saturating_sub(frame.data_ref().map_or(0, Bytes::len));
+            if remaining == 0 {
                 break;
             }
         }
@@ -624,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_call_reads_at_most_one_frame_past_64_kib() {
+    async fn rejected_call_stops_reading_when_frames_reach_64_kib() {
         use futures_util::StreamExt as _;
         use std::convert::Infallible;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -640,6 +641,6 @@ mod tests {
         let response =
             reject_with_budget(&context, request, tonic::Status::unavailable("closed")).await;
         assert_eq!(response.headers()["grpc-status"], "14");
-        assert_eq!(frames.load(Ordering::SeqCst), 5);
+        assert_eq!(frames.load(Ordering::SeqCst), 4);
     }
 }
