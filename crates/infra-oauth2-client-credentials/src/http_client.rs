@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use infra_outbound_http::Client;
+use infra_outbound_http::{Client, Error as HttpError};
 use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 
@@ -69,18 +69,10 @@ impl AuthenticatedClient {
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
         let subject = take_request_subject(&mut request);
-        let mut prepared =
-            self.resource
-                .prepare(request, context)
-                .map_err(|error| match error {
-                    infra_outbound_http::Error::Timeout => {
-                        Error::Acquisition(AcquisitionError::Timeout)
-                    }
-                    infra_outbound_http::Error::Cancelled => {
-                        Error::Acquisition(AcquisitionError::Cancelled)
-                    }
-                    other => Error::Resource(other),
-                })?;
+        let mut prepared = self
+            .resource
+            .prepare(request, context)
+            .map_err(Error::at_prepare)?;
         let deadline = acquisition_deadline(prepared.context());
         let grant = self.tokens.admit(subject, deadline)?;
         let acquired = grant.acquire_for_request(deadline).await?;
@@ -95,12 +87,24 @@ impl AuthenticatedClient {
                 },
             )
             .await
-            .map_err(|error| match error {
-                infra_outbound_http::Error::DispatchRefused => {
-                    AcquisitionError::InvalidResponse.into()
-                }
-                other => Error::from(other),
-            })
+            .map_err(Error::at_send)
+    }
+}
+
+impl Error {
+    fn at_prepare(error: HttpError) -> Self {
+        match error {
+            HttpError::Timeout => AcquisitionError::Timeout.into(),
+            HttpError::Cancelled => AcquisitionError::Cancelled.into(),
+            other => Self::Resource(other),
+        }
+    }
+
+    fn at_send(error: HttpError) -> Self {
+        match error {
+            HttpError::DispatchRefused => AcquisitionError::InvalidResponse.into(),
+            other => Self::Resource(other),
+        }
     }
 }
 

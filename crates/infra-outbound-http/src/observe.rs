@@ -150,13 +150,9 @@ impl Attempt {
         self.status
     }
 
-    pub(crate) fn finish<T>(self, result: &Result<T, Error>) {
-        self.emit(
-            result
-                .as_ref()
-                .map_or_else(Outcome::from_error, |_| Outcome::Response),
-        );
-        if let Err(Error::Transport { source }) = result {
+    pub(crate) fn finish(self, error: Option<&Error>) {
+        self.emit(error.map_or(Outcome::Response, Outcome::from_error));
+        if let Some(Error::Transport { source }) = error {
             self.span.in_scope(|| {
                 tracing::warn!(
                     error = %DisplayErrorChain(&**source),
