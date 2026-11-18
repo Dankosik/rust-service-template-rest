@@ -116,14 +116,13 @@ async fn a_cached_token_is_refreshed_after_its_reuse_cutoff() {
 }
 
 #[tokio::test]
-async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reuse_it() {
+async fn short_lived_background_replacements_get_their_own_early_refresh() {
     let fixture = Fixture::new().await;
     fixture.token_json(
         StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
-    let service_tokens = fixture.service_tokens(&[], None);
-    let client = service_tokens.http(fixture.resource_client());
+    let client = fixture.service_client();
     fixture.send(&client).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3321)).await;
@@ -138,7 +137,7 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
     }
     fixture.token_received().await;
     assert_eq!(fixture.token_requests().len(), 2);
-    let completion_started = Instant::now();
+    let second_requested = Instant::now();
     gate.add_permits(1);
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -147,21 +146,12 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
             if requests.last().unwrap().header("authorization") == Some("Bearer second") {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
-    let completion_observed = Instant::now();
-    let next = service_tokens
-        .cached()
-        .service
-        .as_ref()
-        .unwrap()
-        .refresh_after;
-    assert!(next >= completion_started + Duration::from_secs(30));
-    assert!(next <= completion_observed + Duration::from_secs(33));
     let authorizations = fixture
         .resource_requests()
         .iter()
@@ -172,6 +162,19 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
             .iter()
             .all(|value| value == "Bearer first")
     );
+
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "third", "token_type": "Bearer", "expires_in": 40}),
+    );
+    advance((second_requested + Duration::from_secs(25)).saturating_duration_since(Instant::now()))
+        .await;
+    fixture.send(&client).await.unwrap();
+    fixture.token_received().await;
+    assert_eq!(fixture.token_requests().len(), 3);
+    let last = fixture.resource_requests().pop().unwrap();
+    assert_eq!(last.header("authorization"), Some("Bearer second"));
+    gate.add_permits(1);
     fixture.finish().await;
 }
 
@@ -179,12 +182,18 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
 async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
-    let service = service_tokens.http(fixture.resource_client());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let service = service_tokens.http(fixture.resource_client()).unwrap();
     let exchange = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap()
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let driver = tokio::spawn(driver.run(std::future::pending()));
     let mut response = exchange_response("warm-token");
     response["expires_in"] = 3600.into();
@@ -221,8 +230,9 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
 async fn dropping_registration_stops_a_bound_http_call_during_token_acquisition() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (credentials, _driver) = registration.service_tokens(TokenTarget::default());
-    let client = credentials.http(fixture.resource_client());
+    let (credentials, _driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let client = credentials.http(fixture.resource_client()).unwrap();
     let context = OperationContext::unbounded();
     let client = client.with_context(&context);
     let _gate = fixture.block_tokens();
@@ -250,12 +260,18 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
     let registration = prepare_registration(fixture.options());
-    let (service, driver) = registration.service_tokens(TokenTarget::default());
+    let (service, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     let exchange = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap()
-        .http(fixture.resource_client());
-    let client = service.http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
+    let client = service.http(fixture.resource_client()).unwrap();
     fixture.send(&client).await.unwrap();
     fixture.token_received().await;
     fixture.token_completed().await;
@@ -316,12 +332,18 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
 async fn dropping_the_service_driver_closes_only_service_clients() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
-    let service = service_tokens.http(fixture.resource_client());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let service = service_tokens.http(fixture.resource_client()).unwrap();
     let exchange = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap()
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     fixture.send(&service).await.unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
@@ -396,7 +418,8 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     service_tokens
         .service_token(acquisition_deadline(&token_context()))
         .await
@@ -437,35 +460,67 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
 }
 
 #[tokio::test]
-async fn a_failed_background_refresh_keeps_the_token_and_retries_after_a_pause() {
-    let fixture = Fixture::new().await;
-    fixture.token_json(
-        StatusCode::OK,
-        &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
-    );
-    let client = fixture.service_client();
-    fixture.send(&client).await.unwrap();
-    fixture.token_raw(response(StatusCode::SERVICE_UNAVAILABLE, b"{}"));
-    let gate = fixture.block_tokens();
-    gate.add_permits(Semaphore::MAX_PERMITS / 2);
-    for (advance, token_requests) in [(3321, 2), (0, 2), (34, 3)] {
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(advance)).await;
-        tokio::time::resume();
-        let before = fixture.token_requests().len();
+async fn refreshes_without_a_cacheable_replacement_keep_the_token_and_back_off() {
+    for (refresh_response, quiet_until, retry_by) in [
+        (
+            response(StatusCode::SERVICE_UNAVAILABLE, b"{}"),
+            Duration::from_secs(29),
+            34,
+        ),
+        (
+            json_response(
+                StatusCode::OK,
+                &serde_json::json!({"access_token": "request-only", "token_type": "Bearer"}),
+            ),
+            Duration::from_millis(33_500),
+            38,
+        ),
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.token_json(
+            StatusCode::OK,
+            &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
+        );
+        let service_tokens = fixture.service_tokens(&[]);
+        let client = service_tokens.http(fixture.resource_client()).unwrap();
         fixture.send(&client).await.unwrap();
-        if token_requests > before {
-            fixture.token_received().await;
-        }
-        assert_eq!(fixture.token_requests().len(), token_requests);
+        fixture.token_raw(refresh_response);
+        let gate = fixture.block_tokens();
+        advance(Duration::from_secs(3321)).await;
+        let refresh_requested = Instant::now();
+        fixture.send(&client).await.unwrap();
+        fixture.token_received().await;
+        advance(Duration::from_secs(4)).await;
+        gate.add_permits(1);
+        let refresh = tokio::time::timeout(
+            Duration::from_secs(2),
+            service_tokens.service_request().lock(),
+        )
+        .await
+        .unwrap();
+        drop(refresh);
+
+        advance((refresh_requested + quiet_until).saturating_duration_since(Instant::now())).await;
+        fixture.send(&client).await.unwrap();
+        assert_no_token_request(&fixture).await;
+
+        advance(
+            (refresh_requested + Duration::from_secs(retry_by))
+                .saturating_duration_since(Instant::now()),
+        )
+        .await;
+        fixture.send(&client).await.unwrap();
+        fixture.token_received().await;
+        assert_eq!(fixture.token_requests().len(), 3);
+        assert!(
+            fixture
+                .resource_requests()
+                .iter()
+                .all(|request| request.header("authorization") == Some("Bearer kept"))
+        );
+        gate.add_permits(1);
+        fixture.finish().await;
     }
-    assert!(
-        fixture
-            .resource_requests()
-            .iter()
-            .all(|request| request.header("authorization") == Some("Bearer kept"))
-    );
-    fixture.finish().await;
 }
 
 #[tokio::test]
@@ -581,16 +636,22 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         provider_concurrency: 1,
         ..fixture.options()
     });
-    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    let (service_tokens, driver) =
+        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     fixture.drive(driver);
-    let client = service_tokens.http(fixture.resource_client());
+    let client = service_tokens.http(fixture.resource_client()).unwrap();
     fixture.send(&client).await.unwrap();
     advance(Duration::from_secs(3321)).await;
     let gate = fixture.block_tokens();
     let exchange_client = registration
-        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            fixture.resource_origin(),
+            EXCHANGE_CAPACITY,
+        )
         .unwrap()
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let mut exchange =
         Box::pin(fixture.send_request(&exchange_client, fixture.on_behalf_of_request("active")));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }

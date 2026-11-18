@@ -576,7 +576,7 @@ mod grpc {
             let app = infra_grpc::router(services, reader, authentication, limits).unwrap();
             let listener =
                 infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let server = app.serve(listener, options, None);
+            let server = app.serve(listener, options, None).unwrap();
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),

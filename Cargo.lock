@@ -2639,6 +2639,7 @@ dependencies = [
  "service-failure",
  "shared-rules",
  "thiserror",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
  "tokio-util",

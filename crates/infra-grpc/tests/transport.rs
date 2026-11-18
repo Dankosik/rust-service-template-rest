@@ -559,7 +559,9 @@ impl Fixture {
             }
         });
         let listener = BoundListener::bind(address).expect("listener binds");
-        let bound = app.serve(listener, server_options(connections), tls);
+        let bound = app
+            .serve(listener, server_options(connections), tls)
+            .unwrap();
         let address = bound.local_addr();
         Self {
             server: Some(bound),

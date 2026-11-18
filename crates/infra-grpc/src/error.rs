@@ -23,6 +23,10 @@ pub enum Error {
     ScopesWithServiceTokens,
     // template:end authn:grpc-unauthenticated-business-calls-error
     // template:begin service-auth:grpc-caller-rule-errors
+    #[error("gRPC caller rules require service token authentication")]
+    CallerRulesRequireServiceTokens,
+    #[error("gRPC service token authentication requires TLS")]
+    ServiceTokensRequireTls,
     #[error("gRPC caller rule for {0} must name a described method of a registered service")]
     UnregisteredCallerRule(String),
     #[error("gRPC caller rule is declared twice for {0}")]

@@ -563,7 +563,7 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-bind
     if let Some((listener, grpc)) = grpc_listener {
-        let server = grpc.app.serve(listener, grpc.options, grpc.tls);
+        let server = grpc.app.serve(listener, grpc.options, grpc.tls)?;
         let listener = serving.grpc_listener.insert(server);
         background.watch_listener("grpc_accept", listener);
         tracing::info!(addr = %listener.local_addr(), "grpc listener bound");
@@ -889,13 +889,16 @@ mod tests {
         use infra_serviceauth::test_support::{TestKey, registry};
 
         let key = TestKey::new("orders/1");
+        let certificate = tls_test_support::TlsMaterial::new("127.0.0.1");
         let config = test_config(&[
             ("APP__APP__ENV", "local"),
             ("APP__HTTP__ADDR", "127.0.0.1:0"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "0s"),
             ("APP__GRPC__ENABLED", "true"),
             ("APP__GRPC__ADDR", "127.0.0.1:0"),
-            ("APP__GRPC__SECURITY", "plaintext"),
+            ("APP__GRPC__SECURITY", "tls"),
+            ("APP__GRPC__CERTIFICATE", &certificate.cert_pem),
+            ("APP__GRPC__PRIVATE_KEY", &certificate.key_pem),
             ("APP__OBSERVABILITY__METRICS__ADDR", ""),
             ("APP__SERVICE_AUTH__MODE", "jwt"),
             ("APP__SERVICE_AUTH__NAME", "catalog"),
@@ -931,9 +934,13 @@ mod tests {
         )
         .unwrap();
         let address = serving.grpc_listener.as_ref().unwrap().local_addr();
+        let origin = format!("https://{address}");
         let resource = infra_outbound_grpc::Client::try_new(
-            &format!("http://{address}"),
-            infra_outbound_grpc::ClientSecurity::Plaintext,
+            &origin,
+            infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
+                ca_certificate_pem: Some(certificate.root_pem),
+                identity: None,
+            }),
             Duration::from_secs(5),
         )
         .unwrap();
@@ -950,7 +957,13 @@ mod tests {
         })
         .unwrap();
         let admitted = EchoServiceClient::new(
-            resource.with_service_tokens(signing.receiver("catalog").unwrap()),
+            resource
+                .with_service_tokens(
+                    signing
+                        .receiver("catalog", origin.parse().unwrap())
+                        .unwrap(),
+                )
+                .unwrap(),
         )
         .unary(UnaryRequest::default())
         .await

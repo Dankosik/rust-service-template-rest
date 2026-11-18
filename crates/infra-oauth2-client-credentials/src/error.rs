@@ -9,6 +9,15 @@ pub struct ConfigurationError {
     pub reason: &'static str,
 }
 
+impl ConfigurationError {
+    pub(crate) const fn resource_origin() -> Self {
+        Self {
+            key: "resource_origin",
+            reason: "must match the transport origin registered for these credentials",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AcquisitionError {
     #[error("OAuth2 acquisition deadline elapsed")]

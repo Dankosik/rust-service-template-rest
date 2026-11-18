@@ -49,13 +49,15 @@ impl Origin {
         self.scheme == Scheme::HTTPS
     }
 
-    fn admits(&self, uri: &Uri) -> bool {
-        let default_port = if self.is_https() { 443 } else { 80 };
+    pub(crate) fn admits(&self, uri: &Uri) -> bool {
         uri.scheme() == Some(&self.scheme)
             && uri.authority().is_some_and(|authority| {
-                !authority.as_str().contains('@')
-                    && authority.host().eq_ignore_ascii_case(&self.host)
-                    && authority.port_u16().unwrap_or(default_port) == self.port
+                authority.host().eq_ignore_ascii_case(&self.host)
+                    && shared_rules::uri::http_origin_port(
+                        self.scheme.as_str(),
+                        authority.as_str(),
+                        authority.host(),
+                    ) == Some(self.port)
             })
     }
 }

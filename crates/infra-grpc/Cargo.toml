@@ -72,6 +72,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # template:begin service-auth:grpc-service-auth-test-dependencies
 infra-serviceauth = { workspace = true, features = ["test-support"] }
+tls-test-support = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 # template:end service-auth:grpc-service-auth-test-dependencies
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "sync", "test-util"] }

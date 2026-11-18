@@ -13,8 +13,8 @@ use tokio::{sync::Semaphore, time::Instant};
 use url::{Url, form_urlencoded::Serializer};
 
 use crate::{
-    AcquisitionError, ConfigurationError, Rejection, TokenTarget, assertion::Signer,
-    credentials::acquisition_stopped, token::Token,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Rejection, ServiceTokenTarget,
+    assertion::Signer, credentials::acquisition_stopped, token::Token,
 };
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,24 +64,23 @@ impl TokenEndpoint {
 
     pub(crate) async fn fetch_service_token(
         &self,
-        target: &TokenTarget,
+        target: &ServiceTokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
-        self.fetch_token(Grant::ClientCredentials, target, context, request_context)
+        self.fetch_token(Grant::ClientCredentials(target), context, request_context)
             .await
     }
 
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
-        target: &TokenTarget,
+        target: &ExchangeTokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
         self.fetch_token(
-            Grant::TokenExchange { subject },
-            target,
+            Grant::TokenExchange { subject, target },
             context,
             request_context,
         )
@@ -91,7 +90,6 @@ impl TokenEndpoint {
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
-        target: &TokenTarget,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
     ) -> Result<Token, AcquisitionError> {
@@ -108,7 +106,7 @@ impl TokenEndpoint {
         });
         let result = match check() {
             Ok(()) => {
-                self.request_token(grant, target, started, context, request_context)
+                self.request_token(grant, started, context, request_context)
                     .await
             }
             Err(error) => Err(error),
@@ -129,7 +127,6 @@ impl TokenEndpoint {
     async fn request_token(
         &self,
         grant: Grant<'_>,
-        target: &TokenTarget,
         started: Instant,
         context: &OperationContext,
         request_context: Option<&OperationContext>,
@@ -138,25 +135,15 @@ impl TokenEndpoint {
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
-        let body = self.form_body(grant, target)?;
+        let body = self.form_body(grant)?;
         let response = self.post_form(body, context, request_context).await?;
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
-    fn form_body(
-        &self,
-        grant: Grant<'_>,
-        target: &TokenTarget,
-    ) -> Result<String, AcquisitionError> {
+    fn form_body(&self, grant: Grant<'_>) -> Result<String, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let mut form = Serializer::new(String::new());
         grant.append_fields(&mut form);
-        if let Some(scope) = target.scope.as_deref() {
-            form.append_pair("scope", scope);
-        }
-        if let Some(audience) = target.audience.as_deref() {
-            form.append_pair("audience", audience);
-        }
         Ok(form
             .extend_pairs(self.signer.form_fields(&assertion))
             .finish())
@@ -188,33 +175,45 @@ impl TokenEndpoint {
 }
 
 #[derive(Clone, Copy)]
-enum Grant<'subject> {
-    ClientCredentials,
-    TokenExchange { subject: &'subject SecretString },
+enum Grant<'a> {
+    ClientCredentials(&'a ServiceTokenTarget),
+    TokenExchange {
+        subject: &'a SecretString,
+        target: &'a ExchangeTokenTarget,
+    },
 }
 
 impl Grant<'_> {
     fn append_fields(self, form: &mut Serializer<'_, String>) {
         match self {
-            Self::ClientCredentials => form.append_pair("grant_type", GRANT_CLIENT_CREDENTIALS),
-            Self::TokenExchange { subject } => form
+            Self::ClientCredentials(target) => form
+                .append_pair("grant_type", GRANT_CLIENT_CREDENTIALS)
+                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope))),
+            Self::TokenExchange { subject, target } => form
                 .append_pair("grant_type", GRANT_TOKEN_EXCHANGE)
                 .append_pair("subject_token", subject.expose_secret())
                 .append_pair("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)
-                .append_pair("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+                .append_pair("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN)
+                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope)))
+                .extend_pairs(
+                    target
+                        .audience
+                        .as_deref()
+                        .map(|audience| ("audience", audience)),
+                ),
         };
     }
 
     fn metric_label(self) -> &'static str {
         match self {
-            Self::ClientCredentials => "client_credentials",
+            Self::ClientCredentials(_) => "client_credentials",
             Self::TokenExchange { .. } => "token_exchange",
         }
     }
 
     fn expected_issued_type(self) -> Option<&'static str> {
         match self {
-            Self::ClientCredentials => None,
+            Self::ClientCredentials(_) => None,
             Self::TokenExchange { .. } => Some(TOKEN_TYPE_ACCESS_TOKEN),
         }
     }
@@ -242,12 +241,16 @@ fn classify_token_response(
     use infra_outbound_http::Error::{ResponseBodyTooLarge, Transport};
 
     match (response, observed_status) {
-        (Ok(response), _) if response.status().is_success() => decode_token_response(&response),
+        (Ok(response), _) if response.status() == StatusCode::OK => {
+            decode_token_response(&response)
+        }
         (Ok(response), _) => Err(provider_failure(
             response.status(),
             Some(response.body().as_ref()),
         )),
-        (Err(ResponseBodyTooLarge | Transport { .. }), Some(status)) if !status.is_success() => {
+        (Err(ResponseBodyTooLarge | Transport { .. }), Some(status))
+            if status != StatusCode::OK =>
+        {
             Err(provider_failure(status, None))
         }
         (Err(error), _) => Err(map_transport_error(&error)),
@@ -255,6 +258,9 @@ fn classify_token_response(
 }
 
 fn provider_failure(status: StatusCode, body: Option<&[u8]>) -> AcquisitionError {
+    if status.is_success() {
+        return AcquisitionError::InvalidResponse;
+    }
     if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
         return AcquisitionError::Unavailable;
     }

@@ -56,6 +56,17 @@ async fn each_grant_enforces_its_subject_policy_before_any_io() {
 #[tokio::test]
 async fn invalid_resource_target_refuses_before_acquiring_credentials() {
     let fixture = Fixture::new().await;
+    let other = Fixture::new().await;
+    for binding in [
+        fixture.service_tokens(&[]).http(other.resource_client()),
+        fixture
+            .exchange_tokens(&[], None, EXCHANGE_CAPACITY)
+            .http(other.resource_client()),
+    ] {
+        assert_eq!(binding.unwrap_err().key, "resource_origin");
+    }
+    assert!(other.resource_requests().is_empty());
+    other.finish().await;
     let client = fixture.service_client();
     let mut foreign = fixture.request();
     *foreign.uri_mut() = "https://other.example/resource".parse().unwrap();
@@ -189,16 +200,19 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
     let fixture = Fixture::new().await;
     let token_gate = fixture.block_tokens();
     let resource_gate = fixture.block_resources();
-    let client = fixture.service_tokens(&[], None).http(
-        Client::try_new_for_test_http(
-            &fixture.origin,
-            infra_outbound_http::Limits {
-                operation_timeout: Duration::from_secs(3),
-                ..TOKEN_LIMITS
-            },
+    let client = fixture
+        .service_tokens(&[])
+        .http(
+            Client::try_new_for_test_http(
+                &fixture.origin,
+                infra_outbound_http::Limits {
+                    operation_timeout: Duration::from_secs(3),
+                    ..TOKEN_LIMITS
+                },
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    );
+        .unwrap();
     let context = OperationContext::with_timeout(Duration::from_secs(30));
     let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
     tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
@@ -259,6 +273,18 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::ResponseLimit,
         ),
         (
+            b"HTTP/1.1 202 Accepted\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{".to_vec(),
+            AcquisitionError::InvalidResponse,
+        ),
+        (
+            b"HTTP/1.1 202 Accepted\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::InvalidResponse,
+        ),
+        (
+            b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::InvalidResponse,
+        ),
+        (
             response(
                 StatusCode::BAD_REQUEST,
                 br#"{"error":"invalid\u005fclient","error_description":"provider-secret-body"}"#,
@@ -314,6 +340,41 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         assert!(!error.to_string().contains("provider-secret-body"));
     }
     assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn an_accepted_response_with_a_valid_token_is_refused_until_the_provider_responds_ok() {
+    let fixture = Fixture::new().await;
+    let client = fixture.service_client();
+    let token = serde_json::json!({
+        "access_token": "issued-token",
+        "token_type": "Bearer",
+        "expires_in": 60,
+    });
+    fixture.token_json(StatusCode::ACCEPTED, &token);
+    assert_matches!(
+        fixture.send(&client).await,
+        Err(Error::Acquisition(AcquisitionError::InvalidResponse))
+    );
+
+    fixture.token_json(StatusCode::OK, &token);
+    assert_matches!(
+        fixture.send(&client).await,
+        Err(Error::Acquisition(AcquisitionError::InvalidResponse))
+    );
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert!(fixture.resource_requests().is_empty());
+
+    advance(Duration::from_secs(1)).await;
+    fixture.send(&client).await.unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    let resources = fixture.resource_requests();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(
+        resources[0].header("authorization"),
+        Some("Bearer issued-token")
+    );
     fixture.finish().await;
 }
 
@@ -396,16 +457,19 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
 #[tokio::test]
 async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
     let fixture = Fixture::new().await;
-    let client = fixture.service_tokens(&[], None).http(
-        Client::try_new_for_test_http(
-            &fixture.origin,
-            infra_outbound_http::Limits {
-                response_body_bytes: 8,
-                ..TOKEN_LIMITS
-            },
+    let client = fixture
+        .service_tokens(&[])
+        .http(
+            Client::try_new_for_test_http(
+                &fixture.origin,
+                infra_outbound_http::Limits {
+                    response_body_bytes: 8,
+                    ..TOKEN_LIMITS
+                },
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    );
+        .unwrap();
     let call = || fixture.send(&client);
     call().await.unwrap();
     advance(EVICTION_MIN_AGE).await;
@@ -462,8 +526,8 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
-    let service_tokens = fixture.service_tokens(&[], None);
-    let client = service_tokens.http(fixture.resource_client());
+    let service_tokens = fixture.service_tokens(&[]);
+    let client = service_tokens.http(fixture.resource_client()).unwrap();
     service_tokens
         .service_token(acquisition_deadline(&token_context()))
         .await

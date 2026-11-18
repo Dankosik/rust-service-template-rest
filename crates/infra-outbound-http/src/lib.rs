@@ -87,6 +87,14 @@ pub struct Client {
 }
 
 impl Client {
+    #[must_use]
+    pub fn matches_origin(&self, origin: &http::Uri) -> bool {
+        origin
+            .path_and_query()
+            .is_none_or(|pq| pq.query().is_none() && matches!(pq.path(), "" | "/"))
+            && self.origin.admits(origin)
+    }
+
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
         let origin = policy::admit_origin(origin)?;

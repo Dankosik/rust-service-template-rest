@@ -180,6 +180,14 @@ impl ConfigInput {
         // template:begin service-auth:config-service-auth-admit
         let grpc_enabled = !matches!(grpc, Ok(None));
         let service_auth = self.service_auth.admit(&self.app.env, grpc_enabled, v);
+        if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
+            && matches!(listener.security, GrpcListenerSecurity::Plaintext)
+        {
+            v.check(Err(ValidationError::new(
+                "grpc.security",
+                "must be tls when the listener verifies service JWTs",
+            )));
+        }
         // template:end service-auth:config-service-auth-admit
         // template:begin postgres:config-admit
         let postgres = self.postgres.admit(v);

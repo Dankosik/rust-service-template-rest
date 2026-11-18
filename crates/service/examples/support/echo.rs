@@ -1,0 +1,97 @@
+use std::pin::Pin;
+
+use futures_util::{Stream, StreamExt as _};
+use grpc_contracts::example::v1::{
+    BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
+    ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
+    echo_service_server::{EchoService, EchoServiceServer},
+};
+use infra_grpc::{Failure, ResponseContext, Services};
+use service_failure::Code;
+use tonic::{Request, Response, Status};
+
+const MAX_MESSAGE_BYTES: usize = 1024;
+const MAX_AGGREGATE_BYTES: usize = 1024;
+
+#[derive(Clone, Debug, Default)]
+struct Echo;
+
+pub(super) fn register(services: &mut Services) -> Result<(), infra_grpc::Error> {
+    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+    services.add(EchoServiceServer::new(Echo))
+}
+
+#[tonic::async_trait]
+impl EchoService for Echo {
+    async fn unary(
+        &self,
+        request: Request<UnaryRequest>,
+    ) -> Result<Response<UnaryResponse>, Status> {
+        let message = accepted(request.into_inner().message)?;
+        Ok(Response::new(UnaryResponse { message }))
+    }
+
+    async fn client_stream(
+        &self,
+        request: Request<tonic::Streaming<ClientStreamRequest>>,
+    ) -> Result<Response<ClientStreamResponse>, Status> {
+        let mut input = request.into_inner();
+        let mut message = String::new();
+        while let Some(next) = input.message().await? {
+            let next = accepted(next.message)?;
+            if message.len().saturating_add(next.len()) > MAX_AGGREGATE_BYTES {
+                return Err(Failure::new(Code::RequestEntityTooLarge).into());
+            }
+            message.push_str(&next);
+        }
+        Ok(Response::new(ClientStreamResponse { message }))
+    }
+
+    type ServerStreamStream =
+        Pin<Box<dyn Stream<Item = Result<ServerStreamResponse, Status>> + Send>>;
+
+    async fn server_stream(
+        &self,
+        request: Request<ServerStreamRequest>,
+    ) -> Result<Response<Self::ServerStreamStream>, Status> {
+        let message = accepted(request.into_inner().message)?;
+        Ok(Response::new(Box::pin(futures_util::stream::iter([Ok(
+            ServerStreamResponse { message },
+        )]))))
+    }
+
+    type BidiStreamStream = Pin<Box<dyn Stream<Item = Result<BidiStreamResponse, Status>> + Send>>;
+
+    async fn bidi_stream(
+        &self,
+        request: Request<tonic::Streaming<BidiStreamRequest>>,
+    ) -> Result<Response<Self::BidiStreamStream>, Status> {
+        let context = request
+            .extensions()
+            .get::<ResponseContext>()
+            .cloned()
+            .ok_or_else(|| Failure::new(Code::InternalServerError))?;
+        let responses = request
+            .into_inner()
+            .map(|item| {
+                item.and_then(|request| {
+                    let message = accepted(request.message)?;
+                    Ok(BidiStreamResponse { message })
+                })
+            })
+            .take_until(async move {
+                context.operation().wait_stopped().await;
+            });
+        Ok(Response::new(Box::pin(responses)))
+    }
+}
+
+fn accepted(message: String) -> Result<String, Status> {
+    if (1..=MAX_MESSAGE_BYTES).contains(&message.len()) {
+        Ok(message)
+    } else {
+        Err(Failure::new(Code::BadRequest)
+            .field_violation("message", format!("must be 1 to {MAX_MESSAGE_BYTES} bytes"))
+            .into())
+    }
+}

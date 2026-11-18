@@ -100,7 +100,7 @@ mod tests {
         assert!(
             prepared
                 .tokens
-                .receiver("orders")
+                .receiver("orders", "https://orders.internal".parse().unwrap())
                 .unwrap()
                 .authorization()
                 .unwrap()
@@ -108,11 +108,19 @@ mod tests {
         );
         let receiving_only = prepare(&jwt(&trust, None)).unwrap();
         assert!(receiving_only.verifier.is_some());
-        assert!(receiving_only.tokens.receiver("orders").is_err());
+        assert!(
+            receiving_only
+                .tokens
+                .receiver("orders", "https://orders.internal".parse().unwrap())
+                .is_err()
+        );
         let off = prepare(&test_config(&[])).unwrap();
         assert!(off.verifier.is_none());
         assert_eq!(
-            off.tokens.receiver("orders").unwrap().authorization(),
+            off.tokens
+                .receiver("orders", "https://orders.internal".parse().unwrap())
+                .unwrap()
+                .authorization(),
             Ok(None)
         );
         for (config, key) in [

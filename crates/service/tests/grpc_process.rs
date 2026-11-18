@@ -470,7 +470,7 @@ fn example_binary() -> PathBuf {
                     "build",
                     "--locked",
                     "--example",
-                    "grpc",
+                    "grpc_oidc",
                     "--message-format=json-render-diagnostics",
                 ])
                 .args(selection.split_whitespace())
@@ -501,7 +501,7 @@ fn grpc_example_executable(messages: &[u8], manifest: &str) -> Result<PathBuf, u
         };
         if message["reason"] == "compiler-artifact"
             && message["manifest_path"] == manifest
-            && message["target"]["name"] == "grpc"
+            && message["target"]["name"] == "grpc_oidc"
             && message["target"]["kind"] == serde_json::json!(["example"])
             && message["profile"]["test"].as_bool() == Some(false)
             && let Some(path) = message["executable"].as_str().map(std::path::Path::new)
@@ -519,10 +519,10 @@ fn grpc_example_executable(messages: &[u8], manifest: &str) -> Result<PathBuf, u
 #[test]
 fn grpc_process_requires_one_executable_from_the_selected_build() {
     const MANIFEST: &str = "/workspace/crates/service/Cargo.toml";
-    const EXECUTABLE: &str = "/configured-target/triple/debug/examples/grpc";
+    const EXECUTABLE: &str = "/configured-target/triple/debug/examples/grpc_oidc";
     let artifact = serde_json::json!({
         "reason": "compiler-artifact", "manifest_path": MANIFEST,
-        "target": {"name": "grpc", "kind": ["example"]}, "profile": {"test": false},
+        "target": {"name": "grpc_oidc", "kind": ["example"]}, "profile": {"test": false},
         "executable": EXECUTABLE, "fresh": true,
     });
     let mut messages = String::new();
@@ -537,7 +537,7 @@ fn grpc_process_requires_one_executable_from_the_selected_build() {
         ("/profile/test", serde_json::json!(true)),
         (
             "/executable",
-            serde_json::json!("target/debug/examples/grpc"),
+            serde_json::json!("target/debug/examples/grpc_oidc"),
         ),
     ] {
         let mut unrelated = artifact.clone();

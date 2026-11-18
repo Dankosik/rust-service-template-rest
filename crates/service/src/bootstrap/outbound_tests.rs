@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
-use infra_oauth2_client_credentials::{Algorithm, Options, Registration, TokenTarget};
+use infra_oauth2_client_credentials::{Algorithm, Options, Registration, ServiceTokenTarget};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -70,7 +70,7 @@ fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
         },
     )
     .unwrap();
-    Resource::Http(Arc::new(tokens.http(transport)))
+    Resource::Http(Arc::new(tokens.http(transport).unwrap()))
 }
 
 // template:begin outbound-auth-grpc:service-test-build-grpc-resource
@@ -173,7 +173,11 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
                     peer_addr,
                 ))?);
                 let lifetime = Arc::downgrade(&registration);
-                let tokens = background.service_tokens(registration, TokenTarget::default());
+                let tokens = background.service_tokens(
+                    registration,
+                    ServiceTokenTarget::default(),
+                    "https://127.0.0.1:0".parse().unwrap(),
+                );
                 let resource = build(&tokens);
                 installed.send((lifetime, tokens)).unwrap();
                 Ok(resource)

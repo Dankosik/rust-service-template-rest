@@ -122,8 +122,9 @@ session_budgets = "startup"
 # template:end object-storage:local-config
 
 # template:begin service-auth:local-config
-# Service tokens are inert until mode = "jwt"; a local environment may run
-# gRPC without them. The signing key is environment-only:
+# A gRPC listener verifying service tokens requires grpc.security = "tls",
+# grpc.certificate and a TLS private key. Supply the service signing key through
+# the environment or --secrets-dir:
 #   APP__SERVICE_AUTH__PRIVATE_KEY="$(cat example.pem)"
 # [service_auth]
 # mode = "jwt"

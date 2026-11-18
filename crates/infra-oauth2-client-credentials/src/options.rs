@@ -38,27 +38,32 @@ pub struct Options {
 }
 
 #[derive(Clone, Default, derive_more::Debug)]
-#[debug("TokenTarget([REDACTED])")]
-pub struct TokenTarget {
+#[debug("ServiceTokenTarget([REDACTED])")]
+pub struct ServiceTokenTarget {
+    pub(crate) scope: Option<String>,
+}
+
+impl ServiceTokenTarget {
+    pub fn try_new(scopes: &[String]) -> Result<Self, ConfigurationError> {
+        Ok(Self {
+            scope: scope_parameter(scopes)?,
+        })
+    }
+}
+
+#[derive(Clone, Default, derive_more::Debug)]
+#[debug("ExchangeTokenTarget([REDACTED])")]
+pub struct ExchangeTokenTarget {
     pub(crate) scope: Option<String>,
     pub(crate) audience: Option<String>,
 }
 
-impl TokenTarget {
-    /// RFC 6749 §3.3
+impl ExchangeTokenTarget {
     pub fn try_new(
         scopes: &[String],
         audience: Option<String>,
     ) -> Result<Self, ConfigurationError> {
-        if !scopes
-            .iter()
-            .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
-        {
-            return Err(ConfigurationError {
-                key: "scopes",
-                reason: "must contain RFC 6749 scope tokens",
-            });
-        }
+        let scope = scope_parameter(scopes)?;
         if audience
             .as_ref()
             .is_some_and(|audience| audience.trim().is_empty())
@@ -68,11 +73,21 @@ impl TokenTarget {
                 reason: "must be nonempty when configured",
             });
         }
-        Ok(Self {
-            scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
-            audience,
-        })
+        Ok(Self { scope, audience })
     }
+}
+
+fn scope_parameter(scopes: &[String]) -> Result<Option<String>, ConfigurationError> {
+    if !scopes
+        .iter()
+        .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
+    {
+        return Err(ConfigurationError {
+            key: "scopes",
+            reason: "must contain RFC 6749 scope tokens",
+        });
+    }
+    Ok((!scopes.is_empty()).then(|| scopes.join(" ")))
 }
 
 pub(crate) struct Admitted {
