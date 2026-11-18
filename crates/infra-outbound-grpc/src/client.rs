@@ -186,9 +186,7 @@ impl Client {
             request.headers_mut(),
         );
         if let Err(reason) = opening.check() {
-            let status = client_stopped(reason);
-            call.finish(status.code());
-            return Err(status);
+            return Err(call.refuse(client_stopped(reason)));
         }
         let permit = if let Some(openings) = &self.openings {
             let Ok(permit) = Arc::clone(openings).try_acquire_owned() else {
@@ -196,8 +194,7 @@ impl Client {
                     || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
                     client_stopped,
                 );
-                call.finish(status.code());
-                return Err(status);
+                return Err(call.refuse(status));
             };
             Some(permit)
         } else {
@@ -217,8 +214,7 @@ impl Client {
 
     #[must_use]
     pub fn refuse_call(&self, request: &Request<Body>, status: tonic::Status) -> tonic::Status {
-        crate::observe::Call::start(self.series, request, &self.destination).finish(status.code());
-        status
+        crate::observe::Call::start(self.series, request, &self.destination).refuse(status)
     }
 }
 
@@ -268,8 +264,7 @@ impl PreparedCall {
 
     #[must_use]
     pub fn refuse(self, status: tonic::Status) -> tonic::Status {
-        self.call.finish(status.code());
-        status
+        self.call.refuse(status)
     }
 
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
@@ -348,10 +343,7 @@ impl PreparedCall {
                 )
                 .map(Body::new))
             }
-            Err(status) => {
-                call.finish(status.code());
-                Err(status)
-            }
+            Err(status) => Err(call.refuse(status)),
         }
     }
 }
