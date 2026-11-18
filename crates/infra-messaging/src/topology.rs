@@ -445,7 +445,8 @@ pub(crate) async fn bind_durable(
     name: &str,
     config: PullConfig,
 ) -> Result<PullConsumer, MessagingError> {
-    let pull = match find_durable(jetstream, stream, name).await? {
+    let existing = find_durable(jetstream, stream, name).await?;
+    let pull = match existing {
         Some(pull) => pull,
         None => create_or_find_durable(jetstream, stream, name, config.clone()).await?,
     };
