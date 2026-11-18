@@ -18,6 +18,7 @@
       "vendor/sqlx-core/",
       "crates/infra-postgres/",
       "crates/migrate/",
+      "docs/decisions/postgres-decisions.md",
       "migrations/",
       "crates/config/src/postgres.rs",
       "crates/config/src/postgres/",

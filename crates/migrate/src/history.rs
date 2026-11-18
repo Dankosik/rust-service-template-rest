@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use infra_postgres::{observed, sqlstate};
+use infra_postgres::{failure_cause, observed, sqlstate};
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
 
@@ -22,22 +22,68 @@ pub enum HistoryError {
     Unavailable,
 }
 
+impl HistoryError {
+    fn report(
+        self,
+        stage: &'static str,
+        cause: &'static str,
+        sqlstate: Option<&str>,
+        version: Option<i64>,
+    ) -> Self {
+        tracing::error!(
+            stage,
+            cause,
+            sqlstate,
+            migration.version = version,
+            "postgres_history_refused"
+        );
+        self
+    }
+}
+
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
+    let mut stage = "acquire";
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
+        stage = "read";
         read_history(&mut conn, &MIGRATOR.table_name).await
     };
     let history = match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
         Ok(Ok(HistoryRead::History(history))) => history,
         Ok(Ok(HistoryRead::Missing)) => Vec::new(),
-        Ok(Ok(HistoryRead::NotVisible)) => return Err(HistoryError::NotVisible),
-        Ok(Err(MigrateError::Dirty(_))) => return Err(HistoryError::Mismatch),
-        Ok(Err(_)) | Err(_) => return Err(HistoryError::Unavailable),
+        Ok(Ok(HistoryRead::NotVisible)) => {
+            return Err(HistoryError::NotVisible.report(stage, "not_visible", None, None));
+        }
+        Ok(Err(MigrateError::Dirty(version))) => {
+            return Err(HistoryError::Mismatch.report(stage, "dirty", None, Some(version)));
+        }
+        Ok(Err(MigrateError::Execute(error))) => {
+            return Err(HistoryError::Unavailable.report(
+                stage,
+                failure_cause(&error),
+                sqlstate(&error).as_deref(),
+                None,
+            ));
+        }
+        Ok(Err(_)) => return Err(HistoryError::Unavailable.report(stage, "driver", None, None)),
+        Err(_) => return Err(HistoryError::Unavailable.report(stage, "deadline", None, None)),
     };
-    match pending(&MIGRATOR, &history) {
-        Ok(migrations) if migrations.is_empty() => Ok(()),
-        Ok(_) => Err(HistoryError::Pending),
-        Err(_) => Err(HistoryError::Mismatch),
+    let pending = pending(&MIGRATOR, &history).map_err(|error| {
+        let (cause, version) = match error {
+            PendingError::Migrate(MigrateError::VersionMismatch(v)) => {
+                ("checksum_mismatch", Some(v))
+            }
+            PendingError::Migrate(MigrateError::VersionMissing(v)) => ("version_missing", Some(v)),
+            PendingError::DuplicateVersion(v) => ("duplicate_version", Some(v)),
+            PendingError::Migrate(_) => ("history", None),
+        };
+        HistoryError::Mismatch.report("compare", cause, None, version)
+    })?;
+    match pending.first() {
+        Some(next) => {
+            Err(HistoryError::Pending.report("compare", "pending", None, Some(next.version)))
+        }
+        None => Ok(()),
     }
 }
 

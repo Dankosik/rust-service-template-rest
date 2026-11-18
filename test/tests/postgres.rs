@@ -45,7 +45,17 @@ struct PoolEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
 
 impl PoolEvents {
     fn subscriber(&self) -> tracing::Dispatch {
-        tracing::Dispatch::new(tracing_subscriber::Registry::default().with(self.clone()))
+        self.subscriber_for(&["infra_postgres::observe", "health"])
+    }
+
+    fn subscriber_for(&self, targets: &'static [&'static str]) -> tracing::Dispatch {
+        let filter =
+            tracing_subscriber::filter::filter_fn(move |meta| targets.contains(&meta.target()));
+        tracing::Dispatch::new(
+            tracing_subscriber::Registry::default()
+                .with(self.clone())
+                .with(filter),
+        )
     }
 
     fn take(&self) -> Vec<EventFields> {
@@ -62,12 +72,6 @@ where
         event: &tracing::Event<'_>,
         _context: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if !matches!(
-            event.metadata().target(),
-            "infra_postgres::observe" | "health"
-        ) {
-            return;
-        }
         let mut fields = EventFields::new();
         event.record(
             &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
@@ -553,11 +557,26 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
             })
             .await
         });
-        tokio::select! {
-            result = &mut pending => panic!("{boundary} completed before its held reply: {result:?}"),
-            () = proxy.silenced() => {}
+        let events = PoolEvents::default();
+        async {
+            tokio::select! {
+                result = &mut pending => panic!("{boundary} completed before its held reply: {result:?}"),
+                () = proxy.silenced() => {}
+            }
+            drop(pending);
         }
-        drop(pending);
+        .with_subscriber(events.subscriber())
+        .await;
+        let events = events.take();
+        let mut cancellations = events
+            .iter()
+            .filter(|event| event["message"] == "postgres_transaction_cancelled");
+        if boundary == "commit" {
+            let event = cancellations.next().expect("cancelled COMMIT diagnostic");
+            assert_eq!(event["phase"], "\"commit\"");
+            assert_eq!(event["commit_outcome"], "\"unknown\"");
+        }
+        assert!(cancellations.next().is_none(), "{boundary}: {events:?}");
 
         wait_for_slot_reclamation(&ours).await;
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -1584,6 +1603,81 @@ async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool:
         !exists,
         "history admission must not create migration bookkeeping"
     );
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn history_refusals_identify_permissions_deadlines_and_divergent_versions(pool: PgPool) {
+    let events = PoolEvents::default();
+    let subscriber = events.subscriber_for(&["migrate::history"]);
+    let restricted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .options([("role", "pg_read_all_settings")]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        migrate::verify_history(&restricted)
+            .with_subscriber(subscriber.clone())
+            .await,
+        Err(HistoryError::Unavailable)
+    );
+    restricted.close().await;
+
+    let mut lock = sqlx::PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
+    let mut tx = lock.begin().await.unwrap();
+    tx.execute("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    assert_eq!(
+        migrate::verify_history(&pool)
+            .with_subscriber(subscriber.clone())
+            .await,
+        Err(HistoryError::Unavailable)
+    );
+    tx.rollback().await.unwrap();
+
+    let captured = events.take();
+    let [permission, deadline] = captured.as_slice() else {
+        panic!("unexpected history diagnostics: {captured:?}");
+    };
+    for event in [permission, deadline] {
+        assert_eq!(event["message"], "postgres_history_refused");
+        assert_eq!(event["stage"], "\"read\"");
+    }
+    assert_eq!(permission["cause"], "\"database\"");
+    assert_eq!(permission["sqlstate"], "\"42501\"");
+    assert_eq!(permission.len(), 4);
+    assert_eq!(deadline["cause"], "\"deadline\"");
+    assert_eq!(deadline.len(), 3);
+
+    if let Some(first) = MIGRATOR.iter().next() {
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ''::bytea WHERE version = $1")
+            .bind(first.version)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            migrate::verify_history(&pool)
+                .with_subscriber(subscriber)
+                .await,
+            Err(HistoryError::Mismatch)
+        );
+        let captured = events.take();
+        let [event] = captured.as_slice() else {
+            panic!("unexpected history diagnostics: {captured:?}");
+        };
+        assert_eq!(event["message"], "postgres_history_refused");
+        assert_eq!(event["stage"], "\"compare\"");
+        assert_eq!(event["cause"], "\"checksum_mismatch\"");
+        assert_eq!(event["migration.version"], first.version.to_string());
+        assert_eq!(event.len(), 4);
+    }
 }
 
 #[sqlx::test(migrations = false)]
