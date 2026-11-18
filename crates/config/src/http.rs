@@ -9,7 +9,7 @@ use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
-    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
+    connection_count_range, in_flight_range, validate_request_timeout,
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
@@ -224,20 +224,12 @@ impl<Propagation> HttpFields<Propagation> {
             self.header_read_timeout,
             Duration::from_millis(100)..=Duration::from_mins(15),
         ));
-        let request_timeout_ok =
-            request_timeout_range("http.request_timeout", self.request_timeout);
-        let request_timeout_in_range = request_timeout_ok.is_ok();
-        v.check(request_timeout_ok);
-        if let Some(drain_budget) = drain_budget
-            && request_timeout_in_range
-        {
-            v.check(request_budget_fits_drain(
-                "http.request_timeout",
-                self.request_timeout,
-                drain_budget,
-                "requests",
-            ));
-        }
+        v.check(validate_request_timeout(
+            "http.request_timeout",
+            self.request_timeout,
+            drain_budget,
+            "requests",
+        ));
         v.check(int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),

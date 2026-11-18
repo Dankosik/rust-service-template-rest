@@ -183,18 +183,19 @@ impl ObjectStorageInput {
             ProviderKind::AmazonS3 => self.admit_amazon_s3(v),
             ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(v),
             ProviderKind::Railway => self
-                .admit_endpoint_provider(false, v)
+                .admit_endpoint_provider(v)
                 .map(|(endpoint, region)| ObjectStorageProvider::Railway { endpoint, region }),
             ProviderKind::S3Compatible => {
-                self.admit_endpoint_provider(true, v)
-                    .map(|(endpoint, region)| ObjectStorageProvider::S3Compatible {
+                self.admit_endpoint_provider(v).map(|(endpoint, region)| {
+                    ObjectStorageProvider::S3Compatible {
                         endpoint,
                         region,
                         path_style: self.path_style,
-                    })
+                    }
+                })
             }
             ProviderKind::Local => self
-                .admit_endpoint_provider(false, v)
+                .admit_endpoint_provider(v)
                 .map(|(endpoint, region)| ObjectStorageProvider::Local { endpoint, region }),
         };
         let bucket = v.take(non_blank("object_storage.bucket", &self.bucket));
@@ -253,12 +254,11 @@ impl ObjectStorageInput {
 
     fn admit_endpoint_provider(
         &self,
-        accepts_path_style: bool,
         v: &mut Violations,
     ) -> Result<(String, Option<String>), Rejected> {
         let endpoint = required_text(v, "object_storage.endpoint", &self.endpoint);
         let owner = self.refuse_owner(v);
-        let path_style = if accepts_path_style {
+        let path_style = if self.provider == ProviderKind::S3Compatible {
             Ok(())
         } else {
             self.refuse_path_style(v)

@@ -89,20 +89,16 @@ impl ServiceAuthInput {
                         "must be jwt when grpc.enabled is true unless app.allow_insecure_development is enabled",
                     ));
                 }
-                for (key, present) in [
-                    ("service_auth.name", self.name.is_some()),
-                    ("service_auth.jwt_type", self.jwt_type.is_some()),
-                    ("service_auth.trust", self.trust.is_some()),
-                    ("service_auth.key_id", self.key_id.is_some()),
-                    ("service_auth.private_key", self.private_key.is_some()),
-                ] {
-                    if present {
-                        v.reject(ValidationError::new(
-                            key,
-                            "is only valid when service_auth.mode = jwt",
-                        ));
-                    }
-                }
+                v.reject_present(
+                    &[
+                        ("service_auth.name", self.name.is_some()),
+                        ("service_auth.jwt_type", self.jwt_type.is_some()),
+                        ("service_auth.trust", self.trust.is_some()),
+                        ("service_auth.key_id", self.key_id.is_some()),
+                        ("service_auth.private_key", self.private_key.is_some()),
+                    ],
+                    "is only valid when service_auth.mode = jwt",
+                );
                 Ok(ServiceAuthConfig::None)
             }
             ServiceAuthMode::Jwt => {

@@ -79,6 +79,18 @@ impl Violations {
         Rejected(())
     }
 
+    #[allow(
+        dead_code,
+        reason = "only authentication profiles reject fields by mode"
+    )]
+    pub(crate) fn reject_present(&mut self, fields: &[(&str, bool)], message: &str) {
+        for &(key, present) in fields {
+            if present {
+                self.reject(ValidationError::new(key, message));
+            }
+        }
+    }
+
     pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
         match admitted {
             Ok(value) if self.0.is_empty() => Ok(value),

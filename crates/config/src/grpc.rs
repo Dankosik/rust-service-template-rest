@@ -10,7 +10,7 @@ use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
-    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
+    connection_count_range, in_flight_range, validate_request_timeout,
 };
 use crate::validate::{Rejected, ValidationError, Violations, required};
 
@@ -98,17 +98,12 @@ impl GrpcInput {
     }
 
     fn check_limits(&self, drain_budget: Option<Duration>, violations: &mut Violations) {
-        let timeout = request_timeout_range("grpc.request_timeout", self.request_timeout);
-        let timeout_in_range = timeout.is_ok();
-        violations.check(timeout);
-        if timeout_in_range && let Some(drain_budget) = drain_budget {
-            violations.check(request_budget_fits_drain(
-                "grpc.request_timeout",
-                self.request_timeout,
-                drain_budget,
-                "calls",
-            ));
-        }
+        violations.check(validate_request_timeout(
+            "grpc.request_timeout",
+            self.request_timeout,
+            drain_budget,
+            "calls",
+        ));
         violations.check(admission_wait_range(
             "grpc.admission_wait",
             self.admission_wait,
