@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use backon::BackoffBuilder;
+use futures_util::future::BoxFuture;
 use futures_util::stream::StreamExt;
 use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -101,7 +102,7 @@ impl Generation {
 
 struct AbandonedReply {
     reservation: OwnedSemaphorePermit,
-    reply: Pin<Box<dyn Future<Output = ()> + Send>>,
+    reply: BoxFuture<'static, ()>,
 }
 
 impl AbandonedReply {
@@ -111,7 +112,7 @@ impl AbandonedReply {
     }
 }
 
-type QueryFuture<T> = Pin<Box<dyn Future<Output = redis::RedisResult<T>> + Send>>;
+type QueryFuture<T> = BoxFuture<'static, redis::RedisResult<T>>;
 
 struct Exchange<'a, T: Send + 'static> {
     generation: &'a Generation,

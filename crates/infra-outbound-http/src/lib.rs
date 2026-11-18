@@ -121,7 +121,10 @@ impl Client {
 
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        let origin = policy::admit_origin(origin)?;
+        Self::with_default_transport(policy::admit_origin(origin)?, limits)
+    }
+
+    fn with_default_transport(origin: policy::Origin, limits: Limits) -> Result<Self, BuildError> {
         Ok(Self::from_origin(
             origin,
             limits,
@@ -154,13 +157,7 @@ impl Client {
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        let origin = policy::admit_test_http_origin(origin)?;
-        Ok(Self::from_origin(
-            origin,
-            limits,
-            transport::tls_config()?.clone(),
-            transport::Resolver::new(),
-        ))
+        Self::with_default_transport(policy::admit_test_http_origin(origin)?, limits)
     }
 
     pub async fn execute(

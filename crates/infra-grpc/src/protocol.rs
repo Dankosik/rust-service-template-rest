@@ -3,10 +3,6 @@ use std::time::Duration;
 use http::{HeaderMap, HeaderName};
 
 pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
-pub(crate) const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
-pub(crate) const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
-pub(crate) const GRPC_STATUS_DETAILS: HeaderName =
-    HeaderName::from_static("grpc-status-details-bin");
 
 pub(crate) use shared_rules::grpc::split_method_path;
 
@@ -51,7 +47,7 @@ pub(crate) fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
 
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
-        .get(GRPC_STATUS)
+        .get(tonic::Status::GRPC_STATUS)
         .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 

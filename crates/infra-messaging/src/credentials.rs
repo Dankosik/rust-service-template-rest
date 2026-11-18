@@ -7,6 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
 
 const CREDENTIALS_FILE_BYTES: usize = 1024 * 1024;
+const CHALLENGES_METRIC: &str = "messaging_credentials_file_challenges_total";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
@@ -20,7 +21,7 @@ pub(crate) fn describe_metrics() {
     use metrics::describe_counter;
 
     describe_counter!(
-        "messaging_credentials_file_challenges_total",
+        CHALLENGES_METRIC,
         "Completed file-backed JWT/signature challenge preparations; not broker authentication."
     );
 }
@@ -31,7 +32,8 @@ impl CredentialsFileError {
             Self::Unreadable(_) => "unreadable",
             Self::Malformed => "malformed",
         };
-        metrics::counter!("messaging_credentials_file_challenges_total", "outcome" => "failed", "reason" => reason).increment(1);
+        metrics::counter!(CHALLENGES_METRIC, "outcome" => "failed", "reason" => reason)
+            .increment(1);
     }
 
     pub(crate) const fn error_type(self) -> &'static str {
@@ -93,7 +95,8 @@ impl CredentialsFile {
         let mut auth = async_nats::Auth::new();
         auth.jwt = Some(jwt);
         auth.signature = Some(signature);
-        metrics::counter!("messaging_credentials_file_challenges_total", "outcome" => "prepared", "reason" => "none").increment(1);
+        metrics::counter!(CHALLENGES_METRIC, "outcome" => "prepared", "reason" => "none")
+            .increment(1);
         Ok(auth)
     }
 }
