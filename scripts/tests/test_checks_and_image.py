@@ -114,6 +114,7 @@ class MakeGateTests(unittest.TestCase):
         static_path = "/v1/widgets/latest"
         ordinary_post = {"post": operation(replay=False)}
         ordinary_get = {"get": {"responses": {"200": {"description": "Found"}}}}
+        deprecated = {"post": {**operation(), "deprecated": True}}
         catchall_path = "/v1/widgets/{*rest}"
         detail_path = "/v1/widgets/{id}/details"
         static_detail = "/v1/widgets/latest/details"
@@ -182,6 +183,36 @@ class MakeGateTests(unittest.TestCase):
                     overlapping_dynamic: ordinary_get,
                 },
                 f"{overlapping_dynamic} would take precedence over POST /v1/widgets/{{id}}/{{action}}",
+            ),
+            (
+                "retiring a static route exposes an ordinary POST handler",
+                {static_path: deprecated, path: ordinary_post},
+                {path: ordinary_post},
+                f"removing POST {static_path} would route retries to {path}",
+            ),
+            (
+                "retiring a static route exposes a different idempotent operation",
+                {static_path: deprecated, path: changed},
+                {path: changed},
+                f"removing POST {static_path} would route retries to {path}",
+            ),
+            (
+                "retaining a GET at the retired POST path prevents a fallback POST",
+                {static_path: deprecated, path: ordinary_post},
+                {static_path: ordinary_get, path: ordinary_post},
+                None,
+            ),
+            (
+                "retained prefixed GET takes precedence over a fallback POST",
+                {static_path: deprecated, path: ordinary_post, "/v1/widgets/late{suffix}": ordinary_get},
+                {path: ordinary_post, "/v1/widgets/late{suffix}": ordinary_get},
+                None,
+            ),
+            (
+                "retiring a disjoint route preserves the release policy",
+                {static_path: deprecated, detail_path: ordinary_post},
+                {detail_path: ordinary_post},
+                None,
             ),
             (
                 "unrelated operation",

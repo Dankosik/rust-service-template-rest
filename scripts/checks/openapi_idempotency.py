@@ -53,6 +53,11 @@ def intersection(left: Route, right: Route) -> Route | None:
     return tuple(common) if len(left) == len(right) else None
 
 
+def exposed_overlap(left: Route, right: Route, shadows: list[Route]) -> bool:
+    overlap = intersection(left, right)
+    return overlap is not None and all(intersection(overlap, shadow) != overlap for shadow in shadows)
+
+
 def resolve(document: dict, item: dict) -> dict:
     references = set()
     while "$ref" in item:
@@ -113,6 +118,7 @@ def main() -> int:
     result = 0
     added_routes = sorted(after.keys() - before.keys(), key=lambda route: after[route][0])
     before_priorities = {route: route_priority(route) for route in before}
+    after_priorities = {route: route_priority(route) for route in after}
     for route, (path, before_operations) in before.items():
         protected = [method for method, headers in before_operations.items() if headers is not None]
         if not protected:
@@ -120,10 +126,7 @@ def main() -> int:
         priority = before_priorities[route]
         existing_shadows = [previous for previous, rank in before_priorities.items() if rank > priority]
         for added_route in added_routes:
-            if route_priority(added_route) <= priority:
-                continue
-            overlap = intersection(route, added_route)
-            if overlap is None or any(intersection(overlap, previous) == overlap for previous in existing_shadows):
+            if after_priorities[added_route] <= priority or not exposed_overlap(route, added_route, existing_shadows):
                 continue
             affected = ", ".join(method.upper() for method in protected)
             print(
@@ -132,7 +135,24 @@ def main() -> int:
                 file=sys.stderr,
             )
             result = 1
-        after_operations = after.get(route, ("", {}))[1]
+        if route not in after:
+            for fallback, (fallback_path, operations) in after.items():
+                methods = [method.upper() for method in protected if method in operations]
+                fallback_priority = after_priorities[fallback]
+                if not methods or fallback_priority >= priority:
+                    continue
+                candidate_shadows = [other for other, rank in after_priorities.items() if rank > fallback_priority]
+                if not exposed_overlap(route, fallback, existing_shadows + candidate_shadows):
+                    continue
+                affected = ", ".join(methods)
+                print(
+                    f"openapi-idempotency: removing {affected} {path} would route retries to {fallback_path}. "
+                    "Preserve the idempotent route or move the fallback to a disjoint path.",
+                    file=sys.stderr,
+                )
+                result = 1
+            continue
+        after_operations = after[route][1]
         for method in protected:
             old_headers = before_operations[method]
             if method not in after_operations or old_headers == after_operations[method]:
