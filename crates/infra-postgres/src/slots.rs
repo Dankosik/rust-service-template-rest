@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,15 +80,9 @@ impl Slots {
             }
             (id, granted)
         };
-        let mut wait = Wait {
-            slots: self,
-            queue,
-            id,
-            granted,
-            pending: true,
-        };
-        let _ = (&mut wait.granted).await;
-        wait.pending = false;
+        let mut wait = DropGuard::new(granted, |_receiver| self.cancel_wait(queue, id));
+        let _ = (&mut *wait).await;
+        let _receiver = DropGuard::dismiss(wait);
         Slot(Arc::clone(self))
     }
 
@@ -120,27 +115,14 @@ impl Slots {
             }
         }
     }
-}
 
-struct Wait<'a> {
-    slots: &'a Slots,
-    queue: Queue,
-    id: u64,
-    granted: oneshot::Receiver<()>,
-    pending: bool,
-}
-
-impl Drop for Wait<'_> {
-    fn drop(&mut self) {
-        if !self.pending {
-            return;
-        }
+    fn cancel_wait(&self, queue: Queue, id: u64) {
         let queued = {
-            let mut state = self.slots.state.lock();
-            match self.queue {
-                Queue::Probe => state.probes.remove(&self.id).is_some(),
+            let mut state = self.state.lock();
+            match queue {
+                Queue::Probe => state.probes.remove(&id).is_some(),
                 Queue::Regular => {
-                    let queued = state.regular_waiters.remove(&self.id).is_some();
+                    let queued = state.regular_waiters.remove(&id).is_some();
                     if state.regular_waiters.is_empty() {
                         state.regular_waiters_since = None;
                     }
@@ -149,7 +131,7 @@ impl Drop for Wait<'_> {
             }
         };
         if !queued {
-            self.slots.release();
+            self.release();
         }
     }
 }

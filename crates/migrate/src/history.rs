@@ -50,7 +50,6 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     };
     let history = match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
         Ok(Ok(HistoryRead::History(history))) => history,
-        Ok(Ok(HistoryRead::Missing)) => Vec::new(),
         Ok(Ok(HistoryRead::NotVisible)) => {
             return Err(HistoryError::NotVisible.report(stage, "not_visible", None, None));
         }
@@ -86,7 +85,6 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
 
 enum HistoryRead {
     History(Vec<AppliedMigration>),
-    Missing,
     NotVisible,
 }
 
@@ -97,7 +95,7 @@ async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRea
             if history_table_exists_elsewhere(conn, table).await? {
                 Ok(HistoryRead::NotVisible)
             } else {
-                Ok(HistoryRead::Missing)
+                Ok(HistoryRead::History(Vec::new()))
             }
         }
         Err(error) => Err(error),

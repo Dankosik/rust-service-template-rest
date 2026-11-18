@@ -150,25 +150,18 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
         apply_pending(&mut conn, migrator, options, deadline_at, &mut report),
     )
     .await;
-    match outcome {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(RunFailure { error, report }),
-        Err(_) => {
-            return Err(RunFailure {
-                error: RunError::Deadline(options.deadline),
-                report,
-            });
-        }
+    if let Err(error) = outcome.unwrap_or(Err(RunError::Deadline(options.deadline))) {
+        return Err(RunFailure { error, report });
     }
     drop(tokio::time::timeout_at(deadline_at, conn.close()).await);
     Ok(report)
 }
 
-fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
+fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunError> {
     tokio::time::Instant::now()
         .checked_add(budget)
         .filter(|deadline| deadline.checked_add(Duration::from_millis(1)).is_some())
-        .ok_or_else(|| RunError::InvalidDeadline(budget).into())
+        .ok_or(RunError::InvalidDeadline(budget))
 }
 
 async fn apply_pending(
