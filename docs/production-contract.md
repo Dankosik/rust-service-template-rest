@@ -62,6 +62,13 @@ unable to serve, and budget every downstream deadline inside
   requests first sent under the earlier promise until that window expires.
 <!-- template:end http-idempotency:production-contract-retry-window -->
 <!-- template:begin inbound-webhooks:production-contract-receipt-recovery -->
+- In the PR that adds the service's first inbound webhook handler, include
+  tests for business duplicates and out-of-order events. Deliver the same
+  business operation with two distinct `webhook-id` values and assert that
+  its business effect occurs once. Deliver two events for the same entity in
+  reverse order and assert the expected business result. For versioned state,
+  verify that the older event cannot overwrite the newer state. For
+  order-independent operations, verify the same expected result in both orders.
 - Before relying on a late webhook redelivery, retire every receiver running
   the old 14-day receipt cleanup, including rollback replicas and scheduled
   maintenance. Receipts that still exist protect their delivery IDs. Reconcile
