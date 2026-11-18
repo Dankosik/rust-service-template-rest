@@ -27,6 +27,11 @@ A receiver can accept a message even when the sender loses its acknowledgement.
 The worker therefore retries with the same `webhook-id`. When a receiver reports
 repeated deliveries, correlate that ID before replaying or applying its effect again.
 
+- **Endpoint ownership.** Assign a new `endpoint_id` when a different partner
+  or tenant takes ownership of a destination. Keep the ID when the same owner
+  changes its URL or rotates its key. Never reassign a retired ID. Queued
+  deliveries and manually redriven jobs use the current URL for their stored
+  ID and could send the former owner's data to the new recipient.
 - **Successful acknowledgement.** The final HTTP headers carry the receiver's
   acknowledgement. A `2xx` completes the exchange without waiting for reply
   content, which could stall or cause a duplicate delivery. A lost final
