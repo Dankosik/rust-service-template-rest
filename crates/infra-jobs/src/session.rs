@@ -22,10 +22,7 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
         observed(
             "check jobs session",
-            sqlx::query!("SELECT current_setting('server_encoding') AS \"server_encoding!\", \
-     NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", \
-     current_setting('default_transaction_isolation') = 'read committed' AS \"read_committed!\"")
-            .fetch_one(&mut *connection),
+            infra_postgres::session_properties(&mut connection),
         )
         .await
     };

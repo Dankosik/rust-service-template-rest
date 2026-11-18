@@ -123,8 +123,9 @@ session_budgets = "startup"
 # template:end object-storage:local-config
 
 # template:begin service-auth:local-config
-# This file opts in to running gRPC without service tokens. To enable JWTs,
-# select mode = "jwt" and supply the signing key through the environment:
+# This file opts in to running gRPC without service tokens. For JWTs, select
+# mode = "jwt" and configure grpc.security = "tls" with a certificate and TLS
+# private key. Supply the service signing key through the environment or --secrets-dir:
 #   APP__SERVICE_AUTH__PRIVATE_KEY="$(cat example.pem)"
 # [service_auth]
 # mode = "jwt"

@@ -443,7 +443,7 @@ fn spawn_snapshot_caller(
 async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     let note = Note {
-        text: "kept".to_owned(),
+        text: "zero:\0 and literal:\\u0000".to_owned(),
     };
     let expected = serde_json::to_value(&note).expect("payload JSON");
     let id = in_tx(&jobs, async |tx| -> Result<JobId, AttemptError> {
@@ -468,6 +468,8 @@ async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) 
     assert_eq!(row.id_text, id.to_string());
     assert_eq!(row.kind, Note::NAME);
     assert_eq!(row.payload, expected);
+    let decoded: Note = serde_json::from_value(row.payload).expect("typed payload");
+    assert_eq!(decoded.text, note.text);
     assert!(row.unique_key_is_null);
     assert_eq!(row.state, "pending");
     assert_eq!(row.attempts, 0);
@@ -554,7 +556,21 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e2_an_open_transaction_hides_the_job_until_commit(pool: PgPool) {
+    #[derive(Debug, Serialize, Deserialize)]
+    struct WakeOnCommit;
+    impl JobKind for WakeOnCommit {
+        const NAME: &'static str = "test.wake.on.commit";
+    }
+
     let jobs = open(&pool, 1).await;
+    let mut listener = PgListener::connect_with(&pool).await.unwrap();
+    listener.listen("background_jobs").await.unwrap();
+    let rolled_back = in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        let _ = enqueue(tx, &WakeOnCommit, EnqueueOptions::default()).await?;
+        Err(AttemptError::Rejected)
+    })
+    .await;
+    std::assert_matches!(rolled_back, Err(AttemptError::Rejected));
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let (id, ()) = tokio::join!(
@@ -563,16 +579,7 @@ async fn e2_an_open_transaction_hides_the_job_until_commit(pool: PgPool) {
                 let entered = Arc::clone(&entered);
                 let release = Arc::clone(&release);
                 async move |tx| -> Result<JobId, AttemptError> {
-                    let id = created(
-                        enqueue(
-                            tx,
-                            &Note {
-                                text: "hidden".to_owned(),
-                            },
-                            EnqueueOptions::default(),
-                        )
-                        .await?,
-                    );
+                    let id = created(enqueue(tx, &WakeOnCommit, EnqueueOptions::default()).await?);
                     entered.notify_one();
                     release.notified().await;
                     Ok(id)
@@ -584,12 +591,113 @@ async fn e2_an_open_transaction_hides_the_job_until_commit(pool: PgPool) {
         async {
             entered.notified().await;
             assert_eq!(super::job_count(&pool).await, 0);
+            sqlx::query("SELECT pg_notify('background_jobs', 'before_commit')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let next = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(next.payload(), "before_commit");
             release.notify_one();
         },
     );
     let id_text = id.to_string();
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(visible(&pool, &id_text).await);
+    let next = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.payload(), WakeOnCommit::NAME);
+    super::close_pools(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn denied_notify_preserves_the_business_receipt_and_connection(pool: PgPool) {
+    #[derive(Debug, Serialize, Deserialize)]
+    struct DeniedWake;
+    impl JobKind for DeniedWake {
+        const NAME: &'static str = "test.wake.denied";
+    }
+
+    let jobs = open(&pool, 1).await;
+    sqlx::raw_sql(
+        "CREATE TABLE business_acceptance (job_id text PRIMARY KEY); \
+         GRANT SELECT ON background_jobs TO pg_write_all_data; \
+         REVOKE EXECUTE ON FUNCTION pg_catalog.pg_notify(text, text) FROM PUBLIC",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SET ROLE pg_write_all_data")
+        .execute(&jobs)
+        .await
+        .unwrap();
+    let denied = sqlx::query("SELECT pg_catalog.pg_notify('background_jobs', 'control')")
+        .execute(&jobs)
+        .await
+        .unwrap_err();
+    assert_eq!(super::sqlstate(&denied).as_deref(), Some("42501"));
+
+    let id = in_tx(&jobs, async |tx| -> Result<JobId, AttemptError> {
+        let id = created(enqueue(tx, &DeniedWake, EnqueueOptions::default()).await?);
+        sqlx::query("INSERT INTO business_acceptance VALUES ($1)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        Ok(id)
+    })
+    .await
+    .expect("business write and enqueue commit");
+    assert!(visible(&jobs, &id.to_string()).await);
+    let role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&jobs)
+        .await
+        .unwrap();
+    assert_eq!(role, "pg_write_all_data");
+    let accepted: String = sqlx::query_scalar("SELECT job_id FROM business_acceptance")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(accepted, id.to_string());
+    assert!(visible(&pool, &accepted).await);
+    super::close_pools(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn polling_only_producer_commits_without_sending_a_notification(pool: PgPool) {
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PollOnly;
+    impl JobKind for PollOnly {
+        const NAME: &'static str = "test.wake.poll.only";
+    }
+
+    let jobs = infra_postgres::prepare_pool_with_notifications(
+        &dsn_for(&pool).await,
+        &infra_postgres::PoolOptions {
+            max_connections: std::num::NonZeroU32::MIN,
+            application_name: "polling-producer",
+            default_isolation: Isolation::ReadCommitted,
+            session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+            wait_order: infra_postgres::WaitOrder::Arrival,
+        },
+        false,
+    );
+    let mut listener = PgListener::connect_with(&pool).await.unwrap();
+    listener.listen("background_jobs").await.unwrap();
+    let id = created(write(&jobs, Isolation::ReadCommitted, &PollOnly, None).await);
+    sqlx::query("SELECT pg_notify('background_jobs', 'after_enqueue')")
+        .execute(&jobs)
+        .await
+        .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.payload(), "after_enqueue");
+    assert!(visible(&pool, &id.to_string()).await);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -641,12 +749,6 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
             |err| {
                 matches!(err, EnqueueError::PayloadTooLarge { bytes } if *bytes > MAX_PAYLOAD_BYTES)
             },
-        );
-        still_usable(tx).await;
-        refused(
-            enqueue(tx, &Raw("\0".to_owned()), EnqueueOptions::default()).await,
-            "PayloadContainsNul",
-            |err| matches!(err, EnqueueError::PayloadContainsNul),
         );
         still_usable(tx).await;
         refused(

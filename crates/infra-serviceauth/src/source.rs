@@ -83,7 +83,11 @@ impl TokenSource {
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
 
-    pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
+    pub fn receiver(
+        &self,
+        receiver: &str,
+        origin: http::Uri,
+    ) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let state = match &self.0 {
             Signing::Disabled => ReceiverState::Disabled(audience),
@@ -91,6 +95,7 @@ impl TokenSource {
             Signing::Key(signer) => ReceiverState::Active(Arc::new(ActiveReceiver {
                 signer: Arc::clone(signer),
                 audience,
+                origin,
                 cached: ArcSwapOption::empty(),
                 refresh: Mutex::new(()),
             })),
@@ -111,6 +116,7 @@ enum ReceiverState {
 struct ActiveReceiver {
     signer: Arc<Signer>,
     audience: ServiceName,
+    origin: http::Uri,
     cached: ArcSwapOption<Cached>,
     refresh: Mutex<()>,
 }
@@ -135,6 +141,14 @@ impl fmt::Debug for ReceiverTokens {
 }
 
 impl ReceiverTokens {
+    #[must_use]
+    pub fn signing_origin(&self) -> Option<&http::Uri> {
+        match &self.0 {
+            ReceiverState::Active(active) => Some(&active.origin),
+            ReceiverState::Disabled(_) => None,
+        }
+    }
+
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
         let ReceiverState::Active(active) = &self.0 else {
             return Ok(None);
@@ -214,6 +228,10 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    fn origin() -> http::Uri {
+        http::Uri::from_static("https://private-service.example")
+    }
+
     fn options(key: &TestKey) -> SigningOptions {
         SigningOptions {
             name: ServiceName::parse("orders").unwrap(),
@@ -243,7 +261,7 @@ mod tests {
     fn signed_tokens_meet_the_contract_the_receiver_verifies() {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
-        let catalog = source.receiver("catalog").unwrap();
+        let catalog = source.receiver("catalog", origin()).unwrap();
         let header = at(&catalog, NOW);
         assert!(header.is_sensitive());
         let token = token(&header);
@@ -287,13 +305,13 @@ mod tests {
     fn a_handle_reuses_its_token_for_half_its_lifetime() {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
-        let catalog = source.receiver("catalog").unwrap();
+        let catalog = source.receiver("catalog", origin()).unwrap();
         let first = at(&catalog, NOW);
         let shared = catalog.clone();
         assert_eq!(at(&shared, NOW + 29), first);
-        let inventory = source.receiver("inventory").unwrap();
+        let inventory = source.receiver("inventory", origin()).unwrap();
         assert_ne!(at(&inventory, NOW + 29), first);
-        let another_catalog = source.receiver("catalog").unwrap();
+        let another_catalog = source.receiver("catalog", origin()).unwrap();
         assert_ne!(at(&another_catalog, NOW + 29), first);
         assert_eq!(at(&catalog, NOW + 29), first);
         let renewed = at(&catalog, NOW + 30);
@@ -314,21 +332,27 @@ mod tests {
         );
         let source = TokenSource::try_new(options(&key)).unwrap();
         assert_eq!(
-            source.receiver("Catalog").unwrap_err(),
+            source.receiver("Catalog", origin()).unwrap_err(),
             SigningError::InvalidReceiver
         );
         assert_eq!(
-            TokenSource::without_key().receiver("catalog").unwrap_err(),
+            TokenSource::without_key()
+                .receiver("catalog", origin())
+                .unwrap_err(),
             SigningError::NoSigningKey
         );
-        let disabled = TokenSource::disabled().receiver("catalog").unwrap();
+        let disabled = TokenSource::disabled()
+            .receiver("catalog", origin())
+            .unwrap();
         assert_eq!(disabled.authorization(), Ok(None));
         assert!(format!("{disabled:?}").contains("catalog"));
         assert_eq!(
-            TokenSource::disabled().receiver("Catalog").unwrap_err(),
+            TokenSource::disabled()
+                .receiver("Catalog", origin())
+                .unwrap_err(),
             SigningError::InvalidReceiver
         );
-        let catalog = source.receiver("catalog").unwrap();
+        let catalog = source.receiver("catalog", origin()).unwrap();
         assert!(catalog.authorization().unwrap().is_some());
         for debug in [
             format!("{source:?}"),

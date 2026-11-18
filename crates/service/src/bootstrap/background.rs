@@ -21,10 +21,11 @@ impl BackgroundRegistration<'_> {
     pub fn service_tokens(
         &mut self,
         registration: impl Into<std::sync::Arc<infra_oauth2_client_credentials::Registration>>,
-        target: infra_oauth2_client_credentials::TokenTarget,
+        target: infra_oauth2_client_credentials::ServiceTokenTarget,
+        origin: axum::http::Uri,
     ) -> infra_oauth2_client_credentials::ServiceTokens {
         let registration = registration.into();
-        let (tokens, driver) = registration.service_tokens(target);
+        let (tokens, driver) = registration.service_tokens(target, origin);
         let owner = tokens.clone();
         let stop = self.background.child_token();
         self.background.spawn("oauth_token_refresh", async move {

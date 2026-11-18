@@ -18,8 +18,8 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Authentication, Caller, Error, Limits, Services, require_caller, server_options};
-use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server};
-use infra_outbound_grpc::{Client, ClientSecurity};
+use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, now_secs, registry},
@@ -158,12 +158,17 @@ fn readiness() -> health::ReadinessControl {
     .control()
 }
 
-fn echo_services(echo: &Echo) -> Services {
+fn described_echo(echo: &Echo) -> Services {
     let mut services = Services::new();
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .unwrap();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    services
+}
+
+fn echo_services(echo: &Echo) -> Services {
+    let mut services = described_echo(echo);
     for method in ["Unary", "ClientStream", "BidiStream"] {
         services
             .allow_callers(&format!("{ECHO}/{method}"), &["orders"])
@@ -182,20 +187,47 @@ fn serve(services: Services, authentication: Authentication) -> (Server, SocketA
         max_connections: NonZeroU32::new(64),
         max_connection_age: None,
     });
-    let server = app.serve(listener, options, None);
+    let material = certificate();
+    let config = infra_grpc::server_tls_config(infra_grpc::ServerTlsMaterial {
+        certificate_pem: &material.cert_pem,
+        private_key_pem: &material.key_pem.clone().into(),
+        client_ca_pem: None,
+    })
+    .unwrap();
+    let server = app
+        .serve(
+            listener,
+            options,
+            Some(TlsOptions {
+                config,
+                handshake_timeout: Duration::from_secs(5),
+            }),
+        )
+        .unwrap();
     let address = server.local_addr();
     (server, address)
 }
 
-fn client(address: SocketAddr) -> EchoServiceClient<Client> {
-    EchoServiceClient::new(
-        Client::try_new(
-            &format!("http://{address}"),
-            ClientSecurity::Plaintext,
-            Duration::from_secs(10),
-        )
-        .unwrap(),
+fn certificate() -> &'static tls_test_support::TlsMaterial {
+    static MATERIAL: std::sync::OnceLock<tls_test_support::TlsMaterial> =
+        std::sync::OnceLock::new();
+    MATERIAL.get_or_init(|| tls_test_support::TlsMaterial::new("127.0.0.1"))
+}
+
+fn resource(address: SocketAddr) -> Client {
+    Client::try_new(
+        &format!("https://{address}"),
+        ClientSecurity::Tls(ClientTlsMaterial {
+            ca_certificate_pem: Some(certificate().root_pem.clone()),
+            identity: None,
+        }),
+        Duration::from_secs(10),
     )
+    .unwrap()
+}
+
+fn client(address: SocketAddr) -> EchoServiceClient<Client> {
+    EchoServiceClient::new(resource(address))
 }
 
 fn with_token<T>(message: T, token: Option<&str>) -> Request<T> {
@@ -228,13 +260,7 @@ async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
             frame.freeze(),
         )))
         .unwrap();
-    let client = Client::try_new(
-        &format!("http://{address}"),
-        ClientSecurity::Plaintext,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    let response = client.oneshot(request).await.unwrap();
+    let response = resource(address).oneshot(request).await.unwrap();
     response
         .headers()
         .get("grpc-status")
@@ -274,10 +300,19 @@ fn a_handler_requiring_a_caller_reports_a_missing_identity_as_internal() {
 async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let keys = Keys::new();
     let echo = Echo::default();
-    let (server, address) = serve(
-        echo_services(&echo),
-        Authentication::ServiceTokens(keys.verifier()),
-    );
+    #[allow(
+        unused_mut,
+        reason = "the bearer profile adds explicit empty scope rules"
+    )]
+    let mut services = echo_services(&echo);
+    // template:begin authn:grpc-service-auth-test-empty-scope-rules
+    for method in ["Unary", "ServerStream"] {
+        services
+            .require_scopes(&format!("{ECHO}/{method}"), &[])
+            .unwrap();
+    }
+    // template:end authn:grpc-service-auth-test-empty-scope-rules
+    let (server, address) = serve(services, Authentication::ServiceTokens(keys.verifier()));
 
     let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
     let admitted = client(address)
@@ -345,16 +380,12 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         private_key: keys.orders.pem().into(),
     })
     .unwrap();
-    let resource = || {
-        Client::try_new(
-            &format!("http://{address}"),
-            ClientSecurity::Plaintext,
-            Duration::from_secs(10),
-        )
-        .unwrap()
+    let origin: http::Uri = format!("https://{address}").parse().unwrap();
+    let bound = |source: &TokenSource, receiver| {
+        let tokens = source.receiver(receiver, origin.clone()).unwrap();
+        EchoServiceClient::new(resource(address).with_service_tokens(tokens).unwrap())
     };
-    let mut catalog =
-        EchoServiceClient::new(resource().with_service_tokens(source.receiver("catalog").unwrap()));
+    let mut catalog = bound(&source, "catalog");
     for _ in 0..2 {
         let response = catalog
             .unary(UnaryRequest {
@@ -365,8 +396,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         assert_eq!(response.into_inner().message, "signed");
     }
     assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
-    let mut elsewhere =
-        EchoServiceClient::new(resource().with_service_tokens(source.receiver("billing").unwrap()));
+    let mut elsewhere = bound(&source, "billing");
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
     assert_eq!(status.code(), Code::Unauthenticated);
     assert_eq!(status.message(), "authentication failed");
@@ -381,9 +411,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         "authorization conflicts with the service token"
     );
     assert_eq!(reason(&status), "");
-    let mut open = EchoServiceClient::new(
-        resource().with_service_tokens(TokenSource::disabled().receiver("catalog").unwrap()),
-    );
+    let mut open = bound(&TokenSource::disabled(), "catalog");
     let status = open.unary(UnaryRequest::default()).await.unwrap_err();
     assert_eq!(status.code(), Code::Unauthenticated);
     assert_eq!(status.message(), "authentication failed");
@@ -411,10 +439,27 @@ fn bearer_retained() -> bool {
 
 #[tokio::test]
 async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_the_handler() {
+    let refused = infra_grpc::router(
+        echo_services(&Echo::default()),
+        readiness().reader(),
+        Authentication::None,
+        limits(),
+    );
+    assert_eq!(refused.err(), Some(Error::CallerRulesRequireServiceTokens));
+    // template:begin oidc-jwt:grpc-service-auth-test-caller-rules-bearer
+    let verifier = infra_bearerauthn::test_support::JwtFixture::shared().verifier();
+    let refused = infra_grpc::router(
+        echo_services(&Echo::default()),
+        readiness().reader(),
+        Authentication::Bearer(verifier),
+        limits(),
+    );
+    assert_eq!(refused.err(), Some(Error::CallerRulesRequireServiceTokens));
+    // template:end oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     // template:begin authn:grpc-service-auth-test-without-verifier-bearer
     let readiness = readiness();
     let refused = infra_grpc::router(
-        echo_services(&Echo::default()),
+        described_echo(&Echo::default()),
         readiness.reader(),
         Authentication::None,
         limits(),
@@ -425,7 +470,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         return;
     }
     let echo = Echo::default();
-    let (server, address) = serve(echo_services(&echo), Authentication::None);
+    let (server, address) = serve(described_echo(&echo), Authentication::None);
     let token = Keys::token(&Keys::new().orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&token)).await.unwrap(), "hello");
     assert_eq!(unary(address, None).await.unwrap(), "hello");
@@ -436,21 +481,47 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     );
 }
 
-// template:begin authn:grpc-service-auth-test-scopes-refused
 #[tokio::test]
-async fn a_scope_requirement_cannot_be_dropped_for_service_tokens() {
-    let mut services = echo_services(&Echo::default());
-    services
-        .require_scopes(&format!("{ECHO}/Unary"), &["echo.read"])
-        .unwrap();
-    let readiness = readiness();
-    let refused = infra_grpc::router(
-        services,
-        readiness.reader(),
+async fn service_token_authentication_requires_a_tls_listener() {
+    let app = infra_grpc::router(
+        echo_services(&Echo::default()),
+        readiness().reader(),
         Authentication::ServiceTokens(Keys::new().verifier()),
         limits(),
+    )
+    .unwrap();
+    let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let options = server_options(ConnectionLimits {
+        max_connections: NonZeroU32::new(1),
+        max_connection_age: None,
+    });
+    assert_eq!(
+        app.serve(listener, options, None).err(),
+        Some(Error::ServiceTokensRequireTls)
     );
-    assert_eq!(refused.err(), Some(Error::ScopesWithServiceTokens));
+}
+
+// template:begin authn:grpc-service-auth-test-scopes-refused
+#[tokio::test]
+async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
+    let keys = Keys::new();
+    let readiness = readiness();
+    let path = format!("{ECHO}/Unary");
+    for delegate in [false, true] {
+        let mut services = echo_services(&Echo::default());
+        if delegate {
+            services.require_scopes_for_delegation(&path, &[]).unwrap();
+        } else {
+            services.require_scopes(&path, &["echo.read"]).unwrap();
+        }
+        let refused = infra_grpc::router(
+            services,
+            readiness.reader(),
+            Authentication::ServiceTokens(keys.verifier()),
+            limits(),
+        );
+        assert_eq!(refused.unwrap_err(), Error::ScopesWithServiceTokens);
+    }
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
 
@@ -483,15 +554,15 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
         .unwrap();
     assert_eq!(
-        build(services, Authentication::None),
+        build(services, Authentication::ServiceTokens(keys.verifier())),
         Err(Error::MissingCallerRule(format!("{ECHO}/ClientStream"))),
-        "a declared table must be complete even before tokens are verified"
+        "every method requires an explicit rule"
     );
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.add_reflection().unwrap();
     assert_eq!(
-        build(services, Authentication::None),
+        build(services, Authentication::ServiceTokens(keys.verifier())),
         Err(Error::MissingCallerRule(
             "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo".to_owned()
         ))

@@ -164,6 +164,7 @@ pub(crate) struct AttemptId {
 pub(crate) struct ClaimFence {
     pub(crate) job_id: JobId,
     pub(crate) generation: i64,
+    pub(crate) token: uuid::Uuid,
 }
 
 pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
@@ -221,7 +222,7 @@ pub(crate) fn supervise(
     let crate::claim::Claimed {
         registered,
         attempt,
-        generation,
+        fence,
         payload,
         trace,
         slot,
@@ -240,7 +241,7 @@ pub(crate) fn supervise(
             &shared,
             &registered,
             attempt,
-            generation,
+            fence,
             payload,
             supervisor_deadline,
             slots,
@@ -277,7 +278,7 @@ async fn run_attempt(
     shared: &Shared,
     registered: &Registered,
     attempt: AttemptId,
-    generation: i64,
+    fence: ClaimFence,
     payload: Vec<u8>,
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
@@ -292,9 +293,8 @@ async fn run_attempt(
     let prepared = prepare_handler(
         registered.dispatch.as_ref(),
         Attempt {
-            job_id: attempt.job_id,
+            fence,
             number: attempt.number,
-            generation,
             attempt_deadline,
             cancellation: cancel.clone(),
         },
@@ -361,7 +361,7 @@ async fn run_attempt(
         shared,
         handles,
         &attempt,
-        generation,
+        fence,
         &transition,
         supervisor_deadline,
         &slots,
@@ -514,17 +514,13 @@ async fn persist(
     shared: &Shared,
     handles: &KindMetrics,
     attempt: &AttemptId,
-    generation: i64,
+    fence: ClaimFence,
     transition: &Transition,
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> Option<Written> {
     let write = write_of(transition);
     let operation = write.map_or(Operation::Record, outcome::Write::operation);
-    let fence = ClaimFence {
-        job_id: attempt.job_id,
-        generation,
-    };
     loop {
         if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
             break;
@@ -644,9 +640,12 @@ mod tests {
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let attempt = || Attempt {
-            job_id: ID,
+            fence: ClaimFence {
+                job_id: ID,
+                generation: 1,
+                token: uuid::Uuid::nil(),
+            },
             number: 1,
-            generation: 1,
             attempt_deadline: Instant::now() + Duration::from_secs(1),
             cancellation: CancellationToken::new(),
         };

@@ -8,7 +8,8 @@ use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, RegistrationState, provider_timeout};
 use crate::{
-    AcquisitionError, ConfigurationError, TokenTarget, token::Token, token_endpoint::TokenEndpoint,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token,
+    token_endpoint::TokenEndpoint,
 };
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
@@ -20,7 +21,8 @@ pub struct ExchangeTokens(Arc<ExchangeOwner>);
 
 struct ExchangeOwner {
     registration: Arc<RegistrationState>,
-    target: TokenTarget,
+    target: ExchangeTokenTarget,
+    resource_origin: http::Uri,
     state: ExchangeState,
 }
 
@@ -52,7 +54,7 @@ impl ExchangeState {
     async fn fetch(
         &self,
         endpoint: &TokenEndpoint,
-        target: &TokenTarget,
+        target: &ExchangeTokenTarget,
         key: SubjectKey,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
@@ -172,7 +174,8 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
 impl ExchangeTokens {
     pub(super) fn try_new(
         registration: Arc<RegistrationState>,
-        target: TokenTarget,
+        target: ExchangeTokenTarget,
+        resource_origin: http::Uri,
         capacity: u32,
     ) -> Result<Self, ConfigurationError> {
         if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&capacity) {
@@ -184,12 +187,17 @@ impl ExchangeTokens {
         Ok(Self(Arc::new(ExchangeOwner {
             registration,
             target,
+            resource_origin,
             state: ExchangeState::new(capacity),
         })))
     }
 
     pub(super) fn registration(&self) -> &RegistrationState {
         &self.0.registration
+    }
+
+    pub(super) fn resource_origin(&self) -> &http::Uri {
+        &self.0.resource_origin
     }
 
     #[cfg(test)]

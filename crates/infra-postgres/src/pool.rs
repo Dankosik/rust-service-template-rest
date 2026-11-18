@@ -123,6 +123,15 @@ pub struct SessionOptions<'a> {
 
 #[must_use]
 pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
+    prepare_pool_with_notifications(dsn, options, true)
+}
+
+#[must_use]
+pub fn prepare_pool_with_notifications(
+    dsn: &Dsn,
+    options: &PoolOptions<'_>,
+    notifications: bool,
+) -> PgPool {
     crate::observe::describe();
     let mut settings = Vec::new();
     if options.session_settings_source == SessionSettingsSource::Startup {
@@ -157,44 +166,45 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         });
     let pool = pool_options.connect_lazy_with(connect_options);
     let address = std::ptr::from_ref(pool.options()).addr();
-    let mut known = POOL_SLOTS.lock();
+    let mut known = POOL_POLICIES.lock();
     known.retain(|entry| entry.alive.strong_count() > 0 && entry.options_addr != address);
-    match options.wait_order {
-        WaitOrder::Arrival => {}
-        WaitOrder::NewestOnceStanding => {
-            known.push(PoolSlots {
-                options_addr: address,
-                alive: Arc::downgrade(&alive),
-                slots: Slots::new(options.max_connections.get() as usize),
-            });
-        }
+    let slots = match options.wait_order {
+        WaitOrder::Arrival => None,
+        WaitOrder::NewestOnceStanding => Some(Slots::new(options.max_connections.get() as usize)),
+    };
+    if slots.is_some() || !notifications {
+        known.push(PoolPolicy {
+            options_addr: address,
+            alive: Arc::downgrade(&alive),
+            slots,
+            notifications,
+        });
     }
     drop(known);
     pool
 }
 
-/// The driver's own queue is first come, first served and cannot be told
-/// otherwise, so only as many callers as the pool has connections wait in
-/// it; the rest wait for a slot here, in the order the pool asked for.
-struct PoolSlots {
+struct PoolPolicy {
     options_addr: usize,
     alive: Weak<()>,
-    slots: Arc<Slots>,
+    slots: Option<Arc<Slots>>,
+    notifications: bool,
 }
 
-/// A pool has no place for caller state, so its slots are found by the
-/// address of its options. `alive` is owned by a callback stored in those
-/// options: while it lives the address belongs to that pool, and a pool
-/// prepared at an address forgets whatever was recorded there before it.
-static POOL_SLOTS: Mutex<Vec<PoolSlots>> = Mutex::new(Vec::new());
+static POOL_POLICIES: Mutex<Vec<PoolPolicy>> = Mutex::new(Vec::new());
 
-fn pool_slots(pool: &PgPool) -> Option<Arc<Slots>> {
+fn pool_policy<T>(pool: &PgPool, select: impl FnOnce(&PoolPolicy) -> T) -> Option<T> {
     let options_addr = std::ptr::from_ref(pool.options()).addr();
-    POOL_SLOTS
+    POOL_POLICIES
         .lock()
         .iter()
         .find(|entry| entry.options_addr == options_addr && entry.alive.strong_count() > 0)
-        .map(|entry| Arc::clone(&entry.slots))
+        .map(select)
+}
+
+#[must_use]
+pub fn notifications_enabled(pool: &PgPool) -> bool {
+    pool_policy(pool, |entry| entry.notifications).unwrap_or(true)
 }
 
 async fn take_slot(
@@ -202,7 +212,7 @@ async fn take_slot(
     deadline: tokio::time::Instant,
     queue: Queue,
 ) -> Result<Option<Slot>, sqlx::Error> {
-    let Some(slots) = pool_slots(pool) else {
+    let Some(slots) = pool_policy(pool, |entry| entry.slots.clone()).flatten() else {
         return Ok(None);
     };
     if let Some(slot) = slots.try_take() {
@@ -607,7 +617,7 @@ mod tests {
         );
 
         drop(pool);
-        let known = POOL_SLOTS.lock();
+        let known = POOL_POLICIES.lock();
         assert!(
             known
                 .iter()

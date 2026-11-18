@@ -15,14 +15,20 @@ pub enum Error {
     UnregisteredMethodPath(String),
     #[error("gRPC scope requirement is declared twice for {0}")]
     DuplicateScopeRequirement(String),
+    #[error("gRPC method {0} has no bearer scope requirement")]
+    MissingScopeRequirement(String),
     #[error("gRPC business calls require {}", crate::authn::VERIFIER_SETTINGS.join(" or "))]
     UnauthenticatedBusinessCalls,
     #[error(
-        "gRPC scope requirements cannot be enforced when service tokens replace bearer authentication"
+        "gRPC required scopes or bearer delegation cannot be enforced when service tokens replace bearer authentication"
     )]
     ScopesWithServiceTokens,
     // template:end authn:grpc-unauthenticated-business-calls-error
     // template:begin service-auth:grpc-caller-rule-errors
+    #[error("gRPC caller rules require service token authentication")]
+    CallerRulesRequireServiceTokens,
+    #[error("gRPC service token authentication requires TLS")]
+    ServiceTokensRequireTls,
     #[error("gRPC caller rule for {0} must name a described method of a registered service")]
     UnregisteredCallerRule(String),
     #[error("gRPC caller rule is declared twice for {0}")]
