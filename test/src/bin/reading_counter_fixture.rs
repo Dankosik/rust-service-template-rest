@@ -161,7 +161,7 @@ fn operation(raw: &str) -> Result<Operation, ReceiverError> {
 }
 
 async fn open_pool() -> Result<PgPool, ReceiverError> {
-    let dsn = Dsn::admit(&std::env::var("DATABASE_URL")?)?;
+    let dsn = Dsn::admit_for_environment(&std::env::var("DATABASE_URL")?, None, true)?;
     Ok(infra_postgres::connect(
         &dsn,
         &PoolOptions {

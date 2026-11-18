@@ -53,9 +53,10 @@ async fn open_pool(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
-    let dsn = Dsn::admit_with(
+    let dsn = Dsn::admit_for_environment(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),
+        config.app.is_local_development(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
     let options = pool_options(

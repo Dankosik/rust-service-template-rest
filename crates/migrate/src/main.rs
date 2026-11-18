@@ -191,9 +191,10 @@ fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instan
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
     let postgres = config.postgres();
-    let dsn = Dsn::admit_with(
+    let dsn = Dsn::admit_for_environment(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),
+        config.app().is_local_development(),
     )?;
     tracing::event!(
         target: "migrate_record",

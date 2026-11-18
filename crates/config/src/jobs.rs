@@ -9,7 +9,23 @@ use crate::validate::{Violations, int_range};
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct JobsOperatorInput {
+    app: OperatorAppInput,
     postgres: OperatorPostgresInput,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OperatorAppInput {
+    #[serde(deserialize_with = "crate::de::string")]
+    env: String,
+    #[serde(deserialize_with = "crate::de::boolean")]
+    allow_insecure_development: bool,
+    #[serde(rename = "version")]
+    _version: serde::de::IgnoredAny,
+    #[serde(rename = "commit")]
+    _commit: serde::de::IgnoredAny,
+    #[serde(rename = "instance_id")]
+    _instance_id: serde::de::IgnoredAny,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +43,13 @@ impl JobsOperatorConfig {
 impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let mut violations = Violations::default();
-        let postgres = self.postgres.admit(&mut violations);
+        let local_development = violations
+            .take(crate::app::insecure_development(
+                &self.app.env,
+                self.app.allow_insecure_development,
+            ))
+            .unwrap_or(false);
+        let postgres = self.postgres.admit(local_development, &mut violations);
         let postgres = violations
             .finish(postgres)
             .map_err(Error::from)?

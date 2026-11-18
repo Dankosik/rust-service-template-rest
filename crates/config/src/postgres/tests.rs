@@ -279,17 +279,24 @@ fn migration_ignores_only_the_replica_identity_within_app() {
         config: Some(write(
             &dir,
             "replica.toml",
-            "[app]\nenv = 'production'\ninstance_id = 27\n",
+            "[app]\nenv = 'local'\nallow_insecure_development = true\ninstance_id = 27\n",
         )),
         ..LoadOptions::default()
     };
     let migration = load_migration_from(&options, BUILD, env(&enabled)).unwrap();
-    assert_eq!(migration.app().env, "production");
+    assert_eq!(migration.app().env, "local");
+    assert!(migration.app().is_local_development());
     assert!(migration.app().instance_id.is_none());
     let service = load_from(&options, BUILD, env(&enabled)).unwrap_err();
     assert_matches!(service, Error::Deserialize(_), "{service}");
 
-    for key in ["env", "version", "commit", "instance_id_typo"] {
+    for key in [
+        "env",
+        "allow_insecure_development",
+        "version",
+        "commit",
+        "instance_id_typo",
+    ] {
         let options = LoadOptions {
             config: Some(write(
                 &dir,

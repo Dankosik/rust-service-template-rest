@@ -23,8 +23,12 @@ fi
 if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 	docker_args+=(
 		-e APP__POSTGRES__ENABLED=true
+		-e "APP__APP__ALLOW_INSECURE_DEVELOPMENT=${RUNTIME_IMAGE_ALLOW_INSECURE_DEVELOPMENT:-false}"
 		-e "APP__POSTGRES__DSN=${RUNTIME_IMAGE_POSTGRES_DSN}"
 	)
+	if [[ -n ${RUNTIME_IMAGE_APP_ENV:-} ]]; then
+		docker_args+=(-e "APP__APP__ENV=${RUNTIME_IMAGE_APP_ENV}")
+	fi
 fi
 
 run_args=()

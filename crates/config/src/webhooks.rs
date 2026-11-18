@@ -7,13 +7,15 @@ use serde::Deserialize;
 use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
 #[derive(Default, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields, default)]
 pub(crate) struct ServiceWebhooksInput {
     #[expect(
         clippy::zero_sized_map_values,
         reason = "the service consumes only the names of worker endpoints"
     )]
     endpoints: BTreeMap<String, serde::de::IgnoredAny>,
+    #[serde(rename = "max_concurrent_deliveries")]
+    _max_concurrent_deliveries: serde::de::IgnoredAny,
 }
 
 impl ServiceWebhooksInput {

@@ -38,10 +38,10 @@ pub(crate) struct CacheInput {
     /// set it; the key itself stays in the file it names.
     #[serde(default, deserialize_with = "blank_as_none")]
     client_key_path: Option<PathBuf>,
-    /// Permit a plaintext DSN. Local and development only.
+    /// Permit a plaintext DSN with `app.allow_insecure_development`.
     #[serde(deserialize_with = "crate::de::boolean")]
     allow_plaintext: bool,
-    /// Permit a DSN with no password. Local and development only.
+    /// Permit a DSN with no password with `app.allow_insecure_development`.
     #[serde(deserialize_with = "crate::de::boolean")]
     allow_unauthenticated: bool,
     /// Bound for one cache command, including a reconnect wait.
@@ -91,18 +91,18 @@ pub struct CacheConfig {
 impl CacheInput {
     pub(crate) fn admit(
         self,
-        app_env: &str,
+        insecure_development: bool,
         v: &mut Violations,
     ) -> Result<Option<CacheConfig>, Rejected> {
         v.check(local_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
-            app_env,
+            insecure_development,
         ));
         v.check(local_development_only(
             "cache.allow_unauthenticated",
             self.allow_unauthenticated,
-            app_env,
+            insecure_development,
         ));
         let client_certificate = match (self.client_cert_path, self.client_key_path) {
             (Some(cert_path), Some(key_path)) => Ok(Some(CacheClientCertificate {
