@@ -156,19 +156,21 @@ and the provider and resource revocation policies. If the incident requires
 immediate denial at the resource, invoke its access-token revocation or
 isolation procedure and verify it there.
 
-On 2026-11-18 the isolated Keycloak 26.8.0 drill kept one ES256 client, its
-service account and its catalog scope. Both keys obtained fresh access tokens
-during overlap. Measured from the start of the admin request that removed the
-old JWK, Keycloak acknowledged the update within 4 ms and rejected the first
-fresh old-key assertion with `invalid_client` within 8 ms. The new key
-continued issuing tokens.
+On 2026-11-18 two isolated Keycloak 26.8.0 runs kept one ES256 client, its
+service account and its catalog scope throughout each rotation. Both keys
+obtained fresh access tokens during overlap. Times below start at the admin
+request that removed the old JWK. The original catalog bearer had a
+client-specific 20 s lifetime.
 
-The original catalog bearer had a client-specific 20 s lifetime. Its last
-active introspection request began 19.875 s after withdrawal. The first
-inactive reply arrived by 20.155 s. Catalog still accepted a freshly issued
-new-key token at that point. These times bracket what this recipient observed
-with 250 ms between probes. Client-key withdrawal closed issuance while the
-previously issued access token remained usable until around its own expiry.
+| Run | Key update acknowledged by | Fresh old assertion returned `invalid_client` by | Last active probe started | First inactive reply received by |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 4 ms | 8 ms | 19.875 s | 20.155 s |
+| 2 | 5 ms | 9 ms | 20.306 s | 20.584 s |
+
+Catalog still accepted a freshly issued new-key token after the old bearer
+became inactive in both runs. The final two columns bracket the observed
+transition with 250 ms between probes. Client-key withdrawal closed issuance
+while the previously issued access token remained usable until around its own expiry.
 Repeat for each deployment's token lifetime, resource validation policy and
 cache settings.
 
