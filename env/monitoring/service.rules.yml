@@ -6,20 +6,28 @@
 groups:
   - name: service-http-slo
     rules:
+      - record: instance:slo_http_process:count_values
+        expr: |
+          count_values by(job,instance) ("process_start", process_start_time_seconds{job=~"service|jobs-worker"})
       - record: instance:slo_http_requests:sum
         expr: |
           sum by(job,instance) (http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"})
+          * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
       - record: instance:slo_http_errors:sum
         expr: |
           sum by(job,instance) (
             http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}
             or http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",error_type=~"server_shutdown|response_body_error"}
           )
-          or on(job,instance) (0 * instance:slo_http_requests:sum)
+          * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
+          or on(job,instance,process_start) (0 * instance:slo_http_requests:sum)
       - record: instance:slo_http_fast_responses:sum
         expr: |
-          sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5",error_type!~"server_shutdown|response_body_error|client_closed"})
-          or on(job,instance) (0 * sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}))
+          (
+            sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5",error_type!~"server_shutdown|response_body_error|client_closed"})
+            or on(job,instance) (0 * sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}))
+          )
+          * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
       - record: job:slo_http_errors:ratio_rate5m
         expr: |
           sum by(job) (rate(instance:slo_http_errors:sum[5m]))
@@ -329,13 +337,18 @@ groups:
   # template:begin grpc:monitoring-grpc-slo
   - name: service-grpc-slo
     rules:
+      - record: instance:slo_grpc_process:count_values
+        expr: |
+          count_values by(job,instance) ("process_start", process_start_time_seconds{job=~"service|jobs-worker"})
       - record: instance:slo_grpc_requests:sum
         expr: |
-          sum by(job,instance) (grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"})
+          sum by(job,instance) (grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc[.]health[.]v1[.]Health|grpc[.]reflection[.].+"})
+          * on(job,instance) group_left(process_start) instance:slo_grpc_process:count_values
       - record: instance:slo_grpc_errors:sum
         expr: |
-          sum by(job,instance) (grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"})
-          or on(job,instance) (0 * instance:slo_grpc_requests:sum)
+          sum by(job,instance) (grpc_server_handled_total{job=~"service|jobs-worker",grpc_service!~"grpc[.]health[.]v1[.]Health|grpc[.]reflection[.].+",grpc_code=~"Unknown|DeadlineExceeded|ResourceExhausted|Internal|Unavailable|DataLoss"})
+          * on(job,instance) group_left(process_start) instance:slo_grpc_process:count_values
+          or on(job,instance,process_start) (0 * instance:slo_grpc_requests:sum)
       - record: job:slo_grpc_errors:ratio_rate5m
         expr: |
           sum by(job) (rate(instance:slo_grpc_errors:sum[5m]))
@@ -371,54 +384,62 @@ groups:
           sum by(job) (rate(instance:slo_grpc_errors:sum[3d]))
           /
           sum by(job) (rate(instance:slo_grpc_requests:sum[3d]))
+      - record: instance:slo_grpc_unary_calls:sum
+        expr: |
+          sum by(job,instance) (grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc[.]health[.]v1[.]Health|grpc[.]reflection[.].+",grpc_type="unary"})
+          * on(job,instance) group_left(process_start) instance:slo_grpc_process:count_values
+      - record: instance:slo_grpc_fast_unary_calls:sum
+        expr: |
+          sum by(job,instance) (grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc[.]health[.]v1[.]Health|grpc[.]reflection[.].+",grpc_type="unary",le="0.5"})
+          * on(job,instance) group_left(process_start) instance:slo_grpc_process:count_values
       - record: job:slo_grpc_slow:ratio_rate5m
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[5m]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[5m]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[5m]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[5m]))
           )
       - record: job:slo_grpc_slow:ratio_rate30m
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[30m]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[30m]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[30m]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[30m]))
           )
       - record: job:slo_grpc_slow:ratio_rate1h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1h]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[1h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1h]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[1h]))
           )
       - record: job:slo_grpc_slow:ratio_rate2h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[2h]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[2h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[2h]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[2h]))
           )
       - record: job:slo_grpc_slow:ratio_rate6h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[6h]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[6h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[6h]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[6h]))
           )
       - record: job:slo_grpc_slow:ratio_rate1d
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1d]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[1d]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1d]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[1d]))
           )
       - record: job:slo_grpc_slow:ratio_rate3d
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[3d]))
+            sum by(job) (rate(instance:slo_grpc_fast_unary_calls:sum[3d]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[3d]))
+            sum by(job) (rate(instance:slo_grpc_unary_calls:sum[3d]))
           )
       - alert: GRPCErrorBudgetBurn
         expr: |

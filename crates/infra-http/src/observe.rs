@@ -301,7 +301,7 @@ impl RequestObservation {
             .as_ref()
             .and_then(|id| id.header_value().to_str().ok());
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-        self.span.in_scope(|| {
+        let log = || {
             tracing::info!(
                 method = self.method_label,
                 route = route.unwrap_or(UNMATCHED_ROUTE),
@@ -312,7 +312,16 @@ impl RequestObservation {
                 request_id,
                 "http_request"
             );
-        });
+        };
+        if self
+            .span
+            .with_subscriber(|(_, dispatch)| {
+                tracing::dispatcher::with_default(dispatch, || self.span.in_scope(log));
+            })
+            .is_none()
+        {
+            log();
+        }
     }
 }
 

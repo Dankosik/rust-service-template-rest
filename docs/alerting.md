@@ -114,8 +114,10 @@ within minutes of a fault and reset promptly after recovery.
 
 - **Rule rollout.** Load the per-instance recording rules alongside the existing
   alerts before switching the burn-rate expressions. Allow up to three days
-  for the longest window to fill. Each instance must identify one scrape target.
-  The intermediate counters provide a zero baseline once eligible traffic has
+  for the longest window to fill. Scrape `process_start_time_seconds` with the
+  request metrics from each target. The rules use it to distinguish replacements
+  at the same address before calculating rates. The intermediate counters
+  provide a zero baseline once eligible traffic has
   been observed, so a new error series contributes its first failure. Work
   completed before the first observation of a process has no measured baseline.
 - **Labels.** Burn-rate rules aggregate `by(job)`; add `http_route` only for

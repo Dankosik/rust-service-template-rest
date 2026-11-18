@@ -8,6 +8,9 @@ tests:
       - &service_up
         series: 'up{job="service",instance="a"}'
         values: "1x300"
+      - &api_start
+        series: 'process_start_time_seconds{job="service",instance="a"}'
+        values: "100x300"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+90x300"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="500"}'
@@ -41,6 +44,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="POST",http_route="/v1/items",http_response_status_code="201"}'
         values: "0+199x150"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="POST",http_route="/v1/items",http_response_status_code="503"}'
@@ -56,6 +60,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+50x60"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="<unmatched>",http_response_status_code="404"}'
@@ -73,6 +78,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+100x30"
       - series: 'http_server_request_duration_seconds_bucket{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200",le="0.5"}'
@@ -93,6 +99,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
         values: "0+10x12"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="500",error_type="response_body_error"}'
@@ -112,12 +119,12 @@ tests:
       - expr: instance:slo_http_errors:sum
         eval_time: 11m
         exp_samples:
-          - labels: 'instance:slo_http_errors:sum{job="service",instance="a"}'
+          - labels: 'instance:slo_http_errors:sum{job="service",instance="a",process_start="100"}'
             value: 2
       - expr: instance:slo_http_fast_responses:sum
         eval_time: 11m
         exp_samples:
-          - labels: 'instance:slo_http_fast_responses:sum{job="service",instance="a"}'
+          - labels: 'instance:slo_http_fast_responses:sum{job="service",instance="a",process_start="100"}'
             value: 110
       - expr: job:slo_http_errors:ratio_rate5m > bool 0
         eval_time: 11m
@@ -127,6 +134,23 @@ tests:
       - expr: job:slo_http_errors:ratio_rate5m{job="jobs-worker"}
         eval_time: 11m
         exp_samples: []
+
+  - name: "A replacement at the same scrape address gets a separate SLO baseline"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'process_start_time_seconds{job="service",instance="a"}'
+        values: "100x9 700x10"
+      - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
+        values: "99x9 96+95x9"
+      - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="500"}'
+        values: "1x9 5+5x9"
+    promql_expr_test:
+      - expr: round(job:slo_http_errors:ratio_rate5m, 0.0001)
+        eval_time: 11m
+        exp_samples:
+          - labels: '{job="service"}'
+            value: 0.05
 
   - name: "All reachable API targets must report unready before paging, without request traffic"
     interval: 1m
@@ -305,6 +329,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_type="unary",grpc_service="example.v1.Example",grpc_method="Get",grpc_code="OK"}'
         values: "0+90x30"
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_type="unary",grpc_service="example.v1.Example",grpc_method="Get",grpc_code="InvalidArgument"}'
@@ -347,6 +372,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="OK"}'
         values: "0+10x12"
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="Internal"}'

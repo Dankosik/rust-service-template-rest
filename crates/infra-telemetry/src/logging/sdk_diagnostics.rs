@@ -94,6 +94,7 @@ pub(super) fn is_denied_target(target: &str) -> bool {
         "opentelemetry-http",
         "tracing_opentelemetry",
         "tracing-opentelemetry",
+        "async_nats",
         "reqwest",
         "hyper",
         "hyper_util",
