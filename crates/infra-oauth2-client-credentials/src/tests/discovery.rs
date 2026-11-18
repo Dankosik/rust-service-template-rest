@@ -53,27 +53,19 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         assertion_audience: issuer.clone(),
         ..peer.options()
     };
-    assert!(matches!(
-        Registration::prepare_keycloak(options.clone())
-            .await
-            .unwrap_err(),
-        KeycloakError::Configuration(ConfigurationError {
-            key: "assertion_audience",
-            ..
-        })
-    ));
-    assert!(matches!(
-        Registration::prepare_keycloak(Options {
-            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
+    for (audience, invalid_key) in [
+        (issuer.as_str(), "assertion_audience"),
+        (ASSERTION_AUDIENCE, "token_url"),
+    ] {
+        let result = Registration::prepare_keycloak(Options {
+            assertion_audience: audience.to_owned(),
             ..options.clone()
         })
-        .await
-        .unwrap_err(),
-        KeycloakError::Configuration(ConfigurationError {
-            key: "token_url",
-            ..
-        })
-    ));
+        .await;
+        assert!(
+            matches!(result, Err(KeycloakError::Configuration(ConfigurationError { key, .. })) if key == invalid_key)
+        );
+    }
     assert!(peer.resource_requests().is_empty());
     let metadata = |issuer: &str, endpoint: &str| {
         json_response(

@@ -249,6 +249,7 @@ async fn serve(
     deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
     let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
+    let config = Box::new(config);
     let http_config = config.http.clone();
     let mut background = Background::new(CancellationToken::new());
     let mut observer = background.observer();
