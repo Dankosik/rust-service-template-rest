@@ -15,8 +15,13 @@ pub(super) async fn open(
     };
     let raw = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
+    let local_development = config.app.is_local_development();
     let dsn = super::blocking_startup("postgres", move || {
-        Dsn::admit_with(raw.expose_secret(), password_file.as_deref())
+        Dsn::admit_for_environment(
+            raw.expose_secret(),
+            password_file.as_deref(),
+            local_development,
+        )
     })
     .await?;
     let options = PoolOptions {
@@ -29,7 +34,11 @@ pub(super) async fn open(
         },
         wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
     };
-    let pool = retained.insert(infra_postgres::prepare_pool(&dsn, &options));
+    let pool = retained.insert(infra_postgres::prepare_pool_with_notifications(
+        &dsn,
+        &options,
+        postgres.notifications,
+    ));
     infra_postgres::admit_pool(pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),

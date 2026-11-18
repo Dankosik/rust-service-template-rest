@@ -1,0 +1,28 @@
+name: published-image-scan
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: published-image-scan-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: vars.ENABLE_GHCR_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reassess published image digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/image/rescan.sh

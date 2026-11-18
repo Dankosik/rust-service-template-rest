@@ -23,8 +23,12 @@ fi
 if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
 	docker_args+=(
 		-e APP__POSTGRES__ENABLED=true
+		-e "APP__APP__ALLOW_INSECURE_DEVELOPMENT=${RUNTIME_IMAGE_ALLOW_INSECURE_DEVELOPMENT:-false}"
 		-e "APP__POSTGRES__DSN=${RUNTIME_IMAGE_POSTGRES_DSN}"
 	)
+	if [[ -n ${RUNTIME_IMAGE_APP_ENV:-} ]]; then
+		docker_args+=(-e "APP__APP__ENV=${RUNTIME_IMAGE_APP_ENV}")
+	fi
 fi
 
 run_args=()
@@ -78,6 +82,16 @@ docker run -d --name "${container}" \
 	--security-opt=no-new-privileges \
 	"${docker_args[@]}" \
 	"${image}" ${run_args[@]+"${run_args[@]}"} >/dev/null
+
+read_runtime_license() {
+	docker cp "${container}:/usr/share/licenses/service/$1" - | tar -xO
+}
+if ! read_runtime_license LICENSE | grep -c '[^[:space:]]' >/dev/null ||
+	! read_runtime_license THIRD-PARTY-RUST.txt | grep -cFx 'Copyright (c) Tokio Contributors' >/dev/null; then
+	echo "runtime image is missing the service license or Tokio's copyright in the Rust notices" >&2
+	exit 1
+fi
+echo "runtime image carries license notices in /usr/share/licenses/service/"
 
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
 port=${address##*:}

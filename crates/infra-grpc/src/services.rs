@@ -280,6 +280,23 @@ impl Services {
         );
         Ok(())
     }
+
+    pub(crate) fn prepare_scope_requirements(&mut self) -> Result<(), Error> {
+        if self.reflection {
+            for path in REFLECTION_PATHS {
+                self.scopes.entry(path.to_owned()).or_default();
+            }
+        }
+        for service in &self.names {
+            for (method, _) in self.described.get(*service).into_iter().flatten() {
+                let path = method_path(service, method);
+                if !self.scopes.contains_key(&path) {
+                    return Err(Error::MissingScopeRequirement(path));
+                }
+            }
+        }
+        Ok(())
+    }
     // template:end authn:grpc-services-require-scopes
 
     // template:begin service-auth:grpc-services-allow-callers

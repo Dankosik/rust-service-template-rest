@@ -84,7 +84,7 @@ mod tests {
             .unwrap();
         assert!(registration.with_postgres_messages(|_, _| Ok(())).is_err());
         let dsn =
-            infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=disable")
+            infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=verify-full")
                 .unwrap();
         let pool = infra_postgres::prepare_pool(
             &dsn,

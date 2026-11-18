@@ -49,7 +49,6 @@ parking_lot = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }
-tokio-util = { workspace = true }
 # template:end inbound-webhooks:webhooks-inbound-dependencies
 
 [dev-dependencies]

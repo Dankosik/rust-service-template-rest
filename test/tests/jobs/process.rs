@@ -106,9 +106,10 @@ impl Worker {
             .env("APP__LOG__FORMAT", "json")
             .env("APP__POSTGRES__ENABLED", "true")
             .env("APP__POSTGRES__DSN", database_url)
+            .env("APP__APP__ENV", "local")
+            .env("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")
             // template:begin outbox:test-jobs-process-nats-environment
             .env("APP__POSTGRES__MAX_CONNECTIONS", "6")
-            .env("APP__APP__ENV", "local")
             .env("APP__MESSAGING__URLS", &nats.url)
             .env("APP__MESSAGING__SOURCE_STREAM", &nats.stream)
             .env("APP__MESSAGING__MAX_PAYLOAD_BYTES", "1 KiB")
@@ -288,10 +289,12 @@ async fn await_completed_probe_metrics(url: &str) {
 }
 
 fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
-    let name = format!("{metric}{{population=\"{population}\"}} ");
+    sample_value(body, &format!("{metric}{{population=\"{population}\"}}"))
+}
+
+fn sample_value<T: std::str::FromStr>(body: &str, series: &str) -> Option<T> {
     body.lines()
-        .find_map(|line| line.strip_prefix(&name))
-        .and_then(|value| value.parse().ok())
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
 }
 
 const OLDEST_DUE_UNIX_SECONDS: f64 = 946_684_800.0;
@@ -482,6 +485,30 @@ async fn child_database_url(pool: &PgPool) -> String {
     integration_tests::url_for(pool, integration_tests::DATABASE_URL)
         .await
         .into()
+}
+
+async fn reconnect_worker_sessions(connection: &mut sqlx::PgConnection, read_only: bool) {
+    let alter: String = sqlx::query_scalar(
+        "SELECT format('ALTER DATABASE %I SET default_transaction_read_only = %L', \
+                       current_database(), $1::boolean)",
+    )
+    .bind(read_only)
+    .fetch_one(&mut *connection)
+    .await
+    .expect("the disposable database setting");
+    sqlx::query(sqlx::AssertSqlSafe(alter))
+        .execute(&mut *connection)
+        .await
+        .expect("change the default for newly connected sessions");
+    let terminated: Vec<bool> = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid, 1000) \
+         FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name LIKE '%-jobs-worker'",
+    )
+    .fetch_all(connection)
+    .await
+    .expect("retire the worker's existing sessions");
+    assert!(!terminated.is_empty() && terminated.into_iter().all(|exited| exited));
 }
 
 async fn prepare(pool: &PgPool) {
@@ -762,6 +789,80 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_readiness_recovers_when_postgres_becomes_writable_again(pool: PgPool) {
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-readiness-nats
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-readiness-nats
+    let mut worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-readiness-nats-argument
+        &nats,
+        // template:end outbox:test-jobs-process-readiness-nats-argument
+        &[],
+    );
+    let api = listener_addr(&mut worker, "http listener bound").await;
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
+    let ready = format!("http://{api}/health/ready");
+    let live = format!("http://{api}/health/live");
+    let metrics = format!("http://{diagnostics}/metrics");
+    assert_eq!(get(&ready).await.expect("initial readiness").0, 200);
+
+    let mut admin = infra_postgres::acquire(&pool, "change test database writability")
+        .await
+        .expect("a session that stays writable");
+    reconnect_worker_sessions(&mut admin, true).await;
+    let switched_at: f64 =
+        sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision")
+            .fetch_one(&mut *admin)
+            .await
+            .expect("the database time after session rotation");
+    let failures_series = r#"readiness_probe_checks_total{probe="postgres",outcome="failed"}"#;
+    let failures_at_fresh_sample: u64 = poll_until(
+        "the worker queries PostgreSQL after its sessions reconnect read-only",
+        RECORD_BOUND,
+        POLL,
+        async || {
+            let (_, body) = get(&metrics).await.ok()?;
+            let observed_at: f64 = sample_value(&body, "jobs_observation_timestamp_seconds")?;
+            (observed_at >= switched_at)
+                .then(|| sample_value(&body, failures_series).unwrap_or_default())
+        },
+    )
+    .await;
+    poll_until(
+        "PostgreSQL probes keep failing while queue queries still work",
+        JOB_BOUND,
+        POLL,
+        async || {
+            let (_, body) = get(&metrics).await.ok()?;
+            let failures: u64 = sample_value(&body, failures_series)?;
+            (failures >= failures_at_fresh_sample + 3 && get(&ready).await.ok()?.0 == 503)
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(get(&live).await.expect("liveness during read-only").0, 200);
+
+    reconnect_worker_sessions(&mut admin, false).await;
+    poll_until(
+        "readiness recovers when writes return",
+        JOB_BOUND,
+        POLL,
+        async || (get(&ready).await.ok()?.0 == 200).then_some(()),
+    )
+    .await;
+
+    worker.terminate();
+    let (code, stderr, stdout) = worker.wait().await;
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
+    // template:begin outbox:test-jobs-process-readiness-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-readiness-nats-cleanup
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
     prepare(&pool).await;
     let database_url = child_database_url(&pool).await;
@@ -998,6 +1099,89 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-4
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn worker_backlog_age_includes_expired_leases_without_pending_jobs(pool: PgPool) {
+    const OLDEST_LEASE_EXPIRY: f64 = 1_262_304_000.0;
+    sqlx::query(
+        "INSERT INTO background_jobs (id, kind, payload, state, attempts, claim_generation, \
+                                      not_before, claim_expires_at) \
+         SELECT gen_random_uuid(), $1, '{}'::jsonb, 'running', 1, \
+                nextval('background_jobs_claim_generation'), \
+                to_timestamp($2) - interval '1 day', expiry \
+         FROM (VALUES (to_timestamp($2)), \
+                      (statement_timestamp() - interval '1 hour'), \
+                      (statement_timestamp() + interval '1 hour')) AS lease(expiry)",
+    )
+    .bind(Probe::NAME)
+    .bind(OLDEST_LEASE_EXPIRY)
+    .execute(&pool)
+    .await
+    .expect("two expired leases and one live lease for the registered kind");
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the worker observes committed jobs while their locks prevent claim"
+    )]
+    let mut locked = pool.begin().await.expect("hold running jobs");
+    let locked_rows = sqlx::query("SELECT id FROM background_jobs FOR UPDATE")
+        .fetch_all(&mut *locked)
+        .await
+        .expect("claim skips these locked rows");
+    assert_eq!(locked_rows.len(), 3);
+
+    let database_url = child_database_url(&pool).await;
+    // template:begin outbox:test-jobs-process-expired-backlog-nats
+    let nats = NatsFixture::create().await;
+    // template:end outbox:test-jobs-process-expired-backlog-nats
+    let mut worker = Worker::spawn(
+        &database_url,
+        // template:begin outbox:test-jobs-process-expired-backlog-nats-argument
+        &nats,
+        // template:end outbox:test-jobs-process-expired-backlog-nats-argument
+        &[],
+    );
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
+    let metrics = format!("http://{diagnostics}/metrics");
+    poll_until(
+        "metrics expose expired lease age",
+        METRICS_BOUND,
+        POLL,
+        async || {
+            let (status, body) = get(&metrics).await.ok()?;
+            let sample = queue_observation(&body);
+            let observed_at = f64::from_bits(*sample.get("jobs_observation_timestamp_seconds")?);
+            let age = f64::from_bits(
+                *sample.get(r#"jobs_oldest_available_age_seconds{kind="test.probe"}"#)?,
+            );
+            let count = |state: &str| {
+                let label = format!(r#"state="{state}""#);
+                sample.iter().find_map(|(metric, bits)| {
+                    (metric.starts_with("jobs_live_jobs{")
+                        && metric.contains(r#"kind="test.probe""#)
+                        && metric.contains(&label))
+                    .then_some(f64::from_bits(*bits))
+                })
+            };
+            (status == 200
+                && age > 300.0
+                && (observed_at - age - OLDEST_LEASE_EXPIRY).abs() < 0.001
+                && count("available") == Some(0.0)
+                && count("running") == Some(3.0))
+            .then_some(())
+        },
+    )
+    .await;
+
+    worker.terminate();
+    let (code, stderr, stdout) = worker.wait().await;
+    assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
+    locked.rollback().await.expect("release running jobs");
+    // template:begin outbox:test-jobs-process-expired-backlog-nats-cleanup
+    nats.cleanup().await;
+    // template:end outbox:test-jobs-process-expired-backlog-nats-cleanup
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

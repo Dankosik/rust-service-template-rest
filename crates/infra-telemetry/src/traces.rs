@@ -1,8 +1,6 @@
 mod exporter;
 
-use exporter::{CollectorTrust, export_timeout, parse_headers, resolve_endpoint, span_exporter};
-
-use std::collections::HashMap;
+use exporter::{CollectorConfig, CollectorTrust, compression, export_timeout, span_exporter};
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +15,7 @@ use opentelemetry_sdk::trace::{
 };
 use opentelemetry_semantic_conventions::attribute;
 use parking_lot::Mutex;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
@@ -72,15 +70,10 @@ pub enum ExporterState {
         endpoint_source: EndpointSource,
         has_certificate_file: bool,
         has_client_certificate: bool,
+        ignored_compression: Vec<&'static str>,
     },
     Disabled,
-    Degraded {
-        stage: ExporterBuildStage,
-    },
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExporterBuildStage(&'static str);
 
 impl ExporterState {
     #[must_use]
@@ -88,7 +81,6 @@ impl ExporterState {
         match self {
             ExporterState::Initialized { .. } => "initialized",
             ExporterState::Disabled => "disabled",
-            ExporterState::Degraded { .. } => "degraded",
         }
     }
 
@@ -98,18 +90,22 @@ impl ExporterState {
                 endpoint_source,
                 has_certificate_file,
                 has_client_certificate,
-            } => tracing::info!(
-                endpoint_source = endpoint_source.as_str(),
-                certificate_file = has_certificate_file,
-                client_certificate = has_client_certificate,
-                "trace exporter initialized"
-            ),
+                ignored_compression,
+            } => {
+                for name in ignored_compression {
+                    tracing::warn!(
+                        variable = *name,
+                        "unsupported OTLP compression setting ignored"
+                    );
+                }
+                tracing::info!(
+                    endpoint_source = endpoint_source.as_str(),
+                    certificate_file = has_certificate_file,
+                    client_certificate = has_client_certificate,
+                    "trace exporter initialized"
+                );
+            }
             ExporterState::Disabled => {}
-            ExporterState::Degraded { stage } => tracing::warn!(
-                reason = %"exporter_build",
-                stage = stage.0,
-                "trace exporter degraded; spans are recorded but not exported"
-            ),
         }
     }
 }
@@ -123,10 +119,43 @@ pub enum TracingError {
     )]
     AmbientCredential { name: &'static str },
     #[error(
-        "observability.otel.exporter.otlp_headers entry {position} is not a \
-         valid `name=value` HTTP header"
+        "{name} entry {position} must specify a unique, valid HTTP header and preserve the collector host"
     )]
-    InvalidHeader { position: usize },
+    InvalidHeader { name: &'static str, position: usize },
+    #[error("{name} must be valid Unicode")]
+    NonUnicode { name: &'static str },
+    #[error("{name} must be an absolute HTTP(S) collector URL without userinfo, query or fragment")]
+    InvalidEndpoint { name: &'static str },
+    #[error("{name} requires an explicitly matching collector endpoint")]
+    UnboundCredential { name: &'static str },
+    #[error("{name} requires an HTTPS collector endpoint")]
+    InsecureCollector { name: &'static str },
+    #[error("could not read the OTLP trust file selected by {name} ({kind:?})")]
+    TrustRead {
+        name: &'static str,
+        kind: std::io::ErrorKind,
+    },
+    #[error("{name} must select a regular OTLP trust file")]
+    TrustFileType { name: &'static str },
+    #[error("the OTLP trust file selected by {name} exceeds the {max_bytes}-byte limit")]
+    TrustFileTooLarge { name: &'static str, max_bytes: u64 },
+    #[error("{name} must select a usable PEM certificate bundle")]
+    TrustPem { name: &'static str },
+    #[error("the OTLP client certificate and key must form a usable PEM identity")]
+    IdentityPem,
+    #[error("{present} requires {missing} to configure an OTLP client identity")]
+    IncompleteIdentity {
+        present: &'static str,
+        missing: &'static str,
+    },
+    #[error(
+        "could not construct the OTLP collector HTTP client with the configured trust material"
+    )]
+    ClientBuild,
+    #[error("the OTLP collector client initialization thread failed")]
+    ClientThread,
+    #[error("could not initialize the OTLP trace exporter")]
+    ExporterBuild,
 }
 
 #[derive(Debug)]
@@ -157,11 +186,7 @@ fn tracer_provider(
     env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint = resolve_endpoint(options.otlp_endpoint.as_deref(), &env)?;
-    let headers = match options.otlp_headers.as_ref() {
-        Some(raw) => parse_headers(raw.expose_secret())?,
-        None => HashMap::new(),
-    };
+    let collector = CollectorConfig::resolve(options, trust, &env)?;
     let timeout = export_timeout(&env);
 
     let mut builder = SdkTracerProvider::builder()
@@ -169,29 +194,33 @@ fn tracer_provider(
         .with_sampler(options.sampler.to_sdk());
 
     let drain = Arc::new(Mutex::new(DrainObservation::default()));
-    let exporter_state = match endpoint {
+    let exporter_state = match collector {
         None => ExporterState::Disabled,
-        Some(endpoint) => match span_exporter(&endpoint, headers, trust, timeout, &env) {
-            Ok(span_exporter) => {
-                builder = builder.with_span_processor(
-                    sdktrace::BatchSpanProcessor::builder(ObservedExporter {
-                        inner: span_exporter,
-                        timeout,
-                        drain: Arc::clone(&drain),
-                    })
-                    .with_batch_config(batch_config(&env))
-                    .build(),
-                );
-                ExporterState::Initialized {
-                    endpoint_source: endpoint.source(),
-                    has_certificate_file: trust.certificate.is_some(),
-                    has_client_certificate: trust.client_certificate.is_some(),
-                }
+        Some(collector) => {
+            let (compression, ignored_compression) = compression(&env);
+            let span_exporter = span_exporter(
+                collector.url.as_str(),
+                collector.headers,
+                trust,
+                timeout,
+                compression,
+            )?;
+            builder = builder.with_span_processor(
+                sdktrace::BatchSpanProcessor::builder(ObservedExporter {
+                    inner: span_exporter,
+                    timeout,
+                    drain: Arc::clone(&drain),
+                })
+                .with_batch_config(batch_config(&env))
+                .build(),
+            );
+            ExporterState::Initialized {
+                endpoint_source: collector.source,
+                has_certificate_file: trust.certificate.is_some(),
+                has_client_certificate: trust.client_certificate.is_some(),
+                ignored_compression,
             }
-            Err(error) => ExporterState::Degraded {
-                stage: error.stage(),
-            },
-        },
+        }
     };
 
     Ok(TracerProviderHandle {

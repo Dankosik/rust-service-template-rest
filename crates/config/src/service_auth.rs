@@ -1,7 +1,6 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::is_local_development;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{Rejected, ValidationError, Violations, missing, required_when};
 
@@ -9,7 +8,7 @@ use crate::validate::{Rejected, ValidationError, Violations, missing, required_w
 #[serde(rename_all = "kebab-case")]
 enum ServiceAuthMode {
     /// Calls carry and need no service token. With gRPC enabled this is
-    /// accepted only in a local or development environment. This is the
+    /// accepted only with `app.allow_insecure_development`. This is the
     /// omitted-section default.
     #[default]
     None,
@@ -78,16 +77,16 @@ impl ServiceAuthConfig {
 impl ServiceAuthInput {
     pub(crate) fn admit(
         self,
-        app_env: &str,
+        insecure_development: bool,
         grpc_enabled: bool,
         v: &mut Violations,
     ) -> Result<ServiceAuthConfig, Rejected> {
         match self.mode {
             ServiceAuthMode::None => {
-                if grpc_enabled && !is_local_development(app_env) {
+                if grpc_enabled && !insecure_development {
                     v.check(Err(ValidationError::new(
                         "service_auth.mode",
-                        "must be jwt when grpc.enabled is true outside app.env local or development",
+                        "must be jwt when grpc.enabled is true unless app.allow_insecure_development is enabled",
                     )));
                 }
                 for (key, present) in [

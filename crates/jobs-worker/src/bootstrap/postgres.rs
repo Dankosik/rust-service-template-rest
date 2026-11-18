@@ -53,9 +53,10 @@ async fn open_pool(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
-    let dsn = Dsn::admit_with(
+    let dsn = Dsn::admit_for_environment(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),
+        config.app.is_local_development(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
     let options = pool_options(
@@ -63,7 +64,8 @@ async fn open_pool(
         postgres.max_connections,
         &application_name,
     );
-    let pool = infra_postgres::prepare_pool(&dsn, &options);
+    let pool =
+        infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
     resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
@@ -123,7 +125,7 @@ pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError
 
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
     let pool = admitted_pool(resources).ok()?;
-    Some(Box::new(PostgresProbe::new(pool)))
+    Some(Box::new(PostgresProbe::writable_primary(pool)))
 }
 
 #[cfg(test)]

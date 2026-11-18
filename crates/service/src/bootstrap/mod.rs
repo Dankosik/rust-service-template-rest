@@ -120,6 +120,8 @@ pub(crate) enum BootstrapError {
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
     #[error("inbound webhook endpoints are configured but no PostgreSQL pool was opened")]
     InboundWebhooksWithoutPostgres,
+    #[error(transparent)]
+    InboundWebhookKeyReuse(#[from] infra_webhooks::protocol::SharedEndpointKey),
     #[error("inbound webhook endpoint {endpoint} key {key} is invalid: {source}")]
     InboundWebhookKey {
         endpoint: String,
@@ -450,8 +452,7 @@ async fn start(
     dependencies.object_storage = object_storage::open(config)?;
     // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state =
-        inbound_webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
+    let webhook_state = inbound_webhooks::prepare(config, dependencies.postgres.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,

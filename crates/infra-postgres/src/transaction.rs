@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
@@ -42,13 +43,109 @@ impl TxError {
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
     proven_alive: bool,
+    notifications: Vec<Notification>,
 }
 
 impl Tx<'_> {
+    pub fn notify_after_commit(
+        &mut self,
+        channel: &'static str,
+        payload: &'static str,
+        min_interval: Duration,
+    ) {
+        const MAX_HINTS: usize = 32;
+        let key = (channel, payload);
+        if self.notifications.len() < MAX_HINTS
+            && !self.notifications.iter().any(|hint| hint.key == key)
+        {
+            self.notifications.push(Notification { key, min_interval });
+        }
+    }
+
     pub fn connection(&mut self) -> &mut PgConnection {
         self.proven_alive = false;
         self.conn
     }
+}
+
+type NotificationKey = (&'static str, &'static str);
+
+#[derive(Debug)]
+struct Notification {
+    key: NotificationKey,
+    min_interval: Duration,
+}
+
+impl Notification {
+    fn take_slot(
+        &self,
+        last_sent: &mut BTreeMap<NotificationKey, tokio::time::Instant>,
+        now: tokio::time::Instant,
+    ) -> bool {
+        match last_sent.entry(self.key) {
+            std::collections::btree_map::Entry::Occupied(entry)
+                if now.saturating_duration_since(*entry.get()) < self.min_interval =>
+            {
+                false
+            }
+            entry => {
+                entry.insert_entry(now);
+                true
+            }
+        }
+    }
+}
+
+fn dispatch_notifications(
+    pool: &PgPool,
+    mut guard: DiscardOnDrop,
+    mut notifications: Vec<Notification>,
+) {
+    use tokio::time::Instant;
+
+    const SEND_BUDGET: Duration = Duration::from_millis(100);
+    static LAST_SENT: parking_lot::Mutex<BTreeMap<NotificationKey, Instant>> =
+        parking_lot::Mutex::new(BTreeMap::new());
+
+    if notifications.is_empty() || !crate::notifications_enabled(pool) {
+        return;
+    }
+    let now = Instant::now();
+    let mut last_sent = LAST_SENT.lock();
+    notifications.retain(|hint| hint.take_slot(&mut last_sent, now));
+    drop(last_sent);
+    if notifications.is_empty() {
+        return;
+    }
+    let closing = pool.close_event();
+    tokio::spawn(async move {
+        guard.discard = true;
+        let send = async {
+            for hint in notifications {
+                let (channel, payload) = hint.key;
+                observed(
+                    "post-commit notification",
+                    sqlx::query!("SELECT pg_notify($1, $2)", channel, payload)
+                        .execute(&mut *guard.connection),
+                )
+                .await?;
+            }
+            Ok::<(), sqlx::Error>(())
+        };
+        tokio::select! {
+            biased;
+            () = closing => {}
+            result = tokio::time::timeout_at(now + SEND_BUDGET, send) => match result {
+                Ok(Ok(())) => guard.discard = false,
+                Ok(Err(error)) => {
+                    guard.discard = !matches!(error, sqlx::Error::Database(_));
+                    tracing::warn!(error.type = crate::failure_cause(&error), "postgres_notification_failed");
+                }
+                Err(_) => tracing::warn!("postgres_notification_timed_out"),
+            }
+        }
+        drop(guard);
+    });
 }
 
 pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result<(), sqlx::Error> {
@@ -266,6 +363,7 @@ where
         let mut handle = Tx {
             conn: &mut tx,
             proven_alive: true,
+            notifications: Vec::new(),
         };
         let value = match f(&mut handle).await {
             Ok(value) => value,
@@ -274,6 +372,7 @@ where
                 return Err(err);
             }
         };
+        let notifications = handle.notifications;
         if !(options.read_only || handle.proven_alive) {
             (&mut *tx)
                 .execute("SELECT 1")
@@ -285,6 +384,7 @@ where
             .await
             .map_err(|err| observed.fail(classify_commit(err)))?;
         observed.end(TransactionOutcome::Committed);
+        dispatch_notifications(pool, guard, notifications);
         Ok(value)
     }
     .instrument(span)
@@ -306,6 +406,27 @@ mod tests {
     use futures_util::{StreamExt, stream};
 
     use super::*;
+
+    #[test]
+    fn notification_cooldowns_are_independent_per_channel_and_payload() {
+        let now = tokio::time::Instant::now();
+        let interval = Duration::from_millis(25);
+        let mut last_sent = BTreeMap::new();
+        let first = Notification {
+            key: ("jobs", "first"),
+            min_interval: interval,
+        };
+        assert!(first.take_slot(&mut last_sent, now));
+        assert!(!first.take_slot(&mut last_sent, now + interval / 2));
+        for key in [("jobs", "second"), ("another", "first")] {
+            let other = Notification {
+                key,
+                min_interval: interval,
+            };
+            assert!(other.take_slot(&mut last_sent, now + interval / 2));
+        }
+        assert!(first.take_slot(&mut last_sent, now + interval));
+    }
 
     async fn proof_after(items: Vec<Result<u8, sqlx::Error>>, take: usize) -> bool {
         let mut proven_alive = false;

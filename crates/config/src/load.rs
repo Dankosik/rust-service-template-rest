@@ -99,6 +99,8 @@ pub enum Error {
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
+    #[error("configuration inputs are invalid: {}", join_input_errors(.0))]
+    InputErrors(Vec<Error>),
     #[error("load configuration: {0}")]
     Merge(String),
     #[error("configuration is invalid: {0}")]
@@ -111,6 +113,14 @@ impl From<ValidationErrors> for Error {
     fn from(errors: ValidationErrors) -> Self {
         Self::Validate(errors)
     }
+}
+
+fn join_input_errors(errors: &[Error]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn load(
@@ -259,12 +269,36 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let variables = collect_variables(options.secrets_dir.as_deref(), environment)?;
+    let mut errors = Vec::new();
+    let variables =
+        collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
+            errors.push(error);
+            BTreeMap::new()
+        });
+    let mut files = Vec::new();
+    for path in options.files() {
+        match scan_file(path) {
+            Ok(file) => files.push(file),
+            Err(error) => errors.push(error),
+        }
+    }
+    match errors.len() {
+        0 => {}
+        1 => return Err(errors.remove(0)),
+        _ => return Err(Error::InputErrors(errors)),
+    }
+
     let mut builder = config::Config::builder();
     let mut table_keys = BTreeSet::new();
     let mut datetime_keys = BTreeMap::new();
-    for path in options.files() {
-        let file = scan_file(path, &mut table_keys, &mut datetime_keys)?;
+    for file in files {
+        if let Some(key) = first_table_override(&file.table, &mut table_keys, &mut Vec::new()) {
+            return Err(Error::TableOverride {
+                key,
+                input: file.path.display().to_string(),
+            });
+        }
+        record_datetimes(&file.table, &file.path, &mut Vec::new(), &mut datetime_keys);
         builder = builder.add_source(file);
     }
     if let Some(variable) = variables
@@ -364,11 +398,7 @@ fn from_toml_value(uri: Option<&String>, value: &toml::Value) -> config::Value {
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
-fn scan_file(
-    path: &Path,
-    table_keys: &mut BTreeSet<String>,
-    datetime_keys: &mut BTreeMap<String, PathBuf>,
-) -> Result<ScannedFile, Error> {
+fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
         error,
@@ -395,13 +425,6 @@ fn scan_file(
             path: path.to_owned(),
         });
     }
-    if let Some(key) = first_table_override(&table, table_keys, &mut Vec::new()) {
-        return Err(Error::TableOverride {
-            key,
-            input: path.display().to_string(),
-        });
-    }
-    record_datetimes(&table, path, &mut Vec::new(), datetime_keys);
     Ok(ScannedFile {
         path: path.to_owned(),
         table,

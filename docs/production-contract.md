@@ -61,11 +61,41 @@ unable to serve, and budget every downstream deadline inside
   their original window. When shortening retention or rolling back, honor
   requests first sent under the earlier promise until that window expires.
 <!-- template:end http-idempotency:production-contract-retry-window -->
+<!-- template:begin inbound-webhooks:production-contract-receipt-recovery -->
+- In the PR that adds the service's first inbound webhook handler, include
+  tests for business duplicates and out-of-order events. Deliver the same
+  business operation with two distinct `webhook-id` values and assert that
+  its business effect occurs once. Deliver two events for the same entity in
+  reverse order and assert the expected business result. For versioned state,
+  verify that the older event cannot overwrite the newer state. For
+  order-independent operations, verify the same expected result in both orders.
+- Before relying on a late webhook redelivery, retire every receiver running
+  the old 14-day receipt cleanup, including rollback replicas and scheduled
+  maintenance. Receipts that still exist protect their delivery IDs. Reconcile
+  older events against business records before replaying them: an ID pruned
+  before the cutover cannot be recovered from the receipts table. Restore
+  receipts alongside the processing jobs and their business effects.
+- Budget PostgreSQL storage and backup capacity for one retained receipt per
+  distinct delivery on each endpoint. Keep endpoint IDs stable across
+  deployments. An irreversible effect outside the processing transaction needs
+  its own idempotency key at the recipient.
+<!-- template:end inbound-webhooks:production-contract-receipt-recovery -->
 - RPO, RTO, backup/key custody, and restore-compatible versions: Unresolved.
 - Cache staleness, TTL, invalidation, and token/key revocation lag: N/A for the
   health-only scaffold; reopen when cached state or authentication is enabled.
 
 ## Edge and trust
+
+<!-- template:begin webhooks-common:production-webhook-key-custody -->
+Provision a separate HMAC key for each webhook endpoint, direction and
+environment. During rotation, keep an endpoint's predecessor exclusive to
+that endpoint. Before upgrading a deployment that shared secrets, coordinate
+new keys with the affected partners and retire shared predecessors before
+starting the new replicas. Reconcile deliveries missed during cutover by ID.
+The API and worker load separate secret sets, so cross-process ownership
+belongs to provisioning.
+[Standard Webhooks signing keys](https://github.com/standard-webhooks/standard-webhooks/blob/3d65b1824b6697f05a5a4584e7062bd23512fc8e/spec/standard-webhooks.md#signature-scheme).
+<!-- template:end webhooks-common:production-webhook-key-custody -->
 
 - TLS termination and trusted proxy topology: Unresolved.
 - Gateway retry and fleet rate-limit owners: Unresolved (the service sheds
@@ -74,6 +104,34 @@ unable to serve, and budget every downstream deadline inside
   diagnostics port unreachable from untrusted networks).
 - Egress, identity, and authorization authorities (trusted issuers, audiences,
   callers, and destination origins): Unresolved.
+- For any connection carrying credentials over application-level plaintext,
+  identify what authenticates the intended peer and protects the whole route,
+  including the hop after any TLS termination. Use verified TLS when the
+  deployment cannot establish those properties.
+- For each rotating credential, record the issuer and consumers, how a new
+  authentication with the replacement is confirmed, when the old credential
+  is revoked, and how existing sessions are handled during emergency revocation.
+  Set the permitted revocation delay from the service's threat model.
+  Grant each process access only to the credentials it uses. A role-specific
+  configuration snapshot cannot restrict access to a shared volume or environment.
+
+<!-- template:begin webhooks:production-contract-worker-egress -->
+For outbound webhooks, record the network policy enforced on the delivery
+worker, its owner, the partner destinations, and any private dependencies
+that the worker must reach. Restrict outgoing connections to those destinations
+on IPv4 and IPv6. A configured HTTPS origin authenticates the peer after the
+connection starts. It cannot restrict the IP selected by DNS.
+If the worker also needs internal HTTPS services outside the partner allowlist,
+isolate the webhook delivery path so it cannot use those permissions.
+
+Before promotion, verify the deployed policy from the worker's network
+identity. Confirm a signed delivery to a controlled, permitted HTTPS receiver
+and successful access to required dependencies. On fresh connections, confirm
+that the network denies access to controlled destinations in prohibited
+subnets, including after the test name changes address. Record the policy
+revision and the observed permits and denials. Repeat when worker networking
+or the destination policy changes.
+<!-- template:end webhooks:production-contract-worker-egress -->
 
 <!-- template:begin authn:production-bearer-delegation -->
 When migrating a handler that used `VerifiedPrincipal::access_token()`, keep
@@ -84,6 +142,8 @@ its bearer security requirement. The handler can then read
 authorized downstream audience for that exchange.
 <!-- template:end authn:production-bearer-delegation -->
 <!-- template:begin grpc-authn:production-rpc-delegation -->
+In bearer mode, declare a scope rule for every registered business RPC. Use
+`require_scopes(path, &[])` when any verified principal may call the method.
 Register an RPC that performs token exchange with
 `require_scopes_for_delegation` and its required scopes. Read
 `infra_grpc::DelegationCredential` from the Tonic request extensions after
@@ -102,6 +162,9 @@ Choose `authn.jwks_max_age` from the maximum acceptable delay in observing a
 withdrawn key and the provider outage the service must survive. Allow for the
 normal refresh interval and acquisition time. Exercise an outage across the
 chosen limit, then restore the endpoint and confirm authentication recovers.
+For a discovered JWKS endpoint, rehearse moving `jwks_uri` while the previous
+endpoint still serves its old keys. Verify the replica accepts the new signing
+key and rejects the withdrawn key without restarting.
 <!-- template:end oidc-jwt:production-jwt-issuer-contract -->
 
 <!-- template:begin oidc-introspection:production-introspection-issuer-contract -->
@@ -325,7 +388,7 @@ snapshot guarantee. Any multi-store recovery runbook must:
    consumer state.
 3. Reconcile business identities, applied effects, deduplication records, and
    object digests before lifting the fence.
-4. Invalidate pre-restore tokens, operator commands, and receipts, re-inspecting
+4. Invalidate pre-restore tokens, operator commands, and their receipts, re-inspecting
    live state before resuming writes.
 5. Record observed recovery timing and reconciled gaps.
 
@@ -360,4 +423,30 @@ recover the original encoding and changes how live duplicates are compared.
 For an incompatible handler payload, register the new kind under a new name
 before switching producers. Keep the old handler available until pending,
 running and recoverable failed jobs of the old kind have a disposition.
+
+Before accepting a payload containing an escaped U+0000 in a key or value,
+upgrade every producer that may compare a live duplicate, including rollback
+images. Older producers can refuse that comparison even with a compatible
+text reader.
+
+### Promoting a PostgreSQL replica with active jobs
+
+Apply the additive claim migration before upgrading workers. While an older
+worker can still finish an attempt, stop those processes and prevent their
+connections to the promoted primary before resuming processing. Apply the
+same rule when rolling back to an older worker. Once every active attempt
+uses the new claim identity, a previous owner cannot acknowledge a replacement
+claim even when the promoted replica reuses a sequence value.
+
+Choose a writable endpoint and confirm that the worker loses readiness when
+that endpoint is read-only and regains it after promotion. Record the RPO of
+the promotion target. An asynchronous replica may lack a committed enqueue
+or completion. Reconcile effects at external recipients by their stable IDs
+before replaying ambiguous work, including webhooks and outbox publications.
+
+For a PgBouncer endpoint using transaction pooling, set
+`APP__POSTGRES__NOTIFICATIONS=false` on workers and producers that use that
+endpoint. Allow for the polling interval when setting a pickup latency target.
+Use a direct or session-pooled connection when the target requires prompt
+notification after commit.
 <!-- template:end jobs:production-contract-jobs-rollout -->

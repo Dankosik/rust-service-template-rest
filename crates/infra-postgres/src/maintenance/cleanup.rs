@@ -22,7 +22,6 @@ const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Cleanup {
     Jobs,
     HttpIdempotency,
-    WebhookReceipts,
 }
 
 impl Cleanup {
@@ -30,7 +29,6 @@ impl Cleanup {
         match self {
             Self::Jobs => "jobs",
             Self::HttpIdempotency => "http_idempotency",
-            Self::WebhookReceipts => "webhook_receipts",
         }
     }
 }

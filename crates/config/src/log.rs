@@ -12,13 +12,14 @@ pub enum LogFormat {
     Text,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, derive_more::Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LogConfig {
     /// A `tracing_subscriber::EnvFilter` directive, for example `info` or
     /// `info,sqlx=warn`. `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
     /// override channel like every other key.
     #[serde(deserialize_with = "crate::de::string")]
+    #[debug(skip)]
     pub level: String,
     #[serde(deserialize_with = "crate::de::string_enum")]
     pub format: LogFormat,

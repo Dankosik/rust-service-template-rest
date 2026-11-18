@@ -21,6 +21,7 @@ export default defineRailway((ctx) => {
       dockerfilePath: "build/docker/Dockerfile",
       watchPatterns: [
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "LICENSE", "deny.toml", "tools/versions.env",
         "crates/**", "migrations/**", ".sqlx/**", "vendor/**",
         "test/Cargo.toml", "test/src/**", "test/tests/**", "test/fixtures/**",
         "env/config/**", "build/docker/**", ".dockerignore",
@@ -49,7 +50,6 @@ export default defineRailway((ctx) => {
       // created before 2025-10-16 resolves to IPv6 only.
       PORT: "8080",
       APP__HTTP__ADDR: "[::]:8080",
-      // Only `local` and `development` admit the developer escape hatches.
       APP__APP__ENV: ctx.environment ?? "production",
       // Unset, the runtime starts one worker per vCPU of the plan limit (24)
       // and holds about twice the memory after a burst. Raise this to the
