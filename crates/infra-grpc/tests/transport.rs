@@ -2575,9 +2575,16 @@ fn grpc_frame(message: &str) -> bytes::Bytes {
 #[tokio::test]
 async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
     let fixture = Fixture::plaintext().await;
-    let call = |padding: usize| {
+    let call = |metadata_value_bytes: usize| {
         let mut echo = fixture.echo_client();
         let mut call = request(unary("padded"));
+        let bearer_bytes = call
+            .metadata()
+            .get("authorization")
+            .map_or(0, |value| value.as_encoded_bytes().len());
+        let padding = metadata_value_bytes
+            .checked_sub(bearer_bytes)
+            .expect("the fixture bearer fits within the metadata budget");
         call.metadata_mut()
             .insert("x-padding", "a".repeat(padding).parse().unwrap());
         async move { timeout(WAIT, echo.unary(call)).await.expect("padded call") }
