@@ -222,7 +222,7 @@ fn outbound_destinations_cannot_share_a_rotation_key() {
         "{diagnostics}"
     );
     assert!(!diagnostics.contains("AQEBAQEB"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 // template:end webhooks:worker-outbound-webhook-key-isolation
 
