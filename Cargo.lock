@@ -2830,6 +2830,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]

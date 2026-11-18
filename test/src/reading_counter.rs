@@ -30,6 +30,10 @@ const PUBLICATIONS: PublicationPolicy = PublicationPolicy {
     max_payload_bytes: MAX_OPERATION_BYTES,
 };
 pub const SUBJECT: &str = "reading.accepted";
+const PUBLISHER_ID: uuid::NonNilUuid = uuid::NonNilUuid::new(uuid::Uuid::from_u128(
+    0x2a42fbe7_9da4_48ba_a6e9_84447b8d6310,
+))
+.unwrap();
 
 pub fn publication(
     registry: &mut Registry,
@@ -58,6 +62,10 @@ fn valid_uuid(value: &str) -> bool {
 }
 
 impl Operation {
+    fn local_event_id(&self) -> String {
+        format!("{}:{}", self.scope, self.operation_id)
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
         for id in [&self.scope, &self.operation_id, &self.article_id] {
             if !valid_uuid(id) {
@@ -133,7 +141,7 @@ impl PreparedRequest {
     ) -> Result<Self, Error> {
         operation.validate()?;
         let event = Event {
-            id: format!("{}:{}", operation.scope, operation.operation_id),
+            id: operation.local_event_id(),
             occurred_at: UtcDateTime::now(),
             payload: operation.clone(),
         };
@@ -142,6 +150,8 @@ impl PreparedRequest {
             .format(&Rfc3339)
             .map_err(|_| Error::InvalidOperation)?;
         let event = publication
+            .clone()
+            .for_outbox(PUBLISHER_ID)
             .prepare(&event)
             .map_err(|_| Error::InvalidOperation)?;
         Ok(Self {
@@ -291,9 +301,17 @@ pub async fn replay(
         if remaining { return Err(Error::MissingIntent); }
         let occurred_at = UtcDateTime::parse(&original.event_time, &Rfc3339).map_err(|_| Error::InvalidOperation)?;
         let subject: String = row.try_get("event_subject")?;
-        let event = Event { id: original.event_id, occurred_at, payload: operation.clone() };
+        let event = Event { id: operation.local_event_id(), occurred_at, payload: operation.clone() };
         let publication = publication(&mut Registry::default(), &subject).map_err(|_| Error::InvalidOperation)?;
-        let prepared = PreparedRequest { operation: operation.clone(), event: publication.prepare(&event).map_err(|_| Error::InvalidOperation)?, event_time: original.event_time };
+        let event = if event.id == original.event_id {
+            publication.prepare(&event)
+        } else {
+            publication.for_outbox(PUBLISHER_ID).prepare(&event)
+        }.map_err(|_| Error::InvalidOperation)?;
+        if event.message_id() != original.event_id {
+            return Err(Error::Conflict);
+        }
+        let prepared = PreparedRequest { operation: operation.clone(), event, event_time: original.event_time };
         enqueue_intents(tx, &prepared, outbound, endpoint).await
     }).await
 }

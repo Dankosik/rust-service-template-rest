@@ -4,10 +4,10 @@ use tokio::time::Instant;
 
 use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
-use crate::kind::{
-    Disposition, JobError, MAX_ATTEMPTS, MAX_ERROR_SUMMARY_BYTES, Policy, UNAVAILABLE_DELAY_MICROS,
-};
+use crate::kind::{Disposition, JobError, MAX_ATTEMPTS, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
+
+const OUTBOX_MAX_RETRY_BASE_MICROS: f64 = 54_000_000.0;
 
 #[derive(Debug)]
 pub(super) enum Transition {
@@ -242,10 +242,12 @@ pub(super) enum Ended {
 pub(super) fn map_outcome(
     attempt: &AttemptId,
     policy: Policy,
-    recover_at_exhaustion: bool,
+    is_outbox: bool,
     ended: Ended,
 ) -> Transition {
     let number = attempt.number;
+    let exhausted = number >= policy.max_attempts;
+    let retry_budget_spent = exhausted && !is_outbox;
     match ended {
         Ended::Success(_) => Transition::Complete,
         Ended::Cancelled => Transition::Release,
@@ -260,40 +262,40 @@ pub(super) fn map_outcome(
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
                 number,
-                policy,
+                retry_budget_spent,
                 &error.summary,
                 RetryCause::Failure,
                 floor_micros,
-                recover_at_exhaustion,
+                is_outbox,
             ),
             Disposition::Retry => retry_or_exhaust(
                 number,
-                policy,
+                retry_budget_spent,
                 &error.summary,
                 RetryCause::Failure,
                 0,
-                recover_at_exhaustion,
+                is_outbox,
             ),
         },
         Ended::Panic => retry_or_exhaust(
             number,
-            policy,
+            exhausted,
             "handler panicked",
             RetryCause::Failure,
             0,
-            false,
+            is_outbox,
         ),
         Ended::Payload(error) => retry_or_exhaust(
             number,
-            policy,
+            exhausted,
             &payload_summary(attempt.kind, &error),
             RetryCause::Failure,
             0,
-            false,
+            is_outbox,
         ),
         Ended::Timeout => retry_or_exhaust(
             number,
-            policy,
+            retry_budget_spent,
             &format!(
                 "attempt timed out after {}",
                 jiff::fmt::friendly::SpanPrinter::new()
@@ -301,7 +303,7 @@ pub(super) fn map_outcome(
             ),
             RetryCause::Timeout,
             0,
-            recover_at_exhaustion,
+            is_outbox,
         ),
     }
 }
@@ -314,22 +316,23 @@ pub(super) enum RetryCause {
 
 fn retry_or_exhaust(
     number: u16,
-    policy: Policy,
+    exhausted: bool,
     text: &str,
     cause: RetryCause,
     floor_micros: i64,
-    recover_at_exhaustion: bool,
+    is_outbox: bool,
 ) -> Transition {
     let summary = sanitize_summary(text);
-    let (base_micros, floor_micros) = if number < policy.max_attempts {
-        (f64::from(number).powi(4) * 1_000_000.0, floor_micros)
-    } else if recover_at_exhaustion {
-        (0.0, floor_micros.max(UNAVAILABLE_DELAY_MICROS))
-    } else {
+    if exhausted {
         return Transition::Fail {
             reason: FailureReason::Exhausted,
             summary,
         };
+    }
+    let base_micros = if is_outbox {
+        (2_f64.powi(i32::from(number.max(1))) * 1_000_000.0).min(OUTBOX_MAX_RETRY_BASE_MICROS)
+    } else {
+        f64::from(number).powi(4) * 1_000_000.0
     };
     Transition::Retry {
         summary,
@@ -472,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_recoverable_attempts_retry_after_the_budget_without_reopening_invalid_work() {
+    fn outbox_timeouts_remain_retryable_after_the_budget_and_invalid_work_exhausts() {
         let attempt = AttemptId {
             job_id: ID,
             kind: "sample",
@@ -482,11 +485,10 @@ mod tests {
         std::assert_matches!(
             outcome(Ended::Timeout),
             Transition::Retry {
-                base_micros,
-                floor_micros: 10_000_000,
+                floor_micros: 0,
                 cause: RetryCause::Timeout,
                 ..
-            } if base_micros == 0.0
+            }
         );
         let decode_error = serde_json::from_str::<u64>("null").unwrap_err();
         for ended in [Ended::Panic, Ended::Payload(decode_error)] {

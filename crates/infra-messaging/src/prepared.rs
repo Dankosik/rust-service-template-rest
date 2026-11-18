@@ -13,8 +13,8 @@ use crate::registry::route_key;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     subject: Subject,
-    message_id: String,
-    publication_id: String,
+    pub(crate) message_id: String,
+    pub(crate) publication_id: Option<String>,
     event_type: Cow<'static, str>,
     schema_version: u16,
     occurred_at: OffsetDateTime,
@@ -57,7 +57,7 @@ impl PreparedEvent {
         Ok(Self {
             subject,
             message_id: event.id.clone(),
-            publication_id: event.id.clone(),
+            publication_id: None,
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
             occurred_at,
@@ -92,7 +92,7 @@ impl PreparedEvent {
         Ok(Self {
             subject,
             message_id,
-            publication_id,
+            publication_id: Some(publication_id),
             event_type: event_type.into(),
             schema_version,
             occurred_at,
@@ -112,7 +112,7 @@ impl PreparedEvent {
     }
     #[must_use]
     pub fn publication_id(&self) -> &str {
-        &self.publication_id
+        self.publication_id.as_deref().unwrap_or(&self.message_id)
     }
     #[must_use]
     pub fn event_type(&self) -> &str {

@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    WITH ordered_candidates AS MATERIALIZED (\n                        SELECT created_at, predecessor_job_id\n                        FROM background_jobs\n                        WHERE kind = 'publish_domain_event'\n                          AND state = 'pending' AND predecessor_job_id IS NOT NULL\n                        ORDER BY created_at\n                        LIMIT ($1::bigint + 1)\n                    ), oldest_blocked AS (\n                        SELECT candidate.created_at\n                        FROM ordered_candidates AS candidate\n                        CROSS JOIN LATERAL (\n                            SELECT 1 FROM background_jobs AS predecessor\n                            WHERE predecessor.id = candidate.predecessor_job_id\n                              AND predecessor.state <> 'completed'\n                            LIMIT 1\n                        ) AS blocker\n                        ORDER BY candidate.created_at\n                        LIMIT 1\n                    )\n                    SELECT\n                        GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - (\n                            SELECT created_at\n                            FROM background_jobs\n                            WHERE kind = 'publish_domain_event' AND state <> 'completed'\n                            ORDER BY created_at\n                            LIMIT 1\n                        )))::double precision AS \"oldest_unconfirmed_age!\",\n                        COALESCE(\n                            (SELECT GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - created_at))\n                             FROM oldest_blocked),\n                            CASE WHEN (SELECT count(*) FROM ordered_candidates) > $1\n                                 THEN 'NaN'::double precision ELSE 0 END\n                        )::double precision AS \"oldest_blocked_age!\",\n                        EXTRACT(EPOCH FROM statement_timestamp())::double precision AS \"observed_at!\"\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "oldest_unconfirmed_age!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_blocked_age!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "observed_at!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "1991b2f85ed1691688ac61dadb152f9a9d2a183cc53d768e8e1da4b419fe466e"
+}

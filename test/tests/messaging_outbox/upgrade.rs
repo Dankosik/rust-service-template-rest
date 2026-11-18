@@ -11,8 +11,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    APP, Fixture, OUTBOX_KIND, POLL, Step, WAIT, close, event_key, finish, messaging_options,
-    outbox_count, prepared, start, template_pool,
+    APP, Fixture, OUTBOX_KIND, POLL, Step, WAIT, close, event, event_key, finish,
+    messaging_options, outbox_count, prepared, start, template_pool,
 };
 
 pub(super) const HISTORICAL_SCHEMA: i64 = 20_261_117_120_000;
@@ -183,8 +183,14 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
 
     let jobs = template_pool(&pool, 3).await;
     close_pools(&[&pool]).await;
-    let replay = prepared(&fixture, LOGICAL_ID, "legacy\nbytes");
-    let changed = prepared(&fixture, LOGICAL_ID, "changed");
+    let replay = fixture
+        .publication
+        .prepare(&event(LOGICAL_ID, "legacy\nbytes"))
+        .unwrap();
+    let changed = fixture
+        .publication
+        .prepare(&event(LOGICAL_ID, "changed"))
+        .unwrap();
     in_tx(&jobs, async |tx| -> Result<(), Step> {
         assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
         std::assert_matches!(
@@ -229,6 +235,37 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         assert_eq!(message.headers.get(header).unwrap().as_str(), LOGICAL_ID);
     }
     assert_eq!(message.payload.as_ref(), BODY);
+    let independent = prepared(&fixture, LOGICAL_ID, "legacy\nbytes");
+    in_tx(&jobs, async |tx| -> Result<(), Step> {
+        assert_eq!(independent.enqueue(tx).await?, OutboxEnqueued::Created);
+        assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    poll_until(
+        "new publisher with identical local intent also delivers",
+        WAIT,
+        POLL,
+        async || (fixture.published().await == 2).then_some(()),
+    )
+    .await;
+    let fresh = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .unwrap()
+        .get_raw_message(2)
+        .await
+        .unwrap();
+    for header in ["Message-Id", "Nats-Msg-Id"] {
+        assert_ne!(fresh.headers.get(header).unwrap().as_str(), LOGICAL_ID);
+        assert_eq!(
+            fresh.headers.get(header).unwrap().as_str(),
+            independent.message_id()
+        );
+    }
+    assert_eq!(fresh.payload.as_ref(), BODY);
     finish(run, &[&jobs]).await;
     close(messaging).await;
     fixture.cleanup().await;
@@ -409,5 +446,106 @@ async fn upgrade_requeues_only_verified_transient_exhaustion_without_displacing_
     }
     let stale = in_tx(&pool, async |tx| operator::redrive(tx, &old_target).await).await;
     std::assert_matches!(stale, Err(OperatorError::Stale));
+    close_pools(&[&pool]).await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidence(pool: PgPool) {
+    MIGRATOR.run_to(HISTORICAL_SCHEMA, &pool).await.unwrap();
+    let mut staged_jobs = Vec::new();
+    for (scenario, state, due_in, attempt) in [
+        ("verified-retry", "pending", 259_200_i32, 24_i16),
+        ("ambiguous-retry", "pending", 259_200, 24),
+        ("within-budget", "pending", 30, 24),
+        ("already-due", "pending", -1, 24),
+        ("delayed-admission", "pending", 259_200, 0),
+        ("snoozed-or-rescheduled", "pending", 259_200, 24),
+        ("mismatched-history", "pending", 259_200, 24),
+        ("bad-history-date", "pending", 259_200, 24),
+        ("conflicting-receipt", "pending", 259_200, 24),
+        ("ordinary-job", "pending", 259_200, 24),
+        ("running-lease", "running", 259_200, 24),
+        ("completed", "completed", 259_200, 24),
+        ("failed", "failed", 259_200, 24),
+    ] {
+        let intent = historical_intent(SUBJECT, scenario, BODY);
+        let id = historical_job(&pool, &intent, Storage::Text, LegacyState::Pending, true).await;
+        sqlx::query(
+            "UPDATE background_jobs SET
+                kind = CASE WHEN $5 = 'ordinary-job' THEN 'ordinary_job' ELSE kind END,
+                state = $2, attempts = $4, created_at = statement_timestamp() - interval '5 days',
+                not_before = statement_timestamp() + $3::integer * interval '1 second',
+                claim_generation = CASE WHEN $4 > 0 THEN nextval('background_jobs_claim_generation') ELSE 0 END,
+                attempted_by = CASE WHEN $4 > 0 THEN gen_random_uuid() END,
+                claim_expires_at = CASE WHEN $2 = 'running' THEN statement_timestamp() + interval '30 seconds' END,
+                finished_at = CASE WHEN $2 IN ('completed', 'failed') THEN statement_timestamp() END,
+                failure_reason = CASE WHEN $2 = 'failed' THEN 'permanent' END,
+                error_summary = $6,
+                errors = CASE WHEN $4 = 0 THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object(
+                    'attempt', CASE WHEN $5 = 'mismatched-history' THEN $4 - 1 ELSE $4 END,
+                    'at', CASE
+                        WHEN $5 = 'bad-history-date' THEN to_jsonb('2026-77-41T00:00:00+00:00'::text)
+                        WHEN $5 = 'snoozed-or-rescheduled' THEN to_jsonb(statement_timestamp())
+                        ELSE to_jsonb(statement_timestamp() + ($3 - 331776) * interval '1 second')
+                    END,
+                    'error', $6
+                )) END
+             WHERE id = $1::text::uuid",
+        )
+        .bind(&id)
+        .bind(state)
+        .bind(due_in)
+        .bind(attempt)
+        .bind(scenario)
+        .bind(match scenario {
+            "delayed-admission" => None,
+            "ambiguous-retry" => Some("publication_ack_unknown"),
+            _ => Some("broker_refused"),
+        })
+        .execute(&pool)
+        .await
+        .unwrap();
+        staged_jobs.push((scenario, id));
+    }
+    MIGRATOR.run_to(RECEIPT_BACKFILL, &pool).await.unwrap();
+    let mut snapshots = Vec::new();
+    for (scenario, id) in staged_jobs {
+        if scenario == "conflicting-receipt" {
+            sqlx::query("UPDATE background_jobs SET payload_text = '{' WHERE id = $1::text::uuid")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let before = stored_job(&pool, &id).await;
+        snapshots.push((scenario, id, before));
+    }
+    let upgrade_started: String = sqlx::query_scalar("SELECT statement_timestamp()::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    MIGRATOR.run(&pool).await.unwrap();
+    for (scenario, id, mut before) in snapshots {
+        let mut after = stored_job(&pool, &id).await;
+        if matches!(scenario, "verified-retry" | "ambiguous-retry") {
+            let in_window: bool = sqlx::query_scalar(
+                "SELECT not_before BETWEEN $2::text::timestamptz + interval '48.6 seconds'
+                                       AND statement_timestamp() + interval '59.4 seconds'
+                 FROM background_jobs WHERE id = $1::text::uuid",
+            )
+            .bind(&id)
+            .bind(&upgrade_started)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                in_window,
+                "legacy retry {scenario} must be due within the cap"
+            );
+            before.as_object_mut().unwrap().remove("not_before");
+            after.as_object_mut().unwrap().remove("not_before");
+        }
+        assert_eq!(after, before, "legacy job {scenario}");
+    }
     close_pools(&[&pool]).await;
 }

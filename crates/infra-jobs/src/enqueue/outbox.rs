@@ -13,6 +13,7 @@ pub enum Admission {
     EventIdConflict,
     OrderConflict,
     InvalidOrder,
+    MissingReceipt,
 }
 
 pub fn publisher_kinds<T: JobKind>(
@@ -29,6 +30,23 @@ pub async fn enqueue<T: JobKind>(
     intent: &T,
     order: Option<(&str, i64)>,
 ) -> Result<Admission, EnqueueError> {
+    admit(tx, intent, order, true).await
+}
+
+pub async fn reconcile<T: JobKind>(
+    tx: &mut Tx<'_>,
+    intent: &T,
+    order: Option<(&str, i64)>,
+) -> Result<Admission, EnqueueError> {
+    admit(tx, intent, order, false).await
+}
+
+async fn admit<T: JobKind>(
+    tx: &mut Tx<'_>,
+    intent: &T,
+    order: Option<(&str, i64)>,
+    allow_insert: bool,
+) -> Result<Admission, EnqueueError> {
     if T::NAME != KIND {
         return Err(EnqueueError::OutboxKind);
     }
@@ -37,6 +55,9 @@ pub async fn enqueue<T: JobKind>(
     }
     let payload = encode_payload(intent)?;
     let (aggregate_key, version) = order.unzip();
+    if !allow_insert {
+        return compare_receipt(tx, &payload, aggregate_key, version).await;
+    }
     let trace = trace_context::capture();
     let id = JobId::new_v7();
     let inserted = observed(
@@ -77,6 +98,18 @@ pub async fn enqueue<T: JobKind>(
         wake_workers(tx, KIND).await?;
         return Ok(Admission::Created);
     }
+    match compare_receipt(tx, &payload, aggregate_key, version).await? {
+        Admission::MissingReceipt => Ok(Admission::OrderConflict),
+        other => Ok(other),
+    }
+}
+
+async fn compare_receipt(
+    tx: &mut Tx<'_>,
+    payload: &str,
+    aggregate_key: Option<&str>,
+    version: Option<i64>,
+) -> Result<Admission, EnqueueError> {
     let same = observed(
         "compare outbox receipt",
         sqlx::query_scalar!(
@@ -86,7 +119,7 @@ pub async fn enqueue<T: JobKind>(
                AND aggregate_version IS NOT DISTINCT FROM $3::bigint AS "same!"
             FROM outbox_event_receipts WHERE event_key = outbox_event_key($1::text::jsonb)
             "#,
-            &payload,
+            payload,
             aggregate_key,
             version,
         )
@@ -96,6 +129,6 @@ pub async fn enqueue<T: JobKind>(
     Ok(match same {
         Some(true) => Admission::Duplicate,
         Some(false) => Admission::EventIdConflict,
-        None => Admission::OrderConflict,
+        None => Admission::MissingReceipt,
     })
 }

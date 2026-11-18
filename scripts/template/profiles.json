@@ -444,7 +444,11 @@
     "remove_when_unselected": [
       "migrations/20261118120001_backfill_outbox_event_receipts.sql",
       "migrations/20261118120100_requeue_exhausted_outbox_jobs.sql",
+      "migrations/20261118140000_index_unconfirmed_outbox_jobs.sql",
+      "migrations/20261118140001_index_ordered_outbox_jobs.sql",
+      "migrations/20261118140100_bound_outbox_retry_schedule.sql",
       "crates/infra-jobs/src/enqueue/outbox.rs",
+      "crates/infra-jobs/src/maintenance/outbox.rs",
       "crates/infra-messaging/src/outbox.rs",
       "crates/jobs-worker/src/bootstrap/outbox.rs",
       "test/tests/messaging_outbox.rs",

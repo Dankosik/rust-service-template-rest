@@ -550,6 +550,9 @@ pub(crate) enum Operation {
     Release,
     Retention,
     Sample,
+    // template:begin outbox:jobs-operation-sample-outbox
+    SampleOutbox,
+    // template:end outbox:jobs-operation-sample-outbox
     Listen,
 }
 
@@ -562,6 +565,9 @@ impl Operation {
             Self::Release => "release",
             Self::Retention => "retention",
             Self::Sample => "sample",
+            // template:begin outbox:jobs-operation-sample-outbox-name
+            Self::SampleOutbox => "sample_outbox",
+            // template:end outbox:jobs-operation-sample-outbox-name
             Self::Listen => "listen",
         }
     }

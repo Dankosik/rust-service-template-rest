@@ -45,6 +45,10 @@ const WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const APP: &str = "integration-tests-outbox";
+const PUBLISHER_ID: uuid::NonNilUuid = uuid::NonNilUuid::new(uuid::Uuid::from_u128(
+    0x18ec64bc_9693_465e_a5dc_8f61177b89e2,
+))
+.unwrap();
 const OUTBOX_KIND: &str = "publish_domain_event";
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-constants
 const WEBHOOK_ENDPOINT: &str = "partner/a?#";
@@ -354,6 +358,8 @@ async fn outbox_count(pool: &PgPool) -> i64 {
 fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::PreparedEvent {
     fixture
         .publication
+        .clone()
+        .for_outbox(PUBLISHER_ID)
         .prepare(&event(id, value))
         .expect("fixture event prepares once")
 }
@@ -395,7 +401,8 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
     let mut registry = Registry::default();
     let publication = registry
         .declare_publication(&route, 1024)
-        .expect("typed publication route");
+        .expect("typed publication route")
+        .for_outbox(PUBLISHER_ID);
     let leaf = serde_json::to_string("[{}]\\\"\\").expect("escaped string");
     let raw127 = format!("{}{leaf}{}", "[".repeat(127), "]".repeat(127));
     let raw128 = format!("[{raw127}]");
@@ -521,7 +528,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         WAIT,
         POLL,
         async || {
-            let row = job(&business, &event_key("event-commit")).await;
+            let row = job(&business, &event_key(committed.message_id())).await;
             (row.state == "completed").then_some(row)
         },
     )
@@ -572,7 +579,7 @@ async fn verify_completed_identity(
         infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap(),
         NonZeroU32::MIN,
     );
-    let changed = prepared(fixture, committed.message_id(), "changed");
+    let changed = prepared(fixture, "event-commit", "changed");
     for retained in [true, false] {
         if !retained {
             sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
@@ -608,6 +615,95 @@ async fn verify_completed_identity(
         .unwrap();
     assert_eq!(business_rows, 1);
     assert_eq!(fixture.published().await, 1);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(pool: PgPool) {
+    let fixture = Fixture::create_with_window(false, Duration::from_mins(5)).await;
+    let local_id = "order:17";
+    let jobs = template_pool(&pool, 4).await;
+    let unscoped = fixture
+        .publication
+        .prepare(&event(local_id, "unbound"))
+        .unwrap();
+    let reconcile = async || {
+        in_tx(&jobs, async |tx| -> Result<_, Step> {
+            unscoped.enqueue(tx).await.map_err(Step::from)
+        })
+        .await
+    };
+    let (a, b) = tokio::join!(reconcile(), reconcile());
+    for outcome in [a, b] {
+        std::assert_matches!(
+            outcome,
+            Err(Step::Outbox(OutboxEnqueueError::PublisherRequired))
+        );
+    }
+    assert_eq!(outbox_count(&jobs).await, 0);
+    let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+    let start_time = Instant::now();
+    for (sequence, publisher, value) in [
+        (1, PUBLISHER_ID, "first order"),
+        (
+            2,
+            uuid::NonNilUuid::new(uuid::Uuid::from_u128(
+                0x3df13a07_b452_4cf0_ad2a_81acb263b11f,
+            ))
+            .unwrap(),
+            "second order",
+        ),
+    ] {
+        let messaging = Box::pin(Messaging::connect(
+            messaging_options(&fixture),
+            Instant::now() + WAIT,
+            CancellationToken::new(),
+        ))
+        .await
+        .unwrap();
+        let workers = template_pool(&pool, 3).await;
+        let run = start(
+            &workers,
+            infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap(),
+        )
+        .await;
+        let authored = event(local_id, value);
+        let expected_id = format!(
+            "outbox-v1-{}-4df9dbb3462374b8510500956968320d2725d77ae107b87e4e41ef80d3dbd1bf",
+            publisher.get().simple()
+        );
+        for outcome in [OutboxEnqueued::Created, OutboxEnqueued::Duplicate] {
+            let route = fixture.publication.clone().for_outbox(publisher);
+            let prepared = route.prepare(&authored).unwrap();
+            assert_eq!(prepared.message_id(), expected_id);
+            let observed = in_tx(&jobs, async |tx| -> Result<_, Step> {
+                prepared.enqueue(tx).await.map_err(Step::from)
+            })
+            .await
+            .unwrap();
+            assert_eq!(observed, outcome);
+            poll_until("publisher receives a broker ACK", WAIT, POLL, async || {
+                (job(&jobs, &event_key(prepared.message_id())).await.state == "completed")
+                    .then_some(())
+            })
+            .await;
+        }
+        let message = stream.get_raw_message(sequence).await.unwrap();
+        for header in ["Message-Id", "Nats-Msg-Id"] {
+            assert_eq!(message.headers.get(header).unwrap().as_str(), expected_id);
+        }
+        assert_eq!(message.subject.as_ref(), fixture.subject.as_str());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&message.payload).unwrap(),
+            serde_json::json!({"value": value})
+        );
+        assert_eq!(fixture.published().await, sequence);
+        finish(run, &[&workers]).await;
+        close(messaging).await;
+    }
+    assert!(start_time.elapsed() < fixture.duplicate_window);
+    assert_eq!(outbox_count(&jobs).await, 2);
+    close_pools(&[&jobs]).await;
+    fixture.cleanup().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -747,8 +843,8 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     .await
     .expect("producer-only messaging admits through the transparent relay");
     let jobs = template_pool(&pool, 3).await;
-    let key = event_key("event-lost-ack");
     let intent = prepared(&fixture, "event-lost-ack", "ambiguous");
+    let key = event_key(intent.message_id());
     assert_eq!(
         in_tx(&jobs, async |tx| -> Result<_, Step> {
             intent.enqueue(tx).await.map_err(Step::from)
@@ -789,7 +885,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
         .expect("ambiguous dispatch remains stored");
     assert_eq!(
         stored.headers.get("Nats-Msg-Id").map(ToString::to_string),
-        Some("event-lost-ack".to_owned())
+        Some(intent.publication_id().to_owned())
     );
     finish(first_run, &[&first_pool]).await;
     close(first_messaging).await;
@@ -849,7 +945,8 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     let mut declarations = Registry::default();
     let publication = declarations
         .declare_publication(&fixture.route, 64)
-        .unwrap();
+        .unwrap()
+        .for_outbox(PUBLISHER_ID);
     let too_large = event("oversized-new-intent", &"x".repeat(53));
     let before = outbox_count(&jobs).await;
     let refused = in_tx(&jobs, async |tx| -> Result<(), Step> {
@@ -871,13 +968,8 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     })
     .await
     .expect("both the boundary event and an intent from the previous larger route commit");
-    let key = event_key("event-exhausted");
-    sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = $1 AND unique_key = $2")
-        .bind(OUTBOX_KIND)
-        .bind(&key)
-        .execute(&jobs)
-        .await
-        .expect("two attempts remain for the broker outage");
+    let key = event_key(intent.message_id());
+    let id = job(&jobs, &key).await.id;
     fixture.remove_source().await;
 
     let publisher = template_pool(&pool, 3).await;
@@ -887,7 +979,71 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let oversized_key = event_key("event-oversized");
+    let oversized_key = event_key(oversized.message_id());
+    let make_due = async |generation: i64| {
+        let updated = sqlx::query(
+            "UPDATE background_jobs SET not_before = statement_timestamp()
+             WHERE id::text = $1 AND claim_generation = $2 AND state = 'pending'",
+        )
+        .bind(&id)
+        .bind(generation)
+        .execute(&jobs)
+        .await
+        .expect("make a scheduled retry due");
+        assert_eq!(updated.rows_affected(), 1);
+    };
+    let mut generation = 0;
+    for (attempt, oldest, delay_seconds) in [
+        (1_i16, 1_i16, 1.8..=2.2),
+        (2, 1, 3.6..=4.4),
+        (24, 1, 48.6..=59.4),
+        (25, 1, 48.6..=59.4),
+        (25, 2, 48.6..=59.4),
+    ] {
+        if attempt == 24 {
+            let seeded = sqlx::query(
+                "UPDATE background_jobs SET attempts = 23, errors = errors || (
+                     SELECT jsonb_agg(jsonb_build_object('attempt', attempt, 'at', statement_timestamp(),
+                                                        'error', 'broker_refused') ORDER BY attempt)
+                     FROM generate_series(3, 23) AS history(attempt)
+                 ) WHERE id::text = $1 AND claim_generation = $2 AND state = 'pending'",
+            )
+            .bind(&id)
+            .bind(generation)
+            .execute(&jobs)
+            .await
+            .expect("stage the intervening retry history");
+            assert_eq!(seeded.rows_affected(), 1);
+        }
+        if generation != 0 {
+            make_due(generation).await;
+        }
+        let (next_generation, history_len, oldest_attempt, delay) =
+            poll_until("broker refusal durably schedules a retry", WAIT, POLL, async || {
+                sqlx::query_as::<_, (i64, i32, i16, f64)>(
+                    "SELECT claim_generation, jsonb_array_length(errors),
+                            (errors -> 0 ->> 'attempt')::smallint,
+                            EXTRACT(EPOCH FROM not_before - (errors -> -1 ->> 'at')::timestamptz)::double precision
+                     FROM background_jobs
+                     WHERE id::text = $1 AND claim_generation > $2 AND attempts = $3
+                           AND state = 'pending' AND failure_reason IS NULL",
+                )
+                .bind(&id)
+                .bind(generation)
+                .bind(attempt)
+                .fetch_optional(&jobs)
+                .await
+                .expect("read the stored delay from the transition's PostgreSQL clock")
+            })
+            .await;
+        assert!(
+            delay_seconds.contains(&delay),
+            "attempt {attempt} scheduled {delay}s outside {delay_seconds:?}"
+        );
+        assert_eq!(history_len, i32::from(attempt));
+        assert_eq!(oldest_attempt, oldest);
+        generation = next_generation;
+    }
     let permanent = poll_until(
         "local payload refusal is terminal",
         WAIT,
@@ -900,31 +1056,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     .await;
     assert_eq!(permanent.attempts, 1);
     assert_eq!(permanent.failure_reason.as_deref(), Some("permanent"));
-
-    let pending = poll_until("missing stream is retryable", WAIT, POLL, async || {
-        let row = job(&jobs, &key).await;
-        (row.state == "pending" && row.attempts == 24).then_some(row)
-    })
-    .await;
-    sqlx::query(
-        "UPDATE background_jobs SET not_before = statement_timestamp() WHERE id::text = $1",
-    )
-    .bind(&pending.id)
-    .execute(&jobs)
-    .await
-    .expect("final retry is due");
-    let deferred = poll_until(
-        "a refused final attempt remains eligible for recovery",
-        WAIT,
-        POLL,
-        async || {
-            let row = job(&jobs, &key).await;
-            (row.state == "pending" && row.attempts == 25).then_some(row)
-        },
-    )
-    .await;
-    assert_eq!(deferred.id, pending.id);
-    assert!(deferred.failure_reason.is_none());
+    fixture.restore_source().await;
     let interrupted = prepared(&fixture, "final-lease", "interrupted");
     in_tx(&jobs, async |tx| -> Result<(), Step> {
         interrupted.enqueue(tx).await?;
@@ -940,18 +1072,20 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     })
     .await
     .unwrap();
-    fixture.restore_source().await;
-    poll_until(
+    let completed = poll_until(
         "restoring the stream resumes the outstanding publication without redrive",
-        Duration::from_secs(30),
+        Duration::from_secs(60) + WAIT,
         POLL,
         async || {
-            (job(&jobs, &key).await.state == "completed"
+            let row = job(&jobs, &key).await;
+            (row.state == "completed"
                 && job(&jobs, &event_key(interrupted.message_id())).await.state == "completed")
-                .then_some(())
+                .then_some(row)
         },
     )
     .await;
+    assert_eq!(completed.id, id);
+    assert_eq!(completed.attempts, 25);
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let mut ids = Vec::new();
     for seq in 1..=2 {
@@ -1046,8 +1180,8 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
         WAIT,
         POLL,
         async || {
-            (job(&jobs, &event_key("B1")).await.state == "completed"
-                && job(&jobs, &event_key("A1")).await.state == "failed")
+            (job(&jobs, &event_key(independent.message_id())).await.state == "completed"
+                && job(&jobs, &event_key(first.message_id())).await.state == "failed")
                 .then_some(())
         },
     )
@@ -1056,10 +1190,13 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     finish(b, &[]).await;
     close(restricted).await;
     assert_eq!(fixture.published().await, 1);
-    assert_eq!(job(&jobs, &event_key("A2")).await.attempts, 0);
+    assert_eq!(
+        job(&jobs, &event_key(second.message_id())).await.attempts,
+        0
+    );
     let (id, generation): (String, String) = sqlx::query_as(
         "SELECT id::text, claim_generation::text FROM background_jobs WHERE kind=$1 AND unique_key=$2"
-    ).bind(OUTBOX_KIND).bind(event_key("A1")).fetch_one(&jobs).await.unwrap();
+    ).bind(OUTBOX_KIND).bind(event_key(first.message_id())).fetch_one(&jobs).await.unwrap();
     let target = RecoveryTarget::try_new(&id, OUTBOX_KIND, &generation).unwrap();
     let discard = in_tx(&jobs, async |tx| operator::discard(tx, &target).await).await;
     std::assert_matches!(discard, Err(OperatorError::Conflict));
@@ -1073,7 +1210,9 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
         "successor completes after redrive",
         WAIT,
         POLL,
-        async || (job(&jobs, &event_key("A2")).await.state == "completed").then_some(()),
+        async || {
+            (job(&jobs, &event_key(second.message_id())).await.state == "completed").then_some(())
+        },
     )
     .await;
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -1137,6 +1276,10 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         upgrade::stage_encoded(&pool, &fixture.subject, id, encoded).await;
     }
     migrate::MIGRATOR.run(&pool).await.unwrap();
+    let mut corrupt_keys: Vec<_> = corrupt
+        .iter()
+        .map(|(id, _, reason)| (event_key(id), *reason))
+        .collect();
     for id in ["substituted", "malformed-outer"] {
         let intent = prepared(&fixture, id, "original");
         in_tx(&jobs, async |tx| -> Result<_, Step> {
@@ -1149,13 +1292,14 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
              jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb($3::text), false)::text END
              WHERE unique_key = $1",
         )
-        .bind(event_key(id))
+        .bind(event_key(intent.message_id()))
         .bind(id == "malformed-outer")
         .bind(&valid_body)
         .execute(&jobs)
         .await
         .unwrap();
         assert_eq!(changed.rows_affected(), 1);
+        corrupt_keys.push((event_key(intent.message_id()), "outbox_receipt_mismatch"));
     }
 
     let publisher = template_pool(&pool, 3).await;
@@ -1165,19 +1309,15 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    for (id, reason) in corrupt.iter().map(|(id, _, reason)| (*id, *reason)).chain([
-        ("substituted", "outbox_receipt_mismatch"),
-        ("malformed-outer", "outbox_receipt_mismatch"),
-    ]) {
-        let key = event_key(id);
+    for (key, reason) in corrupt_keys {
         let failed = poll_until("corrupt intent is terminal", WAIT, POLL, async || {
             let row = job(&jobs, &key).await;
             (row.state == "failed").then_some(row)
         })
         .await;
-        assert_eq!(failed.attempts, 1, "{id}");
-        assert_eq!(failed.failure_reason.as_deref(), Some("permanent"), "{id}");
-        assert_eq!(failed.error_summary.as_deref(), Some(reason), "{id}");
+        assert_eq!(failed.attempts, 1, "{key}");
+        assert_eq!(failed.failure_reason.as_deref(), Some("permanent"), "{key}");
+        assert_eq!(failed.error_summary.as_deref(), Some(reason), "{key}");
     }
     let key = event_key("valid");
     poll_until("valid intent completes", WAIT, POLL, async || {

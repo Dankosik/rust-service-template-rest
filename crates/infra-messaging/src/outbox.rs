@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use bytes::Bytes;
+use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
 use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::Tx;
@@ -9,11 +10,13 @@ use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::base64::Base64;
 use serde_with::{DeserializeAs, SerializeAs, serde_as};
+use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
+use uuid::NonNilUuid;
 
 use crate::error::{PublishError, PublishRejection};
 use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
-use crate::{OutboxProducer, Producer};
+use crate::{EnvelopeError, OutboxProducer, Producer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
@@ -32,6 +35,8 @@ pub enum OutboxEnqueued {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
+    #[error("new outbox events require a publication route bound with for_outbox(publisher_id)")]
+    PublisherRequired,
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
     PayloadTooLarge { bytes: usize, max_bytes: usize },
     #[error("outbox event identity conflicts with its immutable intent or business order")]
@@ -44,6 +49,34 @@ pub enum OutboxEnqueueError {
     InvalidOrder,
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
+}
+
+#[derive(Clone, Debug)]
+pub struct OutboxRoute<T: EventPayload> {
+    publication: PublicationRoute<T>,
+    publisher_id: NonNilUuid,
+}
+
+impl<T: EventPayload> PublicationRoute<T> {
+    #[must_use]
+    pub fn for_outbox(self, publisher_id: NonNilUuid) -> OutboxRoute<T> {
+        OutboxRoute {
+            publication: self,
+            publisher_id,
+        }
+    }
+}
+
+impl<T: EventPayload + Serialize> OutboxRoute<T> {
+    pub fn prepare(&self, event: &Event<T>) -> Result<PreparedEvent, EnvelopeError> {
+        let mut prepared = self.publication.prepare(event)?;
+        let prefix = format!("outbox-v1-{}-", self.publisher_id.get().simple());
+        let id =
+            crate::wire::prefixed_digest_hex(&prefix, &Sha256::digest(event.id.as_bytes()).into());
+        prepared.publication_id = Some(id.clone());
+        prepared.message_id = id;
+        Ok(prepared)
+    }
 }
 
 pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
@@ -96,12 +129,18 @@ impl PreparedEvent {
         order: Option<(&str, i64)>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
-        match job_outbox::enqueue(tx, &intent, order).await? {
+        let admission = if self.publication_id.is_some() {
+            job_outbox::enqueue(tx, &intent, order).await?
+        } else {
+            job_outbox::reconcile(tx, &intent, order).await?
+        };
+        match admission {
             Admission::Created => Ok(OutboxEnqueued::Created),
             Admission::Duplicate => Ok(OutboxEnqueued::Duplicate),
             Admission::EventIdConflict => Err(OutboxEnqueueError::EventIdConflict),
             Admission::OrderConflict => Err(OutboxEnqueueError::OrderConflict),
             Admission::InvalidOrder => Err(OutboxEnqueueError::InvalidOrder),
+            Admission::MissingReceipt => Err(OutboxEnqueueError::PublisherRequired),
         }
     }
 

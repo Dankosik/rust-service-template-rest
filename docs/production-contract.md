@@ -155,15 +155,44 @@ snapshot guarantee. Any multi-store recovery runbook must:
 <!-- template:begin outbox:outbox-delivery-rollout -->
 ### Activating outbox delivery guarantees
 
+Allocate a non-nil UUID once for each independent logical publisher. Persist it with
+the publisher's business identity and bind its declared routes with
+`PublicationRoute::for_outbox(publisher_id)`. Replicas, restarts and restores
+of that publisher reuse the UUID. A separately writable fork or independent
+publisher gets its own UUID, including when it shares the database or stream.
+Keep each local event ID and occurrence time with its business operation.
+The wire ID for new events is `outbox-v1-<32 lowercase UUID hex digits>-<64
+lowercase SHA-256 hex digits of the UTF-8 local ID>` in both `Message-Id` and
+`Nats-Msg-Id`. Reserve this prefix across all stream publishers, including
+direct publishers that supply their own globally unique IDs. Check historical
+IDs for overlap before activating the new namespace.
+
+Route resubmissions of pre-upgrade operations by their recorded identity.
+Use the original unbound route, event contents, time and order to reconcile
+an existing receipt. An unknown unbound event fails with `PublisherRequired`.
+New operations use the bound route, including when their local ID also
+appears in another publisher's history. Workers retry already committed
+intents with their stored headers. DLQ restoration preserves the logical
+ID and derives its own publication ID from the retained record.
+
 Set the source stream's retention for the longest promised consumer outage
 and recovery interval. Use Limits retention for independent subscriptions.
 A WorkQueue stream serves one competing group. Provision capacity and
 verify discard and per-subject limits, MaxAge, storage, replication and
 sync policy before enabling publishers or changing stream configuration.
 Monitor rejection on a full stream and free capacity by the retention policy.
+Set a delivery freshness objective for the service and page on the age of
+outstanding publications against that objective. Allow for the next retry,
+queued work, broker admission and the time needed to drain the backlog after
+recovery. The retry delay bounds only the interval until a job is eligible
+again.
 
 Fence all producers, workers, cleanup and operator processes before applying
-the receipt and recovery migrations. The backfill uses retained queue rows.
+the receipt and retry migrations. A stopped old relay cannot schedule another
+multi-day retry after the cutoff. The retry migration shortens long waits
+only when the retained attempt and its timestamp identify the previous
+automatic schedule. Inspect other long waits before changing their due time.
+The receipt backfill uses retained queue rows.
 Recover previously pruned identities from authoritative business history or
 adopt a disjoint ID namespace and fence historical submissions. Resolve
 conflicting historical intents against business records before migration.
