@@ -135,7 +135,7 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
         }
         read_more(&mut received)?;
     };
-    let head = String::from_utf8(received[..head_end].to_vec()).ok()?;
+    let head = std::str::from_utf8(&received[..head_end]).ok()?;
     let mut lines = head.lines();
     let path = lines.next()?.split(' ').nth(1)?.to_owned();
     let headers: Vec<(String, String)> = lines
@@ -383,9 +383,23 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
     assert_eq!(spans.0.lock().len(), 3);
 }
 
+fn assert_exporter_warning(state: &ExporterState, variable: &str) -> String {
+    use crate::logging::{LoggingFormat, tests::capture};
+    let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
+    tracing::dispatcher::with_default(&dispatch, || state.log());
+    std::assert_matches!(
+        guard.shutdown(std::time::Instant::now() + WAIT),
+        crate::logging::LoggerShutdown::Completed(_)
+    );
+    let records = buffer.records();
+    let record: serde_json::Value = serde_json::from_str(&records).unwrap();
+    assert_eq!(record["level"], "WARN");
+    assert_eq!(record["variable"], variable);
+    records
+}
+
 #[test]
 fn ignored_compression_is_reported_after_logging_starts_without_disabling_export() {
-    use crate::logging::{LoggingFormat, tests::capture};
     let variable = opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
     let collector = Collector::start(exchange);
     let handle = tracer_provider(
@@ -397,16 +411,7 @@ fn ignored_compression_is_reported_after_logging_starts_without_disabling_export
         &CollectorTrust::default(),
     )
     .unwrap();
-    let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
-    tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
-    std::assert_matches!(
-        guard.shutdown(std::time::Instant::now() + WAIT),
-        crate::logging::LoggerShutdown::Completed(_)
-    );
-    let records = buffer.records();
-    let record: serde_json::Value = serde_json::from_str(&records).unwrap();
-    assert_eq!(record["level"], "WARN");
-    assert_eq!(record["variable"], variable);
+    let records = assert_exporter_warning(&handle.exporter_state, variable);
     assert!(!records.contains("private-compression-value"));
     handle.tracer().start("still exported").end();
     assert_eq!(shutdown(handle), ProviderShutdown::Completed);
@@ -417,8 +422,6 @@ fn ignored_compression_is_reported_after_logging_starts_without_disabling_export
 
 #[test]
 fn zero_batch_processor_sizes_warn_and_spans_still_reach_the_collector() {
-    use crate::logging::{LoggingFormat, tests::capture};
-
     let queue = sdktrace::OTEL_BSP_MAX_QUEUE_SIZE;
     let batch = sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
     for (variable, vars, batch_limit) in [
@@ -432,15 +435,7 @@ fn zero_batch_processor_sizes_warn_and_spans_still_reach_the_collector() {
             &CollectorTrust::default(),
         )
         .unwrap();
-        let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
-        tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
-        std::assert_matches!(
-            guard.shutdown(std::time::Instant::now() + WAIT),
-            crate::logging::LoggerShutdown::Completed(_)
-        );
-        let record: serde_json::Value = serde_json::from_str(&buffer.records()).unwrap();
-        assert_eq!(record["level"], "WARN");
-        assert_eq!(record["variable"], variable);
+        assert_exporter_warning(&handle.exporter_state, variable);
 
         for _ in 0..=batch_limit {
             handle.tracer().start("still exported").end();

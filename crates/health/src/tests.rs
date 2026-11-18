@@ -396,7 +396,7 @@ async fn draining_prepared_readiness_vetoes_activation() {
     let (readiness, _, _) = flaky(true);
     let control = readiness.control();
     let mut prepared = readiness.prepare().await.unwrap();
-    control.clone().start_drain();
+    control.start_drain();
     assert_eq!(prepared.ensure_fresh().await, Err(NotReady::Draining));
     std::assert_matches!(prepared.activate(), Err(NotReady::Draining));
     assert_eq!(control.reader().verdict(), Err(NotReady::Draining));
