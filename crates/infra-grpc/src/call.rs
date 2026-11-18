@@ -174,9 +174,9 @@ impl<B: Body> ServerState<B> {
 
 struct ResponseBody<B> {
     state: Arc<Mutex<ServerState<B>>>,
-    timer: Option<AbortOnDropHandle<()>>,
+    stop_watcher: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
-    timer_done: Option<tokio::sync::oneshot::Receiver<()>>,
+    stop_watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 pub(crate) fn attach_server(
@@ -240,9 +240,9 @@ where
         let response_active = matches!(state, ServerState::Active(_));
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
-            timer: None,
+            stop_watcher: None,
             #[cfg(test)]
-            timer_done: None,
+            stop_watcher_done: None,
         };
         if response_active {
             if let Some(drain) = custody.end_on_drain {
@@ -269,15 +269,15 @@ where
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         #[cfg(test)]
         {
-            self.timer_done = Some(done_rx);
+            self.stop_watcher_done = Some(done_rx);
         }
-        self.timer = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        self.stop_watcher = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             #[cfg(test)]
             let _done_tx = done_tx;
             let result = AssertUnwindSafe(async {
                 let status = stopped.await;
                 if let Some(state) = weak.upgrade() {
-                    terminate_from_timer(&state, &status);
+                    terminate_stream(&state, &status);
                 }
             })
             .catch_unwind()
@@ -285,24 +285,24 @@ where
             if result.is_err()
                 && let Some(state) = weak.upgrade()
             {
-                terminate_from_timer(&state, &internal_status());
+                terminate_stream(&state, &internal_status());
             }
         })));
     }
 
-    fn poll_timer(&mut self, cx: &mut Context<'_>) {
-        if let Some(timer) = &mut self.timer
-            && let Poll::Ready(joined) = Future::poll(Pin::new(timer), cx)
+    fn poll_stop_watcher(&mut self, cx: &mut Context<'_>) {
+        if let Some(stop_watcher) = &mut self.stop_watcher
+            && let Poll::Ready(joined) = Future::poll(Pin::new(stop_watcher), cx)
         {
-            self.timer = None;
+            self.stop_watcher = None;
             if joined.is_err() {
-                terminate_from_timer(&self.state, &internal_status());
+                terminate_stream(&self.state, &internal_status());
             }
         }
     }
 }
 
-fn terminate_from_timer<B>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
+fn terminate_stream<B>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
     let finalizer = state.lock().stage_status_trailers(status);
     if let Some(mut finalizer) = finalizer {
         if let Some(waker) = finalizer.active.waker.take() {
@@ -328,7 +328,7 @@ where
 
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
         let this = self.get_mut();
-        this.poll_timer(cx);
+        this.poll_stop_watcher(cx);
         let mut state = this.state.lock();
         let (polled, finalizer) = if state.is_expired() {
             state.cut_off(&deadline_status())
@@ -358,7 +358,7 @@ where
         };
         drop(state);
         if let Some(finalizer) = finalizer {
-            this.timer = None;
+            this.stop_watcher = None;
             finalizer.emit();
         }
         polled
@@ -384,7 +384,7 @@ impl<B> Drop for ResponseBody<B> {
             let mut guard = self.state.lock();
             std::mem::replace(&mut *guard, ServerState::Closed)
         };
-        drop(self.timer.take());
+        drop(self.stop_watcher.take());
         drop(stage);
     }
 }
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn watched_deadline_releases_unpolled_resources_and_joins_its_timer() {
+    async fn watched_deadline_releases_unpolled_resources_and_joins_its_stop_watcher() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -497,9 +497,12 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let timer = body.timer.take().unwrap();
+        let stop_watcher = body.stop_watcher.take().unwrap();
         tokio::time::advance(BUDGET).await;
-        tokio::time::timeout(BUDGET, timer).await.unwrap().unwrap();
+        tokio::time::timeout(BUDGET, stop_watcher)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         assert!(token.is_cancelled());
         assert_eq!(permits.available_permits(), 1);
@@ -545,7 +548,7 @@ mod tests {
                 end_on_drain: Some(response_token),
             },
         );
-        let watcher = body.timer.take().unwrap();
+        let watcher = body.stop_watcher.take().unwrap();
         listener_drain.cancel();
         tokio::time::timeout(BUDGET, watcher)
             .await
@@ -566,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn terminal_status_releases_capacity_once_and_aborts_the_timer() {
+    async fn terminal_status_releases_capacity_once_and_aborts_the_stop_watcher() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -587,14 +590,14 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.timer_done.take().unwrap();
+        let done = body.stop_watcher_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(tonic::Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(body.timer.is_none());
+        assert!(body.stop_watcher.is_none());
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
@@ -609,7 +612,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn response_drop_cancels_propagated_work_and_aborts_timer() {
+    async fn response_drop_cancels_propagated_work_and_aborts_stop_watcher() {
         let cancellation = CancellationToken::new();
         let permits = Arc::new(Semaphore::new(1));
         let source = ProbeBody::pending();
@@ -623,7 +626,7 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.timer_done.take().unwrap();
+        let done = body.stop_watcher_done.take().unwrap();
         drop(body);
         assert!(cancellation.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
@@ -669,7 +672,7 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.timer_done.take().unwrap();
+        let done = body.stop_watcher_done.take().unwrap();
         let trailers = body
             .frame()
             .await
@@ -695,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_timer_runtime_ends_the_call_internal() {
+    fn lost_stop_watcher_runtime_ends_the_call_internal() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -722,7 +725,7 @@ mod tests {
         drop(runtime);
         let mut cx = Context::from_waker(Waker::noop());
         let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut cx) else {
-            unreachable!("lost timer runtime produces terminal internal trailers");
+            unreachable!("lost watcher runtime produces terminal internal trailers");
         };
         let status = tonic::Status::from_header_map(&frame.into_trailers().unwrap()).unwrap();
         assert_eq!(status.code(), tonic::Code::Internal);

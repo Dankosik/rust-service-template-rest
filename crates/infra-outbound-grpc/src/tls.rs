@@ -12,23 +12,21 @@ use crate::{ClientError, ClientIdentity, ClientTlsMaterial, TlsMaterialError};
 pub(crate) fn client_tls_config(
     material: &ClientTlsMaterial,
 ) -> Result<Arc<ClientConfig>, ClientError> {
-    match (&material.ca_certificate_pem, &material.identity) {
-        (None, None) => default_tls_config(),
+    let mut config = match (&material.ca_certificate_pem, &material.identity) {
+        (None, None) => return default_tls_config(),
         (None, Some(identity)) => {
             let (certs, key) = parse_client_identity(identity)?;
             let verifier = platform_verifier()?;
-            let mut config = tls13_builder()?
+            tls13_builder()?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
                 .with_client_auth_cert(certs, key)
-                .map_err(identity_setup_error)?;
-            config.alpn_protocols = vec![b"h2".to_vec()];
-            Ok(Arc::new(config))
+                .map_err(identity_setup_error)?
         }
         (Some(ca_pem), identity) => {
             let roots = parse_ca_roots(ca_pem)?;
             let builder = tls13_builder()?.with_root_certificates(roots);
-            let mut config = match identity {
+            match identity {
                 Some(identity) => {
                     let (certs, key) = parse_client_identity(identity)?;
                     builder
@@ -36,11 +34,11 @@ pub(crate) fn client_tls_config(
                         .map_err(identity_setup_error)?
                 }
                 None => builder.with_no_client_auth(),
-            };
-            config.alpn_protocols = vec![b"h2".to_vec()];
-            Ok(Arc::new(config))
+            }
         }
-    }
+    };
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(Arc::new(config))
 }
 
 fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
@@ -88,15 +86,13 @@ fn identity_setup_error(error: rustls::Error) -> ClientError {
 
 fn parse_ca_roots(ca_pem: &str) -> Result<RootCertStore, TlsMaterialError> {
     let mut roots = RootCertStore::empty();
-    let mut count = 0_usize;
     for item in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
         let cert = item.map_err(|_| TlsMaterialError::InvalidCaCertificate(None))?;
         roots
             .add(cert)
             .map_err(|error| TlsMaterialError::InvalidCaCertificate(Some(error)))?;
-        count += 1;
     }
-    if count == 0 {
+    if roots.is_empty() {
         return Err(TlsMaterialError::InvalidCaCertificate(None));
     }
     Ok(roots)
@@ -197,9 +193,8 @@ mod tests {
                     InconsistentKeys::KeyMismatch
                 ))
             );
-            let diagnostics: Vec<_> = shared_rules::error_chain::causes(&error)
-                .map(|cause| format!("{cause}; {cause:?}"))
-                .collect();
+            let diagnostics = shared_rules::error_chain::causes(&error)
+                .map(|cause| format!("{cause}; {cause:?}"));
             for formatted in std::iter::once(format!("{mismatched:?}")).chain(diagnostics) {
                 assert!(!formatted.contains("-----BEGIN"));
                 assert!(!formatted.contains(identity.certificate_pem.lines().nth(1).unwrap()));

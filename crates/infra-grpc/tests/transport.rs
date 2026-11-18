@@ -108,7 +108,6 @@ const ACCEPTED: &str = "accepted";
 const UNSCOPED: &str = "unscoped";
 // template:end oidc-introspection:grpc-transport-test-introspection-tokens
 // template:begin authn:grpc-transport-test-unary-path
-const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 const ORDERS_READ: &str = "orders.read";
 const STREAM_PATHS: [&str; 3] = [
     "/example.v1.EchoService/ClientStream",
@@ -155,7 +154,7 @@ impl Hold {
         }
     }
 
-    async fn wait(&self) {
+    async fn enter_and_wait_for_release(&self) {
         self.entered.send_modify(|entered| *entered += 1);
         let _ = self
             .released
@@ -164,7 +163,7 @@ impl Hold {
             .await;
     }
 
-    async fn wait_for(&self, expected: usize) {
+    async fn wait_for_entries(&self, expected: usize) {
         timeout(
             FILL,
             self.entered
@@ -310,13 +309,13 @@ impl EchoService for Echo {
                 .field_violation("message", "is reserved")
                 .into()),
             "hold" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 Ok(Response::new(UnaryResponse {
                     message: "released".to_owned(),
                 }))
             }
             "deadline" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 std::future::pending().await
             }
             message => Ok(Response::new(UnaryResponse {
@@ -356,7 +355,7 @@ impl EchoService for Echo {
         })]);
         Ok(Response::new(match message.as_str() {
             "hold-before-headers" => {
-                self.hold.wait().await;
+                self.hold.enter_and_wait_for_release().await;
                 Box::pin(first.chain(futures_util::stream::pending()))
             }
             "hold-after-first" => {
@@ -364,7 +363,7 @@ impl EchoService for Echo {
                 let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
                 Box::pin(first.chain(futures_util::stream::once(async move {
                     let _dropped = dropped;
-                    hold.wait().await;
+                    hold.enter_and_wait_for_release().await;
                     let request_cancelled = request_context
                         .is_some_and(|context| context.cancellation().is_cancelled());
                     Ok(ServerStreamResponse {
@@ -878,7 +877,7 @@ async fn client_observation_fallback_preserves_raw_request_routing() {
     for mismatched_extension in [false, true] {
         let builder = http::Request::builder()
             .method("POST")
-            .uri(ECHO_SERVICE_UNARY)
+            .uri(UNARY_PATH)
             .header("content-type", "application/grpc")
             .header("te", "trailers");
         let authentication = request(()).into_parts().0.into_headers();
@@ -1384,7 +1383,7 @@ async fn the_deadline_bounds_authentication_too() {
         .expect("the introspection profile selected its provider")
         .silent
         .store(true, Ordering::Release);
-    let status = timeout(WAIT, raw_call(fixture.address, ECHO_SERVICE_UNARY))
+    let status = timeout(WAIT, raw_call(fixture.address, UNARY_PATH))
         .await
         .expect("the deadline answers while the provider is silent");
     assert_eq!(status, "4");
@@ -1506,7 +1505,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     )));
     timeout(WAIT, async {
         tokio::select! {
-            () = gate.wait_for(1) => {},
+            () = gate.wait_for_entries(1) => {},
             result = &mut leader => panic!("authentication must wait: {result:?}"),
         }
     })
@@ -1663,7 +1662,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     let mut authenticating = Box::pin(app.clone().oneshot(slow));
     timeout(WAIT, async {
         tokio::select! {
-            () = gate.wait_for(1) => {},
+            () = gate.wait_for_entries(1) => {},
             result = &mut authenticating => panic!("authentication must wait: {result:?}"),
         }
     })
@@ -1719,7 +1718,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         let mut slow = Box::pin(app.clone().oneshot(request));
         timeout(WAIT, async {
             tokio::select! {
-                () = gate.wait_for(1) => {},
+                () = gate.wait_for_entries(1) => {},
                 result = &mut slow => panic!("authentication must wait: {result:?}"),
             }
         })
@@ -1898,7 +1897,7 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     )));
     timeout(WAIT, async {
         tokio::select! {
-            () = echo.hold.wait_for(1) => {},
+            () = echo.hold.wait_for_entries(1) => {},
             result = &mut holding => panic!("the stream must hold its opening: {result:?}"),
         }
     })
@@ -2076,7 +2075,7 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
         let mut client = held.clone();
         tokio::spawn(async move { client.unary(request(unary("hold"))).await })
     });
-    fixture.echo.hold.wait_for(2).await;
+    fixture.echo.hold.wait_for_entries(2).await;
 
     let exhausted = timeout(
         WAIT,
@@ -2144,7 +2143,7 @@ async fn one_connection_serves_concurrent_rpcs_and_capacity_returns_after_it_clo
             first.unary(request(unary("hold"))),
             second.unary(request(unary("hold"))),
             async {
-                fixture.echo.hold.wait_for(2).await;
+                fixture.echo.hold.wait_for_entries(2).await;
                 let mut excess = TcpStream::connect(fixture.address).await.unwrap();
                 match excess.read(&mut [0]).await {
                     Ok(bytes) => assert_eq!(bytes, 0, "excess peer received HTTP/2 bytes"),
@@ -2207,7 +2206,7 @@ async fn opened_stream_holds_capacity_until_terminal_release() {
             .message,
         "hold-after-first"
     );
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     let second = timeout(WAIT, client.unary(impatient(request(unary("must shed")))))
         .await
         .expect("overload is answered");
@@ -2322,7 +2321,7 @@ async fn client_clones_share_opening_capacity_until_cancellation_or_response_hea
     let mut opening = Box::pin(client.unary(held_request));
     timeout(WAIT, async {
         tokio::select! {
-            () = fixture.echo.hold.wait_for(1) => {},
+            () = fixture.echo.hold.wait_for_entries(1) => {},
             result = &mut opening => panic!("the opening must remain held: {result:?}"),
         }
     })
@@ -2374,7 +2373,7 @@ async fn client_clones_share_opening_capacity_until_cancellation_or_response_hea
             .message,
         "hold-after-first"
     );
-    fixture.echo.hold.wait_for(2).await;
+    fixture.echo.hold.wait_for_entries(2).await;
     let second = timeout(WAIT, client.unary(request(unary("after-headers"))))
         .await
         .unwrap()
@@ -2433,7 +2432,7 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
             .unwrap()
             .is_some()
     );
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     assert!(
         timeout(Duration::from_millis(200), response.message())
             .await
@@ -2471,7 +2470,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
         clippy::disallowed_methods,
         reason = "the loopback peer records the timeout it received over HTTP/2"
     )]
-    let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
+    let app = axum::Router::new().route(UNARY_PATH, axum::routing::post(peer));
     let server = BoundListener::bind(loopback()).unwrap().serve_h2(
         app,
         server_options(connection_limits()),
@@ -2494,7 +2493,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
             Client::with_timeout_policy(&destination, ClientSecurity::Plaintext, policy).unwrap();
         let mut request = http::Request::builder()
             .method("POST")
-            .uri(ECHO_SERVICE_UNARY)
+            .uri(UNARY_PATH)
             .header("content-type", "application/grpc")
             .body(tonic::body::Body::empty())
             .unwrap();
@@ -2644,8 +2643,8 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
 async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     let fixture = Fixture::plaintext().await;
     let address = fixture.address;
-    let call = tokio::spawn(async move { raw_call(address, ECHO_SERVICE_UNARY).await });
-    fixture.echo.hold.wait_for(1).await;
+    let call = tokio::spawn(async move { raw_call(address, UNARY_PATH).await });
+    fixture.echo.hold.wait_for_entries(1).await;
     let status = timeout(WAIT, call)
         .await
         .expect("raw deadline response")
@@ -2694,7 +2693,7 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
     status
 }
 
-const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
+const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 
 fn grpc_frame(message: &str) -> bytes::Bytes {
     use bytes::{BufMut as _, BytesMut};
@@ -2724,15 +2723,14 @@ async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
     let driver = tokio::spawn(connection);
     let frame = grpc_frame("padded");
     let padded = |budget: usize| {
-        let mut call =
-            http::Request::post(format!("http://{}{ECHO_SERVICE_UNARY}", fixture.address))
-                .header("content-type", "application/grpc")
-                .header("content-length", frame.len())
-                .header("te", "trailers")
-                .header("grpc-timeout", "5S")
-                .header("x-padding", "")
-                .body(Full::new(frame.clone()))
-                .unwrap();
+        let mut call = http::Request::post(format!("http://{}{UNARY_PATH}", fixture.address))
+            .header("content-type", "application/grpc")
+            .header("content-length", frame.len())
+            .header("te", "trailers")
+            .header("grpc-timeout", "5S")
+            .header("x-padding", "")
+            .body(Full::new(frame.clone()))
+            .unwrap();
         call.headers_mut()
             .extend(request(()).into_parts().0.into_headers());
         // RFC 9113 §6.5.2, SETTINGS_MAX_HEADER_LIST_SIZE
@@ -2987,7 +2985,7 @@ async fn cooperative_stream_closes_on_listener_drain_while_inflight_unary_comple
     let mut unary_client = stream_client.clone();
     let inflight_unary =
         tokio::spawn(async move { unary_client.unary(request(unary("hold"))).await });
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
 
     let server = fixture.take_server();
     let drain_started = tokio::time::Instant::now();
@@ -3347,7 +3345,7 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
         let MessageResponse::FileDescriptorResponse(files) = next().await else {
             panic!("a described symbol is answered with its file descriptor");
         };
-        assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
+        assert_matches!(files.file_descriptor_proto.as_slice(), [_, ..]);
     }
 
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
@@ -3560,11 +3558,11 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         let mut client = client.clone();
         async move { client.unary(request(unary("hold"))).await }
     });
-    fixture.echo.hold.wait_for(1).await;
+    fixture.echo.hold.wait_for_entries(1).await;
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
 
-    assert_eq!(raw_call(fixture.address, ECHO_SERVICE_UNARY).await, "4");
+    assert_eq!(raw_call(fixture.address, UNARY_PATH).await, "4");
     assert_eq!(
         raw_call(fixture.address, "/example.v1.EchoService/Invented").await,
         "12"
@@ -3714,7 +3712,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
+        let app = axum::Router::new().route(UNARY_PATH, axum::routing::post(handler_1));
         let server = BoundListener::bind(loopback()).unwrap().serve_h2(
             app,
             server_options(connection_limits()),
@@ -4007,7 +4005,7 @@ async fn answer_introspection(
             calls.fetch_add(1, Ordering::Release);
             let held = gate.lock().clone();
             if let Some(held) = held {
-                held.wait().await;
+                held.enter_and_wait_for_release().await;
             }
             if silent.load(Ordering::Acquire) {
                 std::future::pending::<()>().await;

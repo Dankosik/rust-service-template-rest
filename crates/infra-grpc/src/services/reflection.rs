@@ -44,7 +44,7 @@ fn definition(file: Bytes) -> Result<DynamicMessage, Error> {
     Ok(descriptor)
 }
 
-pub(super) fn cancel_request_body(request: Request<Body>) -> Request<Body> {
+pub(super) fn stop_request_body_on_cancellation(request: Request<Body>) -> Request<Body> {
     let Some(response) = request.extensions().get::<ResponseContext>() else {
         return request;
     };
