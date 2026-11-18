@@ -52,6 +52,9 @@ infra-serviceauth = { path = "crates/infra-serviceauth" }
 # template:begin outbound-http:workspace-outbound-http-crate
 infra-outbound-http = { path = "crates/infra-outbound-http" }
 # template:end outbound-http:workspace-outbound-http-crate
+# template:begin outbound-auth:workspace-outbound-oauth-crate
+infra-oauth2-client-credentials = { path = "crates/infra-oauth2-client-credentials" }
+# template:end outbound-auth:workspace-outbound-oauth-crate
 # template:begin postgres:workspace-postgres-crates
 infra-postgres = { path = "crates/infra-postgres" }
 # template:end postgres:workspace-postgres-crates
@@ -257,9 +260,9 @@ rstest = { version = "0.28.0", default-features = false }
 tempfile = { version = "3", default-features = false }
 nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
-# template:begin tls-fixtures:workspace-tls-fixtures
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
+# template:begin tls-fixtures:workspace-tls-fixtures
 tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures
 

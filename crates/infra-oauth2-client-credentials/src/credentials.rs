@@ -169,11 +169,24 @@ struct CompletedFailure {
 
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, ConfigurationError> {
-        let admitted = admit_options(options)?;
+        let admitted = admit_options(options, "https")?;
         let token_http =
             Client::try_new(admitted.endpoint(), TOKEN_LIMITS).map_err(|_| ConfigurationError {
                 key: "token_url",
                 reason: "transport construction failed",
+            })?;
+        Self::build(admitted, token_http)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
+        let admitted = admit_options(options, "http")?;
+        let token_http =
+            Client::try_new_for_test_http(admitted.endpoint(), TOKEN_LIMITS).map_err(|_| {
+                ConfigurationError {
+                    key: "token_url",
+                    reason: "requires an HTTP loopback IP address",
+                }
             })?;
         Self::build(admitted, token_http)
     }

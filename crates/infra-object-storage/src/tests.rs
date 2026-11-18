@@ -376,6 +376,7 @@ async fn check_service_reply(
 
 #[tokio::test]
 async fn create_only_put_sends_if_none_match_once_and_maps_412() {
+    const CONTENT_TYPE: &str = "Application/JSON;\tCharset=utf-8";
     let parent = OperationContext::unbounded();
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed")).await;
@@ -385,8 +386,7 @@ async fn create_only_put_sends_if_none_match_once_and_maps_412() {
             &parent,
             &key(),
             Bytes::from_static(b"{}").into(),
-            PutOptions::create_only()
-                .content_type(ContentType::try_new("application/json").unwrap()),
+            PutOptions::create_only().content_type(ContentType::try_new(CONTENT_TYPE).unwrap()),
         )
         .await;
     assert_eq!(
@@ -398,7 +398,10 @@ async fn create_only_put_sends_if_none_match_once_and_maps_412() {
     assert_eq!(seen[0].method, Method::PUT);
     assert_eq!(seen[0].path, "/evidence-bucket/results/op-1.json");
     assert_eq!(seen[0].headers["if-none-match"], "*");
-    assert_eq!(seen[0].headers["content-type"], "application/json");
+    assert_eq!(
+        seen[0].headers["content-type"].as_bytes(),
+        CONTENT_TYPE.as_bytes()
+    );
     assert!(seen[0].headers.contains_key("x-amz-checksum-crc64nvme"));
     assert!(!seen[0].headers.contains_key("x-amz-expected-bucket-owner"));
 }
@@ -1254,6 +1257,7 @@ async fn metrics_carry_only_operation_and_outcome() {
             .fail(&Failure {
                 error: ObjectStorageError::NotFound,
                 error_type: "404".into(),
+                timeout_source: None,
             });
         storage
             .start_observation(crate::observe::Operation::Head)

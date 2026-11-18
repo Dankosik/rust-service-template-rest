@@ -139,6 +139,16 @@ snapshot guarantee. Any multi-store recovery runbook must:
 5. Record observed recovery timing and reconciled gaps.
 
 <!-- template:begin jobs:production-contract-jobs-rollout -->
+### First HTTP operation that enqueues a job
+
+When a business crate first connects HTTP and jobs, register its operation
+and job handler together in the service's composition code. Check the operation
+in the generated OpenAPI document, send a command through the shipped HTTP
+entry point, and observe the corresponding business effect after the shipped
+worker processes that command. With only this handler omitted and another kind
+still registered, the missing effect must fail the check even if the worker is
+ready.
+
 ### Rolling out exact background-job payloads
 
 For a service that uses PostgreSQL jobs, inventory every worker, outbox

@@ -248,7 +248,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_consume_it() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
-    let registration = fixture.build(Options {
+    let registration = prepare_registration(Options {
         provider_concurrency: 2,
         ..fixture.options()
     });
@@ -317,7 +317,7 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
 async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waiters_leader() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-    let registration = fixture.build(Options {
+    let registration = prepare_registration(Options {
         provider_concurrency: 1,
         ..fixture.options()
     });

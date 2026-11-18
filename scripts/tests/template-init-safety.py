@@ -493,8 +493,7 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "service-auth", service_auth == "jwt")
     shared_selected = (
         authn != "none" or outbound_http == "bounded" or grpc == "enabled"
-        or cache == "redis" or messaging == "nats-jetstream"
-        or database == "postgres" or object_storage == "s3"
+        or cache == "redis" or database == "postgres"
     )
     assert_profile_pack(source, target, "tls-fixtures", shared_selected)
     assert_profile_pack(

@@ -120,7 +120,7 @@ fn the_assertion_audience_must_be_an_issuer_distinct_from_the_token_endpoint() {
 #[tokio::test]
 async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
     let fixture = Fixture::new().await;
-    let registration = fixture.build(fixture.options());
+    let registration = prepare_registration(fixture.options());
     for capacity in [0, 65_537] {
         let error = registration
             .exchange_tokens(TokenTarget::default(), capacity)

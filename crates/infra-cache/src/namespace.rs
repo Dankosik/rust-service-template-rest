@@ -1,13 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use operation_context::OperationContext;
+use operation_context::{Deadline, OperationContext, Stopped};
 use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
+use tokio::time::Instant;
 
 use crate::connection::{CommandError, ErrorType, query_mutation, query_read};
-use crate::observe::{OperationGuard, Outcome};
-use crate::{Cache, CacheNamespace, MutationError, Namespace, OperationError, SetError};
+use crate::observe::{LocalSizeRefusal, OperationGuard, Outcome};
+use crate::{
+    Cache, CacheLookup, CacheNamespace, MutationError, Namespace, OperationError, SetError,
+};
 
 impl Cache {
     #[must_use]
@@ -17,6 +20,43 @@ impl Cache {
             name,
             histograms: Arc::default(),
         }
+    }
+}
+
+impl CacheLookup {
+    #[must_use]
+    pub const fn new(namespace: Option<CacheNamespace>, source_reserve: Duration) -> Self {
+        Self {
+            namespace,
+            source_reserve,
+        }
+    }
+
+    pub async fn lookup(
+        &self,
+        parent: &OperationContext,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, Stopped> {
+        parent.check()?;
+        let Some(namespace) = &self.namespace else {
+            return Ok(None);
+        };
+        let child = if let Some(deadline) = parent.deadline() {
+            let now = Instant::now();
+            let budget = deadline
+                .remaining_at(now)
+                .saturating_sub(self.source_reserve);
+            if budget.is_zero() {
+                return parent.check().map(|()| None);
+            }
+            Some(parent.child_until(Deadline::new(now, budget)))
+        } else {
+            None
+        };
+
+        let result = namespace.get(child.as_ref().unwrap_or(parent), key).await;
+        parent.check()?;
+        Ok(result.unwrap_or_default())
     }
 }
 
@@ -84,6 +124,7 @@ impl CacheNamespace {
         let operation = Operation::Set;
         let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
         if value.len() > self.cache.max_value_bytes {
+            LocalSizeRefusal::Value.record(self.name);
             return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
         }
         let build_query = |connection| {
@@ -156,6 +197,7 @@ impl CacheNamespace {
             key,
         };
         if full_key.len() > self.cache.max_key_bytes {
+            LocalSizeRefusal::Key.record(self.name);
             return Err(OperationError::KeyTooLarge);
         }
         Ok(full_key)
@@ -210,4 +252,3 @@ impl redis::ToRedisArgs for NamespacedKey<'_> {
         out.write_arg_fmt(format_args!("{}:{}", self.namespace, self.key));
     }
 }
-impl redis::ToSingleRedisArg for NamespacedKey<'_> {}

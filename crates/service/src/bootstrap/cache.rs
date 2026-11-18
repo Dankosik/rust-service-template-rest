@@ -33,16 +33,25 @@ pub(super) async fn open(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::extract::State;
-    use infra_cache::CacheNamespace;
+    use infra_cache::{CacheLookup, namespace};
     use infra_http::RequestContext;
 
     #[test]
-    fn a_feature_handler_can_forward_its_request_context_to_the_cache() {
-        let _: axum::routing::MethodRouter<CacheNamespace> = axum::routing::get(
-            async |State(cache): State<CacheNamespace>, request: RequestContext| {
-                let _lookup = cache.get(request.operation(), "key").await;
+    fn a_cache_aside_handler_can_use_the_retained_startup_cache_and_request_context() {
+        let dependencies = super::super::shutdown::Dependencies::default();
+        let namespace = dependencies
+            .cache
+            .as_ref()
+            .map(|cache| cache.namespace(namespace!("items")));
+        let cache = CacheLookup::new(namespace, Duration::from_millis(100));
+        let _: axum::routing::MethodRouter = axum::routing::get(
+            async |State(cache): State<CacheLookup>, request: RequestContext| {
+                let _lookup = cache.lookup(request.operation(), "key").await;
             },
-        );
+        )
+        .with_state(cache);
     }
 }

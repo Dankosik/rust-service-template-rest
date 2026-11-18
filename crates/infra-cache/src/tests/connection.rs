@@ -6,7 +6,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use operation_context::Stopped;
 
 use super::*;
-use crate::{MutationError, OperationError, SetError};
+use crate::{CacheLookup, MutationError, OperationError, SetError};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -174,10 +174,19 @@ fn late_reconnect_delays_spread_below_the_ceiling_instead_of_pinning_to_it() {
 }
 
 #[tokio::test]
-async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
+async fn acl_denial_is_distinct_in_traces_and_keeps_the_response_series_and_connection() {
     let caller = OperationContext::unbounded();
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
+    let captured = CapturedLogs::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(2),
@@ -193,16 +202,40 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
         namespace.get(&caller, "wrongtype").await,
         Err(OperationError::Unavailable)
     );
+    server
+        .observed
+        .answer_next("GETRANGE", b"-NOPERM range denied\r\n");
+    assert_eq!(
+        namespace.get(&caller, "key").await,
+        Err(OperationError::Unavailable)
+    );
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
     assert_eq!(
         server.connections(),
         connections,
         "an error reply answers its own command and keeps the shared connection"
     );
+    let traces = captured.rendered();
+    let response_spans = traces
+        .lines()
+        .filter(|line| {
+            line.contains("cache.name=\"replies\"") && line.contains("error.type=\"response\"")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(response_spans.len(), 2, "{traces}");
+    assert!(
+        !response_spans[0].contains("cache.error.reason"),
+        "{traces}"
+    );
+    assert!(
+        response_spans[1].contains("cache.error.reason=\"permission_denied\""),
+        "{traces}"
+    );
+    assert!(!traces.contains("range denied"), "{traces}");
     let scrape = recorder.handle().render();
     assert!(
         scrape.contains(
-            "cache_operation_duration_seconds_count{cache=\"replies\",operation=\"get\",outcome=\"error\",error_type=\"response\"} 1"
+            "cache_operation_duration_seconds_count{cache=\"replies\",operation=\"get\",outcome=\"error\",error_type=\"response\"} 2"
         ),
         "{scrape}"
     );
@@ -319,8 +352,78 @@ async fn a_cache_window_must_leave_room_for_maintenance() {
 }
 
 #[tokio::test]
+async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stops() {
+    use std::task::Poll;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(30),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .unwrap();
+    let reserve = Duration::from_secs(8);
+    let lookup = CacheLookup::new(Some(cache.namespace(namespace!("aside"))), reserve);
+    let unbounded = OperationContext::unbounded();
+    assert_eq!(lookup.lookup(&unbounded, "miss").await, Ok(None));
+    server
+        .observed
+        .answer_next("EXEC", b"*2\r\n:1\r\n$3\r\nhit\r\n");
+    assert_eq!(
+        lookup.lookup(&unbounded, "hit").await,
+        Ok(Some(b"hit".to_vec()))
+    );
+    assert_eq!(server.command_count("EXISTS", Some("aside:hit")), 1);
+    assert_eq!(server.command_count("GETRANGE", Some("aside:hit")), 1);
+
+    let disabled = CacheLookup::new(None, reserve);
+    assert_eq!(disabled.lookup(&unbounded, "missing_cache").await, Ok(None));
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        disabled.lookup(&cancelled, "missing_cache").await,
+        Err(Stopped::Cancelled)
+    );
+
+    tokio::time::pause();
+    let parent = OperationContext::with_timeout(reserve);
+    assert_eq!(lookup.lookup(&parent, "skip").await, Ok(None));
+    assert_eq!(parent.remaining(), Some(reserve));
+    assert_eq!(server.command_count("EXISTS", Some("aside:skip")), 0);
+    assert_eq!(server.command_count("GETRANGE", Some("aside:skip")), 0);
+
+    server.stall_existing();
+    let cache_budget = Duration::from_secs(2);
+    let wake_slack = Duration::from_millis(1);
+    for stop in [None, Some(Stopped::Cancelled), Some(Stopped::Deadline)] {
+        let parent = OperationContext::with_timeout(reserve + cache_budget);
+        let mut pending = std::pin::pin!(lookup.lookup(&parent, "stalled"));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        let elapsed = if stop == Some(Stopped::Deadline) {
+            reserve + cache_budget
+        } else {
+            cache_budget + wake_slack
+        };
+        tokio::time::advance(elapsed).await;
+        if stop == Some(Stopped::Cancelled) {
+            parent.cancel();
+        }
+        assert_eq!(
+            futures_util::poll!(pending.as_mut()),
+            Poll::Ready(stop.map_or(Ok(None), Err))
+        );
+        if stop.is_none() {
+            assert_eq!(parent.check(), Ok(()));
+            assert_eq!(parent.remaining(), Some(reserve.saturating_sub(wake_slack)));
+        }
+    }
+}
+
+#[tokio::test]
 async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     let caller = OperationContext::unbounded();
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
         max_key_bytes: 4,
@@ -354,6 +457,22 @@ async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
         assert_eq!(server.command_count(command, Some("n:é")), 1);
         assert_eq!(server.command_count(command, Some("n:éx")), 0);
     }
+    let scrape = recorder.handle().render();
+    for sample in [
+        "cache_local_size_refusals_total{cache=\"n\",reason=\"key_too_large\"} 3",
+        "cache_local_size_refusals_total{cache=\"n\",reason=\"value_too_large\"} 1",
+    ] {
+        assert!(scrape.lines().any(|line| line == sample), "{scrape}");
+    }
+    let command_counts = scrape
+        .lines()
+        .filter(|line| line.starts_with("cache_operation_duration_seconds_count{"))
+        .collect::<Vec<_>>();
+    assert_eq!(command_counts.len(), 3, "{scrape}");
+    assert!(
+        command_counts.iter().all(|line| line.ends_with("} 1")),
+        "{scrape}"
+    );
 }
 
 #[tokio::test]
@@ -380,13 +499,6 @@ async fn bounded_reads_accept_attributed_replies_and_reject_invalid_transactions
     assert_eq!(
         namespace.get(&caller, "key").await,
         Err(OperationError::ValueTooLarge)
-    );
-    server
-        .observed
-        .answer_next("GETRANGE", b"-NOPERM range denied\r\n");
-    assert_eq!(
-        namespace.get(&caller, "key").await,
-        Err(OperationError::Unavailable)
     );
     assert_eq!(namespace.get(&caller, "key").await, Ok(None));
     assert_eq!(server.connections(), generation);

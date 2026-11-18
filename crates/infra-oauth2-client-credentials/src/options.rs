@@ -90,7 +90,7 @@ impl Admitted {
         (self.options, self.endpoint, self.permits)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) fn try_new_for_test(
         options: Options,
         endpoint: Url,
@@ -140,7 +140,10 @@ fn assertion_issuer(raw: &str) -> Result<Url, ConfigurationError> {
     Ok(issuer)
 }
 
-pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationError> {
+pub(crate) fn admit_options(
+    options: Options,
+    scheme: &str,
+) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
     if options.client_id.trim().is_empty() {
@@ -159,8 +162,15 @@ pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationE
     let Ok(endpoint) = Url::parse(&options.token_url) else {
         return error("token_url", "must be a valid HTTPS URL");
     };
-    if endpoint.scheme() != "https" {
-        return error("token_url", "must use HTTPS");
+    if endpoint.scheme() != scheme {
+        return error(
+            "token_url",
+            if scheme == "https" {
+                "must use HTTPS"
+            } else {
+                "must use loopback HTTP"
+            },
+        );
     }
     if endpoint.host_str().is_none() {
         return error("token_url", "must have a host");

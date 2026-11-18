@@ -27,4 +27,4 @@ pub use messaging::{
 pub use prepared::PreparedEvent;
 pub use probe::MessagingProbe;
 pub use producer::{Producer, PublishAck};
-pub use registry::{PublicationRoute, Registry, RegistryError, Route};
+pub use registry::{PublicationPolicy, PublicationRoute, Registry, RegistryError, Route};

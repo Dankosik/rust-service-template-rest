@@ -1,4 +1,8 @@
 mod background;
+// template:begin outbound-auth:bootstrap-outbound-resource-tests
+#[cfg(test)]
+pub(crate) mod outbound_tests;
+// template:end outbound-auth:bootstrap-outbound-resource-tests
 // template:begin grpc:bootstrap-grpc-module
 mod grpc;
 // template:end grpc:bootstrap-grpc-module
@@ -99,6 +103,8 @@ pub(crate) enum BootstrapError {
     HttpContract(#[from] infra_http::FinalizeError),
     #[error("http contract composition: {0}")]
     HttpComposition(#[from] crate::api::ContractError),
+    #[error("HTTP resource preparation failed")]
+    HttpResource(#[source] Box<dyn std::error::Error + Send + Sync>),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -167,11 +173,9 @@ fn process_failure(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub(crate) fn run<I>(
+pub fn run_with<I>(
     args: I,
-    // template:begin grpc:bootstrap-run-registration-parameter
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-run-registration-parameter
+    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
 ) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
@@ -206,9 +210,7 @@ where
         runtime.block_on(serve(
             config,
             &mut logger_installed,
-            // template:begin grpc:bootstrap-grpc-serve-registration-argument
-            grpc_registration,
-            // template:end grpc:bootstrap-grpc-serve-registration-argument
+            registration,
             &mut signals,
             &mut deadline,
         ))
@@ -240,9 +242,7 @@ where
 async fn serve(
     config: Config,
     logger_installed: &mut bool,
-    // template:begin grpc:bootstrap-grpc-serve-registration-parameter
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-grpc-serve-registration-parameter
+    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
     retained_signals: &mut Option<Signals>,
     deadline: &mut Option<Instant>,
 ) -> Result<Outcome, BootstrapError> {
@@ -288,9 +288,7 @@ async fn serve(
                 );
                 start(
                     &config,
-                    // template:begin grpc:bootstrap-grpc-start-registration-argument
-                    grpc_registration,
-                    // template:end grpc:bootstrap-grpc-start-registration-argument
+                    registration,
                     &metrics,
                     &mut background,
                     &mut dependencies,
@@ -420,9 +418,7 @@ fn background_error(failure: BackgroundFailure) -> BootstrapError {
 )]
 async fn start(
     config: &Config,
-    // template:begin grpc:bootstrap-grpc-start-registration-parameter
-    grpc_registration: Option<crate::GrpcRegistration>,
-    // template:end grpc:bootstrap-grpc-start-registration-parameter
+    registration: crate::ServiceRegistration<impl Clone + Send + Sync + 'static>,
     metrics: &Metrics,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
@@ -482,7 +478,7 @@ async fn start(
     let grpc_prepared = if let Some(listener) = &config.grpc {
         Some(grpc::prepare(
             listener,
-            grpc_registration,
+            registration.grpc,
             &state,
             // template:end grpc:bootstrap-grpc-prepare-start
             // template:begin grpc-authn:bootstrap-grpc-bearer-argument
@@ -512,6 +508,14 @@ async fn start(
         // template:end http-idempotency:bootstrap-http-idempotency-resources
     )
     .await?;
+    let app = match registration.http_resource {
+        Some(prepare) => {
+            let resource = prepare(config, &mut BackgroundRegistration { background })
+                .map_err(BootstrapError::HttpResource)?;
+            app.with_extension(resource)
+        }
+        None => app,
+    };
     let http = config.http.listener();
     let app_listener = BoundListener::bind(http.addr)?;
     let diagnostics_listener = match config.observability.metrics.addr {
@@ -633,7 +637,7 @@ mod tests {
         release.send(()).unwrap();
     }
 
-    fn shared_metrics() -> Metrics {
+    pub(super) fn shared_metrics() -> Metrics {
         static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
         METRICS
             .get_or_init(|| telemetry::install_metrics().unwrap())
@@ -701,9 +705,7 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            // template:begin grpc:bootstrap-unready-test-grpc-registration
-            None,
-            // template:end grpc:bootstrap-unready-test-grpc-registration
+            crate::ServiceRegistration::<()>::default(),
             &shared_metrics(),
             &mut background,
             &mut Dependencies::default(),
@@ -771,9 +773,7 @@ mod tests {
         let mut serving = Serving::default();
         let result = start(
             &config,
-            // template:begin grpc:bootstrap-test-grpc-registration
-            None,
-            // template:end grpc:bootstrap-test-grpc-registration
+            crate::ServiceRegistration::<()>::default(),
             &metrics,
             &mut background,
             &mut dependencies,
@@ -908,7 +908,10 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            Some(service_auth_registration::register),
+            crate::ServiceRegistration {
+                grpc: Some(service_auth_registration::register),
+                ..crate::ServiceRegistration::<()>::default()
+            },
             &metrics,
             &mut background,
             &mut dependencies,

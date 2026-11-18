@@ -13,7 +13,9 @@ use infra_jobs::{
     EnqueueOptions, Enqueued, Job, JobError, JobKind, Policy, TransactionalHandler,
     TransactionalJob,
 };
-use infra_messaging::{PreparedEvent, PublicationRoute, Registry, RegistryError, Route};
+use infra_messaging::{
+    PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
+};
 use infra_postgres::{Dsn, Tx, TxError, in_tx};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use secrecy::ExposeSecret as _;
@@ -24,13 +26,16 @@ use time::{UtcDateTime, format_description::well_known::Rfc3339};
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 pub const MAX_OPERATION_BYTES: usize = 1024;
+const PUBLICATIONS: PublicationPolicy = PublicationPolicy {
+    max_payload_bytes: MAX_OPERATION_BYTES,
+};
 pub const SUBJECT: &str = "reading.accepted";
 
 pub fn publication(
     registry: &mut Registry,
     subject: &str,
 ) -> Result<PublicationRoute<Operation>, RegistryError> {
-    registry.declare_publication(&Route::new(subject), MAX_OPERATION_BYTES)
+    PUBLICATIONS.declare(registry, &Route::new(subject))
 }
 pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
 pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";

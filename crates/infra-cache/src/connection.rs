@@ -56,6 +56,7 @@ pub(crate) enum ErrorType {
 pub(crate) enum CommandFailure {
     Stopped(Stopped),
     Failed(ErrorType),
+    PermissionDenied,
     InvalidTtl,
 }
 
@@ -64,7 +65,9 @@ impl CommandFailure {
         match self {
             Self::Stopped(stopped) => OperationError::Stopped(stopped),
             Self::Failed(ErrorType::ValueTooLarge) => OperationError::ValueTooLarge,
-            Self::Failed(_) | Self::InvalidTtl => OperationError::Unavailable,
+            Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
+                OperationError::Unavailable
+            }
         }
     }
 }
@@ -87,16 +90,20 @@ impl CommandError {
         operation: Operation,
         stopped: Option<CommandFailure>,
     ) -> Self {
+        let code = error.code();
         if matches!(operation, Operation::Set)
-            && error.code() == Some("ERR")
+            && code == Some("ERR")
             && error.detail().is_some_and(|detail| {
                 detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
             })
         {
             return Self::NotApplied(CommandFailure::InvalidTtl);
         }
-        let failure = stopped.unwrap_or_else(|| CommandFailure::Failed(error_type(error)));
-        match error.code() {
+        let failure = stopped.unwrap_or_else(|| match code {
+            Some("NOPERM") => CommandFailure::PermissionDenied,
+            _ => CommandFailure::Failed(error_type(error)),
+        });
+        match code {
             Some(
                 "READONLY" | "NOAUTH" | "NOPERM" | "OOM" | "LOADING" | "MOVED" | "ASK"
                 | "CLUSTERDOWN" | "MASTERDOWN" | "MISCONF" | "NOREPLICAS" | "BUSY" | "REDIRECT",
