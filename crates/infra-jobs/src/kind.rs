@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use infra_postgres::{Tx, observed};
 use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
@@ -532,8 +532,7 @@ pub(crate) enum Completion {
     Committed,
 }
 
-pub(crate) type HandlerFuture =
-    Pin<Box<dyn Future<Output = Result<Completion, JobError>> + Send + 'static>>;
+pub(crate) type HandlerFuture = BoxFuture<'static, Result<Completion, JobError>>;
 
 pub(crate) type Dispatch =
     dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
