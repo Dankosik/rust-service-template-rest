@@ -81,7 +81,7 @@ impl AuthenticatedClient {
                     }
                     other => Error::Resource(other),
                 })?;
-        let deadline = acquisition_deadline(&prepared);
+        let deadline = acquisition_deadline(prepared.context());
         let grant = self
             .tokens
             .admit(subject, deadline)

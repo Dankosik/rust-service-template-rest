@@ -97,7 +97,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 return Box::pin(std::future::ready(Err(status)));
             }
         };
-        let context = prepared.opening_context().clone();
+        let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
         let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
             Ok(grant) => grant,
             Err(refusal) => {

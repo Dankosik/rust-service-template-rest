@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
-use infra_outbound_http::{BuildError, Client, Limits};
+use infra_outbound_http::{BuildError, Client, ExchangeError, Limits, prepare_tls};
 use operation_context::OperationContext;
 use serde::Deserialize;
 use url::Url;
 
 use crate::{
-    ConfigurationError, KeycloakError, Options, Registration,
+    DiscoveryTransportError, KeycloakError, Options, Registration, TransportBuildFailure,
     options::{admit_options, assertion_issuer, strict_provider_url, token_endpoint},
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -42,11 +42,8 @@ impl Registration {
             client,
         )
         .await?;
-        let token_http =
-            client(&admitted.endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "transport construction failed",
-            })?;
+        let token_http = client(&admitted.endpoint, TOKEN_LIMITS)
+            .map_err(|cause| TransportBuildFailure::new("token_url", cause))?;
         Self::build(admitted, token_http).map_err(KeycloakError::from)
     }
 }
@@ -63,8 +60,11 @@ async fn verify_metadata(
     endpoint: &Url,
     client: fn(&Url, Limits) -> Result<Client, BuildError>,
 ) -> Result<(), KeycloakError> {
-    let discovery_http = client(issuer_url, TOKEN_LIMITS)
-        .map_err(|_| KeycloakError::Discovery("issuer transport construction failed"))?;
+    let discovery_transport = |cause| TransportBuildFailure::new("assertion_audience", cause);
+    if issuer_url.scheme() == "https" {
+        prepare_tls().await.map_err(discovery_transport)?;
+    }
+    let discovery_http = client(issuer_url, TOKEN_LIMITS).map_err(discovery_transport)?;
     let metadata = fetch_metadata(issuer_url, &discovery_http).await?;
     if metadata.issuer != issuer {
         return Err(KeycloakError::Discovery(
@@ -88,16 +88,20 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Keycl
         .body(Bytes::new())
         .map_err(|_| KeycloakError::Discovery("issuer discovery URL is invalid"))?;
     let context = OperationContext::with_timeout(FETCH_TIMEOUT);
-    let mut observed_status = None;
-    let response = client
-        .execute_with_response_status(request, &context, |status| {
-            observed_status = Some(status);
-        })
-        .await;
-    if let Some(status) = observed_status.filter(|&status| status != StatusCode::OK) {
-        return Err(KeycloakError::DiscoveryStatus(status));
-    }
-    let response = response.map_err(|error| KeycloakError::DiscoveryTransport(error.into()))?;
+    let response = match client.execute_buffered(request, &context).await {
+        Ok(response) if response.status() != StatusCode::OK => {
+            return Err(KeycloakError::DiscoveryStatus(response.status()));
+        }
+        Err(ExchangeError::AfterResponse { status, .. }) if status != StatusCode::OK => {
+            return Err(KeycloakError::DiscoveryStatus(status));
+        }
+        Ok(response) => response,
+        Err(error) => {
+            return Err(KeycloakError::DiscoveryTransport(
+                DiscoveryTransportError::new(error.into_error()),
+            ));
+        }
+    };
     if !response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -112,5 +116,5 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Keycl
     if !body.trim_ascii_start().starts_with(b"{") {
         return Err(KeycloakError::Discovery("invalid issuer metadata"));
     }
-    serde_json::from_slice(body).map_err(|_| KeycloakError::Discovery("invalid issuer metadata"))
+    serde_json::from_slice(body).map_err(KeycloakError::DiscoveryMetadata)
 }
