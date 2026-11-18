@@ -2328,7 +2328,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
             let forwarded = infra_outbound_grpc::grpc_timeout(&headers).unwrap();
             let precision = Duration::from_micros(1);
             let earliest = lifetime.saturating_sub(origin.elapsed() + precision);
-            let latest = lifetime - admission + precision;
+            let latest = lifetime.saturating_sub(admission) + precision;
             assert!(
                 (earliest..=latest).contains(&forwarded),
                 "{policy:?} {original:?} {parent_seconds:?}: {forwarded:?}"

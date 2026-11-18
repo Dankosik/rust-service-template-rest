@@ -564,6 +564,26 @@ mod tests {
     }
 
     // template:begin postgres:shutdown-test-listener-before-pool-close
+    async fn hold_request_until_shutdown(
+        entered: CancellationToken,
+        dropping: CancellationToken,
+        held: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        pool: PgPool,
+        released_before_close: CancellationToken,
+    ) -> &'static str {
+        let _guard = std::mem::DropGuard::new(held, move |held| {
+            dropping.cancel();
+            tokio::task::block_in_place(|| {
+                let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(3));
+            });
+            if !pool.is_closed() {
+                released_before_close.cancel();
+            }
+        });
+        entered.cancel();
+        std::future::pending().await
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forced_handler_releases_before_postgres_close_and_shutdown_stays_degraded() {
         use std::sync::{Arc, Mutex, mpsc};
@@ -583,24 +603,13 @@ mod tests {
             let pool = pool.clone();
             let released_before_close = released_before_close.clone();
             move || {
-                let entered = entered.clone();
-                let dropping = dropping.clone();
-                let held = held.clone();
-                let pool = pool.clone();
-                let released_before_close = released_before_close.clone();
-                async move {
-                    let _guard = std::mem::DropGuard::new(held, move |held| {
-                        dropping.cancel();
-                        tokio::task::block_in_place(|| {
-                            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(3));
-                        });
-                        if !pool.is_closed() {
-                            released_before_close.cancel();
-                        }
-                    });
-                    entered.cancel();
-                    std::future::pending::<&'static str>().await
-                }
+                hold_request_until_shutdown(
+                    entered.clone(),
+                    dropping.clone(),
+                    held.clone(),
+                    pool.clone(),
+                    released_before_close.clone(),
+                )
             }
         };
         #[expect(

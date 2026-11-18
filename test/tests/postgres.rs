@@ -1215,7 +1215,7 @@ async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(po
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [i32; 0]);
     writer.close().await;
 }
 
