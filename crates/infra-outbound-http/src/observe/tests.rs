@@ -402,9 +402,10 @@ async fn exercise_transport_failures() -> Vec<String> {
             .body(Bytes::from_static(b"sentinel-body"))
             .expect("sensitive fixture request")
     };
-    let root_cause = |result: Result<http::Response<Bytes>, Error>| {
+    let root_cause = |result: Result<http::Response<Bytes>, Error>, reason: &str| {
         let error = result.expect_err("transport failure");
         std::assert_matches!(error, Error::Transport { .. }, "{error:?}");
+        assert_eq!(error.diagnostic_reason(), reason);
         shared_rules::error_chain::sources(&error)
             .last()
             .expect("transport source")
@@ -419,13 +420,13 @@ async fn exercise_transport_failures() -> Vec<String> {
     let untrusted = fixture_client(address, &untrusted)
         .execute(sensitive_request(), deadline())
         .await;
-    roots.push(root_cause(untrusted));
+    roots.push(root_cause(untrusted, "TLS exchange failed"));
     server.await.expect("untrusted fixture joins");
 
     let unresolved = fixture_client_resolving(FIXTURE_HOST, vec![], &material, limits())
         .execute(sensitive_request(), deadline())
         .await;
-    roots.push(root_cause(unresolved));
+    roots.push(root_cause(unresolved, "connection failed"));
 
     let (address, server) = tls_server(
         &material,
@@ -442,7 +443,7 @@ async fn exercise_transport_failures() -> Vec<String> {
     )
     .execute(sensitive_request(), deadline())
     .await;
-    roots.push(root_cause(overflow));
+    roots.push(root_cause(overflow, "HTTP protocol error"));
     server.await.expect("parser fixture joins");
 
     let (address, server) =
@@ -450,7 +451,7 @@ async fn exercise_transport_failures() -> Vec<String> {
     let truncated = fixture_client(address, &material)
         .execute(sensitive_request(), deadline())
         .await;
-    roots.push(root_cause(truncated));
+    roots.push(root_cause(truncated, "HTTP transport failed"));
     server.await.expect("truncated fixture joins");
     roots
 }

@@ -1,4 +1,7 @@
+use std::error::Error as _;
+
 use super::*;
+use crate::{ConfigurationError, PreparationError};
 
 #[tokio::test]
 async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
@@ -50,22 +53,26 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         assertion_audience: issuer.clone(),
         ..peer.options()
     };
-    assert_eq!(
+    std::assert_matches!(
         Registration::prepare_keycloak(options.clone())
             .await
-            .unwrap_err()
-            .key,
-        "assertion_audience"
+            .unwrap_err(),
+        PreparationError::Configuration(ConfigurationError {
+            key: "assertion_audience",
+            ..
+        })
     );
-    assert_eq!(
+    std::assert_matches!(
         Registration::prepare_keycloak(Options {
             assertion_audience: ASSERTION_AUDIENCE.to_owned(),
             ..options.clone()
         })
         .await
-        .unwrap_err()
-        .key,
-        "token_url"
+        .unwrap_err(),
+        PreparationError::Configuration(ConfigurationError {
+            key: "token_url",
+            ..
+        })
     );
     assert!(peer.resource_requests().is_empty());
     let metadata = |issuer: &str, endpoint: &str| {
@@ -113,7 +120,7 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
                 StatusCode::OK,
                 &vec![b' '; TOKEN_LIMITS.response_body_bytes + 1],
             ),
-            "issuer discovery request failed",
+            "response body is too large",
         ),
     ] {
         *peer.state.resource_response.lock().unwrap() = body;
@@ -121,9 +128,78 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         let error = Registration::prepare_keycloak_for_test_http(options.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.reason, reason);
+        assert!(
+            error.to_string().ends_with(&format!("({reason})")),
+            "{error}"
+        );
+        if reason == "response body is too large" {
+            std::assert_matches!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<infra_outbound_http::Error>(),
+                Some(infra_outbound_http::Error::ResponseBodyTooLarge)
+            );
+        }
         assert_eq!(peer.resource_requests().len(), attempts + 1);
         assert!(peer.token_requests().is_empty());
     }
     peer.finish().await;
+}
+
+#[tokio::test]
+async fn a_discovery_deadline_returns_a_timeout_cause() {
+    let peer = Fixture::new().await;
+    let gate = peer.block_resources();
+    let options = Options {
+        assertion_audience: peer.origin.join("realms/operations").unwrap().to_string(),
+        ..peer.options()
+    };
+    let (result, ()) = tokio::join!(
+        Registration::prepare_keycloak_for_test_http(options),
+        async {
+            peer.resource_received().await;
+            advance(FETCH_TIMEOUT).await;
+        }
+    );
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "OAuth2 discovery request failed (operation timed out)"
+    );
+    std::assert_matches!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<infra_outbound_http::Error>(),
+        Some(infra_outbound_http::Error::Timeout)
+    );
+    gate.add_permits(1);
+    peer.finish().await;
+}
+
+#[test]
+fn startup_diagnostics_retain_nested_causes_without_printing_them() {
+    const PRIVATE_DETAIL: &str = "sensitive-provider-detail";
+    let source = || Box::new(std::io::Error::other(PRIVATE_DETAIL));
+    for (error, message) in [
+        (
+            PreparationError::Transport {
+                endpoint: "assertion_audience",
+                source: infra_outbound_http::BuildError::Tls { source: source() },
+            },
+            "OAuth2 transport construction failed for assertion_audience (outbound HTTP TLS configuration failed)",
+        ),
+        (
+            PreparationError::DiscoveryRequest {
+                source: infra_outbound_http::Error::Transport { source: source() },
+            },
+            "OAuth2 discovery request failed (HTTP transport failed)",
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+        assert!(!format!("{error:?}").contains(PRIVATE_DETAIL));
+        let cause = error.source().and_then(std::error::Error::source).unwrap();
+        assert_eq!(cause.to_string(), PRIVATE_DETAIL);
+    }
 }

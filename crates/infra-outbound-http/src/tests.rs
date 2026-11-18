@@ -90,7 +90,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     for (wire, succeeds) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let result = fixture_client_with_limits(address, &material, ceiling)
-            .execute(request(), deadline())
+            .execute_buffered(request(), &operation_context::OperationContext::unbounded())
             .await;
         if succeeds {
             assert_eq!(
@@ -98,7 +98,14 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
                 b"ok"
             );
         } else {
-            std::assert_matches!(result, Err(Error::ResponseBodyTooLarge));
+            let error = result.expect_err("response exceeds the ceiling after headers");
+            std::assert_matches!(
+                error,
+                crate::ExchangeError::AfterResponse {
+                    status: http::StatusCode::OK,
+                    source: Error::ResponseBodyTooLarge,
+                }
+            );
         }
         server.await.expect("body fixture server succeeds");
     }
@@ -140,11 +147,13 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
     )
     .await;
+    let error = fixture_client_with_limits(address, &material, parser_limit)
+        .execute_buffered(request(), &operation_context::OperationContext::unbounded())
+        .await
+        .expect_err("header overflow precedes an admitted response");
     std::assert_matches!(
-        fixture_client_with_limits(address, &material, parser_limit)
-            .execute(request(), deadline())
-            .await,
-        Err(Error::Transport { .. })
+        error,
+        crate::ExchangeError::BeforeResponse(Error::Transport { .. })
     );
     server.await.expect("parser header fixture joins");
 }
@@ -307,6 +316,29 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
+    use operation_context::{OperationContext, Stopped};
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let client = fixture_client("127.0.0.1:0".parse().unwrap(), &material);
+    for cancelled in 0..3 {
+        let scopes = [(); 3].map(|()| OperationContext::unbounded());
+        let mut outer = request();
+        outer.extensions_mut().insert(scopes[1].clone());
+        let parent = client.prepare(outer, &scopes[0]).unwrap();
+        let mut inner = request();
+        inner.extensions_mut().insert(scopes[2].clone());
+        let nested = client.prepare(inner, parent.context().clone()).unwrap();
+        let (reason, ()) = tokio::join!(nested.wait_stopped(), async {
+            tokio::task::yield_now().await;
+            scopes[cancelled].cancel();
+        });
+        assert_eq!(reason, Stopped::Cancelled);
+        assert_eq!(nested.stopped(), Some(reason));
+    }
 }
 
 #[tokio::test]

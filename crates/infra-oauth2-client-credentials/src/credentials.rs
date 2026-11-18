@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use infra_outbound_http::{Client, PreparedRequest};
+use infra_outbound_http::{Client, RequestContext};
 use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -13,7 +13,8 @@ use tokio::{
 };
 
 use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, ServiceTokenTarget,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
+    ServiceTokenTarget,
     assertion::Signer,
     options::{Admitted, admit_options},
     request_admission::AdmissionRefusal,
@@ -169,14 +170,15 @@ struct CompletedFailure {
 }
 
 impl Registration {
-    pub fn prepare(options: Options) -> Result<Self, ConfigurationError> {
+    pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let admitted = admit_options(options, "https", "https")?;
-        let token_http =
-            Client::try_new(&admitted.endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "transport construction failed",
-            })?;
-        Self::build(admitted, token_http)
+        let token_http = Client::try_new(&admitted.endpoint, TOKEN_LIMITS).map_err(|source| {
+            PreparationError::Transport {
+                endpoint: "token_url",
+                source,
+            }
+        })?;
+        Self::build(admitted, token_http).map_err(PreparationError::from)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -363,11 +365,11 @@ impl ServiceTokens {
         if let Some(error) = inner.completed_failure(now) {
             return Err(error);
         }
-        let (context, request_context) = deadline.fetch_contexts(now);
+        let context = deadline.fetch_context(now);
         let result = inner
             .registration
             .endpoint
-            .fetch_service_token(&inner.target, &context, request_context.as_ref())
+            .fetch_service_token(&inner.target, &context)
             .await;
         self.check_admission(deadline)?;
         match result.map_err(provider_timeout) {
@@ -470,11 +472,8 @@ impl ServiceState {
             return;
         }
         let endpoint = &self.registration.endpoint;
-        let context = OperationContext::from_deadline(Deadline::at(request.deadline));
-        match endpoint
-            .fetch_service_token(&self.target, &context, None)
-            .await
-        {
+        let context = OperationContext::from_deadline(Deadline::at(request.deadline)).into();
+        match endpoint.fetch_service_token(&self.target, &context).await {
             Ok(token) => {
                 self.store_service_token(token);
                 let mut cached = self.cached();
@@ -516,16 +515,13 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     expiry: AcquisitionError,
-    context: AcquisitionContext<'a>,
+    context: &'a RequestContext,
 }
 
 impl AcquisitionDeadline<'_> {
-    fn fetch_contexts(self, now: Instant) -> (OperationContext, Option<OperationContext>) {
+    fn fetch_context(self, now: Instant) -> RequestContext {
         let ceiling = Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT));
-        match self.context {
-            AcquisitionContext::Operation(context) => (context.child_until(ceiling), None),
-            AcquisitionContext::Http(request) => request.child_contexts(ceiling),
-        }
+        self.context.child_until(ceiling)
     }
 
     fn expired_error(self) -> Option<AcquisitionError> {
@@ -538,49 +534,8 @@ impl AcquisitionDeadline<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum AcquisitionContext<'a> {
-    Operation(&'a OperationContext),
-    Http(&'a PreparedRequest<'a>),
-}
-
-impl<'a> From<&'a OperationContext> for AcquisitionContext<'a> {
-    fn from(context: &'a OperationContext) -> Self {
-        Self::Operation(context)
-    }
-}
-
-impl<'a> From<&'a PreparedRequest<'_>> for AcquisitionContext<'a> {
-    fn from(request: &'a PreparedRequest<'_>) -> Self {
-        Self::Http(request)
-    }
-}
-
-impl AcquisitionContext<'_> {
-    fn stopped(self) -> Option<Stopped> {
-        match self {
-            Self::Operation(context) => context.stopped(),
-            Self::Http(request) => request.stopped(),
-        }
-    }
-
-    async fn wait_stopped(self) -> Stopped {
-        match self {
-            Self::Operation(context) => context.wait_stopped().await,
-            Self::Http(request) => request.wait_stopped().await,
-        }
-    }
-}
-
-pub(crate) fn acquisition_deadline<'a>(
-    context: impl Into<AcquisitionContext<'a>>,
-) -> AcquisitionDeadline<'a> {
-    let context = context.into();
-    let deadline = match context {
-        AcquisitionContext::Operation(context) => context.deadline(),
-        AcquisitionContext::Http(request) => request.deadline(),
-    };
-    let (cutoff, expiry) = match deadline.and_then(Deadline::instant) {
+pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadline<'_> {
+    let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, AcquisitionError::Timeout),
         None => (
             Instant::now() + FETCH_TIMEOUT,

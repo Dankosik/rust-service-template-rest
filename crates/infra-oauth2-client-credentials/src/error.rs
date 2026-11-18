@@ -18,6 +18,33 @@ impl ConfigurationError {
     }
 }
 
+#[derive(derive_more::Debug, thiserror::Error)]
+pub enum PreparationError {
+    #[error("{0}")]
+    Configuration(#[from] ConfigurationError),
+    #[error("OAuth2 transport construction failed for {endpoint} ({source})")]
+    Transport {
+        endpoint: &'static str,
+        #[source]
+        #[debug(skip)]
+        source: infra_outbound_http::BuildError,
+    },
+    #[error("OAuth2 discovery request failed ({})", .source.diagnostic_reason())]
+    DiscoveryRequest {
+        #[source]
+        #[debug(skip)]
+        source: infra_outbound_http::Error,
+    },
+    #[error("OAuth2 discovery response was rejected ({0})")]
+    DiscoveryResponse(&'static str),
+    #[error("OAuth2 discovery response was rejected (invalid issuer metadata)")]
+    DiscoveryMetadata(
+        #[source]
+        #[debug(skip)]
+        serde_json::Error,
+    ),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AcquisitionError {
     #[error("OAuth2 acquisition deadline elapsed")]
