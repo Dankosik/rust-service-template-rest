@@ -158,6 +158,11 @@ impl VerifiedMessage {
     }
 
     #[must_use]
+    pub fn into_message_id(self) -> Bytes {
+        self.message_id
+    }
+
+    #[must_use]
     pub const fn timestamp(&self) -> i64 {
         self.timestamp
     }

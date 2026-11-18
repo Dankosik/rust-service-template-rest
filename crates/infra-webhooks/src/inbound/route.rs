@@ -11,7 +11,7 @@ use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_prob
 use infra_http::{Code, Problem, RequestContext, RequestDeadline};
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
-use utoipa::{IntoResponses, OpenApi, ToResponse};
+use utoipa::{OpenApi, ToResponse};
 
 use super::{ReceiptOutcome, ReceiveError, Receiver};
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
@@ -122,17 +122,6 @@ struct WebhookRejected(Problem);
 #[response(content_type = "application/problem+json")]
 struct ServiceUnavailable(Problem);
 
-#[derive(Debug, IntoResponses)]
-#[expect(dead_code, reason = "The variants exist only for the OpenAPI derive")]
-enum WebhookProblemResponses {
-    #[response(status = 400)]
-    Rejected(#[ref_response] WebhookRejected),
-    #[response(status = 404)]
-    NotFound(#[ref_response] NotFound),
-    #[response(status = 503)]
-    Unavailable(#[ref_response] ServiceUnavailable),
-}
-
 #[derive(OpenApi)]
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
 struct WebhookComponents;
@@ -168,7 +157,9 @@ where
     security(),
     responses(
         (status = 204, description = "webhook receipt is durable"),
-        WebhookProblemResponses,
+        (status = 400, response = WebhookRejected),
+        (status = 404, response = NotFound),
+        (status = 503, response = ServiceUnavailable),
     )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
