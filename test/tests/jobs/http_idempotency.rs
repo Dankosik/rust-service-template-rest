@@ -5,7 +5,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use bytes::Bytes;
 use infra_idempotency_store::{
-    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, Record, ScopeKey, Store,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Record, RequestFingerprint, ScopeKey,
+    Store,
 };
 use infra_jobs::{EnqueueOptions, JobKind, enqueue};
 use infra_postgres::{Dsn, PgPool, Tx};
@@ -24,7 +25,7 @@ impl JobKind for WidgetWelcome {
 
 const KEY: &[u8] = b"widget";
 const OTHER_KEY: &[u8] = b"other-widget";
-const INPUT: Digest = [0xa1; 32];
+const INPUT: RequestFingerprint = RequestFingerprint::from_bytes([0xa1; 32]);
 const WIDGET: u64 = 7;
 const DUPLICATE_WIDGET: u64 = 8;
 

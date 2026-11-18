@@ -90,6 +90,11 @@ where
     })
 }
 
+pub(crate) struct ProtectedAccess {
+    pub(crate) scope_alternatives: Box<[Box<[String]>]>,
+    pub(crate) delegate: bool,
+}
+
 #[derive(Clone)]
 struct AuthState {
     verifier: Verifier,
@@ -109,8 +114,8 @@ async fn authenticate(
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
         None => policy.unregistered(Some(path), request.method()).await,
-        Some(Access::Protected(alternatives, delegate)) => {
-            authenticate_protected(&verifier, alternatives, *delegate, request, next).await
+        Some(Access::Protected(required)) => {
+            authenticate_protected(&verifier, required, request, next).await
         }
     }
 }
@@ -123,8 +128,7 @@ pub(crate) fn strip_identity(extensions: &mut Extensions) {
 
 async fn authenticate_protected(
     verifier: &Verifier,
-    alternatives: &[Box<[String]>],
-    delegate: bool,
+    required: &ProtectedAccess,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -145,11 +149,10 @@ async fn authenticate_protected(
             )
             .await
     };
-    let (principal, delegation) =
-        match authorize(context.operation(), result, alternatives, delegate) {
-            Ok(admitted) => admitted,
-            Err(response) => return response,
-        };
+    let (principal, delegation) = match authorize(context.operation(), result, required) {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
     request.headers_mut().remove(AUTHORIZATION);
     if let Some(credential) = delegation {
         request.extensions_mut().insert(credential);
@@ -165,14 +168,14 @@ async fn authenticate_protected(
 fn authorize(
     operation: &OperationContext,
     result: Result<(Principal, PresentedToken<'_>), Failure>,
-    alternatives: &[Box<[String]>],
-    delegate: bool,
+    required: &ProtectedAccess,
 ) -> Result<(Principal, Option<DelegationCredential>), Response> {
     if let Some(stopped) = operation.stopped() {
         return Err(Problem::from(stopped).into_response());
     }
     let (principal, token) = result.map_err(failure_response)?;
-    if !alternatives
+    if !required
+        .scope_alternatives
         .iter()
         .any(|scopes| principal.has_scopes(scopes))
     {
@@ -183,7 +186,9 @@ fn authorize(
     }
     Ok((
         principal,
-        delegate.then(|| token.into_delegation_credential()),
+        required
+            .delegate
+            .then(|| token.into_delegation_credential()),
     ))
 }
 
@@ -280,7 +285,11 @@ mod tests {
         let context = OperationContext::unbounded();
         context.cancellation().cancel();
 
-        let response = authorize(&context, Err(Failure::Unavailable), &[], false).unwrap_err();
+        let required = ProtectedAccess {
+            scope_alternatives: Box::new([]),
+            delegate: false,
+        };
+        let response = authorize(&context, Err(Failure::Unavailable), &required).unwrap_err();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
