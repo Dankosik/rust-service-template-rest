@@ -37,8 +37,11 @@ jobs:
           set -euo pipefail
           status=0
           report=$(bash scripts/checks/dependency_drift.sh --upstream) || status=$?
+          if ((status > 1)) || [[ -z ${report} ]]; then
+            printf 'dependency-drift: weekly poll did not produce a complete report (status %s)\n' "${status}" >&2
+            exit 2
+          fi
           printf '%s\n' "${report}"
-          ((status <= 1)) || exit "${status}"
           issue=$(gh issue list --label dependency-drift --state open --limit 1 --json number --jq '.[0].number // empty')
           if ((status == 0)); then
             [[ -z ${issue} ]] || gh issue close "${issue}" --comment "No dependency drift at ${GITHUB_SHA}."

@@ -22,7 +22,13 @@ passes never prove CI admission, container behavior, or a release.
   `dependency-review-action` has a graph, and set real principals in
   `.github/CODEOWNERS` before requiring code-owner review. Image publication in
   `cd.yml` stays inert until repository variable `ENABLE_GHCR_PUBLISH` is
-  `'true'`, and release tags must match `v<crate version>`.
+  `'true'`. Before enabling it, apply a tag ruleset restricting creation
+  of `v*` to the trusted release role. Keep deletion and force-push
+  protection in a separate ruleset so that creation rights grant neither.
+  A tag push loads the workflow from that tag, so the repository rule is the
+  trust boundary. Tag a commit already accepted on the default branch as
+  `v<crate version>` while its successful push CI and CodeQL runs are
+  available. The release also needs successful checks on the tag.
 
 ## Vendored forks
 
@@ -46,6 +52,9 @@ When `dependency-drift` names a fork:
    `make native-transport-regressions` plus the affected profile proof.
 4. **Nothing applies:** Update `Upstream reviewed: <version>` with a one-line
    reason, or backport urgent security fixes as exact upstream commits.
+
+A failed upstream poll leaves the last complete issue report available. Use
+the failed Actions run to identify the unavailable source, then rerun the job.
 
 ## Red main
 
@@ -79,6 +88,22 @@ While `main-red` is open:
   (or Railway deployment identity for [source deployments](railway-deployment-profile.md#rollback))
   with compatible config; startup readiness never proves mixed-version SQL or
   payload compatibility ([Production Contract](production-contract.md#operation-and-recovery)).
+
+### Published image advisories
+
+While GHCR publication is enabled, the [published image scan](../.github/workflows/published-image-scan.yml)
+reassesses each distinct digest retaining a deployment tag, including older
+versions. Keep a deployment tag on images still running or reserved for rollback
+so the scan can discover them. The Actions run identifies digests with
+HIGH/CRITICAL findings, including those awaiting a fix, and reports incomplete
+scans as failures. The service maintainer triages these results under the
+[security response policy](../SECURITY.md#response-targets), records the
+affected deployments and reassesses accepted exposure on the next scan.
+Deliver a patched digest before retiring a vulnerable rollback image.
+
+Recipients can retrieve the service license and Rust dependency notices from
+`/usr/share/licenses/service/` inside that same image. Keep these files with
+any redistributed binaries.
 
 ## Decisions Recorded Here
 
