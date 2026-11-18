@@ -103,6 +103,8 @@ pub(crate) struct HttpFields<Propagation> {
     max_connection_age: Duration,
     #[serde(deserialize_with = "crate::de::boolean")]
     access_log_health_probes: bool,
+    #[serde(deserialize_with = "crate::de::boolean")]
+    trust_trace_context: bool,
 }
 
 impl<Propagation: Default> Default for HttpFields<Propagation> {
@@ -121,6 +123,7 @@ impl<Propagation: Default> Default for HttpFields<Propagation> {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_connection_age: Duration::ZERO,
             access_log_health_probes: false,
+            trust_trace_context: false,
         }
     }
 }
@@ -137,6 +140,7 @@ pub struct HttpListenerConfig {
     pub max_connections: Option<NonZeroU32>,
     pub max_connection_age: Option<Duration>,
     pub access_log_health_probes: bool,
+    pub trust_trace_context: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +273,7 @@ impl<Propagation> HttpFields<Propagation> {
             max_connection_age: (!self.max_connection_age.is_zero())
                 .then_some(self.max_connection_age),
             access_log_health_probes: self.access_log_health_probes,
+            trust_trace_context: self.trust_trace_context,
         }
     }
 }

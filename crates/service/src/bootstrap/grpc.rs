@@ -61,7 +61,13 @@ pub(super) fn prepare(
         )
         .map_err(BootstrapError::GrpcRegistration)?;
     }
-    let app = infra_grpc::router(services, state.readiness.clone(), authentication, limits)?;
+    let app = infra_grpc::router(
+        services,
+        state.readiness.clone(),
+        authentication,
+        limits,
+        grpc.trust_trace_context,
+    )?;
     Ok(Prepared {
         addr: grpc.addr,
         app,

@@ -784,7 +784,11 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
         .await
         .expect("privacy TLS channel");
     let mut client = EchoServiceClient::new(channel);
-    for (token, accepted) in [(token, true), ("invalid-token", false)] {
+    for (token, accepted, parent) in [
+        (token, true, TRACEPARENT),
+        ("invalid-token", false, TRACEPARENT),
+        (token, true, "00-11-2222222222222222-01"),
+    ] {
         let mut request = Request::new(UnaryRequest {
             message: "privacy echo".to_owned(),
         });
@@ -793,7 +797,13 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
         request
             .metadata_mut()
-            .insert("traceparent", TRACEPARENT.parse().unwrap());
+            .insert("traceparent", parent.parse().unwrap());
+        request
+            .metadata_mut()
+            .append("tracestate", "first=one".parse().unwrap());
+        request
+            .metadata_mut()
+            .append("tracestate", "second=two".parse().unwrap());
         let result = tokio::time::timeout(Duration::from_secs(5), client.unary(request))
             .await
             .expect("privacy RPC bound");
@@ -841,6 +851,7 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
 
 fn assert_server_privacy_outputs(
     format: &str,
+    trusted: bool,
     stderr: &str,
     logs: &[String],
     exported: &[Vec<u8>],
@@ -850,7 +861,11 @@ fn assert_server_privacy_outputs(
         .iter()
         .find(|line| line.contains("authn_verification_failed"))
         .expect("a real request event must reach the local formatter");
-    assert!(authn.contains(TRACE_ID), "request correlation: {authn}");
+    assert_eq!(
+        authn.contains(TRACE_ID),
+        trusted,
+        "request correlation: {authn}"
+    );
     assert!(authn.contains("span_id"), "span correlation: {authn}");
     assert!(
         authn.contains("example.v1.EchoService/Unary"),
@@ -867,11 +882,24 @@ fn assert_server_privacy_outputs(
         .filter(|span| span.name == "example.v1.EchoService/Unary")
         .collect::<Vec<_>>();
     assert!(!unary.is_empty(), "missing exported unary span: {spans:?}");
+    let continued = unary
+        .iter()
+        .filter(|span| span.trace_id == [0x11; 16])
+        .collect::<Vec<_>>();
+    assert_eq!(continued.len(), if trusted { 2 } else { 0 }, "{unary:?}");
+    for span in continued {
+        assert_eq!(span.parent_span_id, [0x22; 8]);
+        assert_eq!(span.trace_state, "first=one,second=two");
+    }
+    let roots = unary
+        .iter()
+        .filter(|span| span.parent_span_id.is_empty())
+        .count();
+    assert!(roots >= if trusted { 1 } else { 3 }, "{unary:?}");
     assert!(
         unary
             .iter()
-            .any(|span| span.trace_id == [0x11; 16] && span.parent_span_id == [0x22; 8]),
-        "no unary span continues the caller's trace: {unary:?}"
+            .all(|span| span.trace_id != 0x11_u128.to_be_bytes())
     );
     assert!(
         spans.iter().any(|span| span
@@ -909,23 +937,22 @@ fn assert_server_privacy_outputs(
     }
 }
 
-fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) -> u16 {
+fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str, trusted: bool) -> u16 {
     let collector = Collector::start(&oidc.runtime);
     let (certificate, private_key) = tls_material();
-    let mut example = Example::spawn_with(
-        oidc,
-        &certificate,
-        &private_key,
-        &[
-            ("APP__LOG__FORMAT", format),
-            ("APP__LOG__LEVEL", level),
-            (
-                "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
-                &collector.endpoint,
-            ),
-            ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
-        ],
-    );
+    let mut environment = vec![
+        ("APP__LOG__FORMAT", format),
+        ("APP__LOG__LEVEL", level),
+        (
+            "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT",
+            &collector.endpoint,
+        ),
+        ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
+    ];
+    if trusted {
+        environment.push(("APP__GRPC__TRUST_TRACE_CONTEXT", "true"));
+    }
+    let mut example = Example::spawn_with(oidc, &certificate, &private_key, &environment);
     let _ = example.await_address("http listener bound");
     let _ = example.await_address("diagnostics listener bound");
     let address = example.await_address("grpc listener bound");
@@ -938,7 +965,7 @@ fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) -> u16 
     let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
     assert_eq!(code, Some(0), "{format}: {stderr}; {logs:?}");
     let exported = collector.finish(&oidc.runtime);
-    assert_server_privacy_outputs(format, &stderr, &logs, &exported);
+    assert_server_privacy_outputs(format, trusted, &stderr, &logs, &exported);
     address.parse::<std::net::SocketAddr>().unwrap().port()
 }
 
@@ -969,8 +996,8 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     })
     .expect("client subscriber");
 
-    let ports = [("json", "debug"), ("text", "trace")]
-        .map(|(format, level)| exercise_server_format(&oidc, format, level));
+    let ports = [("json", "debug", true), ("text", "trace", false)]
+        .map(|(format, level, trusted)| exercise_server_format(&oidc, format, level, trusted));
 
     assert_eq!(
         oidc.runtime

@@ -188,7 +188,14 @@ fn echo_services(echo: &Echo) -> Services {
 }
 
 fn serve(services: Services, authentication: Authentication) -> (Server, SocketAddr) {
-    let app = infra_grpc::router(services, readiness().reader(), authentication, limits()).unwrap();
+    let app = infra_grpc::router(
+        services,
+        readiness().reader(),
+        authentication,
+        limits(),
+        false,
+    )
+    .unwrap();
     let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let options = server_options(ConnectionLimits {
         max_connections: NonZeroU32::new(64),
@@ -484,6 +491,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         readiness().reader(),
         Authentication::None,
         limits(),
+        false,
     );
     std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
     // template:begin oidc-jwt:grpc-service-auth-test-caller-rules-bearer
@@ -493,6 +501,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         readiness().reader(),
         Authentication::Bearer(verifier),
         limits(),
+        false,
     );
     std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
     // template:end oidc-jwt:grpc-service-auth-test-caller-rules-bearer
@@ -503,6 +512,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         readiness.reader(),
         Authentication::None,
         limits(),
+        false,
     );
     std::assert_matches!(refused, Err(Error::UnauthenticatedBusinessCalls));
     // template:end authn:grpc-service-auth-test-without-verifier-bearer
@@ -530,6 +540,7 @@ async fn service_token_authentication_requires_a_tls_listener() {
         readiness().reader(),
         Authentication::ServiceTokens(Keys::new().verifier()),
         limits(),
+        false,
     )
     .unwrap();
     let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -561,6 +572,7 @@ async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
             readiness.reader(),
             Authentication::ServiceTokens(keys.verifier()),
             limits(),
+            false,
         );
         std::assert_matches!(refused, Err(Error::ScopesWithServiceTokens));
     }
@@ -571,7 +583,14 @@ async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
 async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     let keys = Keys::new();
     let build = |services, authentication| {
-        infra_grpc::router(services, readiness().reader(), authentication, limits()).map(|_| ())
+        infra_grpc::router(
+            services,
+            readiness().reader(),
+            authentication,
+            limits(),
+            false,
+        )
+        .map(|_| ())
     };
     let mut services = Services::new();
     services

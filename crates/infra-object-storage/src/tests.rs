@@ -1022,13 +1022,12 @@ async fn the_span_names_the_region_only_on_amazon() {
         records.matching("span", " cloud.region=eu-central-1").len(),
         1
     );
-    assert_eq!(
-        records
-            .matching("span", " otel.name=S3.PresignGetObject")
-            .len(),
-        1,
-        "one Amazon operation span"
-    );
+    let spans = records.matching("span", " otel.name=S3.PresignGetObject");
+    let [span] = spans.as_slice() else {
+        panic!("expected one local signing span: {spans:?}");
+    };
+    assert!(span.contains(" otel.kind=internal"), "{span}");
+    assert!(!span.contains(" rpc."), "{span}");
 
     let r2 = ObjectStorage::try_new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),

@@ -441,6 +441,9 @@ impl std::fmt::Debug for NeverFormat {
 
 fn emit_denied_diagnostics() {
     tracing::error!("ordinary_record");
+    tracing::warn!(target: "infra_messaging::consumer::delivery", "messaging_delivery_failed");
+    tracing::debug!(target: "async_nats", "received MESSAGE: sid=1, subject=events.PRIVATE_NATS");
+    tracing::trace!(target: "async_nats::connection", "server op: events.PRIVATE_NATS");
     tracing::debug!(name: "HttpTraceClient.ResponseParseError", target: "opentelemetry-otlp", error = ?NeverFormat);
     tracing::trace!(target: "reqwest::connect", "SDK_SECRET_SENTINEL");
     tracing::warn!(target: "opentelemetry_sdk", "SDK_SECRET_SENTINEL");
@@ -485,9 +488,12 @@ fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
             let records = buffer.records();
             assert!(!records.contains("SDK_SECRET_SENTINEL"), "{records}");
             assert!(!records.contains("ResponseParseError"), "{records}");
+            assert!(!records.contains("PRIVATE_NATS"), "{records}");
             if level != "off" && !level.starts_with("off,") {
                 assert!(
-                    records.contains("ordinary_record") && records.contains("safe-request"),
+                    records.contains("ordinary_record")
+                        && records.contains("safe-request")
+                        && records.contains("messaging_delivery_failed"),
                     "{records}"
                 );
             }

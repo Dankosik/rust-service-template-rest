@@ -539,6 +539,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
 
 #[tokio::test]
 async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer() {
+    let exporter = install_tracing();
     let fixture = Fixture::create(false).await;
     let filter = format!("{}.events.>", fixture.subject);
     let registered_subject = format!("{}.events.known", fixture.subject);
@@ -563,7 +564,7 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
         .register(&route, |_, _| async { Ok(()) })
         .unwrap();
     let mut consumer = consumer_options(&fixture);
-    consumer.filter_subject = filter;
+    consumer.filter_subject.clone_from(&filter);
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer), 1024),
@@ -608,6 +609,32 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
     assert_eq!(transferred.payload, *prepared.payload());
     wait_for_source_ack(&fixture).await;
     handle.finish(deadline()).await.unwrap();
+
+    let spans = exported_spans(exporter, &format!("process {filter}"));
+    let [process] = spans.as_slice() else {
+        panic!("expected one unhandled delivery: {spans:?}");
+    };
+    assert_eq!(attribute(process, "outcome").as_deref(), Some("unhandled"));
+    assert!(
+        process
+            .events
+            .iter()
+            .any(|event| event.name == "messaging_delivery_failed")
+    );
+    let ack = exported_spans(exporter, "ack")
+        .into_iter()
+        .find(|span| span.parent_span_id == process.span_context.span_id())
+        .expect("dead-letter transfer acknowledges the source");
+    for span in [process, &ack] {
+        assert_eq!(
+            attribute(span, "messaging.destination.template").as_deref(),
+            Some(filter.as_str())
+        );
+        assert!(
+            !format!("{span:?}").contains(subject.as_str()),
+            "unregistered subject reached telemetry"
+        );
+    }
     close(messaging).await;
     fixture.cleanup().await;
 }

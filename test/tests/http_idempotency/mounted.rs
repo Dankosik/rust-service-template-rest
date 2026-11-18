@@ -547,6 +547,7 @@ fn options(budget: Duration) -> HardenOptions {
         max_in_flight: NonZeroU32::new(16),
         admission_wait: budget,
         log_health_probes: false,
+        trust_trace_context: false,
         draining: None,
     }
 }
@@ -1709,6 +1710,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
                 max_in_flight: None,
                 admission_wait: Duration::ZERO,
                 log_health_probes: false,
+                trust_trace_context: false,
                 draining: None,
             },
             store,

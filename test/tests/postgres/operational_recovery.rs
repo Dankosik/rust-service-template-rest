@@ -66,6 +66,7 @@ fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Applic
                 max_in_flight: NonZeroU32::new(256),
                 admission_wait: Duration::from_secs(8),
                 log_health_probes: false,
+                trust_trace_context: false,
                 draining: None,
             },
         )
@@ -582,7 +583,7 @@ mod grpc {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             });
-            let app = infra_grpc::router(services, reader, authentication, limits).unwrap();
+            let app = infra_grpc::router(services, reader, authentication, limits, false).unwrap();
             let listener =
                 infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let server = app.serve(listener, options, None).unwrap();

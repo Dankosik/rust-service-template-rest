@@ -605,6 +605,7 @@ async fn http_application(
         max_in_flight: http.max_in_flight,
         admission_wait: http.admission_wait,
         log_health_probes: http.access_log_health_probes,
+        trust_trace_context: http.trust_trace_context,
         draining: Some(state.readiness.clone()),
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation

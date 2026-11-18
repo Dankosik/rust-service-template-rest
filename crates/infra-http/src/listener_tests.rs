@@ -36,6 +36,7 @@ fn harden(app: Router) -> Router {
             max_in_flight: None,
             admission_wait: Duration::from_secs(30),
             log_health_probes: false,
+            trust_trace_context: false,
             draining: None,
         },
     )
@@ -97,9 +98,24 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
     std::assert_matches!(closed, Ok(Ok(0) | Err(_)));
     assert_eq!(body.as_slice(), b"");
     let spans = exporter.get_finished_spans().unwrap();
-    let access = spans
+    let span = spans
         .iter()
-        .flat_map(|span| span.events.iter())
+        .find(|span| span.name == "GET /pending")
+        .expect("the interrupted request exports a span");
+    assert!(
+        !span
+            .attributes
+            .iter()
+            .any(|kv| kv.key.as_str() == "http.response.status_code")
+    );
+    assert!(span.attributes.contains(&opentelemetry::KeyValue::new(
+        "error.type",
+        "server_shutdown"
+    )));
+    std::assert_matches!(span.status, opentelemetry::trace::Status::Error { .. });
+    let access = span
+        .events
+        .iter()
         .find(|event| event.name == "http_request")
         .expect("the interrupted request has an access event");
     assert!(
@@ -120,7 +136,11 @@ use tls_test_support::localhost_tls;
 use tokio_rustls::TlsConnector;
 
 #[tokio::test]
-async fn tls_http1_origin_form_reports_https_in_the_server_span() {
+async fn tls_http1_stream_completes_at_content_length_and_reports_https() {
+    use axum::body::Body;
+    use axum::http::header::CONTENT_LENGTH;
+    use futures_util::stream;
+
     let (_subscriber, _provider, exporter) = capture_request_spans();
     let (server_config, client_config) = localhost_tls(b"http/1.1");
     let opts = Http1Options {
@@ -131,7 +151,13 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         clippy::disallowed_methods,
         reason = "test fixture registers a raw route"
     )]
-    let route = Router::new().route("/ok", get(|| async { "ok" }));
+    let route = Router::new().route(
+        "/ok",
+        get(|| async {
+            let body = Body::from_stream(stream::iter([Ok::<_, std::convert::Infallible>("ok")]));
+            ([(CONTENT_LENGTH, "2")], body)
+        }),
+    );
     let server = BoundListener::bind(loopback()).unwrap().serve_tls(
         harden(route),
         opts,
@@ -149,9 +175,10 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         tls.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
-        let mut status = [0; 12];
-        tls.read_exact(&mut status).await.unwrap();
-        assert_eq!(&status, b"HTTP/1.1 200");
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(response.ends_with(b"\r\n\r\nok"));
     })
     .await
     .unwrap();
@@ -164,6 +191,12 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
     assert!(
         span.attributes
             .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
+    );
+    assert!(
+        !span
+            .attributes
+            .iter()
+            .any(|kv| kv.key.as_str() == "error.type")
     );
 }
 

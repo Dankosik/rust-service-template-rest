@@ -129,6 +129,7 @@ pub fn router(
     readiness: ::health::ReadinessReader,
     authentication: Authentication,
     limits: Limits,
+    trust_trace_context: bool,
 ) -> Result<Application, Error> {
     if services.reflection {
         services.attach_reflection()?;
@@ -188,6 +189,7 @@ pub fn router(
             services.names,
             methods,
             limits.request_timeout,
+            trust_trace_context,
         ),
         // template:begin service-auth:grpc-app-tls-init
         requires_tls,
@@ -215,6 +217,7 @@ fn native_router(
     names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
     request_timeout: Duration,
+    trust_trace_context: bool,
 ) -> axum::Router {
     let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
     #[expect(
@@ -235,10 +238,17 @@ fn native_router(
         Some(layer) => axum::Router::new().fallback_service(layer.layer(router)),
         None => router,
     };
-    router.layer(axum::middleware::from_fn(native_grpc))
+    router.layer(axum::middleware::from_fn_with_state(
+        trust_trace_context,
+        native_grpc,
+    ))
 }
 
-async fn native_grpc(request: Request, next: Next) -> Response {
+async fn native_grpc(
+    State(trust_trace_context): State<bool>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let response = if request.method() != http::Method::POST {
         (
             http::StatusCode::METHOD_NOT_ALLOWED,
@@ -248,6 +258,7 @@ async fn native_grpc(request: Request, next: Next) -> Response {
     } else if !crate::protocol::native_content_type(request.headers()) {
         http::StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response()
     } else {
+        infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
         return next.run(request).await;
     };
     drain_rejected(request, REJECT_DRAIN).await;

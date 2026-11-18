@@ -48,6 +48,7 @@ fn app() -> (axum::Router, ::health::Readiness) {
             services.names,
             methods,
             OPENING,
+            false,
         ),
         readiness,
     )

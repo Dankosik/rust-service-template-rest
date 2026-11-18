@@ -411,7 +411,7 @@ impl Consumer {
                     | BatchEnd::MaxBytesExceededBeforeFirstDelivery
                     | BatchEnd::Failed { .. }),
                 ) => {
-                    release(messages, slots, stop).await;
+                    release(messages, slots, stop, &self.handler.filter_subject).await;
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
@@ -444,7 +444,7 @@ impl Consumer {
                 Err(error) if error.requires_delivery_drain() => {
                     let _ = tokio::time::timeout(
                         BROKER_OPERATION_BUDGET,
-                        release(messages, slots, stop),
+                        release(messages, slots, stop, &self.handler.filter_subject),
                     )
                     .await;
                     return Err(error);
@@ -532,7 +532,7 @@ impl Consumer {
                             let loss_check = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
-                                    release_message(&message, stop).await;
+                                    release_message(&message, stop, &self.handler.filter_subject).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
                                 limits = self.durable_pull_limits() => limits,
@@ -541,7 +541,7 @@ impl Consumer {
                                 Ok(Some(_)) => {}
                                 Ok(None) => return Err(ConsumerError::ConsumerLost),
                                 Err(error) => {
-                                    release_message(&message, stop).await;
+                                    release_message(&message, stop, &self.handler.filter_subject).await;
                                     return Ok(BatchEnd::Failed {
                                         phase: "consumer_info",
                                         error_kind: consumer_info_error_kind(&error.kind()),
@@ -550,7 +550,7 @@ impl Consumer {
                             }
                         }
                         if stop.is_cancelled() {
-                            release_message(&message, stop).await;
+                            release_message(&message, stop, &self.handler.filter_subject).await;
                             return Ok(BatchEnd::Stopped);
                         }
                         remaining -= 1;
@@ -673,7 +673,12 @@ async fn retry_after_backoff(stop: &CancellationToken) -> ControlFlow<()> {
     }
 }
 
-async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationToken) {
+async fn release(
+    mut messages: pull::Batch,
+    slots: usize,
+    stop: &CancellationToken,
+    filter_subject: &str,
+) {
     let mut prefetched = Vec::new();
     for _ in 0..slots {
         let Some(Some(item)) = messages.next().now_or_never() else {
@@ -685,12 +690,16 @@ async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationTok
     }
     drop(messages);
     for message in &prefetched {
-        release_message(message, stop).await;
+        release_message(message, stop, filter_subject).await;
     }
 }
 
-async fn release_message(message: &async_nats::jetstream::Message, stop: &CancellationToken) {
-    let request = redeliver_after(message, RELEASE_DELAY);
+async fn release_message(
+    message: &async_nats::jetstream::Message,
+    stop: &CancellationToken,
+    filter_subject: &str,
+) {
+    let request = redeliver_after(message, RELEASE_DELAY, filter_subject);
     tokio::pin!(request);
     tokio::select! {
         biased;
