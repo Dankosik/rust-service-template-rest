@@ -9,7 +9,7 @@ pub fn http_origin_port(scheme: &str, authority: &str, host: &str) -> Option<u16
         return None;
     }
     match authority.strip_prefix(host)? {
-        "" => Some(default),
+        "" | ":" => Some(default),
         suffix => {
             let digits = suffix.strip_prefix(':')?;
             if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
