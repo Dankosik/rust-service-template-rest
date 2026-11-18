@@ -121,6 +121,7 @@ type Register<'r> = Box<dyn FnOnce(&mut Registration<'_>) -> Result<(), BuildErr
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
+const EXIT_USAGE: u8 = 2;
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
 #[expect(
@@ -139,13 +140,11 @@ where
     let args = match cli::WorkerArgs::try_parse_from(args) {
         Ok(args) => args,
         Err(error) => {
-            let result = if error.kind() == clap::error::ErrorKind::DisplayHelp {
-                ProcessResult::Reported(error.print().is_ok())
-            } else {
-                report_failure("invalid command arguments; use --help for usage");
-                ProcessResult::Usage
-            };
-            return ExitCode::from(exit_code(&result));
+            if error.kind() == clap::error::ErrorKind::DisplayHelp {
+                return reported_exit(error.print().is_ok());
+            }
+            report_failure("invalid command arguments; use --help for usage");
+            return ExitCode::from(EXIT_USAGE);
         }
     };
     // template:begin jobs:worker-operator-dispatch
@@ -154,32 +153,28 @@ where
             Ok(request) => request,
             Err(error) => {
                 report_failure(error);
-                return ExitCode::from(exit_code(&ProcessResult::Usage));
+                return ExitCode::from(EXIT_USAGE);
             }
         };
-        return ExitCode::from(exit_code(&ProcessResult::Reported(operator::run(
-            &args.options,
-            &request,
-        ))));
+        return reported_exit(operator::run(&args.options, &request));
     }
     // template:end jobs:worker-operator-dispatch
-    let result = start(&args.options, Box::new(register));
-    ExitCode::from(exit_code(&ProcessResult::Worker(result)))
+    worker_exit(start(&args.options, Box::new(register)))
 }
 
-enum ProcessResult {
-    Worker(Result<shutdown::Outcome, bootstrap::WorkerError>),
-    Reported(bool),
-    Usage,
-}
-
-fn exit_code(result: &ProcessResult) -> u8 {
-    match result {
-        ProcessResult::Worker(Ok(shutdown::Outcome::Graceful)) | ProcessResult::Reported(true) => 0,
-        ProcessResult::Worker(Ok(shutdown::Outcome::Degraded)) => EXIT_DEGRADED_SHUTDOWN,
-        ProcessResult::Worker(Err(_)) | ProcessResult::Reported(false) => 1,
-        ProcessResult::Usage => 2,
+fn reported_exit(success: bool) -> ExitCode {
+    if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
+}
+
+fn worker_exit(result: Result<shutdown::Outcome, bootstrap::WorkerError>) -> ExitCode {
+    result.map_or(ExitCode::FAILURE, |outcome| match outcome {
+        shutdown::Outcome::Graceful => ExitCode::SUCCESS,
+        shutdown::Outcome::Degraded => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
+    })
 }
 
 fn start(
@@ -242,20 +237,20 @@ mod tests {
 
     use super::bootstrap::WorkerError;
     use super::shutdown::Outcome;
-    use super::{ProcessResult, exit_code, start};
+    use super::{ExitCode, start, worker_exit};
 
     #[test]
     fn exit_code_maps_the_three_rows() {
-        assert_eq!(exit_code(&ProcessResult::Worker(Ok(Outcome::Graceful))), 0);
-        assert_eq!(exit_code(&ProcessResult::Worker(Ok(Outcome::Degraded))), 3);
+        assert_eq!(worker_exit(Ok(Outcome::Graceful)), ExitCode::from(0));
+        assert_eq!(worker_exit(Ok(Outcome::Degraded)), ExitCode::from(3));
         assert_eq!(
-            exit_code(&ProcessResult::Worker(Err(WorkerError::NoRegistrations))),
-            1
+            worker_exit(Err(WorkerError::NoRegistrations)),
+            ExitCode::from(1)
         );
         // template:begin jobs:worker-lib-test-postgres-refusal
         assert_eq!(
-            exit_code(&ProcessResult::Worker(Err(WorkerError::PostgresDisabled))),
-            1
+            worker_exit(Err(WorkerError::PostgresDisabled)),
+            ExitCode::from(1)
         );
         // template:end jobs:worker-lib-test-postgres-refusal
     }

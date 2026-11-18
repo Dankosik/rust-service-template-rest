@@ -68,7 +68,7 @@ pub(crate) enum WorkerError {
     #[error(transparent)]
     Metrics(#[from] infra_telemetry::MetricsError),
     #[error("worker registration failed: {0}")]
-    Registration(#[source] BuildError),
+    Registration(#[from] BuildError),
     // template:begin webhooks:worker-bootstrap-webhook-tls-error
     #[error("outbound webhook TLS preparation failed ({0})")]
     WebhookTls(#[source] infra_outbound_http::BuildError),
@@ -430,7 +430,7 @@ fn register_capabilities(
     background: &Background,
 ) -> Result<RetainedCapabilities, WorkerError> {
     let mut registration = Registration::new(config, background);
-    register(&mut registration).map_err(WorkerError::Registration)?;
+    register(&mut registration)?;
     #[allow(
         unused_variables,
         reason = "retained jobs shadow the inert registration"
