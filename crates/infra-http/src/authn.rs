@@ -132,7 +132,7 @@ async fn authenticate_protected(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(context) = request.extensions().get::<crate::RequestContext>().cloned() else {
+    let Some(context) = request.extensions().get::<crate::RequestContext>() else {
         return wiring_failure("context_missing");
     };
     let result = {

@@ -6,7 +6,7 @@ use axum::routing::MethodFilter;
 use itertools::Itertools as _;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
-use utoipa::openapi::{RefOr, Schema};
+use utoipa::openapi::{Content, RefOr, Schema};
 
 use crate::contract::{fixed_path_operations, same_definition};
 
@@ -268,41 +268,7 @@ fn supplement_success(
     schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Option<()> {
     for (media_type, content) in annotation.content {
-        let actual = response.content.get_mut(&media_type)?;
-        let (actual, mut supplement) = match (actual, content) {
-            (RefOr::T(actual), RefOr::T(supplement)) => (actual, supplement),
-            (RefOr::Ref(actual), RefOr::Ref(supplement)) if *actual == supplement => continue,
-            _ => return None,
-        };
-        if let Some(declared) = &supplement.schema {
-            let typed = actual.schema.as_ref()?;
-            if !same_definition(typed, declared)
-                && !same_definition(
-                    crate::contract::resolve_schema(typed, schemas)?,
-                    crate::contract::resolve_schema(declared, schemas)?,
-                )
-            {
-                return None;
-            }
-            actual.schema.clone_from(&supplement.schema);
-        } else {
-            supplement.schema.clone_from(&actual.schema);
-        }
-        if supplement.example.is_some() || !supplement.examples.is_empty() {
-            actual.example.clone_from(&supplement.example);
-            actual.examples.clone_from(&supplement.examples);
-        } else {
-            supplement.example.clone_from(&actual.example);
-            supplement.examples.clone_from(&actual.examples);
-        }
-        if supplement.description.is_some() {
-            actual.description.clone_from(&supplement.description);
-        } else {
-            supplement.description.clone_from(&actual.description);
-        }
-        if !same_definition(actual, &supplement) {
-            return None;
-        }
+        supplement_content(response.content.get_mut(&media_type)?, content, schemas)?;
     }
     for (name, header) in annotation.headers {
         if let Some((_, existing)) = response
@@ -331,6 +297,45 @@ fn supplement_success(
             .merge(extensions);
     }
     Some(())
+}
+
+fn supplement_content(
+    actual: &mut RefOr<Content>,
+    annotation: RefOr<Content>,
+    schemas: &BTreeMap<String, RefOr<Schema>>,
+) -> Option<()> {
+    let (actual, mut supplement) = match (actual, annotation) {
+        (RefOr::T(actual), RefOr::T(supplement)) => (actual, supplement),
+        (RefOr::Ref(actual), RefOr::Ref(supplement)) if *actual == supplement => return Some(()),
+        _ => return None,
+    };
+    if let Some(declared) = &supplement.schema {
+        let typed = actual.schema.as_ref()?;
+        if !same_definition(typed, declared)
+            && !same_definition(
+                crate::contract::resolve_schema(typed, schemas)?,
+                crate::contract::resolve_schema(declared, schemas)?,
+            )
+        {
+            return None;
+        }
+        actual.schema.clone_from(&supplement.schema);
+    } else {
+        supplement.schema.clone_from(&actual.schema);
+    }
+    if supplement.example.is_some() || !supplement.examples.is_empty() {
+        actual.example.clone_from(&supplement.example);
+        actual.examples.clone_from(&supplement.examples);
+    } else {
+        supplement.example.clone_from(&actual.example);
+        supplement.examples.clone_from(&actual.examples);
+    }
+    if supplement.description.is_some() {
+        actual.description.clone_from(&supplement.description);
+    } else {
+        supplement.description.clone_from(&actual.description);
+    }
+    same_definition(actual, &supplement).then_some(())
 }
 
 fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), Rule> {

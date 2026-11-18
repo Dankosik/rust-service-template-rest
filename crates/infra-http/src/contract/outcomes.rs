@@ -72,7 +72,7 @@ fn add_outcomes(
     // template:end authn:http-outcomes-protected-parameter
     probe: bool,
 ) -> Result<(), (&'static str, &'static str)> {
-    let reads_body = operation.request_body.is_some();
+    let declares_request_body = operation.request_body.is_some();
     let declares_json_body = operation
         .request_body
         .as_ref()
@@ -111,7 +111,7 @@ fn add_outcomes(
     add("413", responses::RequestEntityTooLarge::response())?;
     add("500", responses::InternalServerError::response())?;
     add("504", responses::GatewayTimeout::response())?;
-    if reads_body {
+    if declares_request_body {
         add("408", responses::RequestTimeout::response())?;
     }
     if !probe {
