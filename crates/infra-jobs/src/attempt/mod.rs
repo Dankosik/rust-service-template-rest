@@ -70,16 +70,15 @@ pub(crate) fn describe_metrics() {
 
 #[derive(Clone, Copy)]
 enum Persistence {
-    Applied,
-    Unchanged,
+    Acknowledged(Written),
     Unknown,
 }
 
 impl Persistence {
     const fn label(self) -> &'static str {
         match self {
-            Self::Applied => "applied",
-            Self::Unchanged => "unchanged",
+            Self::Acknowledged(Written::Applied) => "applied",
+            Self::Acknowledged(Written::Unchanged) => "unchanged",
             Self::Unknown => "unknown",
         }
     }
@@ -105,7 +104,7 @@ impl KindMetrics {
         Self {
             completed: attempts_counter(kind, Transition::COMPLETED_LABEL),
             duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
-            applied: persistence_counter(kind, Persistence::Applied),
+            applied: persistence_counter(kind, Persistence::Acknowledged(Written::Applied)),
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
         }
     }
@@ -547,7 +546,7 @@ fn observe_acknowledged(
     written: Written,
 ) {
     observe_recovery(shared, operation);
-    let persistence = written.persistence();
+    let persistence = Persistence::Acknowledged(written);
     match written {
         Written::Applied => handles.applied.increment(1),
         Written::Unchanged => persistence_counter(attempt.kind, persistence).increment(1),

@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::BTreeSet, fmt, time::Duration};
 
-use infra_postgres::{Tx, TxError, observed};
+use infra_postgres::{Tx, TxError, observed, set_statement_timeout};
 use sqlx::PgPool;
 
 use crate::kind::{MAX_KIND_LEN, is_valid_kind_name};
@@ -355,10 +355,6 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
     }
 }
 
-async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
-    Ok(infra_postgres::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
-}
-
 macro_rules! snapshot_query {
     ($tail:tt $(, $arg:expr)*) => {
         sqlx::query_as!(
@@ -379,7 +375,7 @@ pub async fn inspect(
     tx: &mut Tx<'_>,
     inspection: &Inspection,
 ) -> Result<InspectionResult, OperatorError> {
-    apply_statement_timeout(tx).await?;
+    set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
     let observed_at = observed("observe jobs time", sqlx::query_scalar!(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
     ).fetch_one(&mut *tx)).await?;
@@ -452,7 +448,7 @@ async fn lock_failed_target(
     target: &RecoveryTarget,
     action: RecoveryAction,
 ) -> Result<(), OperatorError> {
-    apply_statement_timeout(tx).await?;
+    set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
     let row = observed(
         "lock failed job",
         sqlx::query!(
