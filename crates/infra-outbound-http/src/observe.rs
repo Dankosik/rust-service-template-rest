@@ -29,9 +29,9 @@ impl Error {
             Self::DispatchRefused => "dispatch was refused",
             Self::ResponseBodyTooLarge => "response body is too large",
             Self::Transport { source } => match transport_error_type(&**source) {
-                "tls" => "TLS exchange failed",
-                "connect" => "connection failed",
-                "protocol" => "HTTP protocol error",
+                "tls" => "HTTP transport failed during the TLS exchange",
+                "connect" => "HTTP transport failed during connection setup",
+                "protocol" => "HTTP transport failed while parsing the response",
                 _ => "HTTP transport failed",
             },
         }

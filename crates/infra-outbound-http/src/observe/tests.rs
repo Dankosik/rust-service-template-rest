@@ -420,13 +420,19 @@ async fn exercise_transport_failures() -> Vec<String> {
     let untrusted = fixture_client(address, &untrusted)
         .execute(sensitive_request(), deadline())
         .await;
-    roots.push(root_cause(untrusted, "TLS exchange failed"));
+    roots.push(root_cause(
+        untrusted,
+        "HTTP transport failed during the TLS exchange",
+    ));
     server.await.expect("untrusted fixture joins");
 
     let unresolved = fixture_client_resolving(FIXTURE_HOST, vec![], &material, limits())
         .execute(sensitive_request(), deadline())
         .await;
-    roots.push(root_cause(unresolved, "connection failed"));
+    roots.push(root_cause(
+        unresolved,
+        "HTTP transport failed during connection setup",
+    ));
 
     let (address, server) = tls_server(
         &material,
@@ -443,7 +449,10 @@ async fn exercise_transport_failures() -> Vec<String> {
     )
     .execute(sensitive_request(), deadline())
     .await;
-    roots.push(root_cause(overflow, "HTTP protocol error"));
+    roots.push(root_cause(
+        overflow,
+        "HTTP transport failed while parsing the response",
+    ));
     server.await.expect("parser fixture joins");
 
     let (address, server) =
