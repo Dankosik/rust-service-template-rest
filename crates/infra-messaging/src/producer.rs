@@ -146,14 +146,12 @@ fn source_message(
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishRejection> {
     if event.payload().len() > max_payload_bytes {
-        return Err(PublishRejection::InvalidEnvelope(
-            EnvelopeError::PayloadTooLarge,
-        ));
+        return Err(EnvelopeError::PayloadTooLarge.into());
     }
-    let mut headers = encode_prepared(event).map_err(PublishRejection::InvalidEnvelope)?;
+    let mut headers = encode_prepared(event)?;
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
-    validate_header_bytes(&headers).map_err(PublishRejection::InvalidEnvelope)?;
+    validate_header_bytes(&headers)?;
     Ok(PublishMessage::build()
         .headers(headers)
         .payload(event.payload().clone()))
