@@ -37,10 +37,7 @@ pub(super) fn prepare(
 impl MountedStore {
     pub(super) async fn activate(self, background: &mut Background) -> Result<(), BootstrapError> {
         self.store.check_startup().await?;
-        background.spawn(
-            "idempotency_cleanup",
-            self.store.run_cleanup(background.child_token()),
-        );
+        background.spawn_with_token("idempotency_cleanup", |stop| self.store.run_cleanup(stop));
         tracing::info!(
             http_idempotency.operations = self.operations.get(),
             http_idempotency.retention = ?self.retention,

@@ -9,17 +9,13 @@ use tokio_rustls::TlsConnector;
 use tokio_util::either::Either;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
+use crate::ServerEndpoint;
+
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
-
-pub(crate) struct Dial {
-    pub(crate) host: String,
-    pub(crate) port: u16,
-    pub(crate) tls: Option<Tls>,
-}
 
 pub(crate) struct Tls {
     pub(crate) connector: TlsConnector,
@@ -31,15 +27,16 @@ pub(crate) struct Dialed {
     pub(crate) driver: AbortOnDropHandle<()>,
 }
 
-impl Dial {
+impl ServerEndpoint {
     pub(crate) async fn connect(
         &self,
+        tls: Option<&Tls>,
         settings: &redis::RedisConnectionInfo,
         config: redis::AsyncConnectionConfig,
         tasks: &TaskTracker,
     ) -> redis::RedisResult<Dialed> {
         let tcp = self.connect_tcp().await?;
-        let stream = match &self.tls {
+        let stream = match tls {
             None => Either::Left(tcp),
             Some(tls) => Either::Right(tls.connector.connect(tls.server_name.clone(), tcp).await?),
         };

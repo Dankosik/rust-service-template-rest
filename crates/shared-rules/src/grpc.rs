@@ -14,7 +14,9 @@ const UNKNOWN_STATUS: StatusNames = StatusNames {
     metric: "Unknown",
 };
 
-const STATUS_CODE_NAMES: [StatusNames; 17] = [
+pub const STATUS_CODE_COUNT: usize = STATUS_CODE_NAMES.len();
+
+const STATUS_CODE_NAMES: &[StatusNames] = &[
     StatusNames {
         span: "OK",
         metric: "OK",

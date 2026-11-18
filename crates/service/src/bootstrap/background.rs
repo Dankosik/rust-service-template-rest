@@ -27,11 +27,11 @@ impl BackgroundRegistration<'_> {
         let registration = registration.into();
         let (tokens, driver) = registration.service_tokens(target, origin);
         let owner = tokens.clone();
-        let stop = self.background.child_token();
-        self.background.spawn("oauth_token_refresh", async move {
-            driver.run(stop.cancelled_owned()).await;
-            drop((registration, owner));
-        });
+        self.background
+            .spawn_with_token("oauth_token_refresh", |stop| async move {
+                driver.run(stop.cancelled_owned()).await;
+                drop((registration, owner));
+            });
         tokens
     }
     // template:end outbound-auth:service-oauth-refresh
@@ -100,6 +100,17 @@ impl Background {
         self.cancel.child_token()
     }
 
+    pub(crate) fn spawn_with_token<F>(
+        &mut self,
+        name: &'static str,
+        start: impl FnOnce(CancellationToken) -> F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = start(self.child_token());
+        self.spawn(name, task);
+    }
+
     pub(crate) fn spawn(
         &mut self,
         name: &'static str,
@@ -147,8 +158,7 @@ impl Background {
 
     pub(crate) fn watch_listener(&mut self, name: &'static str, listener: &Server) {
         let failure = listener.accept_failure();
-        let cancel = self.child_token();
-        self.spawn(name, async move {
+        self.spawn_with_token(name, |cancel| async move {
             tokio::select! {
                 biased;
                 failure = failure => tracing::error!(listener = name, ?failure, "listener failed"),
