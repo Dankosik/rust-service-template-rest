@@ -103,18 +103,18 @@ impl ServiceAuthInput {
             }
             ServiceAuthMode::Jwt => {
                 let condition = "service_auth.mode = jwt";
-                let named = v.take(required_when("service_auth.name", self.name, condition));
-                let typed = v.take(required_when(
+                let name = v.take(required_when("service_auth.name", self.name, condition));
+                let jwt_type = v.take(required_when(
                     "service_auth.jwt_type",
                     self.jwt_type,
                     condition,
                 ));
-                let trusted = v.take(required_when("service_auth.trust", self.trust, condition));
+                let trust = v.take(required_when("service_auth.trust", self.trust, condition));
                 let signing_key = v.take(signing_key(self.key_id, self.private_key));
                 Ok(ServiceAuthConfig::Jwt {
-                    name: named?,
-                    jwt_type: typed?,
-                    trust: trusted?,
+                    name: name?,
+                    jwt_type: jwt_type?,
+                    trust: trust?,
                     signing_key: signing_key?,
                 })
             }

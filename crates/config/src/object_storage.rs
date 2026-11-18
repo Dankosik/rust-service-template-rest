@@ -199,7 +199,13 @@ impl ObjectStorageInput {
                 .map(|(endpoint, region)| ObjectStorageProvider::Local { endpoint, region }),
         };
         let bucket = v.take(non_blank("object_storage.bucket", &self.bucket));
-        let credentials = self.admit_credentials(v);
+        let credentials = Self::admit_credentials(
+            self.credentials,
+            self.provider,
+            self.access_key_id,
+            self.secret_access_key,
+            v,
+        );
         bucket?;
         Ok(Some(ObjectStorageConfig {
             provider: provider?,
@@ -286,14 +292,22 @@ impl ObjectStorageInput {
         Ok(())
     }
 
-    fn admit_credentials(&self, v: &mut Violations) -> Result<ObjectStorageCredentials, Rejected> {
-        match self.credentials {
+    fn admit_credentials(
+        credentials: CredentialsKind,
+        provider: ProviderKind,
+        access_key_id: String,
+        secret_access_key: Option<SecretString>,
+        v: &mut Violations,
+    ) -> Result<ObjectStorageCredentials, Rejected> {
+        match credentials {
             CredentialsKind::AccessKey => {
-                let access_key_id =
-                    required_text(v, "object_storage.access_key_id", &self.access_key_id);
+                let access_key_id = v.take(
+                    non_blank("object_storage.access_key_id", &access_key_id)
+                        .map(|()| access_key_id),
+                );
                 let secret_access_key = v.take(required(
                     "object_storage.secret_access_key",
-                    self.secret_access_key.clone(),
+                    secret_access_key,
                     "object_storage.credentials = access_key",
                 ));
                 Ok(ObjectStorageCredentials::AccessKey {
@@ -302,7 +316,7 @@ impl ObjectStorageInput {
                 })
             }
             CredentialsKind::WorkloadIdentity => {
-                let provider = if self.provider == ProviderKind::AmazonS3 {
+                let provider = if provider == ProviderKind::AmazonS3 {
                     Ok(())
                 } else {
                     Err(v.reject(ValidationError::new(
@@ -312,10 +326,10 @@ impl ObjectStorageInput {
                 };
                 let access_key_id = v.take(forbidden(
                     "object_storage.access_key_id",
-                    &self.access_key_id,
+                    &access_key_id,
                     "is not accepted with workload_identity",
                 ));
-                let secret_access_key = if self.secret_access_key.is_some() {
+                let secret_access_key = if secret_access_key.is_some() {
                     Err(v.reject(ValidationError::new(
                         "object_storage.secret_access_key",
                         "is not accepted with workload_identity",

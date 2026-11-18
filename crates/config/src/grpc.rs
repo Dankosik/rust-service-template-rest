@@ -83,7 +83,13 @@ impl GrpcInput {
         }
         let addr = violations.take(required("grpc.addr", self.addr, ENABLED));
         self.check_limits(drain_budget, violations);
-        let security = self.admit_security(violations);
+        let security = Self::admit_security(
+            self.security,
+            self.certificate,
+            self.private_key,
+            self.client_ca,
+            violations,
+        );
         Ok(Some(GrpcConfig {
             trust_trace_context: self.trust_trace_context,
             addr: addr?,
@@ -120,16 +126,19 @@ impl GrpcInput {
     }
 
     fn admit_security(
-        &self,
+        security: Option<GrpcSecurity>,
+        certificate: Option<String>,
+        private_key: Option<SecretString>,
+        client_ca: Option<String>,
         violations: &mut Violations,
     ) -> Result<GrpcListenerSecurity, Rejected> {
-        match violations.take(required("grpc.security", self.security, ENABLED))? {
+        match violations.take(required("grpc.security", security, ENABLED))? {
             GrpcSecurity::Plaintext => {
                 let mut refused = None;
                 for (key, present) in [
-                    ("grpc.certificate", self.certificate.is_some()),
-                    ("grpc.private_key", self.private_key.is_some()),
-                    ("grpc.client_ca", self.client_ca.is_some()),
+                    ("grpc.certificate", certificate.is_some()),
+                    ("grpc.private_key", private_key.is_some()),
+                    ("grpc.client_ca", client_ca.is_some()),
                 ] {
                     if present {
                         refused = Some(violations.reject(ValidationError::new(
@@ -143,20 +152,15 @@ impl GrpcInput {
             GrpcSecurity::Tls => {
                 let certificate = violations.take(required(
                     "grpc.certificate",
-                    self.certificate
-                        .clone()
-                        .filter(|certificate| !certificate.is_empty()),
+                    certificate.filter(|certificate| !certificate.is_empty()),
                     TLS_SELECTED,
                 ));
-                let private_key = violations.take(required(
-                    "grpc.private_key",
-                    self.private_key.clone(),
-                    TLS_SELECTED,
-                ));
+                let private_key =
+                    violations.take(required("grpc.private_key", private_key, TLS_SELECTED));
                 Ok(GrpcListenerSecurity::Tls(GrpcTlsMaterial {
                     certificate: certificate?,
                     private_key: private_key?,
-                    client_ca: self.client_ca.clone(),
+                    client_ca,
                 }))
             }
         }

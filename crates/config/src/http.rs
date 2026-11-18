@@ -279,25 +279,24 @@ impl HttpInput {
         let drain_fits_grace =
             validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let readiness_propagation_delay = self.readiness_propagation_delay.0;
-        let mut propagation_fits_drain = false;
-        if drain_fits_grace {
-            if readiness_propagation_delay >= self.drain_timeout {
-                v.reject(ValidationError::new(
-                    "http.readiness_propagation_delay",
-                    format!(
-                        "must be less than http.drain_timeout ({}), got {}",
-                        crate::de::display_duration(self.drain_timeout),
-                        crate::de::display_duration(readiness_propagation_delay)
-                    ),
-                ));
-            } else {
-                propagation_fits_drain = true;
-            }
-        }
-        let drain_budget = propagation_fits_drain.then(|| {
-            self.drain_timeout
-                .saturating_sub(readiness_propagation_delay)
-        });
+        let drain_budget = if !drain_fits_grace {
+            None
+        } else if readiness_propagation_delay >= self.drain_timeout {
+            v.reject(ValidationError::new(
+                "http.readiness_propagation_delay",
+                format!(
+                    "must be less than http.drain_timeout ({}), got {}",
+                    crate::de::display_duration(self.drain_timeout),
+                    crate::de::display_duration(readiness_propagation_delay)
+                ),
+            ));
+            None
+        } else {
+            Some(
+                self.drain_timeout
+                    .saturating_sub(readiness_propagation_delay),
+            )
+        };
         let listener = self.admit_listener(drain_budget, v);
         let config = HttpConfig {
             listener,
