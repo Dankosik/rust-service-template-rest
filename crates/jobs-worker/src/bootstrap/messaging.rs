@@ -150,13 +150,12 @@ pub(super) fn start_consumer(
     background: &Background,
     signals: &mut Signals,
 ) -> Option<Ended> {
-    if let Some(consumer) = consumer {
-        if let Some(ended) = pending_end(resources, background, signals) {
-            return Some(ended);
-        }
-        resources.consumer = Some(consumer.start(&background.cancel));
-        tracing::info!("messaging_consuming_started");
+    let consumer = consumer?;
+    if let Some(ended) = pending_end(resources, background, signals) {
+        return Some(ended);
     }
+    resources.consumer = Some(consumer.start(&background.cancel));
+    tracing::info!("messaging_consuming_started");
     None
 }
 

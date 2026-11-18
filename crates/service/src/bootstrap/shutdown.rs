@@ -216,40 +216,13 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     drop(serving);
 
     background.cancel();
-    let background_outcome = stage("background", async {
-        match background
-            .join_until(budget.stage_deadline(BACKGROUND_JOIN))
-            .await
-        {
-            JoinOutcome::Complete => {
-                tracing::info!("background_joined");
-                Outcome::Graceful
-            }
-            JoinOutcome::Failed => {
-                tracing::warn!("background_failed");
-                Outcome::Degraded
-            }
-            JoinOutcome::Unconfirmed => {
-                background.abort_all();
-                tracing::warn!("background_abort_requested");
-                Outcome::Degraded
-            }
-        }
-    })
-    .await;
+    let background_outcome = stage("background", join_background(&mut background, &budget)).await;
     outcome = outcome.combine(background_outcome);
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
-    let forced_background_outcome = stage("background_forced", async {
-        if background.is_empty() {
-            return Outcome::Graceful;
-        }
-        background.abort_all();
-        match background.join_until(dependency_deadline).await {
-            JoinOutcome::Unconfirmed => tracing::warn!("background_unconfirmed"),
-            JoinOutcome::Complete | JoinOutcome::Failed => tracing::warn!("background_forced"),
-        }
-        Outcome::Degraded
-    })
+    let forced_background_outcome = stage(
+        "background_forced",
+        confirm_background_abort(&mut background, dependency_deadline),
+    )
     .await;
     outcome = outcome.combine(forced_background_outcome);
     let dependencies_outcome = stage("dependencies", async {
@@ -258,6 +231,42 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     .await;
     outcome = outcome.combine(dependencies_outcome);
     finish_telemetry(tracer_provider, logger, signals, &budget, outcome).await
+}
+
+async fn join_background(background: &mut Background, budget: &Budget) -> Outcome {
+    match background
+        .join_until(budget.stage_deadline(BACKGROUND_JOIN))
+        .await
+    {
+        JoinOutcome::Complete => {
+            tracing::info!("background_joined");
+            Outcome::Graceful
+        }
+        JoinOutcome::Failed => {
+            tracing::warn!("background_failed");
+            Outcome::Degraded
+        }
+        JoinOutcome::Unconfirmed => {
+            background.abort_all();
+            tracing::warn!("background_abort_requested");
+            Outcome::Degraded
+        }
+    }
+}
+
+async fn confirm_background_abort(
+    background: &mut Background,
+    dependency_deadline: Instant,
+) -> Outcome {
+    if background.is_empty() {
+        return Outcome::Graceful;
+    }
+    background.abort_all();
+    match background.join_until(dependency_deadline).await {
+        JoinOutcome::Unconfirmed => tracing::warn!("background_unconfirmed"),
+        JoinOutcome::Complete | JoinOutcome::Failed => tracing::warn!("background_forced"),
+    }
+    Outcome::Degraded
 }
 
 async fn finish_telemetry(
@@ -299,7 +308,7 @@ async fn finish_telemetry(
     })
     .await;
     outcome = outcome.combine(trace_outcome);
-    if let Err(error) = signals.pending() {
+    if let Err(error) = signals.take_pending() {
         outcome = Outcome::Degraded;
         tracing::error!(%error, "signal_owner_failed");
     }

@@ -29,20 +29,30 @@ fn document() -> Value {
         .expect("document serializes")
 }
 
-fn operations(document: &Value) -> Vec<(String, String, &Value)> {
+struct Operation<'a> {
+    method: String,
+    path: &'a str,
+    value: &'a Value,
+}
+
+fn operations(document: &Value) -> Vec<Operation<'_>> {
     let mut found = Vec::new();
     for (path, item) in document["paths"].as_object().expect("paths object") {
         for method in HTTP_METHODS {
             if let Some(operation) = item.get(*method) {
-                found.push((method.to_uppercase(), path.clone(), operation));
+                found.push(Operation {
+                    method: method.to_uppercase(),
+                    path,
+                    value: operation,
+                });
             }
         }
         if let Some(additional) = item["additionalOperations"].as_object() {
-            found.extend(
-                additional
-                    .iter()
-                    .map(|(method, operation)| (method.clone(), path.clone(), operation)),
-            );
+            found.extend(additional.iter().map(|(method, operation)| Operation {
+                method: method.clone(),
+                path,
+                value: operation,
+            }));
         }
     }
     found
@@ -139,14 +149,11 @@ fn committed_document_matches_the_generator() {
 fn document_has_the_probe_operations() {
     let document = document();
     let ids: Vec<_> = operations(&document)
-        .iter()
-        .map(|(_, _, operation)| operation["operationId"].as_str().unwrap().to_owned())
+        .into_iter()
+        .map(|operation| operation.value["operationId"].as_str().unwrap())
         .collect();
     for probe in ["healthLive", "healthReady"] {
-        assert!(
-            ids.contains(&probe.to_owned()),
-            "missing {probe} in {ids:?}"
-        );
+        assert!(ids.contains(&probe), "missing {probe} in {ids:?}");
     }
 }
 
@@ -159,11 +166,11 @@ fn security_gate_checks_query_and_extension_methods() {
     }}, "components":{"securitySchemes":{"otherBearer":{"type":"http","scheme":"bearer"}}}});
     let checked: Vec<_> = operations(&fixture)
         .into_iter()
-        .map(|(method, _, operation)| {
+        .map(|Operation { method, value, .. }| {
             (
                 method,
-                is_public(&fixture, operation),
-                uses_bearer_only(&fixture, operation),
+                is_public(&fixture, value),
+                uses_bearer_only(&fixture, value),
             )
         })
         .collect();
@@ -241,7 +248,12 @@ fn webhook_ingress_is_public_to_bearer_auth_but_declares_signature_and_problem_c
 #[test]
 fn every_operation_has_supported_security_and_matching_optional_context() {
     let document = document();
-    for (method, path, operation) in operations(&document) {
+    for Operation {
+        method,
+        path,
+        value: operation,
+    } in operations(&document)
+    {
         let public = is_public(&document, operation);
         if !public {
             assert!(
@@ -282,7 +294,12 @@ fn problem_schemas_are_closed() {
 #[test]
 fn operations_declare_the_shared_problem_responses_and_probes_bypass_admission() {
     let document = document();
-    for (method, path, operation) in operations(&document) {
+    for Operation {
+        method,
+        path,
+        value: operation,
+    } in operations(&document)
+    {
         for status in ["413", "500", "504"] {
             assert!(
                 has_problem_response(&document, operation, status),
@@ -323,9 +340,9 @@ fn retained_authentication_document_declares_one_bearer_default_and_public_probe
     for operation_id in ["healthLive", "healthReady"] {
         let operation = operations(&document)
             .into_iter()
-            .find(|(_, _, operation)| operation["operationId"] == operation_id)
+            .find(|operation| operation.value["operationId"] == operation_id)
             .expect("probe operation exists")
-            .2;
+            .value;
         assert_eq!(operation["security"], json!([]));
         assert!(is_public(&document, operation));
     }
@@ -348,7 +365,7 @@ fn only_composed_operations_declare_the_idempotency_key() {
         .expect("document serializes");
     let declared = operations(&document)
         .iter()
-        .filter(|(_, _, operation)| declares_idempotency_key(operation))
+        .filter(|operation| declares_idempotency_key(operation.value))
         .count();
     assert_eq!(declared, served);
 }

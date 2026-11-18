@@ -53,7 +53,7 @@ pub(crate) enum Outcome {
 
 enum DrainOutcome {
     NoCleanupNeeded,
-    NeedsAttemptCleanup,
+    NeedsForcedCleanup,
 }
 
 pub(crate) fn stop_deadline(first_stop: Option<Instant>, grace: Duration) -> Instant {
@@ -105,10 +105,10 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let drain_outcome = stage_or(
         "drain",
         drain(&mut resources, http.drain_timeout, &budget, signals),
-        DrainOutcome::NeedsAttemptCleanup,
+        DrainOutcome::NeedsForcedCleanup,
     )
     .await;
-    if matches!(drain_outcome, DrainOutcome::NeedsAttemptCleanup) {
+    if matches!(drain_outcome, DrainOutcome::NeedsForcedCleanup) {
         outcome = Outcome::Degraded;
         stage_or(
             "attempt_cleanup",
@@ -286,7 +286,7 @@ async fn drain(
                 error,
                 "drain_forced"
             );
-            DrainOutcome::NeedsAttemptCleanup
+            DrainOutcome::NeedsForcedCleanup
         }
     }
 }

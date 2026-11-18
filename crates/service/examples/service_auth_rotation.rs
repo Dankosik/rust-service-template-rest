@@ -234,11 +234,17 @@ impl Receiver {
     }
 }
 
-async fn drill(emergency: bool) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RotationMode {
+    Planned,
+    Emergency,
+}
+
+async fn drill(mode: RotationMode) -> Result<()> {
     let keys = Keys::generate()?;
     let tls = TlsMaterial::new("127.0.0.1");
     let mut fleet = Vec::new();
-    let initial_trust = if emergency {
+    let initial_trust = if mode == RotationMode::Emergency {
         &keys.overlap
     } else {
         &keys.old_trust
@@ -253,7 +259,7 @@ async fn drill(emergency: bool) -> Result<()> {
             .probe(
                 &new,
                 &keys.control,
-                if emergency {
+                if mode == RotationMode::Emergency {
                     Code::Ok
                 } else {
                     Code::Unauthenticated
@@ -263,7 +269,7 @@ async fn drill(emergency: bool) -> Result<()> {
         fleet.push((server, warm));
     }
 
-    if emergency {
+    if mode == RotationMode::Emergency {
         println!(
             "emergency baseline: three independent receivers admitted the same old token twice per receiver and admitted standby"
         );
@@ -304,7 +310,7 @@ async fn drill(emergency: bool) -> Result<()> {
             .await?;
         let new = server.fresh(&keys.new)?;
         server.probe(&new, &keys.control, Code::Ok).await?;
-        if emergency {
+        if mode == RotationMode::Emergency {
             println!(
                 "emergency replica {}: stale process accepted same fresh old token rejected by replacement; stale process exited; warm and fresh old UNAUTHENTICATED, new OK; elapsed_upper_us={}",
                 index + 1,
@@ -320,7 +326,7 @@ async fn drill(emergency: bool) -> Result<()> {
         let new = server.fresh(&keys.new)?;
         server.probe(&new, &keys.control, Code::Ok).await?;
     }
-    if emergency {
+    if mode == RotationMode::Emergency {
         println!(
             "emergency fleet: 3/3 old processes exited, 3/3 live receivers rejected fresh old and admitted new; elapsed_upper_us={}",
             started.elapsed().as_micros().saturating_add(1)
@@ -422,8 +428,8 @@ fn main() -> Result<ExitCode> {
         tokio::select! {
             result = async {
                 if !cold_only {
-                    drill(false).await?;
-                    drill(true).await?;
+                    drill(RotationMode::Planned).await?;
+                    drill(RotationMode::Emergency).await?;
                 }
                 cold_emergency().await
             } => result,

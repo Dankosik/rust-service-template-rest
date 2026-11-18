@@ -157,6 +157,9 @@ impl Example {
     fn await_line(&mut self, message: &str) -> String {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(20);
+        let expected = serde_json::to_string(message).expect("encode message");
+        let json_message = format!("\"message\":{expected}");
+        let text_message = format!("\"message\"={expected}");
         loop {
             let line = match self
                 .lines
@@ -171,10 +174,7 @@ impl Example {
                 }
             };
             self.remember_stdout(&line);
-            let expected = serde_json::to_string(message).expect("encode message");
-            if line.contains(&format!("\"message\":{expected}"))
-                || line.contains(&format!("\"message\"={expected}"))
-            {
+            if line.contains(&json_message) || line.contains(&text_message) {
                 return line;
             }
         }

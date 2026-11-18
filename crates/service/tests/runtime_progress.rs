@@ -877,8 +877,10 @@ async fn observations(
                 let started = Instant::now().duration_since(start).as_secs_f64();
                 let response = http_get(&address, route).await;
                 let completed = Instant::now().duration_since(start).as_secs_f64();
-                let status = response.as_ref().ok().map(|value| value.0);
-                let body = response.as_ref().map_or_else(Clone::clone, |value| value.1.clone());
+                let (status, body) = match response {
+                    Ok((status, body)) => (Some(status), body),
+                    Err(error) => (None, error),
+                };
                 evidence.record(json!({"event": "scrape", "phase": label, "route": route, "index": index, "scheduled_s": scheduled.duration_since(evidence.zero).as_secs_f64(), "started_s": started, "completion_s": completed, "latency_s": scheduled.elapsed().as_secs_f64(), "status": status, "body": body}));
                 Scrape { started, completed, route, status, body }
             });
@@ -914,7 +916,7 @@ fn total_metric(body: &str, prefix: &str) -> f64 {
         .sum()
 }
 
-fn gap(mut completions: Vec<f64>, start: f64, end: f64) -> f64 {
+fn max_completion_gap(mut completions: Vec<f64>, start: f64, end: f64) -> f64 {
     completions.retain(|at| *at >= start && *at <= end);
     completions.extend([start, end]);
     completions.sort_by(f64::total_cmp);
@@ -929,7 +931,7 @@ struct Summary {
     offered: usize,
     succeeded: usize,
     p99: f64,
-    gap: f64,
+    max_completion_gap: f64,
 }
 
 fn summarize(
@@ -964,9 +966,9 @@ fn summarize(
         offered: offers.len(),
         succeeded: latency.len(),
         p99,
-        gap: gap(successes, start, end),
+        max_completion_gap: max_completion_gap(successes, start, end),
     };
-    evidence.record(json!({"event": "traffic_summary", "phase": label, "start_s": start, "end_s": end, "goodput": result.goodput, "offered": result.offered, "succeeded": result.succeeded, "p99_s": result.p99, "max_gap_s": result.gap}));
+    evidence.record(json!({"event": "traffic_summary", "phase": label, "start_s": start, "end_s": end, "goodput": result.goodput, "offered": result.offered, "succeeded": result.succeeded, "p99_s": result.p99, "max_gap_s": result.max_completion_gap}));
     result
 }
 
@@ -1214,7 +1216,7 @@ fn metrics_checks(
             })
             .map(|scrape| scrape.completed)
             .collect();
-        let max_gap = gap(successful, 0.0, 30.0);
+        let max_gap = max_completion_gap(successful, 0.0, 30.0);
         evidence.record(
             json!({"event": "external_gap", "phase": label, "route": route, "max_gap_s": max_gap}),
         );
@@ -1741,12 +1743,15 @@ fn cheap_progress_checks(
     );
     require(
         failures,
-        mixed.gap < 2.0,
-        format!("{label}: cheap completion gap {}s >=2s", mixed.gap),
+        mixed.max_completion_gap < 2.0,
+        format!(
+            "{label}: cheap completion gap {}s >=2s",
+            mixed.max_completion_gap
+        ),
     );
     require(
         failures,
-        mixed.gap < 8.0,
+        mixed.max_completion_gap < 8.0,
         format!("{label}: unconditional R5 failure: an8s budget elapsed without a cheap success"),
     );
     require(
@@ -2081,10 +2086,10 @@ async fn negative_control(
     let result = summarize(&cheap, 0.0, 12.0, evidence, "negative-control");
     require(
         failures,
-        result.gap > 8.0,
+        result.max_completion_gap > 8.0,
         format!(
             "negative control failed to reveal an>8s cheap request gap: {}",
-            result.gap
+            result.max_completion_gap
         ),
     );
     let after = scrapes
@@ -2133,7 +2138,7 @@ async fn experiment(
     let capacity_met = qualified.offered == 6000
         && qualified.succeeded >= 5940
         && qualified.p99 <= 0.2
-        && qualified.gap < 1.0;
+        && qualified.max_completion_gap < 1.0;
     evidence.save("qualification.jsonl").await?;
     if !capacity_met {
         return Err("capacity precondition failed; retained qualification; reopen Design before changing the experiment".into());
