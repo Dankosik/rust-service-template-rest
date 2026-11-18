@@ -179,6 +179,7 @@ impl Store {
                             None,
                         )
                     })?;
+                tx.discard_pending_notifications();
             }
             write(tx, scope, fingerprint, &record, self.retention).await?;
             Ok(record)

@@ -62,6 +62,10 @@ impl Tx<'_> {
         }
     }
 
+    pub fn discard_pending_notifications(&mut self) {
+        self.notifications.clear();
+    }
+
     pub fn connection(&mut self) -> &mut PgConnection {
         self.proven_alive = false;
         self.conn
