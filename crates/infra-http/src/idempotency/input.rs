@@ -6,7 +6,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, Method};
 use http_body_util::Collected;
-use infra_idempotency_store::Digest;
+use infra_idempotency_store::RequestFingerprint;
 use itertools::Itertools as _;
 use serde::de::DeserializeOwned;
 
@@ -33,7 +33,7 @@ impl CommandInput {
         mut parts: Parts,
         fingerprint_headers: &[HeaderName],
         collected: Collected<Bytes>,
-    ) -> (Self, Digest) {
+    ) -> (Self, RequestFingerprint) {
         if let Some(original) = parts.extensions.remove::<OriginalUri>() {
             parts.uri = original.0;
         }
@@ -49,23 +49,13 @@ impl CommandInput {
                     .sorted_unstable_by(|a, b| a.as_str().cmp(b.as_str())),
             )
         });
-        let body = collected.to_bytes();
-        let fingerprint = request_fingerprint(
-            &parts.method,
-            &parts.uri,
-            &parts.headers,
-            fingerprint_headers,
-            &body,
-            Some(&trailers),
-        );
-        (
-            Self {
-                parts,
-                body,
-                trailers,
-            },
-            fingerprint,
-        )
+        let input = Self {
+            parts,
+            body: collected.to_bytes(),
+            trailers,
+        };
+        let fingerprint = request_fingerprint(&input, fingerprint_headers);
+        (input, fingerprint)
     }
 
     #[must_use]

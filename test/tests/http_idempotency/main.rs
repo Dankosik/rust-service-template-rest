@@ -32,7 +32,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
     AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
-    CallerKind, CleanupError, Digest, Record, ScopeKey, StartupError, Store,
+    CallerKind, CleanupError, Record, RequestFingerprint, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
 use integration_tests::{close_pools, dsn_for, poll_until};
@@ -54,8 +54,8 @@ const KEY: &[u8] = b"k-123";
 const OTHER_KEY: &[u8] = b"other-key";
 const SUBJECT: &str = "fixture-subject";
 const OTHER_SUBJECT: &str = "other-subject";
-const INPUT: Digest = [0xa1; 32];
-const OTHER_INPUT: Digest = [0xa2; 32];
+const INPUT: RequestFingerprint = RequestFingerprint::from_bytes([0xa1; 32]);
+const OTHER_INPUT: RequestFingerprint = RequestFingerprint::from_bytes([0xa2; 32]);
 
 const BACKLOG: i64 = 1_201;
 const LIVE: i64 = 10;
@@ -258,7 +258,7 @@ enum Refusal {
 async fn execute(
     store: &Store,
     scope: &ScopeKey,
-    fingerprint: Digest,
+    fingerprint: RequestFingerprint,
     record: &Record,
     work: &Work,
 ) -> Outcome<Refusal> {
@@ -366,7 +366,7 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
             work.run(tx).await;
             sqlx::query(INSERT_LIVE)
                 .bind(scope.digest())
-                .bind(OTHER_INPUT)
+                .bind(OTHER_INPUT.as_bytes())
                 .execute(&pool)
                 .await
                 .expect("another writer commits a live record");
@@ -588,11 +588,11 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
     const GZIP_BODY: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xabV\xcaLQ\xb22\xac\x05\x00\xc5\xf8]D\x08\x00\x00\x00";
-    let fingerprint: Digest = [
+    let fingerprint = RequestFingerprint::from_bytes([
         0x2e, 0x4f, 0xb5, 0x7a, 0x46, 0x09, 0x5c, 0x45, 0xe8, 0x86, 0xd2, 0x90, 0x70, 0x7b, 0xf6,
         0x45, 0x41, 0x23, 0x66, 0x96, 0x6b, 0xf1, 0x00, 0x09, 0x31, 0x40, 0x01, 0xfd, 0x08, 0x7e,
         0xb3, 0x0b,
-    ];
+    ]);
     sqlx::query(
         "INSERT INTO http_idempotency_records \
          (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, expires_at) \
@@ -605,7 +605,7 @@ async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
            ROW('etag', decode('228022', 'hex'))::http_idempotency_header_pair \
          ], $2, 'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')",
     )
-    .bind(fingerprint)
+    .bind(fingerprint.as_bytes())
     .bind(GZIP_BODY)
     .execute(&pool)
     .await
@@ -802,7 +802,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
         let scope = ScopeKey::new(caller(SUBJECT), key);
         sqlx::query(INSERT_LIVE)
             .bind(scope.digest())
-            .bind(INPUT)
+            .bind(INPUT.as_bytes())
             .execute(&pool)
             .await
             .expect("seed the old record");

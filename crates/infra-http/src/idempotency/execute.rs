@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
+use infra_idempotency_store::{
+    AttemptError, Attempted, Digest, RequestFingerprint, ScopeKey, Store,
+};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use tokio::time::Instant;
 
@@ -73,7 +75,7 @@ impl Outcome {
 pub(super) struct Attempt {
     pub(super) store: Store,
     pub(super) scope: ScopeKey,
-    pub(super) fingerprint: Digest,
+    pub(super) fingerprint: RequestFingerprint,
     pub(super) operation_id: Arc<str>,
     pub(super) rules_link: HeaderValue,
     pub(super) deadline: RequestDeadline,
@@ -144,14 +146,9 @@ impl Attempt {
                 result
             }
         };
-        let mut answer = map_attempted(attempted, &scope, &operation_id);
-        if answer.outcome == Outcome::KeyMismatch {
-            answer
-                .response
-                .headers_mut()
-                .insert(axum::http::header::LINK, rules_link);
-        }
-        answer.settle(deadline.at(), guard).await
+        map_attempted(attempted, &scope, &operation_id, rules_link)
+            .settle(deadline.at(), guard)
+            .await
     }
 }
 
@@ -253,6 +250,7 @@ fn map_attempted<T>(
     attempted: Result<Attempted<Rollback<T>>, AttemptError>,
     scope: &ScopeKey,
     operation_id: &str,
+    rules_link: HeaderValue,
 ) -> Answer {
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
@@ -278,7 +276,9 @@ fn map_attempted<T>(
             );
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
-        Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
+        Ok(Attempted::Mismatch) => {
+            Answer::boundary_problem(key_mismatch(rules_link), Outcome::KeyMismatch)
+        }
         Ok(Attempted::Replay(record)) => {
             let mut response = response_from_record(record);
             response
@@ -339,9 +339,11 @@ fn unavailable() -> Response {
         .into_response()
 }
 
-fn key_mismatch() -> Response {
-    Problem::new(Code::IdempotencyKeyMismatch)
-        .detail(KEY_MISMATCH_DETAIL)
+fn key_mismatch(rules_link: HeaderValue) -> Response {
+    (
+        [(axum::http::header::LINK, rules_link)],
+        Problem::new(Code::IdempotencyKeyMismatch).detail(KEY_MISMATCH_DETAIL),
+    )
         .into_response()
 }
 
@@ -372,6 +374,10 @@ mod tests {
 
     use super::*;
     use crate::test_support::body_json;
+
+    fn rules_link() -> HeaderValue {
+        HeaderValue::from_static("<https://docs.example/retry>; rel=\"describedby\"")
+    }
 
     fn scope() -> ScopeKey {
         ScopeKey::new(
@@ -410,11 +416,9 @@ mod tests {
                 store: Store::new(pool.clone(), Duration::from_mins(1))
                     .expect("retention fits PostgreSQL"),
                 scope: scope(),
-                fingerprint: [9; 32],
+                fingerprint: RequestFingerprint::from_bytes([9; 32]),
                 operation_id: "test".into(),
-                rules_link: HeaderValue::from_static(
-                    "<https://docs.example/retry>; rel=\"describedby\"",
-                ),
+                rules_link: rules_link(),
                 deadline: RequestDeadline::from_deadline(
                     operation_context::Deadline::new(origin, budget),
                     budget,
@@ -435,7 +439,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_internal_store_failure_is_a_sanitized_500() {
-        let answer = map_attempted::<Infallible>(Err(AttemptError::Internal), &scope(), "test");
+        let answer = map_attempted::<Infallible>(
+            Err(AttemptError::Internal),
+            &scope(),
+            "test",
+            rules_link(),
+        );
         assert_eq!(answer.outcome, Outcome::Internal);
         assert_eq!(answer.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
@@ -464,7 +473,12 @@ mod tests {
             ),
         ] {
             let rollback: Rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
-            let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), "test");
+            let answer = map_attempted(
+                Ok(Attempted::RolledBack(rollback)),
+                &scope(),
+                "test",
+                rules_link(),
+            );
             assert_eq!(answer.response.status(), expected);
             assert!(!answer.response.headers().contains_key(REPLAYED_HEADER));
         }

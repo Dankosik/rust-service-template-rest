@@ -12,6 +12,21 @@ use crate::{READ_COMMITTED, Record, Store};
 
 pub type Digest = [u8; 32];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestFingerprint(Digest);
+
+impl RequestFingerprint {
+    #[must_use]
+    pub const fn from_bytes(bytes: Digest) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &Digest {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeKey {
     digest: Digest,
@@ -121,7 +136,7 @@ impl Store {
     pub async fn attempt<W, R>(
         &self,
         scope: &ScopeKey,
-        fingerprint: &Digest,
+        fingerprint: &RequestFingerprint,
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
     where
@@ -139,7 +154,7 @@ impl Store {
     pub async fn attempt_with_acquire_deadline<W, R>(
         &self,
         scope: &ScopeKey,
-        fingerprint: &Digest,
+        fingerprint: &RequestFingerprint,
         deadline: tokio::time::Instant,
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
@@ -158,7 +173,7 @@ impl Store {
     pub async fn attempt_with_deadline<W, R>(
         &self,
         scope: &ScopeKey,
-        fingerprint: &Digest,
+        fingerprint: &RequestFingerprint,
         deadline: tokio::time::Instant,
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
@@ -178,7 +193,7 @@ impl Store {
         &self,
         tx: &mut Tx<'_, M>,
         scope: &ScopeKey,
-        fingerprint: &Digest,
+        fingerprint: &RequestFingerprint,
         work: W,
     ) -> Result<Record, Stop<R>>
     where
@@ -237,7 +252,7 @@ enum Decision {
 async fn arbitrate(
     tx: &mut Tx<'_, impl TxMode>,
     scope: &ScopeKey,
-    fingerprint: &Digest,
+    fingerprint: &RequestFingerprint,
 ) -> Result<Option<Decision>, AttemptError> {
     let row = observed(
         "lock and read idempotency record",
@@ -254,7 +269,7 @@ async fn arbitrate(
              ON r.scope_key = $2 AND r.expires_at > statement_timestamp()",
             scope.lock_key(),
             scope.digest.as_slice(),
-            fingerprint.as_slice(),
+            fingerprint.as_bytes().as_slice(),
         )
         .fetch_one(&mut *tx),
     )
@@ -290,7 +305,7 @@ async fn arbitrate(
                      FROM http_idempotency_records \
                      WHERE scope_key = $1 AND expires_at > statement_timestamp()",
                     scope.digest.as_slice(),
-                    fingerprint.as_slice(),
+                    fingerprint.as_bytes().as_slice(),
                 )
                 .fetch_optional(tx),
             )
@@ -315,9 +330,9 @@ fn decide_live(
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
-    fingerprint: &Digest,
+    fingerprint: &RequestFingerprint,
 ) -> Result<Decision, AttemptError> {
-    if stored_fingerprint != *fingerprint {
+    if &stored_fingerprint != fingerprint.as_bytes() {
         return Ok(Decision::Mismatch);
     }
     let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
@@ -338,7 +353,7 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
 async fn write(
     tx: &mut Tx<'_, impl TxMode>,
     scope: &ScopeKey,
-    fingerprint: &Digest,
+    fingerprint: &RequestFingerprint,
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
@@ -360,7 +375,7 @@ async fn write(
              caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $9 \
              WHERE r.expires_at <= statement_timestamp()",
             scope.digest.as_slice(),
-            fingerprint.as_slice(),
+            fingerprint.as_bytes().as_slice(),
             record.status(),
             &headers as _,
             record.body(),
@@ -510,7 +525,7 @@ mod tests {
             let attempted = store
                 .attempt(
                     &ScopeKey::new(caller, b"k"),
-                    &[0; 32],
+                    &RequestFingerprint::from_bytes([0; 32]),
                     async |_: &mut Tx<'_>| -> Result<Record, ()> {
                         ran = true;
                         Err(())

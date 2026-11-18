@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, HeaderName, Method, Uri};
-use infra_idempotency_store::{CallerIdentity, CallerKind, Digest};
+use axum::http::{HeaderMap, HeaderName};
+use infra_idempotency_store::{CallerIdentity, CallerKind, RequestFingerprint};
 use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
+
+use super::CommandInput;
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
@@ -53,13 +55,9 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
 }
 
 pub(super) fn request_fingerprint(
-    method: &Method,
-    uri: &Uri,
-    headers: &HeaderMap,
+    input: &CommandInput,
     fingerprint_headers: &[HeaderName],
-    body: &[u8],
-    trailers: Option<&HeaderMap>,
-) -> Digest {
+) -> RequestFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(if fingerprint_headers.is_empty() {
         REQUEST_DOMAIN
@@ -67,25 +65,26 @@ pub(super) fn request_fingerprint(
         REQUEST_WITH_HEADERS_DOMAIN
     });
     hasher.update([0]);
-    frame(&mut hasher, method.as_str().as_bytes());
-    frame(&mut hasher, uri.path().as_bytes());
-    match uri.query() {
+    frame(&mut hasher, input.method().as_str().as_bytes());
+    frame(&mut hasher, input.raw_path().as_bytes());
+    match input.raw_query() {
         Some(query) => {
             hasher.update([1]);
             frame(&mut hasher, query.as_bytes());
         }
         None => hasher.update([0]),
     }
-    frame_header_values(&mut hasher, headers, &CONTENT_TYPE);
+    frame_header_values(&mut hasher, input.headers(), &CONTENT_TYPE);
     if !fingerprint_headers.is_empty() {
         hasher.update((fingerprint_headers.len() as u64).to_be_bytes());
         for name in fingerprint_headers {
             frame(&mut hasher, name.as_str().as_bytes());
-            frame_header_values(&mut hasher, headers, name);
+            frame_header_values(&mut hasher, input.headers(), name);
         }
     }
-    frame(&mut hasher, body);
-    if let Some(trailers) = trailers.filter(|trailers| !trailers.is_empty()) {
+    frame(&mut hasher, input.body());
+    let trailers = input.trailers();
+    if !trailers.is_empty() {
         hasher.update(b"trailers/v1\0");
         let mut fields = trailers
             .iter()
@@ -96,7 +95,7 @@ pub(super) fn request_fingerprint(
             frame(&mut hasher, value.as_bytes());
         }
     }
-    hasher.finalize().into()
+    RequestFingerprint::from_bytes(hasher.finalize().into())
 }
 
 fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderName) {
@@ -114,7 +113,11 @@ fn frame(hasher: &mut Sha256, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::HeaderValue;
+    use axum::body::Bytes;
+    use axum::http::{HeaderValue, Method, Request, Uri};
+    use futures_util::FutureExt as _;
+    use http_body_util::{BodyExt as _, Full};
+    use infra_idempotency_store::Digest;
 
     use super::*;
 
@@ -125,11 +128,22 @@ mod tests {
         body: &[u8],
         trailers: Option<&HeaderMap>,
     ) -> Digest {
-        let mut headers = HeaderMap::new();
+        let mut request = Request::builder().method(method).uri(uri).body(()).unwrap();
         for value in content_types {
-            headers.append(CONTENT_TYPE, HeaderValue::from_bytes(value).unwrap());
+            request
+                .headers_mut()
+                .append(CONTENT_TYPE, HeaderValue::from_bytes(value).unwrap());
         }
-        request_fingerprint(method, uri, &headers, &[], body, trailers)
+        let frames = Full::new(Bytes::copy_from_slice(body))
+            .with_trailers(std::future::ready(trailers.cloned().map(Ok)));
+        let collected = frames
+            .collect()
+            .now_or_never()
+            .expect("fixture body is ready")
+            .unwrap();
+        *CommandInput::capture(request.into_parts().0, &[], collected)
+            .1
+            .as_bytes()
     }
 
     fn decode_digest(hex: &str) -> Digest {

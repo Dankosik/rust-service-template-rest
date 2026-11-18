@@ -652,8 +652,7 @@ pub(crate) enum Access {
     Public,
     Protected(
         // template:begin authn:http-contract-protected-scopes
-        Box<[Box<[String]>]>,
-        bool,
+        crate::authn::ProtectedAccess,
         // template:end authn:http-contract-protected-scopes
     ),
 }
@@ -1008,12 +1007,14 @@ impl Access {
         }
         Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value
-            requirements
-                .into_iter()
-                .flat_map(BTreeMap::into_values)
-                .map(Vec::into_boxed_slice)
-                .collect(),
-            delegate,
+            crate::authn::ProtectedAccess {
+                scope_alternatives: requirements
+                    .into_iter()
+                    .flat_map(BTreeMap::into_values)
+                    .map(Vec::into_boxed_slice)
+                    .collect(),
+                delegate,
+            },
             // template:end authn:http-contract-protected-value
         ))
     }
