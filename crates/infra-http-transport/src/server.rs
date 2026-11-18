@@ -288,7 +288,7 @@ impl Server {
         self.connection_shutdown.finish.cancel();
         let joined = self.join_accept_until(graceful_deadline).await;
         let mut accept_unconfirmed = joined.is_none();
-        let cause = match joined {
+        let graceful_result = match joined {
             None => {
                 self.accept_loop.abort();
                 Err(ServerError::AcceptTimeout)
@@ -321,7 +321,7 @@ impl Server {
             remaining_connections: self.connections.len(),
             remaining_delegated_tasks: self.delegated.tasks.len(),
         };
-        (cause, residue)
+        (graceful_result, residue)
     }
 
     async fn join_accept_until(
@@ -549,15 +549,15 @@ async fn accept_loop<F, Fut, IO>(
                 continue;
             }
         };
-        let permit = match permits.as_ref().map(|p| p.clone().try_acquire_owned()) {
-            None => None,
-            Some(Ok(permit)) => Some(permit),
-            Some(Err(_)) => {
-                metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
-                tracing::debug!(%local_addr, %peer, "http_connection_refused");
-                drop(stream);
-                continue;
-            }
+        let Ok(permit) = permits
+            .as_ref()
+            .map(|semaphore| Arc::clone(semaphore).try_acquire_owned())
+            .transpose()
+        else {
+            metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
+            tracing::debug!(%local_addr, %peer, "http_connection_refused");
+            drop(stream);
+            continue;
         };
         configure_accepted(&stream);
         connections.spawn(serve_connection(

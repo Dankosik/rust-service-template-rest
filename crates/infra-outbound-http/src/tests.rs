@@ -223,6 +223,11 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
 
 #[tokio::test]
 async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
+    enum Expected {
+        BodyTooLarge,
+        Transport,
+    }
+
     let material = TlsMaterial::new(FIXTURE_HOST);
     let mut ceiling = limits();
     ceiling.response_body_bytes = 2;
@@ -230,39 +235,40 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
             "advertised overflow",
+            Expected::BodyTooLarge,
         ),
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no".as_slice(),
             "missing exact-cap EOF",
+            Expected::Transport,
         ),
         (
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\no\r\n1\r\nk\r\n"
                 .as_slice(),
             "missing chunked EOF after exact-cap payload",
+            Expected::Transport,
         ),
         (
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\ninvalid-trailer\r\n\r\n"
                 .as_slice(),
             "malformed trailer after exact-cap payload",
+            Expected::Transport,
         ),
     ];
-    for (wire, name) in cases {
+    for (wire, name, expected) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let error = fixture_client_with_limits(address, &material, ceiling)
             .execute(request(), deadline())
             .await
             .expect_err(name);
-        match name {
-            "advertised overflow" => std::assert_matches!(error, Error::ResponseBodyTooLarge),
-            "missing exact-cap EOF"
-            | "missing chunked EOF after exact-cap payload"
-            | "malformed trailer after exact-cap payload" => {
+        match expected {
+            Expected::BodyTooLarge => std::assert_matches!(error, Error::ResponseBodyTooLarge),
+            Expected::Transport => {
                 let Error::Transport { source } = error else {
                     panic!("{name} must retain a transport cause");
                 };
                 assert!(source.is::<hyper::Error>(), "{name} retains the body error");
             }
-            _ => unreachable!("fixed test case name"),
         }
         server.await.expect("framing fixture server succeeds");
     }
