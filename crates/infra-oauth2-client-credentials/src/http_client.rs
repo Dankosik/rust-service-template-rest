@@ -5,7 +5,7 @@ use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 
 use crate::{
-    AcquisitionError, Error, ExchangeTokens, ServiceTokens,
+    AcquisitionError, ConfigurationError, Error, ExchangeTokens, ServiceTokens,
     credentials::{TokenSource, acquisition_deadline},
     request_admission::{AdmissionRefusal, take_request_subject},
 };
@@ -24,26 +24,25 @@ pub struct RequestClient<'a> {
 }
 
 impl ServiceTokens {
-    #[must_use]
-    pub fn http(&self, resource: Client) -> AuthenticatedClient {
-        AuthenticatedClient {
-            tokens: TokenSource::Service(self.clone()),
-            resource,
-        }
+    pub fn http(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
+        AuthenticatedClient::new(TokenSource::Service(self.clone()), resource)
     }
 }
 
 impl ExchangeTokens {
-    #[must_use]
-    pub fn http(&self, resource: Client) -> AuthenticatedClient {
-        AuthenticatedClient {
-            tokens: TokenSource::Exchange(self.clone(), ()),
-            resource,
-        }
+    pub fn http(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
+        AuthenticatedClient::new(TokenSource::Exchange(self.clone(), ()), resource)
     }
 }
 
 impl AuthenticatedClient {
+    fn new(tokens: TokenSource, resource: Client) -> Result<Self, ConfigurationError> {
+        if !resource.matches_origin(tokens.resource_origin()) {
+            return Err(ConfigurationError::resource_origin());
+        }
+        Ok(Self { tokens, resource })
+    }
+
     #[must_use]
     pub const fn with_context<'a>(&'a self, context: &'a OperationContext) -> RequestClient<'a> {
         RequestClient {

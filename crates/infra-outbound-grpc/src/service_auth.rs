@@ -6,7 +6,7 @@ use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use tonic::body::Body;
 
-use crate::{Client, call::client_stopped};
+use crate::{Client, ClientError, call::client_stopped};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -15,12 +15,22 @@ pub struct ServiceTokenClient {
 }
 
 impl Client {
-    #[must_use]
-    pub fn with_service_tokens(&self, tokens: ReceiverTokens) -> ServiceTokenClient {
-        ServiceTokenClient {
+    pub fn with_service_tokens(
+        &self,
+        tokens: ReceiverTokens,
+    ) -> Result<ServiceTokenClient, ClientError> {
+        if let Some(origin) = tokens.signing_origin() {
+            if !self.uses_tls() {
+                return Err(ClientError::ServiceTokensRequireTls);
+            }
+            if !self.matches_origin(origin) {
+                return Err(ClientError::ServiceTokenOriginMismatch);
+            }
+        }
+        Ok(ServiceTokenClient {
             tokens,
             resource: self.clone(),
-        }
+        })
     }
 }
 
@@ -85,13 +95,46 @@ mod tests {
             private_key: key.pem().into(),
         })
         .unwrap();
-        let client = Client::try_new(
+        let origin = http::Uri::from_static("https://peer.example:443");
+        let tokens = source.receiver("catalog", origin.clone()).unwrap();
+        let plain = Client::try_new(
             "http://127.0.0.1:1",
             ClientSecurity::Plaintext,
             Duration::from_secs(1),
         )
         .unwrap();
-        let bound = client.with_service_tokens(source.receiver("catalog").unwrap());
+        assert_eq!(
+            plain.with_service_tokens(tokens.clone()).unwrap_err(),
+            ClientError::ServiceTokensRequireTls
+        );
+        let disabled = TokenSource::disabled().receiver("catalog", origin).unwrap();
+        assert!(plain.with_service_tokens(disabled).is_ok());
+        let ca = rcgen::generate_simple_self_signed(["peer.example".to_owned()]).unwrap();
+        let client = Client::try_new(
+            "https://PEER.example",
+            ClientSecurity::Tls(crate::ClientTlsMaterial {
+                ca_certificate_pem: Some(ca.cert.pem()),
+                identity: None,
+            }),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        for wrong in [
+            "https://other.example",
+            "https://peer.example:444",
+            "http://peer.example:443",
+            "https://peer.example/path",
+            "https://peer.example/?query",
+            "https://user@peer.example",
+            "https://peer.example:65536",
+        ] {
+            let elsewhere = source.receiver("catalog", wrong.parse().unwrap()).unwrap();
+            assert_eq!(
+                client.with_service_tokens(elsewhere).unwrap_err(),
+                ClientError::ServiceTokenOriginMismatch
+            );
+        }
+        let bound = client.with_service_tokens(tokens).unwrap();
 
         let formatted = format!("{bound:?}");
         assert!(formatted.contains("catalog"), "{formatted}");

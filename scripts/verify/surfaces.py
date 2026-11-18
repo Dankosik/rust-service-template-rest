@@ -574,7 +574,8 @@ def classify_report(
                 file,
                 "api/proto/*", "crates/infra-grpc/*", "crates/infra-outbound-grpc/*",
                 "crates/grpc-contracts/*", "crates/shared-rules/src/grpc.rs",
-                "crates/service/examples/grpc.rs", "tools/grpc-codegen/*", "buf.yaml",
+                "crates/service/examples/grpc.rs", "crates/service/examples/grpc_oidc.rs",
+                "crates/service/examples/support/echo.rs", "tools/grpc-codegen/*", "buf.yaml",
                 "scripts/profiles/grpc_generate.sh", "scripts/profiles/grpc_check.sh",
             ):
                 mark("module_initializer", "initializer_runtime")

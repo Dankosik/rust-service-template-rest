@@ -273,6 +273,7 @@
       "crates/infra-outbound-grpc/",
       "crates/infra-telemetry/src/traces/tests/delivery/",
       "crates/service/examples/grpc.rs",
+      "crates/service/examples/support/echo.rs",
       "crates/service/src/bootstrap/grpc.rs",
       "crates/shared-rules/src/grpc.rs",
       "docs/decisions/grpc-decisions.md",
@@ -304,6 +305,7 @@
   },
   "grpc-jwt": {
     "remove_when_unselected": [
+      "crates/service/examples/grpc_oidc.rs",
       "crates/service/tests/grpc_process.rs"
     ]
   },
@@ -329,6 +331,9 @@
       "docs/decisions/outbound-http-decisions.md",
       "test/tests/outbound_http.rs"
     ]
+  },
+  "service-test-tls": {
+    "remove_when_unselected": []
   },
   "tls-fixtures": {
     "remove_when_unselected": [

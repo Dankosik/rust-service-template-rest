@@ -6,7 +6,9 @@ use rcgen::{
 #[derive(Debug)]
 pub struct TlsMaterial {
     pub cert: Vec<u8>,
+    pub cert_pem: String,
     pub key: Vec<u8>,
+    pub key_pem: String,
     pub root: Vec<u8>,
     pub root_pem: String,
 }
@@ -30,7 +32,9 @@ impl TlsMaterial {
 
         Self {
             cert: certificate.der().to_vec(),
+            cert_pem: certificate.pem(),
             key: leaf_key.serialize_der(),
+            key_pem: leaf_key.serialize_pem(),
             root: issuer.der().to_vec(),
             root_pem: issuer.pem(),
         }

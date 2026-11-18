@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use crate::{
-    AcquisitionError, ConfigurationError, Options, TokenTarget,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, ServiceTokenTarget,
     assertion::Signer,
     options::{Admitted, admit_options},
     request_admission::AdmissionRefusal,
@@ -129,7 +129,8 @@ impl Drop for RefreshDriver {
 
 struct ServiceState {
     registration: Arc<RegistrationState>,
-    target: TokenTarget,
+    target: ServiceTokenTarget,
+    resource_origin: http::Uri,
     cached: Mutex<Cached>,
     service_request: tokio::sync::Mutex<()>,
 }
@@ -205,10 +206,15 @@ impl Registration {
         })
     }
 
-    pub fn service_tokens(&self, target: TokenTarget) -> (ServiceTokens, RefreshDriver) {
+    pub fn service_tokens(
+        &self,
+        target: ServiceTokenTarget,
+        resource_origin: http::Uri,
+    ) -> (ServiceTokens, RefreshDriver) {
         let inner = Arc::new(ServiceState {
             registration: self.shared.clone(),
             target,
+            resource_origin,
             cached: Mutex::default(),
             service_request: tokio::sync::Mutex::new(()),
         });
@@ -230,10 +236,11 @@ impl Registration {
 
     pub fn exchange_tokens(
         &self,
-        target: TokenTarget,
+        target: ExchangeTokenTarget,
+        resource_origin: http::Uri,
         capacity: u32,
     ) -> Result<ExchangeTokens, ConfigurationError> {
-        ExchangeTokens::try_new(self.shared.clone(), target, capacity)
+        ExchangeTokens::try_new(self.shared.clone(), target, resource_origin, capacity)
     }
 }
 
@@ -244,6 +251,13 @@ pub(crate) enum TokenSource<Subject = ()> {
 }
 
 impl<Subject> TokenSource<Subject> {
+    pub(crate) fn resource_origin(&self) -> &http::Uri {
+        match self {
+            Self::Service(service) => &service.0.inner.resource_origin,
+            Self::Exchange(exchange, _) => exchange.resource_origin(),
+        }
+    }
+
     fn registration(&self) -> &RegistrationState {
         match self {
             Self::Service(service) => &service.0.inner.registration,
@@ -463,7 +477,14 @@ impl ServiceState {
         {
             Ok(token) => {
                 self.store_service_token(token);
-                self.cached().defer_refresh(Instant::now());
+                let mut cached = self.cached();
+                if cached
+                    .service
+                    .as_ref()
+                    .is_some_and(|service| Arc::ptr_eq(&service.token, &request.current))
+                {
+                    cached.defer_refresh(Instant::now());
+                }
             }
             Err(error) => {
                 self.remember_failure(provider_timeout(error));

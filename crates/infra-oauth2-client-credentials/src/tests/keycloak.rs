@@ -1,7 +1,7 @@
 use std::{sync::Mutex, time::Duration};
 
 use bytes::Bytes;
-use http::{Method, Request, StatusCode, header};
+use http::{Method, Request, StatusCode, Uri, header};
 use infra_outbound_http::Client;
 use jsonwebtoken::jwk::Jwk;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
@@ -12,12 +12,15 @@ use uuid::Uuid;
 
 use super::{
     AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
-    token_context,
+    exchange_target, service_target, token_context,
 };
-use crate::{Registration, ServiceTokens, TokenTarget, options::Admitted};
+use crate::{Registration, ServiceTokenTarget, ServiceTokens, options::Admitted, token::Token};
 
 const KEY_ID: &str = "key-1";
-const TARGET: &str = "target";
+const CATALOG: &str = "catalog";
+const CATALOG_SCOPE: &str = "catalog-audience";
+const BILLING: &str = "billing";
+const BILLING_SCOPE: &str = "billing-audience";
 const UPSTREAM: &str = "upstream";
 const UPSTREAM_SECRET: &str = "upstream-fixture-secret";
 
@@ -73,9 +76,27 @@ impl Realm {
                 &serde_json::json!({"realm": realm.name, "enabled": true}),
             )
             .await;
-        realm
-            .client(&serde_json::json!({"clientId": TARGET, "publicClient": false}))
-            .await;
+        for (recipient, scope) in [(CATALOG, CATALOG_SCOPE), (BILLING, BILLING_SCOPE)] {
+            realm
+                .client(&serde_json::json!({
+                    "clientId": recipient,
+                    "protocol": "openid-connect",
+                    "publicClient": false,
+                    "standardFlowEnabled": false,
+                    "secret": format!("{recipient}-fixture-secret"),
+                }))
+                .await;
+            realm
+                .admin_post(
+                    &format!("/admin/realms/{}/client-scopes", realm.name),
+                    &serde_json::json!({
+                        "name": scope,
+                        "protocol": "openid-connect",
+                        "protocolMappers": [audience_mapper(recipient)],
+                    }),
+                )
+                .await;
+        }
         realm
             .client(&serde_json::json!({
                 "clientId": UPSTREAM,
@@ -114,20 +135,46 @@ impl Realm {
     }
 
     async fn token(&self, realm: &str, fields: &[(&str, &str)]) -> String {
+        let token = self.form_post(self.token_endpoint(realm), fields).await;
+        token["access_token"].as_str().unwrap().to_owned()
+    }
+
+    async fn accepts_token(&self, recipient: &str, token: &Token) -> bool {
+        let endpoint = self
+            .origin
+            .join(&format!(
+                "/realms/{}/protocol/openid-connect/token/introspect",
+                self.name
+            ))
+            .unwrap();
+        let secret = format!("{recipient}-fixture-secret");
+        let result = self
+            .form_post(
+                endpoint,
+                &[
+                    ("client_id", recipient),
+                    ("client_secret", &secret),
+                    ("token", access_token(token)),
+                ],
+            )
+            .await;
+        result["active"].as_bool().unwrap()
+    }
+
+    async fn form_post(&self, endpoint: Url, fields: &[(&str, &str)]) -> serde_json::Value {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(fields)
             .finish();
         let response = self
             .send(
-                Request::post(self.token_endpoint(realm).as_str())
+                Request::post(endpoint.as_str())
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(Bytes::from(body))
                     .unwrap(),
             )
             .await;
         assert_eq!(response.status(), StatusCode::OK, "{:?}", response.body());
-        let body: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
-        body["access_token"].as_str().unwrap().to_owned()
+        serde_json::from_slice(response.body()).unwrap()
     }
 
     async fn admin_post(&self, path: &str, body: &serde_json::Value) {
@@ -162,16 +209,19 @@ impl Realm {
         let client_id = caller(algorithm);
         self.client(&serde_json::json!({
             "clientId": client_id,
+            "protocol": "openid-connect",
             "publicClient": false,
             "serviceAccountsEnabled": true,
             "standardFlowEnabled": false,
+            "fullScopeAllowed": false,
             "clientAuthenticatorType": "client-jwt",
             "attributes": {
                 "use.jwks.string": "true",
                 "jwks.string": serde_json::json!({"keys": [public_jwk(algorithm, key)]}).to_string(),
                 "standard.token.exchange.enabled": "true",
             },
-            "protocolMappers": [audience_mapper(TARGET)],
+            "defaultClientScopes": ["basic"],
+            "optionalClientScopes": [CATALOG_SCOPE, BILLING_SCOPE],
         }))
         .await;
         self.registration(algorithm, key)
@@ -196,8 +246,13 @@ impl Realm {
         .unwrap()
     }
 
-    fn service_tokens(&self, registration: &Registration, target: TokenTarget) -> ServiceTokens {
-        let (tokens, driver) = registration.service_tokens(target);
+    fn service_tokens(
+        &self,
+        registration: &Registration,
+        target: ServiceTokenTarget,
+        recipient: &str,
+    ) -> ServiceTokens {
+        let (tokens, driver) = registration.service_tokens(target, resource_origin(recipient));
         let mut shutdown = self.driver_shutdown.subscribe();
         self.drivers
             .lock()
@@ -242,6 +297,10 @@ fn caller(algorithm: Algorithm) -> String {
     format!("caller-{algorithm:?}").to_lowercase()
 }
 
+fn resource_origin(recipient: &str) -> Uri {
+    format!("https://{recipient}.example").parse().unwrap()
+}
+
 fn key_pair(algorithm: Algorithm) -> KeyPair {
     KeyPair::generate_for(match algorithm {
         Algorithm::Rs256 | Algorithm::Ps256 => &PKCS_RSA_SHA256,
@@ -277,9 +336,17 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-fn claims(token: &crate::token::Token) -> Claims {
-    let bearer = token.header.to_str().unwrap();
-    jsonwebtoken::dangerous::insecure_decode::<Claims>(bearer.strip_prefix("Bearer ").unwrap())
+fn access_token(token: &Token) -> &str {
+    token
+        .header
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+}
+
+fn claims(token: &Token) -> Claims {
+    jsonwebtoken::dangerous::insecure_decode::<Claims>(access_token(token))
         .unwrap()
         .claims
 }
@@ -289,29 +356,39 @@ fn audiences(claims: &Claims) -> Vec<&str> {
         serde_json::Value::String(audience) => vec![audience.as_str()],
         serde_json::Value::Array(audiences) => audiences
             .iter()
-            .filter_map(|value| value.as_str())
+            .map(|value| value.as_str().unwrap())
             .collect(),
         _ => Vec::new(),
     }
 }
 
 #[tokio::test]
-async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token() {
+async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges_a_subject() {
     let realm = Realm::create().await;
     for algorithm in Algorithm::ALL {
         let key = key_pair(algorithm);
         let registration = realm.caller(algorithm, &key).await;
-        let tokens = realm.service_tokens(&registration, super::token_target(&[], Some(TARGET)));
+        let catalog =
+            realm.service_tokens(&registration, service_target(&[CATALOG_SCOPE]), CATALOG);
+        let billing =
+            realm.service_tokens(&registration, service_target(&[BILLING_SCOPE]), BILLING);
 
-        let service = tokens
-            .service_token(acquisition_deadline(&token_context()))
-            .await
-            .unwrap();
-        let service = claims(&service);
-        assert_eq!(service.iss, realm.issuer());
-        assert_eq!(service.azp, caller(algorithm));
-        *tokens.cached() = super::Cached::default();
-        tokens
+        for (tokens, intended, other) in
+            [(&catalog, CATALOG, BILLING), (&billing, BILLING, CATALOG)]
+        {
+            let service = tokens
+                .service_token(acquisition_deadline(&token_context()))
+                .await
+                .unwrap();
+            let claims = claims(&service);
+            assert_eq!(claims.iss, realm.issuer());
+            assert_eq!(claims.azp, caller(algorithm));
+            assert_eq!(audiences(&claims), [intended]);
+            assert!(realm.accepts_token(intended, &service).await);
+            assert!(!realm.accepts_token(other, &service).await);
+        }
+        *catalog.cached() = super::Cached::default();
+        catalog
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap();
@@ -323,7 +400,11 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         .unwrap()
         .claims;
         let exchanged = registration
-            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .exchange_tokens(
+                exchange_target(&[CATALOG_SCOPE, BILLING_SCOPE], Some(CATALOG)),
+                resource_origin(CATALOG),
+                1024,
+            )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await
@@ -331,7 +412,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         let exchanged = claims(&exchanged);
         assert_eq!(exchanged.sub, subject_claims.sub);
         assert_eq!(exchanged.azp, caller(algorithm));
-        assert_eq!(audiences(&exchanged), [TARGET]);
+        assert_eq!(audiences(&exchanged), [CATALOG]);
     }
     realm.finish().await;
 }
@@ -346,7 +427,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let stranger = realm.registration(algorithm, &key_pair(algorithm));
     assert_eq!(
         realm
-            .service_tokens(&stranger, TokenTarget::default())
+            .service_tokens(&stranger, ServiceTokenTarget::default(), CATALOG)
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
@@ -355,18 +436,21 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
 
     assert_eq!(
         realm
-            .service_tokens(&registered, super::token_target(&["not-a-scope"], None))
+            .service_tokens(&registered, service_target(&["not-a-scope"]), CATALOG)
             .service_token(acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
-    // RFC 8693 §2.2.2
     let subject = SecretString::from("not-a-token");
     assert_eq!(
         registered
-            .exchange_tokens(super::token_target(&[], Some(TARGET)), 1024)
+            .exchange_tokens(
+                exchange_target(&[CATALOG_SCOPE], Some(CATALOG)),
+                resource_origin(CATALOG),
+                1024,
+            )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
             .await

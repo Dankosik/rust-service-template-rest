@@ -144,7 +144,9 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
         ("APP__APP__ENV", "production"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
-        ("APP__GRPC__SECURITY", "plaintext"),
+        ("APP__GRPC__SECURITY", "tls"),
+        ("APP__GRPC__CERTIFICATE", "server certificate"),
+        ("APP__GRPC__PRIVATE_KEY", "server private key"),
         ("APP__SERVICE_AUTH__MODE", "jwt"),
         ("APP__SERVICE_AUTH__NAME", "catalog"),
         ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
@@ -189,6 +191,19 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         ("APP__APP__ENV", "development"),
         ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
     ];
+    let jwt = [
+        ("APP__SERVICE_AUTH__MODE", "jwt"),
+        ("APP__SERVICE_AUTH__NAME", "catalog"),
+        ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
+        ("APP__SERVICE_AUTH__TRUST", "{}"),
+    ];
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        listener.into_iter().chain(development).chain(jwt),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Validate(errors) if errors.names("grpc.security"), "{err}");
     load_from(
         &LoadOptions::default(),
         BUILD,

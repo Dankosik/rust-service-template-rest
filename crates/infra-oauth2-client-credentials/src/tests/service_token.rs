@@ -41,15 +41,17 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
         StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
-    let service_tokens = fixture.service_tokens(&[], None);
+    let service_tokens = fixture.service_tokens(&[]);
     service_tokens
         .http(fixture.resource_client())
+        .unwrap()
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
     service_tokens
         .clone()
         .http(fixture.resource_client())
+        .unwrap()
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -103,9 +105,10 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
                     ..fixture.options()
                 },
                 &[],
-                None,
+                fixture.resource_origin(),
             )
-            .http(fixture.resource_client());
+            .http(fixture.resource_client())
+            .unwrap();
         let gate = fixture.block_tokens();
         let before_tokens = fixture.token_requests().len();
         let mut leader = Box::pin(fixture.send(&client));
@@ -155,9 +158,10 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
                 ..fixture.options()
             },
             &[],
-            None,
+            fixture.resource_origin(),
         )
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let gate = fixture.block_tokens();
     let context = OperationContext::with_timeout(Duration::from_secs(10));
     let mut leader = Box::pin(client.execute_with_context(fixture.request(), &context));
@@ -180,8 +184,8 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
 #[tokio::test]
 async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
     let fixture = Fixture::new().await;
-    let service_tokens = fixture.service_tokens(&[], None);
-    let client = service_tokens.http(fixture.resource_client());
+    let service_tokens = fixture.service_tokens(&[]);
+    let client = service_tokens.http(fixture.resource_client()).unwrap();
     fixture
         .send(&client)
         .await
@@ -210,16 +214,19 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
 #[tokio::test]
 async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure_window_ends() {
     let fixture = Fixture::new().await;
-    let client = fixture.service_tokens(&[], None).http(
-        Client::try_new_for_test_http(
-            &fixture.origin,
-            infra_outbound_http::Limits {
-                operation_timeout: Duration::from_secs(10),
-                ..TOKEN_LIMITS
-            },
+    let client = fixture
+        .service_tokens(&[])
+        .http(
+            Client::try_new_for_test_http(
+                &fixture.origin,
+                infra_outbound_http::Limits {
+                    operation_timeout: Duration::from_secs(10),
+                    ..TOKEN_LIMITS
+                },
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    );
+        .unwrap();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
@@ -256,10 +263,11 @@ async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline(
         },
     )
     .unwrap();
-    let service = fixture.service_tokens(&[], None).http(resource.clone());
+    let service = fixture.service_tokens(&[]).http(resource.clone()).unwrap();
     let exchange = fixture
         .exchange_tokens(&[], None, EXCHANGE_CAPACITY)
-        .http(resource);
+        .http(resource)
+        .unwrap();
     let context = OperationContext::unbounded();
     let _gate = fixture.block_tokens();
 
@@ -296,9 +304,10 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
                 ..fixture.options()
             },
             &[],
-            None,
+            fixture.resource_origin(),
         )
-        .http(fixture.resource_client());
+        .http(fixture.resource_client())
+        .unwrap();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }

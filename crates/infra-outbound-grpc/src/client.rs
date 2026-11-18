@@ -76,6 +76,8 @@ pub struct Client {
     channel: Channel,
     uses_tls: bool,
     #[debug(skip)]
+    origin: http::Uri,
+    #[debug(skip)]
     destination: crate::observe::Destination,
     timeout: ClientTimeout,
     series: &'static crate::observe::Series,
@@ -96,7 +98,7 @@ impl Client {
         timeout: ClientTimeout,
     ) -> Result<Self, ClientError> {
         let (uri, tls) = parse_destination(destination, security)?;
-        let endpoint = Endpoint::from(uri)
+        let endpoint = Endpoint::from(uri.clone())
             .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
@@ -114,6 +116,7 @@ impl Client {
         http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
         Ok(Self {
             uses_tls: tls.is_some(),
+            origin: uri,
             channel: Channel::new(GrpcConnector { http, tls }, endpoint),
             destination,
             timeout,
@@ -124,6 +127,16 @@ impl Client {
     #[must_use]
     pub const fn uses_tls(&self) -> bool {
         self.uses_tls
+    }
+
+    #[must_use]
+    pub fn matches_origin(&self, origin: &http::Uri) -> bool {
+        let (Some((scheme, host, port)), Some((other_scheme, other_host, other_port))) =
+            (origin_parts(&self.origin), origin_parts(origin))
+        else {
+            return false;
+        };
+        scheme == other_scheme && host.eq_ignore_ascii_case(other_host) && port == other_port
     }
 
     #[must_use]
@@ -357,6 +370,17 @@ impl Service<http::Uri> for GrpcConnector {
     }
 }
 
+fn origin_parts(uri: &http::Uri) -> Option<(&str, &str, u16)> {
+    if !matches!(uri.path(), "" | "/") || uri.query().is_some() {
+        return None;
+    }
+    let scheme = uri.scheme_str()?;
+    let authority = uri.authority()?;
+    let host = authority.host();
+    let port = shared_rules::uri::http_origin_port(scheme, authority.as_str(), host)?;
+    Some((scheme, host, port))
+}
+
 fn parse_destination(
     raw: &str,
     security: ClientSecurity,
@@ -368,22 +392,7 @@ fn parse_destination(
         return Err(ClientError::InvalidDestination);
     }
     let uri = http::Uri::try_from(raw).map_err(|_| ClientError::InvalidDestination)?;
-    let Some(scheme @ ("http" | "https")) = uri.scheme_str() else {
-        return Err(ClientError::InvalidDestination);
-    };
-    let Some(host) = uri
-        .authority()
-        .and_then(|_| uri.host())
-        .filter(|host| !host.is_empty())
-    else {
-        return Err(ClientError::InvalidDestination);
-    };
-    let root_only = uri
-        .path_and_query()
-        .is_none_or(|pq| pq.query().is_none() && matches!(pq.path(), "" | "/"));
-    if !root_only {
-        return Err(ClientError::InvalidDestination);
-    }
+    let (scheme, host, _) = origin_parts(&uri).ok_or(ClientError::InvalidDestination)?;
     match security {
         ClientSecurity::Plaintext => {
             if scheme != "http" {

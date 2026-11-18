@@ -261,6 +261,7 @@ _PROFILE_SECTION_ORDER = (
     "runtime-progress",
     "test-digest",
     "service-auth",
+    "service-test-tls",
     "test-metrics",
     "test-metrics-util",
     "jobs-reference",
@@ -459,6 +460,8 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("config-url")
     if inputs.service_auth == "jwt":
         selected.add("service-auth")
+    if inputs.service_auth == "jwt" or inputs.outbound_auth == "oauth2-client-credentials":
+        selected.add("service-test-tls")
     if (
         inputs.authn == "oidc-jwt"
         or inputs.outbound_auth == "oauth2-client-credentials"
