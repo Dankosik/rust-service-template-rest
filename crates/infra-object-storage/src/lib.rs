@@ -340,7 +340,7 @@ impl ObjectStorage {
         );
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| guard.fail(&Failure::stopped(interrupted.stopped)))?;
+            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
         guard.answered_by(&result);
         Self::check(&context, &mut guard)?;
         let output = match result {
@@ -382,7 +382,7 @@ impl ObjectStorage {
             .send();
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| guard.fail(&Failure::stopped(interrupted.stopped)))?;
+            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
         guard.answered_by(&result);
         Self::check(&context, &mut guard)?;
         let output = result.map_err(|sdk_error| guard.fail(&error::from_sdk(&sdk_error)))?;
@@ -454,7 +454,7 @@ impl ObjectStorage {
             .presigned(config);
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| guard.fail(&Failure::stopped(interrupted.stopped)))?;
+            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
         Self::check(&context, &mut guard)?;
         match result {
             Ok(request) if request.headers().next().is_some() => {

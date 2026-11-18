@@ -71,6 +71,25 @@ pub(crate) struct Admitted {
     pub(crate) workload_identity: bool,
 }
 
+impl Admitted {
+    fn at_endpoint(
+        endpoint: String,
+        region: String,
+        path_style: bool,
+        checksum: UploadChecksum,
+    ) -> Self {
+        Self {
+            endpoint: Some(endpoint),
+            region,
+            path_style,
+            expected_bucket_owner: None,
+            checksum,
+            cloud_region: None,
+            workload_identity: false,
+        }
+    }
+}
+
 pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, ConfigError> {
     if !valid_bucket(bucket) {
         return Err(ConfigError::Bucket);
@@ -103,53 +122,41 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
-            Ok(Admitted {
-                endpoint: Some(serialize(&origin)),
-                region: "auto".to_owned(),
-                path_style: false,
-                expected_bucket_owner: None,
-                checksum: UploadChecksum::BytesOnly,
-                cloud_region: None,
-                workload_identity: false,
-            })
+            Ok(Admitted::at_endpoint(
+                serialize(&origin),
+                "auto".to_owned(),
+                false,
+                UploadChecksum::BytesOnly,
+            ))
         }
         Provider::Railway { endpoint, region } => {
             let origin = origin(endpoint, OriginScheme::HttpsOnly)?;
             if origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
-            Ok(Admitted {
-                endpoint: Some(serialize(&origin)),
-                region: signing_region(region, Some("auto"))?,
-                path_style: false,
-                expected_bucket_owner: None,
-                checksum: UploadChecksum::Never,
-                cloud_region: None,
-                workload_identity: false,
-            })
+            Ok(Admitted::at_endpoint(
+                serialize(&origin),
+                signing_region(region, Some("auto"))?,
+                false,
+                UploadChecksum::Never,
+            ))
         }
         Provider::S3Compatible {
             endpoint,
             region,
             path_style,
-        } => Ok(Admitted {
-            endpoint: Some(serialize(&origin(endpoint, OriginScheme::HttpsOnly)?)),
-            region: signing_region(region, Some("us-east-1"))?,
-            path_style: *path_style,
-            expected_bucket_owner: None,
-            checksum: UploadChecksum::Never,
-            cloud_region: None,
-            workload_identity: false,
-        }),
-        Provider::Local { endpoint, region } => Ok(Admitted {
-            endpoint: Some(serialize(&origin(endpoint, OriginScheme::HttpOrHttps)?)),
-            region: signing_region(region, Some("us-east-1"))?,
-            path_style: true,
-            expected_bucket_owner: None,
-            checksum: UploadChecksum::Always,
-            cloud_region: None,
-            workload_identity: false,
-        }),
+        } => Ok(Admitted::at_endpoint(
+            serialize(&origin(endpoint, OriginScheme::HttpsOnly)?),
+            signing_region(region, Some("us-east-1"))?,
+            *path_style,
+            UploadChecksum::Never,
+        )),
+        Provider::Local { endpoint, region } => Ok(Admitted::at_endpoint(
+            serialize(&origin(endpoint, OriginScheme::HttpOrHttps)?),
+            signing_region(region, Some("us-east-1"))?,
+            true,
+            UploadChecksum::Always,
+        )),
     }
 }
 

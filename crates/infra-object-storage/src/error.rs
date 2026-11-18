@@ -136,6 +136,12 @@ impl Failure {
     }
 }
 
+impl From<Interrupted> for Failure {
+    fn from(interrupted: Interrupted) -> Self {
+        Self::stopped(interrupted.stopped)
+    }
+}
+
 impl Failure<MutationError> {
     pub(crate) fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
         Self::with_label(MutationError::NotApplied(reason), error_type)
