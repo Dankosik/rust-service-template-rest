@@ -93,11 +93,23 @@ pub const fn status_code_names(code: usize) -> StatusNames {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RpcName<'a> {
+    pub service: &'a str,
+    pub method: &'a str,
+}
+
+impl std::fmt::Display for RpcName<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}", self.service, self.method)
+    }
+}
+
 #[must_use]
-pub fn split_method_path(path: &str) -> Option<(&str, &str)> {
+pub fn split_method_path(path: &str) -> Option<RpcName<'_>> {
     let (service, method) = path.strip_prefix('/')?.split_once('/')?;
     let valid = !service.is_empty() && !method.is_empty() && !method.contains('/');
-    valid.then_some((service, method))
+    valid.then_some(RpcName { service, method })
 }
 
 #[must_use]
@@ -200,7 +212,10 @@ mod tests {
     fn split_method_path_requires_service_and_method_segments() {
         assert_eq!(
             split_method_path("/example.v1.EchoService/Unary"),
-            Some(("example.v1.EchoService", "Unary"))
+            Some(RpcName {
+                service: "example.v1.EchoService",
+                method: "Unary",
+            })
         );
         for invalid in [
             "",

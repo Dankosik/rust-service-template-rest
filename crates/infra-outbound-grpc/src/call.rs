@@ -679,7 +679,7 @@ mod tests {
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::new(None, CancellationToken::new()),
+                lifetime: OperationContext::unbounded(),
                 watch_stop: false,
                 guards: ClientGuards::default(),
                 on_status: None,
@@ -693,7 +693,7 @@ mod tests {
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::new(None, CancellationToken::new()),
+                lifetime: OperationContext::unbounded(),
                 watch_stop: true,
                 guards: ClientGuards::default(),
                 on_status: None,
@@ -707,7 +707,7 @@ mod tests {
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::new(None, CancellationToken::new()),
+                lifetime: OperationContext::unbounded(),
                 watch_stop: true,
                 guards: ClientGuards::default(),
                 on_status: None,
@@ -823,8 +823,7 @@ mod tests {
         let upload_dropped = Arc::clone(&upload_source.dropped);
         let (mut outgoing, upload_guard) = upload(tonic::body::Body::new(upload_source));
 
-        let lifetime =
-            OperationContext::new(Some(Deadline::after(TEST_BUDGET)), CancellationToken::new());
+        let lifetime = OperationContext::with_timeout(TEST_BUDGET);
         let mut body = ClientResponseBody::start(
             response_source,
             ClientObservation::Transport(sample_call()),
@@ -889,8 +888,7 @@ mod tests {
             move |code| wire_codes.lock().push(code)
         });
         let dropped = Arc::new(AtomicBool::new(false));
-        let lifetime =
-            OperationContext::new(Some(Deadline::after(TEST_BUDGET)), CancellationToken::new());
+        let lifetime = OperationContext::with_timeout(TEST_BUDGET);
         let mut body = ClientResponseBody::start(
             UnwindingBody(Arc::clone(&dropped)),
             ClientObservation::Decoded {

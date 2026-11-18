@@ -42,7 +42,7 @@ metrics-exporter-prometheus = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 tls-test-support = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 tower = { workspace = true }
 tracing-opentelemetry = { workspace = true }

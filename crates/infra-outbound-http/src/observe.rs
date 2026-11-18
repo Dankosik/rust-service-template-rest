@@ -261,20 +261,18 @@ fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportError
             label: "tls",
             diagnostic: "HTTP transport failed during the TLS exchange",
         }
-    } else if causes().any(|cause| {
-        cause
-            .downcast_ref::<hyper_util::client::legacy::Error>()
-            .is_some_and(hyper_util::client::legacy::Error::is_connect)
-    }) {
+    } else if causes()
+        .filter_map(<dyn StdError>::downcast_ref::<hyper_util::client::legacy::Error>)
+        .any(hyper_util::client::legacy::Error::is_connect)
+    {
         TransportErrorDescription {
             label: "connect",
             diagnostic: "HTTP transport failed during connection setup",
         }
-    } else if causes().any(|cause| {
-        cause
-            .downcast_ref::<hyper::Error>()
-            .is_some_and(hyper::Error::is_parse)
-    }) {
+    } else if causes()
+        .filter_map(<dyn StdError>::downcast_ref::<hyper::Error>)
+        .any(hyper::Error::is_parse)
+    {
         TransportErrorDescription {
             label: "protocol",
             diagnostic: "HTTP transport failed while parsing the response",
