@@ -58,10 +58,10 @@ async fn admit<T: JobKind>(
         return Err(EnqueueError::PayloadContainsNul);
     }
     serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    let (aggregate_key, version) = order.unzip();
     if !allow_insert {
-        return compare_receipt(tx, &payload, aggregate_key, version).await;
+        return compare_receipt(tx, &payload, order).await;
     }
+    let (aggregate_key, version) = order.unzip();
     let trace = trace_context::capture();
     let id = JobId::new_v7();
     let inserted = observed(
@@ -102,7 +102,7 @@ async fn admit<T: JobKind>(
         notify_workers_after_commit(tx, KIND);
         return Ok(Admission::Created);
     }
-    match compare_receipt(tx, &payload, aggregate_key, version).await? {
+    match compare_receipt(tx, &payload, order).await? {
         Admission::MissingReceipt => Ok(Admission::OrderConflict),
         other => Ok(other),
     }
@@ -130,9 +130,9 @@ fn contains_decoded_nul(payload: &str) -> bool {
 async fn compare_receipt(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &str,
-    aggregate_key: Option<&str>,
-    version: Option<i64>,
+    order: Option<(&str, i64)>,
 ) -> Result<Admission, EnqueueError> {
+    let (aggregate_key, version) = order.unzip();
     let same = observed(
         "compare outbox receipt",
         sqlx::query_scalar!(

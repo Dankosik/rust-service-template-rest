@@ -362,7 +362,7 @@ async fn claim(
             &policy.recover_at_exhaustion[..],
             i32::from(crate::kind::MAX_ATTEMPTS),
         )
-        .try_map(|row| row.into_drawn(policy.registry))
+        .try_map(|row| row.into_drawn(policy.registry).map_err(ClaimDecodeError::into_sqlx))
         .fetch_all(&mut *connection),
     )
     .await
@@ -534,15 +534,15 @@ struct ClaimRow {
 }
 
 impl ClaimRow {
-    fn into_drawn(self, registry: &crate::Kinds) -> Result<Drawn, sqlx::Error> {
-        let Some(registered) = registry.get(&self.kind) else {
-            return Err(ClaimDecodeError::UnknownKind.into_sqlx());
-        };
+    fn into_drawn(self, registry: &crate::Kinds) -> Result<Drawn, ClaimDecodeError> {
+        let registered = registry
+            .get(&self.kind)
+            .ok_or(ClaimDecodeError::UnknownKind)?;
         let attempt = AttemptId {
             job_id: JobId(self.id),
             kind: registered.name,
             number: u16::try_from(self.attempts)
-                .map_err(|_| ClaimDecodeError::AttemptOutOfRange.into_sqlx())?,
+                .map_err(|_| ClaimDecodeError::AttemptOutOfRange)?,
         };
         if self.exhausted {
             return Ok(Drawn::Exhausted {
@@ -555,7 +555,7 @@ impl ClaimRow {
             None if registered.recover_at_exhaustion => {
                 Err(crate::JobError::permanent("outbox_receipt_mismatch"))
             }
-            None => return Err(ClaimDecodeError::MissingPayload.into_sqlx()),
+            None => return Err(ClaimDecodeError::MissingPayload),
         };
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),

@@ -416,27 +416,6 @@ fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
     base.checked_add(wait).unwrap_or(limit).min(limit)
 }
 
-struct OwnedHandler(Option<HandlerFuture>);
-
-impl OwnedHandler {
-    fn destroy(&mut self) {
-        if let Some(future) = self.0.take()
-            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                drop(future);
-            }))
-        {
-            tracing::warn!("job_handler_drop_panicked");
-            drop(payload);
-        }
-    }
-}
-
-impl Drop for OwnedHandler {
-    fn drop(&mut self) {
-        self.destroy();
-    }
-}
-
 async fn drive(
     cleanup: &ForcedCleanup,
     future: HandlerFuture,
@@ -445,10 +424,16 @@ async fn drive(
     supervisor_deadline: Instant,
 ) -> Option<Ended> {
     let _ended = cancel.clone().drop_guard();
-    let mut handler = OwnedHandler(Some(future));
+    let mut handler = std::mem::DropGuard::new(future, |future| {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
+        {
+            tracing::warn!("job_handler_drop_panicked");
+            drop(payload);
+        }
+    });
     let reason = {
-        let mut run =
-            std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
+        let mut run = std::pin::pin!(std::panic::AssertUnwindSafe(&mut *handler).catch_unwind());
         let mut first_poll = true;
         let admitted = std::future::poll_fn(|cx| {
             let now = Instant::now();
@@ -484,7 +469,7 @@ async fn drive(
         }
         reason
     };
-    handler.destroy();
+    drop(handler);
     (Instant::now() < supervisor_deadline && !cleanup.has_ended()).then_some(reason)
 }
 

@@ -299,7 +299,6 @@ impl KindsBuilder {
         })
     }
 
-    #[warn(clippy::map_err_ignore)]
     pub fn register_transactional<K: JobKind>(
         &mut self,
         policy: Policy,
@@ -307,40 +306,7 @@ impl KindsBuilder {
     ) -> &mut Self {
         let handler = Arc::new(handler);
         self.register_dispatch::<K>(policy, move |job| {
-            let handler = Arc::clone(&handler);
-            Box::pin(async move {
-                let Job {
-                    attempt,
-                    payload,
-                    pool,
-                } = job;
-                let job = Job {
-                    attempt,
-                    payload,
-                    pool: (),
-                };
-                let fence = job.attempt.fence;
-                infra_postgres::in_tx_with_acquire_deadline(
-                    &pool,
-                    job.deadline(),
-                    infra_postgres::TxOptions::default(),
-                    async move |tx| {
-                        handler.run(job, tx).await.map_err(TransactionFailure)?;
-                        let complete = crate::attempt::complete_query(fence);
-                        let rows = observed("complete job", complete.execute(&mut *tx))
-                            .await
-                            .map_err(|error| TransactionFailure::completion(&error))?;
-                        if rows.rows_affected() == 0 {
-                            return Err(TransactionFailure(JobError::retryable(
-                                "job claim is stale",
-                            )));
-                        }
-                        Ok(Completion::Committed)
-                    },
-                )
-                .await
-                .map_err(|failure| failure.0)
-            })
+            Box::pin(run_transactional(Arc::clone(&handler), job))
         })
     }
 
@@ -418,6 +384,44 @@ impl KindsBuilder {
             entries: self.entries.into_iter().map(Arc::new).collect(),
         })
     }
+}
+
+#[warn(clippy::map_err_ignore)]
+async fn run_transactional<K: JobKind>(
+    handler: Arc<impl TransactionalHandler<K>>,
+    job: Job<K>,
+) -> Result<Completion, JobError> {
+    let Job {
+        attempt,
+        payload,
+        pool,
+    } = job;
+    let job = Job {
+        attempt,
+        payload,
+        pool: (),
+    };
+    let fence = job.attempt.fence;
+    infra_postgres::in_tx_with_acquire_deadline(
+        &pool,
+        job.deadline(),
+        infra_postgres::TxOptions::default(),
+        async move |tx| {
+            handler.run(job, tx).await.map_err(TransactionFailure)?;
+            let complete = crate::attempt::complete_query(fence);
+            let rows = observed("complete job", complete.execute(&mut *tx))
+                .await
+                .map_err(|error| TransactionFailure::completion(&error))?;
+            if rows.rows_affected() == 0 {
+                return Err(TransactionFailure(JobError::retryable(
+                    "job claim is stale",
+                )));
+            }
+            Ok(Completion::Committed)
+        },
+    )
+    .await
+    .map_err(|failure| failure.0)
 }
 
 impl fmt::Debug for KindsBuilder {
