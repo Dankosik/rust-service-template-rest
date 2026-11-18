@@ -4,7 +4,7 @@ use secrecy::ExposeSecret as _;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::load_from;
+use crate::load::{Error, load_from};
 use crate::test_support::{
     BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, load_env, write,
 };
@@ -12,12 +12,12 @@ use crate::validate::{ValidationErrors, admit_with};
 
 const CACHE_DSN_ENV: (&str, &str) = ("APP__CACHE__DSN", "rediss://:hunter2@cache.example:6379");
 
-fn admit(input: CacheInput, app_env: &str) -> Result<Option<CacheConfig>, ValidationErrors> {
-    admit_with(|v| input.admit(app_env, v))
+fn admit(input: CacheInput) -> Result<Option<CacheConfig>, ValidationErrors> {
+    admit_with(|v| input.admit(false, v))
 }
 
-fn rejected_keys(input: CacheInput, app_env: &str) -> Vec<String> {
-    admit(input, app_env)
+fn rejected_keys(input: CacheInput) -> Vec<String> {
+    admit(input)
         .unwrap_err()
         .iter()
         .map(|error| error.key.clone())
@@ -53,31 +53,20 @@ fn admission_leaves_dsn_parsing_to_the_driver() {
 }
 
 #[test]
-fn allow_flags_are_refused_outside_local_development() {
-    for app_env in ["production", "staging"] {
-        let plaintext = CacheInput {
-            allow_plaintext: true,
-            ..CacheInput::default()
-        };
-        assert_eq!(rejected_keys(plaintext, app_env), ["cache.allow_plaintext"]);
-        let unauthenticated = CacheInput {
-            allow_unauthenticated: true,
-            ..CacheInput::default()
-        };
-        assert_eq!(
-            rejected_keys(unauthenticated, app_env),
-            ["cache.allow_unauthenticated"]
+fn a_local_environment_name_alone_refuses_each_cache_exception() {
+    for (variable, key) in [
+        ("APP__CACHE__ALLOW_PLAINTEXT", "cache.allow_plaintext"),
+        (
+            "APP__CACHE__ALLOW_UNAUTHENTICATED",
+            "cache.allow_unauthenticated",
+        ),
+    ] {
+        let result = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            [("APP__APP__ENV", "local"), (variable, "true")],
         );
-    }
-    for app_env in ["local", "development"] {
-        let local = CacheInput {
-            dsn: Some(SecretString::from(CACHE_DSN_ENV.1.to_owned())),
-            allow_plaintext: true,
-            allow_unauthenticated: true,
-            ..CacheInput::default()
-        };
-        let admitted = admit(local, app_env).unwrap().unwrap();
-        assert!(admitted.allow_plaintext && admitted.allow_unauthenticated);
+        std::assert_matches!(result, Err(Error::Validate(errors)) if errors.names(key));
     }
 }
 
@@ -87,29 +76,19 @@ fn a_client_certificate_and_its_key_are_set_together() {
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         ..CacheInput::default()
     };
-    assert_eq!(
-        rejected_keys(certificate_only, "production"),
-        ["cache.client_key_path"]
-    );
+    assert_eq!(rejected_keys(certificate_only), ["cache.client_key_path"]);
     let key_only = CacheInput {
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
         ..CacheInput::default()
     };
-    assert_eq!(
-        rejected_keys(key_only, "production"),
-        ["cache.client_cert_path"]
-    );
+    assert_eq!(rejected_keys(key_only), ["cache.client_cert_path"]);
     let both = CacheInput {
         dsn: Some(SecretString::from(CACHE_DSN_ENV.1.to_owned())),
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
         ..CacheInput::default()
     };
-    let certificate = admit(both, "production")
-        .unwrap()
-        .unwrap()
-        .client_certificate
-        .unwrap();
+    let certificate = admit(both).unwrap().unwrap().client_certificate.unwrap();
     assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
     assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));
 }
@@ -124,7 +103,7 @@ fn every_violated_rule_is_reported_together() {
         ..CacheInput::default()
     };
     assert_eq!(
-        rejected_keys(input, "production"),
+        rejected_keys(input),
         [
             "cache.allow_plaintext",
             "cache.client_key_path",
@@ -141,16 +120,13 @@ fn command_timeout_is_bounded() {
             command_timeout,
             ..CacheInput::default()
         };
-        assert_eq!(
-            rejected_keys(input, "production"),
-            ["cache.command_timeout"]
-        );
+        assert_eq!(rejected_keys(input), ["cache.command_timeout"]);
     }
     let edges = CacheInput {
         command_timeout: Duration::from_secs(10),
         ..CacheInput::default()
     };
-    assert!(admit(edges, "production").unwrap().is_none());
+    assert!(admit(edges).unwrap().is_none());
 }
 
 #[test]
@@ -161,7 +137,7 @@ fn byte_limits_reject_zero_and_values_above_the_server_ceiling() {
         ..CacheInput::default()
     };
     assert_eq!(
-        rejected_keys(input, "production"),
+        rejected_keys(input),
         ["cache.max_key_bytes", "cache.max_value_bytes"]
     );
 }
@@ -176,10 +152,12 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
         ("APP__CACHE__MAX_KEY_BYTES", "3 KiB"),
         ("APP__CACHE__MAX_VALUE_BYTES", "17 KiB"),
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
     ]);
     let cache = cfg.cache.as_ref().unwrap();
+    assert!(cache.allow_plaintext && cache.allow_unauthenticated);
     assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
     assert_eq!(cache.command_timeout, Duration::from_millis(200));
     assert_eq!(cache.max_concurrency, 2);

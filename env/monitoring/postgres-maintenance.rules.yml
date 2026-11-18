@@ -35,16 +35,6 @@ groups:
         expr: vector(1)
         labels: {database: example, job: service, instance: 'service-2:9090', population: http_idempotency}
       # template:end http-idempotency:maintenance-rule-5
-      # template:begin inbound-webhooks:maintenance-rule-6
-      - record: pg:expected
-        expr: vector(1)
-        labels: {database: example, job: service, instance: 'service-1:9090', population: webhook_receipts}
-      # template:end inbound-webhooks:maintenance-rule-6
-      # template:begin inbound-webhooks:maintenance-rule-7
-      - record: pg:expected
-        expr: vector(1)
-        labels: {database: example, job: service, instance: 'service-2:9090', population: webhook_receipts}
-      # template:end inbound-webhooks:maintenance-rule-7
       # template:begin jobs:maintenance-rule-8
       - record: pg:writer_set_changed_timestamp_seconds
         expr: vector(0)
@@ -55,11 +45,6 @@ groups:
         expr: vector(0)
         labels: {database: example, population: http_idempotency}
       # template:end http-idempotency:maintenance-rule-9
-      # template:begin inbound-webhooks:maintenance-rule-10
-      - record: pg:writer_set_changed_timestamp_seconds
-        expr: vector(0)
-        labels: {database: example, population: webhook_receipts}
-      # template:end inbound-webhooks:maintenance-rule-10
       - record: pg:owner_ok
         expr: |
           (

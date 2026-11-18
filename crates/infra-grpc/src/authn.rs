@@ -85,7 +85,7 @@ pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
     extensions.remove::<DelegationCredential>();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ScopeRequirement {
     pub(crate) scopes: Box<[String]>,
     pub(crate) delegate: bool,
@@ -128,8 +128,10 @@ pub(crate) async fn authenticate(
             return Err(reject_with_budget(context, request, authentication_status(failure)).await);
         }
     };
-    let requirement = scopes.get(request.uri().path());
-    if requirement.is_some_and(|rule| !principal.has_scopes(&rule.scopes)) {
+    let Some(requirement) = scopes.get(request.uri().path()) else {
+        return Err(reject_with_budget(context, request, tonic::Status::unimplemented("")).await);
+    };
+    if !principal.has_scopes(&requirement.scopes) {
         let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
@@ -142,8 +144,8 @@ pub(crate) async fn authenticate(
         return Err(server_stopped(reason).into_http());
     }
     let delegation = requirement
-        .filter(|rule| rule.delegate)
-        .map(|_| token.into_delegation_credential());
+        .delegate
+        .then(|| token.into_delegation_credential());
     request.headers_mut().remove(AUTHORIZATION);
     if let Some(credential) = delegation {
         request.extensions_mut().insert(credential);

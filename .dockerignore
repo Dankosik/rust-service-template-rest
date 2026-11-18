@@ -7,11 +7,17 @@
 *
 !Cargo.toml
 !Cargo.lock
+!LICENSE
+!deny.toml
+!tools/versions.env
+!build/docker/rust-notices.py
+!build/docker/rust-notices.toml
 !vendor/
 vendor/*
 !vendor/hotpath/
 # template:begin postgres:dockerignore-postgres-vendor
 !vendor/sqlx-core/
+!vendor/sqlx-postgres/
 # template:end postgres:dockerignore-postgres-vendor
 # template:begin messaging:dockerignore-messaging-vendor
 !vendor/async-nats/

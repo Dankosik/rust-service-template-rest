@@ -214,7 +214,8 @@ impl CommitProxy {
             .expect("the proxy address is a host");
         url.set_port(Some(proxy.address().port()))
             .expect("the proxy URL accepts a port");
-        let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+        let proxied = Dsn::admit_for_environment(url.as_str(), None, true)
+            .expect("the proxied DSN is admitted");
         (proxy, proxied)
     }
 

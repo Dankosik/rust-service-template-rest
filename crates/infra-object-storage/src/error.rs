@@ -68,6 +68,10 @@ pub enum ConfigError {
     ExpectedBucketOwner,
     #[error("object_storage.credentials is not usable for the selected provider")]
     Credentials,
+    #[error(
+        "AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE must both have nonblank Unicode values when configuring web identity"
+    )]
+    WebIdentity,
     #[error("object_storage.access_key_id is required")]
     AccessKeyId,
     #[error("object_storage.secret_access_key is required")]

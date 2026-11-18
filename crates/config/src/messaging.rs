@@ -43,7 +43,7 @@ pub(crate) struct MessagingInput {
     /// empty, or whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
     root_ca_path: Option<PathBuf>,
-    /// Permit `nats://` only for a local or development process.
+    /// Permit `nats://` with `app.allow_insecure_development`.
     #[serde(deserialize_with = "crate::de::boolean")]
     allow_plaintext: bool,
     /// Perform TLS before INFO; every configured URL must use `tls://`.
@@ -51,12 +51,11 @@ pub(crate) struct MessagingInput {
     tls_first: bool,
     /// The operator declares the private network the broker trust boundary,
     /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
-    /// in every environment. Credentials stay required outside local and
-    /// development.
+    /// in every environment. Credentials stay required unless the separate
+    /// development exception for unauthenticated connections is enabled.
     #[serde(deserialize_with = "crate::de::boolean")]
     trusted_network: bool,
-    /// Permit a connection without credentials only for a local or
-    /// development process.
+    /// Permit a connection without credentials with `app.allow_insecure_development`.
     #[serde(deserialize_with = "crate::de::boolean")]
     allow_unauthenticated: bool,
     #[serde(default, deserialize_with = "blank_as_none")]
@@ -153,18 +152,18 @@ impl Default for MessagingConfig {
 impl MessagingInput {
     pub(crate) fn admit(
         self,
-        app_env: &str,
+        insecure_development: bool,
         v: &mut Violations,
     ) -> Result<MessagingConfig, Rejected> {
         let plaintext = v.take(local_development_only(
             "messaging.allow_plaintext",
             self.allow_plaintext,
-            app_env,
+            insecure_development,
         ));
         let unauthenticated = v.take(local_development_only(
             "messaging.allow_unauthenticated",
             self.allow_unauthenticated,
-            app_env,
+            insecure_development,
         ));
         let credentials = match (self.credentials, self.credentials_file) {
             (Some(_), Some(_)) => Err(v.reject(ValidationError::new(

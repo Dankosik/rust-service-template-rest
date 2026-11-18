@@ -74,6 +74,9 @@ runs:
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       id: buildx
       with:
+        version: v${{ env.BUILDX_VERSION }}
+        cache-binary: false
+        driver-opts: image=${{ env.BUILDKIT_IMAGE }}
         use: false
         cleanup: false
 
@@ -164,6 +167,7 @@ runs:
         IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
         DIGEST: ${{ steps.digest.outputs.digest }}
         IDENTITY: ${{ steps.meta.outputs.identity }}
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       run: |
         set -euo pipefail
         image="${IMAGE_REPO}@${DIGEST}"
@@ -171,10 +175,16 @@ runs:
           --certificate-identity "${IDENTITY}" \
           --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
           "${image}"
-        gh attestation verify "oci://${image}" --repo "${GITHUB_REPOSITORY}"
-        gh attestation verify "oci://${image}" \
-          --repo "${GITHUB_REPOSITORY}" \
-          --predicate-type "https://cyclonedx.org/bom"
+        policy=(
+          --repo "${GITHUB_REPOSITORY}"
+          --bundle-from-oci
+          --cert-identity "${IDENTITY}"
+          --source-ref "${GITHUB_REF}"
+          --source-digest "${CANDIDATE_SHA}"
+        )
+        gh attestation verify "oci://${image}" "${policy[@]}" --predicate-type "https://slsa.dev/provenance/v1"
+        gh attestation verify "oci://${image}" "${policy[@]}" --predicate-type "https://cyclonedx.org/bom" --format json |
+          jq -e --slurpfile sbom sbom.cdx.json 'any(.[]; .verificationResult.statement.predicate == $sbom[0])'
 
     - name: Record verified image
       shell: bash

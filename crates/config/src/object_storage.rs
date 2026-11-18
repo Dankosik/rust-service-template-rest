@@ -26,7 +26,7 @@ enum ProviderKind {
     /// Any other S3-compatible store: an HTTPS `endpoint`, optional `region`
     /// and `path_style`.
     S3Compatible,
-    /// An S3 emulator; `app.env` must be `local` or `development`.
+    /// An S3 emulator requiring `app.allow_insecure_development`.
     Local,
 }
 
@@ -155,7 +155,7 @@ pub struct ObjectStorageConfig {
 impl ObjectStorageInput {
     pub(crate) fn admit(
         self,
-        app_env: &str,
+        insecure_development: bool,
         v: &mut Violations,
     ) -> Result<Option<ObjectStorageConfig>, Rejected> {
         v.check(int_range(
@@ -176,7 +176,7 @@ impl ObjectStorageInput {
         v.check(local_development_only(
             "object_storage.provider",
             self.provider == ProviderKind::Local,
-            app_env,
+            insecure_development,
         ));
         let provider = match self.provider {
             ProviderKind::None => return Ok(None),

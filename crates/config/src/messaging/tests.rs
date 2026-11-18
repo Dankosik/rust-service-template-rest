@@ -9,8 +9,11 @@ use crate::load::{Error, load_from, load_worker_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
 use crate::validate::{ValidationErrors, admit_with};
 
-fn admit(input: MessagingInput, app_env: &str) -> Result<MessagingConfig, ValidationErrors> {
-    admit_with(|v| input.admit(app_env, v))
+fn admit(
+    input: MessagingInput,
+    insecure_development: bool,
+) -> Result<MessagingConfig, ValidationErrors> {
+    admit_with(|v| input.admit(insecure_development, v))
 }
 
 fn tls_input() -> MessagingInput {
@@ -26,7 +29,7 @@ fn fixture_credentials() -> SecretString {
 
 #[test]
 fn defaults_are_inactive_and_within_the_delivery_budget() {
-    let config = admit(MessagingInput::default(), "production").unwrap();
+    let config = admit(MessagingInput::default(), false).unwrap();
     assert!(!config.is_active());
     assert!(!config.tls_first);
     assert_eq!(config.max_payload_bytes, ByteSize::kib(256));
@@ -50,7 +53,7 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
         source_stream: Some("events".to_owned()),
         ..tls_input()
     };
-    let config = admit(input, "production").unwrap();
+    let config = admit(input, false).unwrap();
     assert_matches!(
         &config.credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/nats.creds")
@@ -63,7 +66,7 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
         ..tls_input()
     };
     assert!(
-        admit(both, "production")
+        admit(both, false)
             .unwrap_err()
             .names("messaging.credentials_file")
     );
@@ -71,7 +74,7 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
 
 #[test]
 fn producer_requires_admitted_connection_credentials_and_source() {
-    let mut config = admit(tls_input(), "production").unwrap();
+    let mut config = admit(tls_input(), false).unwrap();
     assert_eq!(
         config.producer_source_stream().unwrap_err().key,
         "messaging.credentials"
@@ -136,7 +139,7 @@ fn rejects_url_userinfo_unknown_protocol_and_unapproved_plaintext() {
             urls: vec![url.to_owned()],
             ..MessagingInput::default()
         };
-        let errors = admit(input, "local").unwrap_err();
+        let errors = admit(input, true).unwrap_err();
         assert!(errors.names(key), "{url}");
     }
     let input = MessagingInput {
@@ -144,7 +147,7 @@ fn rejects_url_userinfo_unknown_protocol_and_unapproved_plaintext() {
         ..MessagingInput::default()
     };
     assert!(
-        admit(input, "production")
+        admit(input, false)
             .unwrap_err()
             .names("messaging.allow_plaintext")
     );
@@ -160,7 +163,7 @@ fn every_invalid_url_is_reported() {
         ],
         ..MessagingInput::default()
     };
-    let errors = admit(input, "production").unwrap_err();
+    let errors = admit(input, false).unwrap_err();
     assert!(errors.names("messaging.urls[0]"));
     assert!(!errors.names("messaging.urls[1]"));
     assert!(errors.names("messaging.urls[2]"));
@@ -168,20 +171,25 @@ fn every_invalid_url_is_reported() {
 
 #[test]
 fn plaintext_and_unauthenticated_are_only_available_in_local_development() {
-    let input = || MessagingInput {
-        urls: vec!["nats://127.0.0.1:4222".to_owned()],
-        allow_plaintext: true,
-        allow_unauthenticated: true,
-        source_stream: Some("events".to_owned()),
-        ..MessagingInput::default()
-    };
-    admit(input(), "local")
-        .unwrap()
-        .producer_source_stream()
-        .unwrap();
-    let errors = admit(input(), "production").unwrap_err();
-    assert!(errors.names("messaging.allow_plaintext"));
-    assert!(errors.names("messaging.allow_unauthenticated"));
+    let local = [
+        ("APP__APP__ENV", "development"),
+        ("APP__MESSAGING__URLS", "nats://127.0.0.1:4222"),
+        ("APP__MESSAGING__ALLOW_PLAINTEXT", "true"),
+        ("APP__MESSAGING__ALLOW_UNAUTHENTICATED", "true"),
+        ("APP__MESSAGING__SOURCE_STREAM", "events"),
+    ];
+    let options = LoadOptions::default();
+    let error = load_worker_from(&options, BUILD, env(&local)).unwrap_err();
+    assert_matches!(&error, Error::Validate(errors) if errors.names("messaging.allow_plaintext") && errors.names("messaging.allow_unauthenticated"));
+    let config = load_worker_from(
+        &options,
+        BUILD,
+        local
+            .into_iter()
+            .chain([("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")]),
+    )
+    .unwrap();
+    config.messaging.producer_source_stream().unwrap();
 }
 
 #[test]
@@ -192,7 +200,7 @@ fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
         source_stream: Some("events".to_owned()),
         ..MessagingInput::default()
     };
-    let mut config = admit(input, "production").unwrap();
+    let mut config = admit(input, false).unwrap();
     assert_eq!(
         config.producer_source_stream().unwrap_err().key,
         "messaging.credentials"
@@ -208,7 +216,7 @@ fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
         ..MessagingInput::default()
     };
     assert!(
-        admit(unauthenticated, "production")
+        admit(unauthenticated, false)
             .unwrap_err()
             .names("messaging.allow_unauthenticated")
     );
@@ -227,7 +235,7 @@ fn tls_first_requires_all_configured_seeds_to_use_tls() {
             ..MessagingInput::default()
         };
         assert!(
-            admit(input, "production")
+            admit(input, false)
                 .unwrap_err()
                 .names("messaging.tls_first")
         );
@@ -237,7 +245,7 @@ fn tls_first_requires_all_configured_seeds_to_use_tls() {
             tls_first: true,
             ..tls_input()
         },
-        "production",
+        false,
     )
     .unwrap();
 }
@@ -256,7 +264,7 @@ fn resident_delivery_memory_is_bounded(
         consumer_concurrency: NonZeroU32::new(concurrency).unwrap(),
         ..MessagingInput::default()
     };
-    match admit(input, "production") {
+    match admit(input, false) {
         Ok(_) => assert!(accepted),
         Err(errors) => {
             assert!(!accepted);

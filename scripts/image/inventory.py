@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Admit each selected binary's native Trivy runtime graph before reporting."""
+"""Admit Debian packages and the selected Rust runtime graphs before reporting."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import posixpath
 import re
@@ -200,10 +201,49 @@ def check_pruned_rootfs(source: BinaryIO, mounts: object, pruned: set[str]) -> N
                 raise Refusal("invalid data after rootfs tar end")
 
 
-def admit(report: object, expected: dict[str, tuple[str, str, str]], image_id: str) -> None:
+def check_debian_inventory(os: object, results: list[dict]) -> None:
+    if not isinstance(os, dict) or os.get("Family") != "debian":
+        raise Refusal("Trivy did not identify a Debian OS")
+    required_string(os.get("Name"), "Trivy Debian release")
+    inventories = [result for result in results if result.get("Class") == "os-pkgs"]
+    if len(inventories) != 1 or inventories[0].get("Type") != "debian":
+        raise Refusal("expected exactly one Debian OS inventory")
+    packages = inventories[0].get("Packages")
+    if not isinstance(packages, list) or not packages:
+        raise Refusal("missing Debian OS packages")
+    names = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            raise Refusal("malformed Debian package")
+        names.add(required_string(package.get("Name"), "Debian package name"))
+        required_string(package.get("Version"), "Debian package version")
+    if "libc6" not in names:
+        raise Refusal("Debian OS inventory is missing libc6")
+
+
+def archive_config_id(path: Path) -> str:
+    with tarfile.open(path, "r:") as archive:
+        def member_bytes(name: str) -> bytes:
+            entries = [member for member in archive.getmembers() if posixpath.normpath(member.name) == name]
+            if len(entries) != 1 or not entries[0].isfile():
+                raise Refusal(f"Docker archive: expected one regular {name}")
+            contents = archive.extractfile(entries[0])
+            assert contents is not None
+            with contents:
+                return contents.read()
+
+        manifest = parse_json_bytes(member_bytes("manifest.json"), "Docker archive manifest")
+        if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+            raise Refusal("Docker archive: expected exactly one image")
+        config = required_string(manifest[0].get("Config"), "Docker archive configuration path")
+        return "sha256:" + hashlib.sha256(member_bytes(posixpath.normpath(config))).hexdigest()
+
+
+def admit(report: object, expected: dict[str, tuple[str, str, str]], image_id: str) -> list[dict]:
     if not isinstance(report, dict) or report.get("ArtifactType") != "container_image":
         raise Refusal("expected a native Trivy container image report")
-    if report.get("Metadata", {}).get("ImageID") != image_id:
+    metadata = report.get("Metadata")
+    if not isinstance(metadata, dict) or metadata.get("ImageID") != image_id:
         raise Refusal("Trivy report does not identify the fixed image ID")
     results = report.get("Results")
     if not isinstance(results, list) or not all(isinstance(result, dict) for result in results):
@@ -267,6 +307,21 @@ def admit(report: object, expected: dict[str, tuple[str, str, str]], image_id: s
                 pending.extend(deps)
         if visited != set(by_id):
             raise Refusal(f"{target}: disconnected runtime packages {sorted(set(by_id) - visited)}")
+    check_debian_inventory(metadata.get("OS"), results)
+    return results
+
+
+def fixed_high_critical_count(results: list[dict]) -> int:
+    count = 0
+    for result in results:
+        vulnerabilities = result.get("Vulnerabilities", [])
+        if not isinstance(vulnerabilities, list) or not all(isinstance(vuln, dict) for vuln in vulnerabilities):
+            raise Refusal("Trivy vulnerabilities are malformed")
+        count += sum(
+            vuln.get("Severity") in ("HIGH", "CRITICAL") and vuln.get("Status") == "fixed"
+            for vuln in vulnerabilities
+        )
+    return count
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -283,10 +338,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="inspect the exported rootfs on stdin against these container mounts",
     )
     parser.add_argument("--pruned", nargs="+")
+    parser.add_argument("--archive", type=Path, help="print the configuration digest of a saved image")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--image-id")
+    parser.add_argument("--count-fixed-high-critical", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.archive is not None:
+            print(archive_config_id(args.archive))
+            return 0
         if args.rootfs_mounts is not None:
             if not args.pruned:
                 parser.error("--pruned is required for rootfs inspection")
@@ -300,8 +360,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             if args.report is None or not args.image_id:
                 parser.error("--report and --image-id are required for admission")
-            admit(parse_json_bytes(args.report.read_bytes(), "Trivy report"), expected, args.image_id)
-            print("runtime-image-inventory: admitted runtime graphs for " + ", ".join(expected))
+            results = admit(parse_json_bytes(args.report.read_bytes(), "Trivy report"), expected, args.image_id)
+            print(
+                f"runtime-image-inventory: admitted Debian packages and runtime graphs for {', '.join(expected)} "
+                f"in {args.image_id}",
+                file=sys.stderr if args.count_fixed_high_critical else sys.stdout,
+            )
+            if args.count_fixed_high_critical:
+                print(fixed_high_critical_count(results))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError) as error:
         print(f"runtime-image-inventory: {error}", file=sys.stderr)
         return 1

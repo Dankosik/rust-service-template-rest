@@ -71,7 +71,6 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         // template:begin service-auth:bootstrap-startup-log-service-auth
         service_auth.mode = config.service_auth.mode(),
         // template:end service-auth:bootstrap-startup-log-service-auth
-        log.level = %config.log.level,
         tracing.exporter = exporter.as_str(),
         "service_starting"
     );

@@ -28,7 +28,7 @@ pub enum PostgresSessionBudgets {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct PostgresFields<Session, Capacity, Deadline> {
+pub(crate) struct PostgresFields<Session, Capacity, Deadline, Notifications> {
     #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
@@ -48,6 +48,9 @@ pub(crate) struct PostgresFields<Session, Capacity, Deadline> {
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
     max_connections: Capacity,
+    /// Enables PostgreSQL LISTEN/NOTIFY for job wakeups. Set to false on producers
+    /// and workers using PgBouncer transaction pooling to use periodic polling.
+    notifications: Notifications,
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds
     /// an index concurrently on a large table. Only `migrate` checks the range.
@@ -80,11 +83,23 @@ impl Default for MigrationDeadline {
     }
 }
 
-pub(crate) type PostgresInput = PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredSection>;
-type MigrationPostgresInput = PostgresFields<IgnoredSection, IgnoredSection, MigrationDeadline>;
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Notifications(#[serde(deserialize_with = "crate::de::boolean")] bool);
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+pub(crate) type PostgresInput =
+    PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredSection, Notifications>;
+type MigrationPostgresInput =
+    PostgresFields<IgnoredSection, IgnoredSection, MigrationDeadline, IgnoredSection>;
 // template:begin jobs:postgres-operator-input
 pub(crate) type OperatorPostgresInput =
-    PostgresFields<SessionBudgetsInput, IgnoredSection, IgnoredSection>;
+    PostgresFields<SessionBudgetsInput, IgnoredSection, IgnoredSection, IgnoredSection>;
 // template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]
@@ -93,6 +108,7 @@ pub struct PostgresConfig {
     pub password_file: Option<PathBuf>,
     pub session_budgets: PostgresSessionBudgets,
     pub max_connections: NonZeroU32,
+    pub notifications: bool,
 }
 
 fn admit_dsn(
@@ -125,6 +141,7 @@ impl PostgresInput {
             password_file: self.password_file,
             session_budgets: self.session_budgets.0,
             max_connections: self.max_connections.0,
+            notifications: self.notifications.0,
         }))
     }
 }
@@ -132,6 +149,7 @@ impl PostgresInput {
 // template:begin jobs:postgres-operator-admission
 #[derive(Clone, Debug)]
 pub struct OperatorPostgresConfig {
+    pub local_development: bool,
     pub dsn: SecretString,
     pub password_file: Option<PathBuf>,
     pub session_budgets: PostgresSessionBudgets,
@@ -140,10 +158,12 @@ pub struct OperatorPostgresConfig {
 impl OperatorPostgresInput {
     pub(crate) fn admit(
         self,
+        local_development: bool,
         violations: &mut Violations,
     ) -> Result<Option<OperatorPostgresConfig>, Rejected> {
         Ok(
             admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| OperatorPostgresConfig {
+                local_development,
                 dsn,
                 password_file: self.password_file,
                 session_budgets: self.session_budgets.0,

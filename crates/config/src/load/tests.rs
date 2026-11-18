@@ -25,6 +25,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
     assert_eq!(cfg.app.env, "unspecified");
+    assert!(!cfg.app.is_local_development());
     assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app.version, "1.2.3");
     assert_eq!(cfg.app.commit, "abc123");
@@ -81,6 +82,29 @@ fn shipped_local_configuration_loads_without_environment_overrides() {
     )
     .unwrap();
     assert_eq!(cfg.log.format, LogFormat::Text);
+    assert!(cfg.app.is_local_development());
+}
+
+#[test]
+fn insecure_development_refuses_unrecognized_environment_names() {
+    for name in [
+        "production",
+        "dev",
+        "Development",
+        "private-environment-value",
+    ] {
+        let error = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__APP__ENV", name),
+                ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+            ]),
+        )
+        .unwrap_err();
+        assert_matches!(&error, Error::Validate(errors) if errors.names("app.allow_insecure_development"));
+        assert!(!error.to_string().contains("private-environment-value"));
+    }
 }
 
 #[test]
@@ -245,6 +269,38 @@ fn malformed_toml_reports_its_position_without_echoing_input() {
 }
 
 #[test]
+fn independent_input_failures_are_reported_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = LoadOptions {
+        config: Some(write(&dir, "base.toml", "key = \"base-private\" trailing")),
+        config_overlay: vec![
+            dir.path().join("missing-overlay.toml"),
+            write(
+                &dir,
+                "broken-overlay.toml",
+                "key = \"overlay-private\" trailing",
+            ),
+        ],
+        secrets_dir: Some(dir.path().join("missing-secrets")),
+    };
+    let err = load_from(&options, BUILD, env(&[])).unwrap_err();
+    assert_matches!(&err, Error::InputErrors(errors) if errors.len() == 4, "{err}");
+    let message = err.to_string();
+    for rejected in [
+        "missing-secrets",
+        "base.toml: invalid TOML at byte",
+        "missing-overlay.toml",
+        "broken-overlay.toml: invalid TOML at byte",
+    ] {
+        assert!(message.contains(rejected), "{message}");
+    }
+    for value in ["base-private", "overlay-private"] {
+        assert!(!message.contains(value), "{message}");
+        assert!(!format!("{err:?}").contains(value));
+    }
+}
+
+#[test]
 fn utf8_bom_loads_once_and_rejects_a_second_bom() {
     let dir = tempfile::tempdir().unwrap();
     let single = LoadOptions {
@@ -282,7 +338,7 @@ fn utf8_bom_loads_once_and_rejects_a_second_bom() {
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
-    let source = scan_file(&path, &mut BTreeSet::new(), &mut BTreeMap::new()).unwrap();
+    let source = scan_file(&path).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
     let merged = config::Config::builder()
@@ -374,6 +430,7 @@ fn service_counts_finite_caps_of_enabled_listeners(
 ) {
     let cfg = load_env(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__HTTP__MAX_CONNECTIONS", http_max_connections),
         ("APP__OBSERVABILITY__METRICS__ADDR", diagnostics_addr),
         ("APP__GRPC__ENABLED", grpc_enabled),
@@ -774,6 +831,86 @@ fn secrets_directory_follows_the_links_of_a_mounted_volume() {
 
     let cfg = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap();
     assert_eq!(cfg.log.level, "warn");
+}
+
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture publishes a new generation before updating the public links"
+)]
+fn projected_secrets_use_the_active_generation_even_before_its_public_links_are_updated() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let old = "..2026_11_18_01_00_00.10000001";
+    let next = "..2026_11_18_01_00_01.10000002";
+    for generation in [old, next] {
+        std::fs::create_dir(dir.path().join(generation)).unwrap();
+    }
+    for (generation, key, value) in [
+        (old, "APP__LOG__LEVEL", "warn"),
+        (old, "APP__HTTP__ADDR", "127.0.0.1:7"),
+        (next, "APP__LOG__LEVEL", "debug"),
+        (next, "APP__LOG__FORMAT", "text"),
+    ] {
+        std::fs::write(dir.path().join(generation).join(key), value).unwrap();
+    }
+    let active = dir.path().join("..data");
+    symlink(old, &active).unwrap();
+    for key in ["APP__LOG__LEVEL", "APP__HTTP__ADDR"] {
+        symlink(Path::new("..data").join(key), dir.path().join(key)).unwrap();
+    }
+    let pending = dir.path().join("..data_tmp");
+    symlink(next, &pending).unwrap();
+    std::fs::rename(&pending, &active).unwrap();
+
+    let cfg = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap();
+    assert_eq!(cfg.log.level, "debug");
+    assert_eq!(cfg.log.format, LogFormat::Text);
+    assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn secrets_directory_refuses_a_symlink_to_a_fifo_without_waiting_for_a_writer() {
+    use std::sync::mpsc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("fifo");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let file = dir.path().join("APP__LOG__LEVEL");
+    std::os::unix::fs::symlink(&fifo, &file).unwrap();
+    let options = with_secrets(&dir);
+    let (sender, receiver) = mpsc::channel();
+    let loader = std::thread::spawn(move || {
+        sender.send(load_from(&options, BUILD, env(&[]))).unwrap();
+    });
+    let err = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("secret loading must return without opening a blocking FIFO")
+        .unwrap_err();
+    loader.join().unwrap();
+    assert_matches!(&err, Error::ReadSecret { path, error }
+        if *path == file && error.kind() == std::io::ErrorKind::InvalidInput, "{err}");
+}
+
+#[test]
+fn secrets_directory_accepts_one_mib_and_refuses_larger_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut value = "warn".to_owned();
+    value.extend(std::iter::repeat_n('\n', 1024 * 1024 - value.len()));
+    let options = with_secrets(&dir);
+    write(&dir, "APP__LOG__LEVEL", &value);
+    let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+    assert_eq!(cfg.log.level, "warn");
+
+    value.push('\n');
+    let file = write(&dir, "APP__LOG__LEVEL", &value);
+    let err = load_from(&options, BUILD, env(&[])).unwrap_err();
+    assert_matches!(&err, Error::ReadSecret { path, error }
+        if *path == file && error.kind() == std::io::ErrorKind::InvalidData, "{err}");
+    assert!(err.to_string().contains("1 MiB secret file limit"), "{err}");
 }
 
 #[test]
