@@ -1054,6 +1054,10 @@ class VerifyRunnerTests(unittest.TestCase):
 
         res = self._run_verify("--plan", "--files", "LICENSE")
         self.assertEqual(res.returncode, 0)
+        self.assertIn("  make dockerfile-check\n", res.stdout)
+
+        res = self._run_verify("--plan", "--files", ".editorconfig")
+        self.assertEqual(res.returncode, 0)
         self.assertIn("  none\n", res.stdout)
 
         # Ordinary .rs edit routes duplication-check + architecture-check + affected crates, NOT quality-check-self-test or template-quality-projections

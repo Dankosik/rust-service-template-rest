@@ -509,7 +509,7 @@ def classify_report(
 
         if _matches(
             file,
-            ".editorconfig", ".gitattributes", ".gitignore", ".gitkeep", "*/.gitkeep", "LICENSE",
+            ".editorconfig", ".gitattributes", ".gitignore", ".gitkeep", "*/.gitkeep",
             ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/*",
         ):
             mark("no_validation_required")
