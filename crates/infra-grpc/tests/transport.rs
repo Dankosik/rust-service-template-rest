@@ -2574,21 +2574,71 @@ fn grpc_frame(message: &str) -> bytes::Bytes {
 
 #[tokio::test]
 async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
+    use http_body_util::{BodyExt as _, Full};
+
     let fixture = Fixture::plaintext().await;
-    let call = |padding: usize| {
-        let mut echo = fixture.echo_client();
-        let mut call = request(unary("padded"));
-        call.metadata_mut()
-            .insert("x-padding", "a".repeat(padding).parse().unwrap());
-        async move { timeout(WAIT, echo.unary(call)).await.expect("padded call") }
+    let stream = TcpStream::connect(fixture.address).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(stream),
+    )
+    .await
+    .unwrap();
+    let driver = tokio::spawn(connection);
+    let frame = grpc_frame("padded");
+    let padded = |budget: usize| {
+        let mut call =
+            http::Request::post(format!("http://{}{ECHO_SERVICE_UNARY}", fixture.address))
+                .header("content-type", "application/grpc")
+                .header("content-length", frame.len())
+                .header("te", "trailers")
+                .header("grpc-timeout", "5S")
+                .header("x-padding", "")
+                .body(Full::new(frame.clone()))
+                .unwrap();
+        call.headers_mut()
+            .extend(request(()).into_parts().0.into_headers());
+        // RFC 9113 §6.5.2, SETTINGS_MAX_HEADER_LIST_SIZE
+        let size: usize = [
+            (":method", call.method().as_str().len()),
+            (":scheme", call.uri().scheme_str().unwrap().len()),
+            (":authority", call.uri().authority().unwrap().as_str().len()),
+            (":path", call.uri().path().len()),
+        ]
+        .into_iter()
+        .chain(
+            call.headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes().len())),
+        )
+        .map(|(name, value_len)| name.len() + value_len + 32)
+        .sum();
+        call.headers_mut()
+            .insert("x-padding", "a".repeat(budget - size).parse().unwrap());
+        call
     };
+    let served = timeout(WAIT, sender.send_request(padded(16 * 1024 - 1)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(served.status(), http::StatusCode::OK);
+    let body = timeout(WAIT, served.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(body.trailers().unwrap()["grpc-status"], "0");
+    assert_eq!(body.to_bytes(), frame);
+    let refused = timeout(WAIT, sender.send_request(padded(16 * 1024 + 1)))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        call(15 * 1024).await.unwrap().into_inner().message,
-        "padded"
+        refused.status(),
+        http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
     );
-    let refused = call(17 * 1024).await.unwrap_err();
-    assert_eq!(refused.code(), Code::Unknown);
-    assert!(refused.message().contains("431"), "{}", refused.message());
+    assert_seen(&fixture.echo, &[Seen::Unary]);
+    drop(sender);
+    driver.abort();
     fixture.stop().await;
 }
 
