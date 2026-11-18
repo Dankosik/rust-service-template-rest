@@ -118,31 +118,25 @@ impl TokenEndpoint {
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
-        let body = self.form_body(grant)?;
-        let response = self.post_form(body, context).await?;
+        let request = self.token_request(grant)?;
+        let exchange = self.http.execute_buffered(request, context.clone()).await;
+        let response = classify_token_response(exchange)?;
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
-    fn form_body(&self, grant: Grant<'_>) -> Result<String, AcquisitionError> {
-        let assertion = self.signer.sign()?;
-        let mut form = Serializer::new(String::new());
-        grant.append_fields(&mut form);
-        Ok(form
-            .extend_pairs(self.signer.form_fields(&assertion))
-            .finish())
-    }
-
-    async fn post_form(
-        &self,
-        body: String,
-        context: &RequestContext,
-    ) -> Result<TokenResponse, AcquisitionError> {
-        let request = Request::post(self.uri.clone())
+    fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
+        let body = {
+            let assertion = self.signer.sign()?;
+            let mut form = Serializer::new(String::new());
+            grant.append_fields(&mut form);
+            form.extend_pairs(self.signer.form_fields(&assertion))
+                .finish()
+        };
+        Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
-        classify_token_response(self.http.execute_buffered(request, context.clone()).await)
+            .map_err(|_| AcquisitionError::InvalidResponse)
     }
 }
 
