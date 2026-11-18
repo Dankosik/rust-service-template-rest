@@ -264,11 +264,10 @@ impl<Subject> TokenSource<Subject> {
     }
 
     fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        self.registration().check_admission(deadline)?;
-        if let Self::Service(service) = self {
-            service.check_refresh_driver()?;
+        match self {
+            Self::Service(service) => service.check_admission(deadline),
+            Self::Exchange(exchange, _) => exchange.registration().check_admission(deadline),
         }
-        Ok(())
     }
 }
 
@@ -322,10 +321,6 @@ impl TokenSource<OnBehalfOf> {
 impl ServiceTokens {
     fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
         self.0.inner.registration.check_admission(deadline)?;
-        self.check_refresh_driver()
-    }
-
-    fn check_refresh_driver(&self) -> Result<(), AcquisitionError> {
         if self.0.refresh_requests.is_closed() {
             return Err(AcquisitionError::Unavailable);
         }

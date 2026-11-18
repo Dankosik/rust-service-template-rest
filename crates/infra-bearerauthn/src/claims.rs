@@ -1,6 +1,6 @@
 use crate::{
     Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
-    principal::Identity,
+    principal::{Identifiers, Identity},
 };
 use serde::Deserialize;
 use std::{borrow::Cow, fmt, time::Duration};
@@ -51,9 +51,9 @@ enum Values<'a> {
 
 impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor<'a>(std::marker::PhantomData<Values<'a>>);
-        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visitor<'a> {
-            type Value = Values<'a>;
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Values<'de>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a string or an array of strings")
             }
@@ -77,7 +77,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 Ok(Values::Many(values))
             }
         }
-        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -247,12 +247,15 @@ pub(crate) fn validate_jwt_claims(
             .into_iter()
             .find_map(non_empty)
     });
-    require_identity(subject.as_deref(), client_id.as_deref())?;
+    let identifiers = Identifiers::from_claims(subject, client_id)?;
     let missing_profile_claims = match token_profile {
         TokenProfile::ResourceServer => false,
         TokenProfile::Rfc9068 => {
             let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
-            claims.iat.is_none() || subject.is_none() || !has_standard_client_id || !has_jti
+            claims.iat.is_none()
+                || matches!(identifiers, Identifiers::ClientOnly(_))
+                || !has_standard_client_id
+                || !has_jti
         }
     };
     if missing_profile_claims {
@@ -266,8 +269,7 @@ pub(crate) fn validate_jwt_claims(
         identity: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
-                subject,
-                client_id,
+                identifiers,
                 scopes,
                 payload,
                 actor,
@@ -377,7 +379,7 @@ pub(crate) fn validate_introspection_claims(
     check_lifetime(expiry, not_before, Duration::from_secs(now))?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
-    require_identity(subject.as_deref(), client_id.as_deref())?;
+    let identifiers = Identifiers::from_claims(subject, client_id)?;
     let scopes = Scopes::from_claim(claims.scope.map(Values::One).or(claims.scp))
         .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
     let actor = optional_actor(claims.act).map_err(|()| malformed())?;
@@ -386,8 +388,7 @@ pub(crate) fn validate_introspection_claims(
         identity: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
-                subject,
-                client_id,
+                identifiers,
                 scopes,
                 payload: payload.to_owned(),
                 actor,
@@ -419,14 +420,17 @@ fn not_yet_valid(not_before: Option<Duration>, now: Duration) -> bool {
     not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY))
 }
 
-fn require_identity(
-    subject: Option<&str>,
-    client_id: Option<&str>,
-) -> Result<(), VerificationError> {
-    if subject.is_none() && client_id.is_none() {
-        return Err(VerificationError::invalid(VerificationReason::MissingClaim));
+impl Identifiers {
+    fn from_claims(
+        subject: Option<String>,
+        client_id: Option<String>,
+    ) -> Result<Self, VerificationError> {
+        match (subject, client_id) {
+            (Some(subject), client_id) => Ok(Self::Subject { subject, client_id }),
+            (None, Some(client_id)) => Ok(Self::ClientOnly(client_id)),
+            (None, None) => Err(VerificationError::invalid(VerificationReason::MissingClaim)),
+        }
     }
-    Ok(())
 }
 
 fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
