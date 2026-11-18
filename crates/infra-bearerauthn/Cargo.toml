@@ -42,8 +42,8 @@ moka = { workspace = true, features = [
   "sync",
   # template:end oidc-jwt:authn-jwt-moka-sync
 ] }
-# template:begin oidc-introspection:authn-secret-dependency
 futures-util = { workspace = true, features = ["std"] }
+# template:begin oidc-introspection:authn-secret-dependency
 parking_lot = { workspace = true }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
