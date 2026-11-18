@@ -23,22 +23,21 @@ fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> 
 }
 
 #[tokio::test]
-async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing_role() {
-    for (no_ack, storage, persist_mode, error_type) in [
-        (true, stream::StorageType::File, None, "stream_no_ack"),
-        (
-            false,
-            stream::StorageType::Memory,
-            None,
-            "stream_memory_storage",
-        ),
-        (
-            false,
-            stream::StorageType::File,
-            Some(stream::PersistenceMode::Async),
-            "stream_async_persistence",
-        ),
-    ] {
+async fn admission_requires_streams_that_accept_and_retain_acknowledged_publications() {
+    let cases: [(&str, fn(&mut stream::Config)); 5] = [
+        ("stream_no_ack", |config| config.no_ack = true),
+        ("stream_memory_storage", |config| {
+            config.storage = stream::StorageType::Memory;
+        }),
+        ("stream_async_persistence", |config| {
+            config.persist_mode = Some(stream::PersistenceMode::Async);
+        }),
+        ("stream_interest_retention", |config| {
+            config.retention = stream::RetentionPolicy::Interest
+        }),
+        ("stream_sealed", |config| config.sealed = true),
+    ];
+    for (error_type, configure) in cases {
         for (consumer_mode, dead_letter) in [(false, false), (true, false), (true, true)] {
             let fixture = Fixture::create(false).await;
             let name = if dead_letter {
@@ -54,10 +53,18 @@ async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing
                 .cached_info()
                 .config
                 .clone();
-            config.storage = storage;
-            config.persist_mode = persist_mode;
-            config.no_ack = no_ack;
-            fixture.replace_stream(config).await;
+            configure(&mut config);
+            if dead_letter && config.retention == stream::RetentionPolicy::Interest {
+                let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+                let mut source_config = source.cached_info().config.clone();
+                source_config.retention = stream::RetentionPolicy::WorkQueue;
+                fixture.replace_stream(source_config).await;
+            }
+            if config.sealed {
+                fixture.jetstream.update_stream(config).await.unwrap();
+            } else {
+                fixture.replace_stream(config).await;
+            }
             let (_guard, logged) = capture_logs();
             let refused = Box::pin(Messaging::connect(
                 options(
@@ -69,7 +76,7 @@ async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing
                 CancellationToken::new(),
             ))
             .await
-            .expect_err("each publishing role requires ACKs and durable storage");
+            .expect_err("the configured publishing role cannot accept or retain messages");
             std::assert_matches!(refused, infra_messaging::MessagingError::Topology);
             assert_eq!(
                 admission_refusals(&logged),

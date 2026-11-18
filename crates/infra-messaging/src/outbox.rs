@@ -169,7 +169,9 @@ impl Handler<PublishDomainEvent> for Publisher {
                     PublishRejection::InvalidEnvelope(_) => {
                         JobError::permanent("outbox_envelope_invalid")
                     }
-                    PublishRejection::BrokerRefused => JobError::retryable("broker_refused"),
+                    PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed => {
+                        JobError::retryable("broker_refused")
+                    }
                     PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
                     PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
                     PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),

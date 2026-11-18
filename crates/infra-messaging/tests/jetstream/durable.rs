@@ -16,6 +16,20 @@ fn handle<T: EventPayload + serde::de::DeserializeOwned + 'static>(
     registry.register(route, |_, _| async { Ok(()) }).unwrap();
 }
 
+fn assert_durable_refusal(logged: &Logged, operation: &str, error_type: &str) {
+    assert!(
+        logged.lock().unwrap().iter().any(|event| {
+            event
+                .iter()
+                .any(|(name, value)| *name == "operation" && value == operation)
+                && event
+                    .iter()
+                    .any(|(name, value)| *name == "error.type" && value == error_type)
+        }),
+        "{operation} must report {error_type}"
+    );
+}
+
 #[test]
 fn operator_metadata_matches_the_deployment_contract_vector() {
     let mut registry = Registry::default();
@@ -148,6 +162,65 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
 }
 
 #[tokio::test]
+async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage() {
+    for (inactive_threshold, memory_storage, error_type) in [
+        (Duration::from_secs(60), false, "durable_inactive_threshold"),
+        (Duration::ZERO, true, "durable_memory_storage"),
+    ] {
+        let fixture = Fixture::create(false).await;
+        let mut registered = fixture.registry.clone();
+        registered
+            .register(&fixture.route, |_, _| async { Ok(()) })
+            .unwrap();
+        let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
+        if memory_storage {
+            source
+                .create_consumer(consumer::pull::Config {
+                    durable_name: Some(fixture.durable.clone()),
+                    filter_subject: fixture.subject.clone(),
+                    metadata: registered
+                        .durable_metadata(&fixture.dlq_stream, &fixture.dlq_subject),
+                    ack_wait: Duration::from_secs(46),
+                    max_deliver: -1,
+                    memory_storage,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        } else {
+            let mut config = source.cached_info().config.clone();
+            config.consumer_limits = Some(stream::ConsumerLimits {
+                inactive_threshold,
+                ..Default::default()
+            });
+            fixture.jetstream.update_stream(config).await.unwrap();
+        }
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, Some(consumer_options(&fixture)), 1024),
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .unwrap();
+        let (_guard, logged) = capture_logs();
+        std::assert_matches!(
+            messaging.consumer(registered, deadline(), &cancel).await,
+            Err(infra_messaging::MessagingError::Topology)
+        );
+        assert_durable_refusal(&logged, "bind_consumer", error_type);
+        let actual = durable(&fixture).await;
+        assert_eq!(
+            actual.cached_info().config.inactive_threshold,
+            inactive_threshold
+        );
+        assert_eq!(actual.cached_info().config.memory_storage, memory_storage);
+        close(messaging).await;
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
 async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmission() {
     enum Change {
         Delivery,
@@ -155,6 +228,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         Legacy,
         DlqStream,
         DlqSubject,
+        IdleExpiry,
     }
     for change in [
         Change::Delivery,
@@ -162,6 +236,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         Change::Legacy,
         Change::DlqStream,
         Change::DlqSubject,
+        Change::IdleExpiry,
     ] {
         let fixture = Fixture::create(true).await;
         let cancel = CancellationToken::new();
@@ -197,8 +272,10 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
             Change::DlqSubject => {
                 config.metadata = registered.durable_metadata(&fixture.dlq_stream, "other.errors");
             }
+            Change::IdleExpiry => config.inactive_threshold = Duration::from_secs(60),
         }
         let changed = stream.update_consumer(config).await.unwrap();
+        let (_guard, logged) = capture_logs();
         std::assert_matches!(
             messaging.consumer(registered, deadline(), &cancel).await,
             Err(infra_messaging::MessagingError::Topology)
@@ -217,6 +294,10 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
             handle.finish(deadline()).await,
             Err(ConsumerError::ConsumerLost)
         );
+        if let Change::IdleExpiry = change {
+            assert_durable_refusal(&logged, "bind_consumer", "durable_inactive_threshold");
+            assert_durable_refusal(&logged, "consumer_info", "durable_inactive_threshold");
+        }
         close(messaging).await;
         fixture.cleanup().await;
     }

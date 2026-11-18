@@ -72,6 +72,8 @@ pub enum PublishRejection {
     WindowFull,
     #[error("message exceeds the broker's current size limit")]
     BrokerSizeLimit,
+    #[error("publication destination stream is sealed")]
+    BrokerStreamSealed,
     #[error("broker refused publication")]
     BrokerRefused,
 }
