@@ -210,6 +210,7 @@ impl Tx<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct CommandSavepoint {
     pending_notifications: usize,
 }
