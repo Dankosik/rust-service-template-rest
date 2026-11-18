@@ -95,7 +95,11 @@ enum ReadStep {
 type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
 impl State {
-    fn close(&mut self, outcome: Outcome) -> Option<Completion> {
+    fn close(
+        &mut self,
+        outcome: Outcome,
+        discarded: Option<Result<Bytes, ByteStreamError>>,
+    ) -> Option<Completion> {
         if !matches!(self.status, Status::Open(_)) {
             return None;
         }
@@ -111,27 +115,19 @@ impl State {
             resources,
             outcome,
             waker: self.waker.take(),
-            discarded: None,
+            discarded,
         })
     }
 
-    fn close_failed(&mut self, failure: Failure) -> (ReadPoll, Option<Completion>) {
-        (
-            Poll::Ready(Err(failure.error)),
-            self.close(Outcome::Failure(failure)),
-        )
-    }
-
-    fn close_failed_with_item(
+    fn close_failed(
         &mut self,
         failure: Failure,
-        item: Result<Bytes, ByteStreamError>,
+        discarded: Option<Result<Bytes, ByteStreamError>>,
     ) -> (ReadPoll, Option<Completion>) {
-        let (result, mut completion) = self.close_failed(failure);
-        if let Some(completion) = &mut completion {
-            completion.discarded = Some(item);
-        }
-        (result, completion)
+        (
+            Poll::Ready(Err(failure.error)),
+            self.close(Outcome::Failure(failure), discarded),
+        )
     }
 
     fn unread_bytes(&self) -> Option<u64> {
@@ -164,7 +160,10 @@ impl State {
         } else {
             LocalFailure::TooLarge.into()
         };
-        (Err(failure.error), self.close(Outcome::Failure(failure)))
+        (
+            Err(failure.error),
+            self.close(Outcome::Failure(failure), None),
+        )
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
@@ -174,7 +173,7 @@ impl State {
             Status::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.close_failed(Failure::stopped(stopped));
+            return self.close_failed(Failure::stopped(stopped), None);
         }
         self.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
@@ -185,11 +184,11 @@ impl State {
             coop.made_progress();
         }
         if let Some(stopped) = resources.context.stopped() {
-            let (result, mut completion) = self.close_failed(Failure::stopped(stopped));
-            if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
-                completion.discarded = item;
-            }
-            return (result, completion);
+            let discarded = match polled {
+                Poll::Ready(item) => item,
+                Poll::Pending => None,
+            };
+            return self.close_failed(Failure::stopped(stopped), discarded);
         }
         match polled {
             Poll::Pending => (Poll::Pending, None),
@@ -207,22 +206,20 @@ impl State {
                         resources.remaining = remaining;
                         (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
                     }
-                    None => {
-                        self.close_failed_with_item(LocalFailure::ContentLength.into(), Ok(chunk))
-                    }
+                    None => self.close_failed(LocalFailure::ContentLength.into(), Some(Ok(chunk))),
                 }
             }
             Poll::Ready(Some(Err(error))) => {
-                self.close_failed_with_item(error::from_download_body(&error), Err(error))
+                self.close_failed(error::from_download_body(&error), Some(Err(error)))
             }
             Poll::Ready(None) if resources.remaining == 0 => {
                 let chunk = resources.final_chunk.take();
                 (
                     Poll::Ready(Ok(ReadStep::Chunk(chunk))),
-                    self.close(Outcome::Success),
+                    self.close(Outcome::Success, None),
                 )
             }
-            Poll::Ready(None) => self.close_failed(LocalFailure::ContentLength.into()),
+            Poll::Ready(None) => self.close_failed(LocalFailure::ContentLength.into(), None),
         }
     }
 }
@@ -246,7 +243,7 @@ fn terminate(shared: &Mutex<State>, termination: Termination) {
                 })
             }
         };
-        state.close(outcome)
+        state.close(outcome, None)
     };
     if let Some(completion) = completion {
         completion.finish();

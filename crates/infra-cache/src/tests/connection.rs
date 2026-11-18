@@ -732,7 +732,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             let mut command = redis::cmd("DEL");
             command.arg("stop:during_build");
             during_build.cancel();
-            crate::connection::query_mutation(
+            crate::namespace::query_mutation(
                 command,
                 connection,
                 crate::namespace::Operation::Delete,

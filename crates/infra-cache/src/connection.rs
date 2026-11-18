@@ -191,53 +191,7 @@ impl<T: Send + 'static> Drop for Exchange<'_, T> {
     }
 }
 
-pub(super) async fn query_mutation(
-    command: redis::Cmd,
-    mut connection: MultiplexedConnection,
-    operation: Operation,
-) -> redis::RedisResult<()> {
-    let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
-    match (operation, reply_data(reply)?) {
-        (Operation::Set, redis::Value::Okay) | (Operation::Delete, redis::Value::Int(0 | 1)) => {
-            Ok(())
-        }
-        _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
-    }
-}
-
-pub(super) async fn query_read(
-    pipeline: redis::Pipeline,
-    mut connection: MultiplexedConnection,
-    limit: usize,
-) -> redis::RedisResult<Option<Vec<u8>>> {
-    use redis::Value;
-
-    let replies =
-        tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
-    let unexpected =
-        || redis::RedisError::from((redis::ErrorKind::Parse, "unexpected cache read reply"));
-    let [multi, exists_queued, range_queued, exec] =
-        <[_; 4]>::try_from(replies).map_err(|_| unexpected())?;
-    if reply_data(multi)? != Value::Okay {
-        return Err(unexpected());
-    }
-    for queued in [exists_queued, range_queued] {
-        if !matches!(reply_data(queued)?, Value::SimpleString(status) if status == "QUEUED") {
-            return Err(unexpected());
-        }
-    }
-    let Value::Array(results) = reply_data(exec)? else {
-        return Err(unexpected());
-    };
-    let [exists, value] = <[_; 2]>::try_from(results).map_err(|_| unexpected())?;
-    match (reply_data(exists)?, reply_data(value)?) {
-        (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
-        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= limit + 1 => Ok(Some(bytes)),
-        _ => Err(unexpected()),
-    }
-}
-
-fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::Value> {
+pub(super) fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::Value> {
     while let redis::Value::Attribute { data, .. } = reply {
         reply = *data;
     }
@@ -588,25 +542,8 @@ async fn supervise(
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
-    run_supervisor(
-        &exit.shared,
-        &exit.server,
-        tls.as_ref(),
-        &settings,
-        password_file.as_ref(),
-        command_timeout,
-    )
-    .await;
-}
-
-async fn run_supervisor(
-    shared: &Shared,
-    server: &ServerEndpoint,
-    tls: Option<&Tls>,
-    settings: &redis::RedisConnectionInfo,
-    password_file: Option<&PasswordFile>,
-    command_timeout: Duration,
-) {
+    let shared = &exit.shared;
+    let server = &exit.server;
     let mut backoff = setup_backoff();
     let mut next_attempt = Instant::now();
     loop {
@@ -615,7 +552,16 @@ async fn run_supervisor(
             return;
         }
         let retired = CancellationToken::new();
-        match setup_attempt(server, tls, settings, password_file, &retired, shared).await {
+        match setup_attempt(
+            server,
+            tls.as_ref(),
+            &settings,
+            password_file.as_ref(),
+            &retired,
+            shared,
+        )
+        .await
+        {
             Ok((dialed, rotation)) => {
                 let _driver = dialed.driver;
                 let (abandoned, replies) = mpsc::unbounded_channel();
@@ -804,8 +750,13 @@ struct Rotation<'a> {
     file: &'a PasswordFile,
     tasks: &'a TaskTracker,
     authenticated_password: Zeroizing<String>,
-    unreadable_logged: bool,
-    refused_logged: bool,
+    last_warning: Option<RefreshWarning>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshWarning {
+    Unreadable,
+    AuthRefused,
 }
 
 enum RefreshOutcome {
@@ -853,8 +804,7 @@ impl<'a> Rotation<'a> {
             file,
             tasks,
             authenticated_password,
-            unreadable_logged: false,
-            refused_logged: false,
+            last_warning: None,
         }
     }
 
@@ -913,23 +863,23 @@ impl<'a> Rotation<'a> {
         let (label, reason) = outcome.labels();
         metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => label, "reason" => reason)
             .increment(1);
-        let read_failed = matches!(outcome, RefreshOutcome::ReadFailed(_));
-        let unreadable_logged = std::mem::replace(&mut self.unreadable_logged, read_failed);
-        let refused = matches!(outcome, RefreshOutcome::AuthRefused);
-        let refused_logged = std::mem::replace(&mut self.refused_logged, refused);
+        let warning = match outcome {
+            RefreshOutcome::ReadFailed(_) => Some(RefreshWarning::Unreadable),
+            RefreshOutcome::AuthRefused => Some(RefreshWarning::AuthRefused),
+            _ => None,
+        };
+        let previous = std::mem::replace(&mut self.last_warning, warning);
+        if warning.is_some() && warning == previous {
+            return;
+        }
         match outcome {
-            RefreshOutcome::ReadFailed(error) => {
-                if !unreadable_logged {
-                    warn_password_file_unreadable(server, *error);
-                }
-            }
+            RefreshOutcome::ReadFailed(error) => warn_password_file_unreadable(server, *error),
             RefreshOutcome::Unchanged => {}
             RefreshOutcome::AuthAccepted => tracing::info!(
                 server.address = %server.host,
                 server.port = server.port,
                 "cache_password_reloaded"
             ),
-            RefreshOutcome::AuthRefused if refused_logged => {}
             RefreshOutcome::AuthRefused | RefreshOutcome::Failed(_) => {
                 tracing::warn!(
                     server.address = %server.host,

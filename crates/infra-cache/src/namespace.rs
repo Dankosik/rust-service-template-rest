@@ -6,7 +6,7 @@ use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
 use tokio::time::Instant;
 
-use crate::connection::{query_mutation, query_read};
+use crate::connection::reply_data;
 use crate::error::{CommandError, ErrorType};
 use crate::observe::{LocalSizeRefusal, OperationGuard, Outcome};
 use crate::{
@@ -202,6 +202,52 @@ impl CacheNamespace {
             return Err(OperationError::KeyTooLarge);
         }
         Ok(full_key)
+    }
+}
+
+pub(super) async fn query_mutation(
+    command: redis::Cmd,
+    mut connection: MultiplexedConnection,
+    operation: Operation,
+) -> redis::RedisResult<()> {
+    let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
+    match (operation, reply_data(reply)?) {
+        (Operation::Set, redis::Value::Okay) | (Operation::Delete, redis::Value::Int(0 | 1)) => {
+            Ok(())
+        }
+        _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
+    }
+}
+
+async fn query_read(
+    pipeline: redis::Pipeline,
+    mut connection: MultiplexedConnection,
+    limit: usize,
+) -> redis::RedisResult<Option<Vec<u8>>> {
+    use redis::Value;
+
+    let replies =
+        tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
+    let unexpected =
+        || redis::RedisError::from((redis::ErrorKind::Parse, "unexpected cache read reply"));
+    let [multi, exists_queued, range_queued, exec] =
+        <[_; 4]>::try_from(replies).map_err(|_| unexpected())?;
+    if reply_data(multi)? != Value::Okay {
+        return Err(unexpected());
+    }
+    for queued in [exists_queued, range_queued] {
+        if !matches!(reply_data(queued)?, Value::SimpleString(status) if status == "QUEUED") {
+            return Err(unexpected());
+        }
+    }
+    let Value::Array(results) = reply_data(exec)? else {
+        return Err(unexpected());
+    };
+    let [exists, value] = <[_; 2]>::try_from(results).map_err(|_| unexpected())?;
+    match (reply_data(exists)?, reply_data(value)?) {
+        (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
+        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= limit + 1 => Ok(Some(bytes)),
+        _ => Err(unexpected()),
     }
 }
 

@@ -231,9 +231,7 @@ impl ObjectStorage {
     ) -> Result<(), MutationError> {
         let (context, mut guard) = self.begin_mutation(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
-            return Err(
-                guard.fail_mutation(Failure::not_applied(MutationFailure::TooLarge, "too_large"))
-            );
+            return Err(guard.fail_mutation(Failure::TOO_LARGE));
         }
         let _permit = self.admit_mutation(&mut guard)?;
         let outcomes = body.outcomes.take();
@@ -485,7 +483,7 @@ impl ObjectStorage {
     ) -> Result<OwnedSemaphorePermit, MutationError> {
         Arc::clone(&self.inner.admission)
             .try_acquire_owned()
-            .map_err(|_| guard.fail_mutation(Failure::not_applied(MutationFailure::Busy, "busy")))
+            .map_err(|_| guard.fail_mutation(Failure::BUSY))
     }
 
     fn begin(
