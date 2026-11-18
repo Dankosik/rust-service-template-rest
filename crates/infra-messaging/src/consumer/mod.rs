@@ -1,6 +1,7 @@
 mod delivery;
 
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -336,10 +337,8 @@ impl Consumer {
                         break 'pulls;
                     }
                     pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
-                    tokio::select! {
-                        biased;
-                        () = stop.cancelled() => break 'pulls,
-                        () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                    if retry_after_backoff(stop).await.is_break() {
+                        break 'pulls;
                     }
                     continue;
                 }
@@ -382,10 +381,8 @@ impl Consumer {
                         if lost {
                             return Err(ConsumerError::ConsumerLost);
                         }
-                        tokio::select! {
-                            biased;
-                            () = stop.cancelled() => break 'pulls,
-                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        if retry_after_backoff(stop).await.is_break() {
+                            break 'pulls;
                         }
                         continue 'pulls;
                     }
@@ -439,10 +436,8 @@ impl Consumer {
                         }
                     } else if let BatchEnd::Failed { phase, error_kind } = end {
                         pull_failed(phase, error_kind);
-                        tokio::select! {
-                            biased;
-                            () = stop.cancelled() => break 'pulls,
-                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        if retry_after_backoff(stop).await.is_break() {
+                            break 'pulls;
                         }
                     }
                 }
@@ -668,6 +663,14 @@ fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError 
 fn pull_failed(phase: &'static str, error_type: &'static str) {
     tracing::warn!(phase, error.type = error_type, "messaging_pull_failed");
     metrics::counter!(STREAM_ERRORS_TOTAL).increment(1);
+}
+
+async fn retry_after_backoff(stop: &CancellationToken) -> ControlFlow<()> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => ControlFlow::Break(()),
+        () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => ControlFlow::Continue(()),
+    }
 }
 
 async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationToken) {

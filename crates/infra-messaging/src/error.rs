@@ -67,7 +67,7 @@ pub enum PublishError {
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PublishRejection {
     #[error("invalid publication envelope: {0}")]
-    InvalidEnvelope(#[source] EnvelopeError),
+    InvalidEnvelope(#[from] EnvelopeError),
     #[error("messaging resource is draining or its consumer failed")]
     Unavailable,
     #[error("publication context stopped before dispatch")]
