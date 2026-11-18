@@ -74,7 +74,7 @@ impl MethodMetrics {
 
     fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
         let metric_code = status_code_names(code as usize).metric;
-        self.handling_seconds.record(elapsed.as_secs_f64());
+        self.handling_seconds.record(elapsed);
         self.handled[code as usize]
             .get_or_init(|| {
                 let mut labels = self.base_labels.to_vec();
@@ -207,7 +207,7 @@ pub(crate) fn admission_waiting() -> impl Drop {
     metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC).increment(1.0);
     DropGuard::new(tokio::time::Instant::now(), |started| {
         metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC).decrement(1.0);
-        metrics::histogram!(SERVER_ADMISSION_WAIT_METRIC).record(started.elapsed().as_secs_f64());
+        metrics::histogram!(SERVER_ADMISSION_WAIT_METRIC).record(started.elapsed());
     })
 }
 

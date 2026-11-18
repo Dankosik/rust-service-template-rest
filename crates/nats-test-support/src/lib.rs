@@ -28,6 +28,12 @@ pub async fn eventually<T>(
     .expect(what)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DroppedAck {
+    Request,
+    Reply,
+}
+
 #[derive(Debug)]
 pub struct AckDroppingRelay {
     pub url: String,
@@ -206,7 +212,7 @@ impl AckDroppingRelay {
         (relay, pull)
     }
 
-    pub async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
+    pub async fn start_source_ack(stream: &str, durable: &str, dropped: DroppedAck) -> Self {
         let identity = format!(".{stream}.{durable}.");
         let reply_subject = Arc::new(Mutex::new(None::<String>));
         let sent_reply = Arc::clone(&reply_subject);
@@ -225,7 +231,7 @@ impl AckDroppingRelay {
                 {
                     seen_request = true;
                     *sent_reply.lock().expect("ACK reply lock") = Some(reply.to_owned());
-                    return drop_request;
+                    return dropped == DroppedAck::Request;
                 }
                 false
             },
@@ -235,7 +241,8 @@ impl AckDroppingRelay {
                     .split_ascii_whitespace()
                     .nth(1);
                 let mut reply = reply_subject.lock().expect("ACK reply lock");
-                if !drop_request && payload.is_empty() && subject == reply.as_deref() {
+                if dropped == DroppedAck::Reply && payload.is_empty() && subject == reply.as_deref()
+                {
                     reply.take();
                     return true;
                 }

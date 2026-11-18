@@ -59,7 +59,7 @@ impl<O: OutcomeLabel> Outcomes<O> {
     pub(crate) fn record(&self, outcome: O, elapsed: Duration) {
         let (total, duration) = &self.handles[outcome];
         total.increment(1);
-        duration.record(elapsed.as_secs_f64());
+        duration.record(elapsed);
     }
 }
 
