@@ -117,7 +117,7 @@ async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Re
 }
 
 // template:begin http-idempotency:http-mounted-operations
-pub(crate) use components::merge_map;
+pub(crate) use components::{merge_map, same_definition};
 
 pub(crate) fn resolve_schema<'a>(
     schema: &'a RefOr<utoipa::openapi::Schema>,

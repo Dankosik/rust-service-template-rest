@@ -8,7 +8,7 @@ use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::{RefOr, Schema};
 
-use crate::contract::fixed_path_operations;
+use crate::contract::{fixed_path_operations, same_definition};
 
 use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
@@ -302,9 +302,11 @@ fn supplement_success(
         };
         if let Some(declared) = &supplement.schema {
             let typed = actual.schema.as_ref()?;
-            if typed != declared
-                && crate::contract::resolve_schema(typed, schemas)?
-                    != crate::contract::resolve_schema(declared, schemas)?
+            if !same_definition(typed, declared)
+                && !same_definition(
+                    crate::contract::resolve_schema(typed, schemas)?,
+                    crate::contract::resolve_schema(declared, schemas)?,
+                )
             {
                 return None;
             }
@@ -324,7 +326,7 @@ fn supplement_success(
         } else {
             supplement.description.clone_from(&actual.description);
         }
-        if *actual != supplement {
+        if !same_definition(actual, &supplement) {
             return None;
         }
     }
@@ -334,7 +336,7 @@ fn supplement_success(
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(&name))
         {
-            if existing != &header {
+            if !same_definition(existing, &header) {
                 return None;
             }
         } else {
@@ -372,7 +374,7 @@ fn prepare_success_headers(
                 .headers
                 .insert(REPLAYED_HEADER.to_owned(), replay_header());
         }
-        Ok(Some((_, header))) if header == &replay_header() => {}
+        Ok(Some((_, header))) if same_definition(header, &replay_header()) => {}
         _ => {
             return Err(CompositionError::new(
                 operation_id,
