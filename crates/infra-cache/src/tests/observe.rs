@@ -1,3 +1,5 @@
+#![warn(clippy::let_underscore_must_use)]
+
 use super::*;
 use operation_context::OperationContext;
 
@@ -250,7 +252,9 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
     let namespace = cache.namespace(namespace!("obs"));
     {
         let mut operation = std::pin::pin!(namespace.get(&caller, "hunter2-key"));
-        let _ = tokio::time::timeout(Duration::from_millis(30), &mut operation).await;
+        tokio::time::timeout(Duration::from_millis(30), &mut operation)
+            .await
+            .expect_err("the GET must still be pending when dropped");
     }
     let scrape = recorder.handle().render();
     assert!(

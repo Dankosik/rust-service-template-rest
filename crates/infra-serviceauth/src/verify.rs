@@ -53,6 +53,7 @@ pub(crate) enum Reason {
     Clock,
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 impl Reason {
     const fn label(self) -> &'static str {
         match self {
@@ -80,7 +81,19 @@ impl Reason {
             Self::Missing => Failure::Missing,
             Self::Malformed => Failure::Malformed,
             Self::Clock => Failure::Unavailable,
-            _ => Failure::Invalid,
+            Self::Header
+            | Self::Algorithm
+            | Self::Type
+            | Self::KeyId
+            | Self::Claims
+            | Self::Issuer
+            | Self::UnknownKey
+            | Self::Signature
+            | Self::Subject
+            | Self::Audience
+            | Self::Expired
+            | Self::NotYetValid
+            | Self::Lifetime => Failure::Invalid,
         }
     }
 }
