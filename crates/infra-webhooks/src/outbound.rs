@@ -10,7 +10,7 @@ use std::{
 use bytes::Bytes;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
-use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
 use infra_jobs::{Handler, Job, JobError, JobKind, KindsBuilder, Policy};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use metrics::{Counter, SharedString};
@@ -101,7 +101,7 @@ pub struct Dispatcher {
 
 struct ConfiguredEndpoint {
     endpoint: Endpoint,
-    metrics: EndpointMetrics,
+    outcomes: EndpointOutcomes,
 }
 
 impl Dispatcher {
@@ -111,8 +111,8 @@ impl Dispatcher {
             .into_iter()
             .map(|(endpoint_id, endpoint)| {
                 let id: Arc<str> = Arc::from(endpoint_id);
-                let metrics = EndpointMetrics::new(SharedString::from(Arc::clone(&id)));
-                (id, ConfiguredEndpoint { endpoint, metrics })
+                let outcomes = EndpointOutcomes::new(SharedString::from(Arc::clone(&id)));
+                (id, ConfiguredEndpoint { endpoint, outcomes })
             })
             .collect();
         Self {
@@ -163,25 +163,22 @@ impl Handler<Delivery> for Dispatcher {
     async fn run(&self, job: Job<Delivery>) -> Result<(), JobError> {
         let delivery = job.payload();
         let endpoint_id = delivery.endpoint_id.as_str();
-        let Some(ConfiguredEndpoint { endpoint, metrics }) = self.endpoints.get(endpoint_id) else {
+        let Some(ConfiguredEndpoint { endpoint, outcomes }) = self.endpoints.get(endpoint_id)
+        else {
             return Err(self.fail_missing_endpoint(endpoint_id));
         };
         let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
-            return Err(fail(
-                endpoint_id,
-                metrics,
-                DeliveryFailure::ClockUnavailable,
-            ));
+            return Err(outcomes.fail(DeliveryFailure::ClockUnavailable));
         };
         let message_id = job.id().to_string();
         let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
-            return Err(fail(endpoint_id, metrics, DeliveryFailure::InvalidPayload));
+            return Err(outcomes.fail(DeliveryFailure::InvalidPayload));
         };
         let response = endpoint
             .client
             .execute_for_headers(request, &job.context())
             .await;
-        classify_response(endpoint_id, metrics, response, SystemTime::now())
+        outcomes.classify_response(response, SystemTime::now())
     }
 }
 
@@ -233,21 +230,66 @@ enum OutcomeSlot {
     Client,
 }
 
-struct EndpointMetrics {
+struct EndpointOutcomes {
     endpoint: SharedString,
-    outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
+    counters: EnumMap<OutcomeSlot, OnceLock<Counter>>,
 }
 
-impl EndpointMetrics {
+impl EndpointOutcomes {
     fn new(endpoint: SharedString) -> Self {
         Self {
             endpoint,
-            outcomes: EnumMap::default(),
+            counters: EnumMap::default(),
+        }
+    }
+
+    fn classify_response(
+        &self,
+        response: Result<http::response::Parts, HttpError>,
+        response_time: SystemTime,
+    ) -> Result<(), JobError> {
+        match response {
+            Ok(response) if response.status.is_success() => {
+                tracing::debug!(
+                    webhook.endpoint = &*self.endpoint,
+                    webhook.outcome = "delivered",
+                    http.status = response.status.as_u16(),
+                    "webhook_delivery_finished"
+                );
+                self.record_delivered();
+                Ok(())
+            }
+            Ok(response) if response.status == StatusCode::GONE => {
+                Err(self.fail(DeliveryFailure::EndpointGone))
+            }
+            Ok(response) => {
+                let failure = DeliveryFailure::Status(response.status);
+                let Some(delay) = retry_after(&response.headers, response_time) else {
+                    return Err(self.fail(failure));
+                };
+                let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) else {
+                    return Err(
+                        self.fail(DeliveryFailure::RetryAfterExceedsMaxDelay(response.status))
+                    );
+                };
+                self.record_failure(failure);
+                Err(retry)
+            }
+            Err(error) => Err(self.fail(DeliveryFailure::from_exchange(&error))),
+        }
+    }
+
+    fn fail(&self, failure: DeliveryFailure) -> JobError {
+        self.record_failure(failure);
+        if failure.is_permanent() {
+            JobError::permanent(failure.reason())
+        } else {
+            JobError::retryable(failure.reason())
         }
     }
 
     fn record_delivered(&self) {
-        self.outcomes[OutcomeSlot::Delivered]
+        self.counters[OutcomeSlot::Delivered]
             .get_or_init(|| {
                 metrics::counter!(
                     WEBHOOK_DELIVERY_OUTCOMES_METRIC,
@@ -259,13 +301,33 @@ impl EndpointMetrics {
     }
 
     fn record_failure(&self, failure: DeliveryFailure) {
-        self.outcomes[failure.slot()]
+        let outcome = failure.outcome();
+        let reason = failure.reason();
+        let status = failure.status().map(|status| status.as_u16());
+        if failure.is_permanent() {
+            tracing::warn!(
+                webhook.endpoint = &*self.endpoint,
+                webhook.outcome = outcome,
+                webhook.reason = reason,
+                http.status = status,
+                "webhook_delivery_finished"
+            );
+        } else {
+            tracing::info!(
+                webhook.endpoint = &*self.endpoint,
+                webhook.outcome = outcome,
+                webhook.reason = reason,
+                http.status = status,
+                "webhook_delivery_finished"
+            );
+        }
+        self.counters[failure.slot()]
             .get_or_init(|| {
                 metrics::counter!(
                     WEBHOOK_DELIVERY_OUTCOMES_METRIC,
                     "endpoint" => self.endpoint.clone(),
-                    "outcome" => failure.outcome(),
-                    "reason" => failure.reason()
+                    "outcome" => outcome,
+                    "reason" => reason
                 )
             })
             .increment(1);
@@ -370,9 +432,7 @@ impl Endpoint {
             .keys
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
             .ok()?;
-        Request::builder()
-            .method(Method::POST)
-            .uri(self.destination.clone()?)
+        Request::post(self.destination.clone()?)
             .header(header::CONTENT_TYPE, &delivery.content_type)
             .header(WEBHOOK_ID, message_id)
             .header(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp))
@@ -380,82 +440,6 @@ impl Endpoint {
             .body(delivery.body.clone())
             .ok()
     }
-}
-
-fn classify_response(
-    endpoint_id: &str,
-    metrics: &EndpointMetrics,
-    response: Result<http::response::Parts, HttpError>,
-    response_time: SystemTime,
-) -> Result<(), JobError> {
-    match response {
-        Ok(response) if response.status.is_success() => {
-            tracing::debug!(
-                webhook.endpoint = endpoint_id,
-                webhook.outcome = "delivered",
-                http.status = response.status.as_u16(),
-                "webhook_delivery_finished"
-            );
-            metrics.record_delivered();
-            Ok(())
-        }
-        Ok(response) if response.status == StatusCode::GONE => {
-            Err(fail(endpoint_id, metrics, DeliveryFailure::EndpointGone))
-        }
-        Ok(response) => {
-            let failure = DeliveryFailure::Status(response.status);
-            let Some(delay) = retry_after(&response.headers, response_time) else {
-                return Err(fail(endpoint_id, metrics, failure));
-            };
-            let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) else {
-                return Err(fail(
-                    endpoint_id,
-                    metrics,
-                    DeliveryFailure::RetryAfterExceedsMaxDelay(response.status),
-                ));
-            };
-            record_failure(endpoint_id, metrics, failure);
-            Err(retry)
-        }
-        Err(error) => Err(fail(
-            endpoint_id,
-            metrics,
-            DeliveryFailure::from_exchange(&error),
-        )),
-    }
-}
-
-fn fail(endpoint_id: &str, metrics: &EndpointMetrics, failure: DeliveryFailure) -> JobError {
-    record_failure(endpoint_id, metrics, failure);
-    if failure.is_permanent() {
-        JobError::permanent(failure.reason())
-    } else {
-        JobError::retryable(failure.reason())
-    }
-}
-
-fn record_failure(endpoint_id: &str, metrics: &EndpointMetrics, failure: DeliveryFailure) {
-    let outcome = failure.outcome();
-    let reason = failure.reason();
-    let status = failure.status().map(|status| status.as_u16());
-    if failure.is_permanent() {
-        tracing::warn!(
-            webhook.endpoint = endpoint_id,
-            webhook.outcome = outcome,
-            webhook.reason = reason,
-            http.status = status,
-            "webhook_delivery_finished"
-        );
-    } else {
-        tracing::info!(
-            webhook.endpoint = endpoint_id,
-            webhook.outcome = outcome,
-            webhook.reason = reason,
-            http.status = status,
-            "webhook_delivery_finished"
-        );
-    }
-    metrics.record_failure(failure);
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -626,7 +610,7 @@ mod tests {
                 .into_parts()
                 .0)
         };
-        let metrics = super::EndpointMetrics::new("partner".into());
+        let outcomes = super::EndpointOutcomes::new("partner".into());
         let dispatcher = super::Dispatcher::new(BTreeMap::new());
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -638,7 +622,7 @@ mod tests {
                 response(410),
                 Err(super::HttpError::Timeout),
             ] {
-                let _ = super::classify_response("partner", &metrics, exchange, UNIX_EPOCH);
+                let _ = outcomes.classify_response(exchange, UNIX_EPOCH);
             }
             let _ = dispatcher.fail_missing_endpoint("removed");
             let _ = dispatcher.fail_missing_endpoint("removed");

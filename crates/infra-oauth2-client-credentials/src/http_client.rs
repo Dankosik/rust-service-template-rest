@@ -82,15 +82,7 @@ impl AuthenticatedClient {
                     other => Error::Resource(other),
                 })?;
         let deadline = acquisition_deadline(prepared.context());
-        let grant = self
-            .tokens
-            .admit(subject, deadline)
-            .map_err(|refusal| match refusal {
-                AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
-                AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
-                AdmissionRefusal::UnexpectedSubject => Error::UnexpectedSubject,
-                AdmissionRefusal::Acquisition(error) => Error::Acquisition(error),
-            })?;
+        let grant = self.tokens.admit(subject, deadline)?;
         let acquired = grant.acquire_for_request(deadline).await?;
         prepared.set_authorization(acquired.header.clone());
         prepared
@@ -117,5 +109,16 @@ impl RequestClient<'_> {
         self.client
             .execute_with_context(request, self.context)
             .await
+    }
+}
+
+impl From<AdmissionRefusal> for Error {
+    fn from(refusal: AdmissionRefusal) -> Self {
+        match refusal {
+            AdmissionRefusal::AuthorizationConflict => Self::AuthorizationConflict,
+            AdmissionRefusal::SubjectRequired => Self::SubjectRequired,
+            AdmissionRefusal::UnexpectedSubject => Self::UnexpectedSubject,
+            AdmissionRefusal::Acquisition(error) => Self::Acquisition(error),
+        }
     }
 }
