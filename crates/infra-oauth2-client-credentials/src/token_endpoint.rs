@@ -221,7 +221,7 @@ fn classify_token_response(
             status,
             source: ResponseBodyTooLarge | Transport { .. },
         }) if status != StatusCode::OK => Err(provider_failure(status, None)),
-        Err(error) => Err(map_transport_error(&error.into_error())),
+        Err(error) => Err(crate::TransportFailure::from(error.into_error()).into()),
     }
 }
 
@@ -245,17 +245,6 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
         }
     }
     serde_json::from_slice(response.body().as_ref()).map_err(|_| AcquisitionError::InvalidResponse)
-}
-
-fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
-    match error {
-        infra_outbound_http::Error::Timeout => AcquisitionError::Timeout,
-        infra_outbound_http::Error::Cancelled => AcquisitionError::Cancelled,
-        infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
-        infra_outbound_http::Error::InvalidTarget
-        | infra_outbound_http::Error::DispatchRefused
-        | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
-    }
 }
 
 /// RFC 8693 §2.2.1

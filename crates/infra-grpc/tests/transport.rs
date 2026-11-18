@@ -1290,6 +1290,30 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         Err(Error::DuplicateScopeRequirement(UNARY_PATH.to_owned()))
     );
 }
+
+#[test]
+fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
+    let mut services = described();
+    services.add(EchoServiceServer::new(Echo::new())).unwrap();
+
+    assert_eq!(
+        services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
+        Err(Error::InvalidScopeToken {
+            path: UNARY_PATH.to_owned(),
+            index: 1,
+        })
+    );
+    assert_eq!(
+        services.require_scopes_for_delegation(UNARY_PATH, &[""]),
+        Err(Error::InvalidScopeToken {
+            path: UNARY_PATH.to_owned(),
+            index: 0,
+        })
+    );
+    services
+        .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])
+        .unwrap();
+}
 // template:end authn:grpc-transport-test-insufficient-scope
 
 // template:begin authn:grpc-transport-test-rejection-flood

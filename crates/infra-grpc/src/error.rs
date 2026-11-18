@@ -15,6 +15,8 @@ pub enum Error {
     UnregisteredMethodPath(String),
     #[error("gRPC scope requirement is declared twice for {0}")]
     DuplicateScopeRequirement(String),
+    #[error("gRPC scope requirement for {path} has an invalid scope token at index {index}")]
+    InvalidScopeToken { path: String, index: usize },
     #[error("gRPC method {0} has no bearer scope requirement")]
     MissingScopeRequirement(String),
     #[error("gRPC business calls require {}", crate::authn::VERIFIER_SETTINGS.join(" or "))]

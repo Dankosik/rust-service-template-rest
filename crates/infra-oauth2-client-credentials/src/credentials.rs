@@ -14,7 +14,7 @@ use tokio::{
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
-    ServiceTokenTarget,
+    ServiceTokenTarget, TransportBuildFailure,
     assertion::Signer,
     options::{Admitted, admit_options},
     request_admission::AdmissionRefusal,
@@ -172,12 +172,8 @@ struct CompletedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let admitted = admit_options(options, "https", "https")?;
-        let token_http = Client::try_new(&admitted.endpoint, TOKEN_LIMITS).map_err(|source| {
-            PreparationError::Transport {
-                endpoint: "token_url",
-                source,
-            }
-        })?;
+        let token_http = Client::try_new(&admitted.endpoint, TOKEN_LIMITS)
+            .map_err(|cause| TransportBuildFailure::new("token_url", cause))?;
         Self::build(admitted, token_http).map_err(PreparationError::from)
     }
 
