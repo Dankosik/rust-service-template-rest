@@ -589,7 +589,7 @@ impl Fixture {
             .expect("echo registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
-            .require_scopes_for_delegation(ECHO_SERVICE_UNARY, &[ORDERS_READ])
+            .require_scopes_for_delegation(UNARY_PATH, &[ORDERS_READ])
             .expect("unary scopes register once");
         for path in STREAM_PATHS {
             if Some(path) != omitted_method {
@@ -877,7 +877,7 @@ async fn client_observation_fallback_preserves_raw_request_routing() {
     for mismatched_extension in [false, true] {
         let builder = http::Request::builder()
             .method("POST")
-            .uri(ECHO_SERVICE_UNARY)
+            .uri(UNARY_PATH)
             .header("content-type", "application/grpc")
             .header("te", "trailers");
         let authentication = request(()).into_parts().0.into_headers();
@@ -1257,7 +1257,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
     let (verifier, fixture) = BearerFixture::start().await;
     let mut services = described();
     services.add(EchoServiceServer::new(Echo::new())).unwrap();
-    for path in std::iter::once(ECHO_SERVICE_UNARY).chain(STREAM_PATHS) {
+    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
         if path != SERVER_STREAM_PATH {
             services.require_scopes(path, &[]).unwrap();
         }
@@ -1281,8 +1281,8 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
 fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
     let mut services = described();
     assert_matches!(
-        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.read"]),
-        Err(Error::UnregisteredMethodPath(path)) if path == ECHO_SERVICE_UNARY
+        services.require_scopes(UNARY_PATH, &["echo.read"]),
+        Err(Error::UnregisteredMethodPath(path)) if path == UNARY_PATH
     );
     services
         .add(EchoServiceServer::new(Echo::new()))
@@ -1303,11 +1303,11 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         );
     }
     services
-        .require_scopes(ECHO_SERVICE_UNARY, &["echo.read"])
+        .require_scopes(UNARY_PATH, &["echo.read"])
         .expect("first requirement");
     assert_matches!(
-        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.write"]),
-        Err(Error::DuplicateScopeRequirement(path)) if path == ECHO_SERVICE_UNARY
+        services.require_scopes(UNARY_PATH, &["echo.write"]),
+        Err(Error::DuplicateScopeRequirement(path)) if path == UNARY_PATH
     );
 }
 
@@ -1317,15 +1317,15 @@ fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
     services.add(EchoServiceServer::new(Echo::new())).unwrap();
 
     assert_matches!(
-        services.require_scopes(ECHO_SERVICE_UNARY, &["echo.read", "echo.read echo.write"]),
-        Err(Error::InvalidScopeToken { path, index: 1 }) if path == ECHO_SERVICE_UNARY
+        services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
+        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
     );
     assert_matches!(
-        services.require_scopes_for_delegation(ECHO_SERVICE_UNARY, &[""]),
-        Err(Error::InvalidScopeToken { path, index: 0 }) if path == ECHO_SERVICE_UNARY
+        services.require_scopes_for_delegation(UNARY_PATH, &[""]),
+        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
     );
     services
-        .require_scopes_for_delegation(ECHO_SERVICE_UNARY, &["echo.read", "echo.write"])
+        .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])
         .unwrap();
 }
 // template:end authn:grpc-transport-test-insufficient-scope
@@ -1383,7 +1383,7 @@ async fn the_deadline_bounds_authentication_too() {
         .expect("the introspection profile selected its provider")
         .silent
         .store(true, Ordering::Release);
-    let status = timeout(WAIT, raw_call(fixture.address, ECHO_SERVICE_UNARY))
+    let status = timeout(WAIT, raw_call(fixture.address, UNARY_PATH))
         .await
         .expect("the deadline answers while the provider is silent");
     assert_eq!(status, "4");
@@ -1427,7 +1427,7 @@ fn opening_app_waiting(
 ) -> infra_grpc::Application {
     let mut services = described();
     services.add(EchoServiceServer::new(echo.clone())).unwrap();
-    for path in std::iter::once(ECHO_SERVICE_UNARY).chain(STREAM_PATHS) {
+    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
         services.require_scopes(path, &[]).unwrap();
     }
     infra_grpc::router(
@@ -1499,7 +1499,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     let gate = Arc::new(Hold::new());
     *provider.gate.lock() = Some(Arc::clone(&gate));
     let mut leader = Box::pin(app.clone().oneshot(opening_request(
-        ECHO_SERVICE_UNARY,
+        UNARY_PATH,
         Some(ACCEPTED),
         "first",
     )));
@@ -1512,7 +1512,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     .await
     .unwrap();
     let mut follower = Box::pin(app.clone().oneshot(opening_request(
-        ECHO_SERVICE_UNARY,
+        UNARY_PATH,
         Some(ACCEPTED),
         "follower",
     )));
@@ -1522,9 +1522,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         let response = timeout(
             WAIT,
             app.clone().oneshot(impatient_raw(opening_request(
-                ECHO_SERVICE_UNARY,
-                bearer,
-                "overflow",
+                UNARY_PATH, bearer, "overflow",
             ))),
         )
         .await
@@ -1558,7 +1556,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     let response = app
         .clone()
         .oneshot(pending_upload(
-            opening_request(ECHO_SERVICE_UNARY, None, "draining"),
+            opening_request(UNARY_PATH, None, "draining"),
             "50m",
         ))
         .await
@@ -1574,7 +1572,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     drop(follower);
     let response = app
         .clone()
-        .oneshot(opening_request(ECHO_SERVICE_UNARY, None, "missing"))
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
         .await
         .unwrap();
     assert_eq!(
@@ -1586,11 +1584,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     gate.release();
     let response = timeout(
         WAIT,
-        app.oneshot(opening_request(
-            ECHO_SERVICE_UNARY,
-            Some("recovered"),
-            "recovered",
-        )),
+        app.oneshot(opening_request(UNARY_PATH, Some("recovered"), "recovered")),
     )
     .await
     .unwrap()
@@ -1610,13 +1604,7 @@ async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
     let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
-    let call = || {
-        opening_request(
-            ECHO_SERVICE_UNARY,
-            Some(BearerMode::SELECTED.token(true)),
-            "echo",
-        )
-    };
+    let call = || opening_request(UNARY_PATH, Some(BearerMode::SELECTED.token(true)), "echo");
     let warm = app.clone().oneshot(call()).await.unwrap();
     assert!(grpc_status(&warm).is_none());
     drop(warm);
@@ -1668,7 +1656,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     assert!(grpc_status(&first).is_none());
     let gate = Arc::new(Hold::new());
     *provider.gate.lock() = Some(Arc::clone(&gate));
-    let mut slow = opening_request(ECHO_SERVICE_UNARY, Some("slow"), "slow");
+    let mut slow = opening_request(UNARY_PATH, Some("slow"), "slow");
     slow.headers_mut()
         .insert("grpc-timeout", "1500m".parse().unwrap());
     let mut authenticating = Box::pin(app.clone().oneshot(slow));
@@ -1694,7 +1682,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     assert!(grpc_status(&second).is_none());
     let missing = app
         .clone()
-        .oneshot(opening_request(ECHO_SERVICE_UNARY, None, "missing"))
+        .oneshot(opening_request(UNARY_PATH, None, "missing"))
         .await
         .unwrap();
     assert_eq!(grpc_status(&missing).unwrap().code(), Code::Unauthenticated);
@@ -1708,11 +1696,7 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     drop(first);
     drop(second);
     let recovered = app
-        .oneshot(opening_request(
-            ECHO_SERVICE_UNARY,
-            Some(ACCEPTED),
-            "recovered",
-        ))
+        .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "recovered"))
         .await
         .unwrap();
     assert!(grpc_status(&recovered).is_none());
@@ -1727,7 +1711,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         let app = opening_app(verifier, &echo, capacity);
         let gate = Arc::new(Hold::new());
         *provider.gate.lock() = Some(Arc::clone(&gate));
-        let mut request = opening_request(ECHO_SERVICE_UNARY, Some(ACCEPTED), "slow");
+        let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "slow");
         request
             .headers_mut()
             .insert("grpc-timeout", "100m".parse().unwrap());
@@ -1740,7 +1724,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         })
         .await
         .unwrap();
-        let missing = opening_request(ECHO_SERVICE_UNARY, None, "missing");
+        let missing = opening_request(UNARY_PATH, None, "missing");
         let response = app
             .clone()
             .oneshot(if capacity == 0 {
@@ -1800,7 +1784,7 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     let held = hold_capacity(&app).await;
     assert!(grpc_status(&held).is_none());
     let mut waiting = Box::pin(app.clone().oneshot(opening_request(
-        ECHO_SERVICE_UNARY,
+        UNARY_PATH,
         Some(BearerMode::SELECTED.token(true)),
         "waited",
     )));
@@ -1875,7 +1859,7 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     let response = timeout(
         WAIT,
         app.clone().oneshot(opening_request(
-            ECHO_SERVICE_UNARY,
+            UNARY_PATH,
             Some(BearerMode::SELECTED.token(true)),
             "refused",
         )),
@@ -1923,7 +1907,7 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     tokio::time::pause();
     let started = tokio::time::Instant::now();
     let mut waiting = Box::pin(app.oneshot(opening_request(
-        ECHO_SERVICE_UNARY,
+        UNARY_PATH,
         Some(BearerMode::SELECTED.token(true)),
         "queued",
     )));
@@ -1966,7 +1950,7 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     let response = timeout(
         WAIT,
         app.clone().oneshot(opening_request(
-            ECHO_SERVICE_UNARY,
+            UNARY_PATH,
             Some(BearerMode::SELECTED.token(true)),
             "refused",
         )),
@@ -1995,7 +1979,7 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
             progressed.store(true, Ordering::Release);
         }
     });
-    let mut request = opening_request(ECHO_SERVICE_UNARY, None, "");
+    let mut request = opening_request(UNARY_PATH, None, "");
     *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::iter(
         std::iter::repeat_n(Ok::<_, std::convert::Infallible>(bytes::Bytes::new()), 1024),
     ));
@@ -2032,7 +2016,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let app = opening_app(verifier, &echo, 4);
 
     let mut request = opening_request(
-        ECHO_SERVICE_UNARY,
+        UNARY_PATH,
         Some(BearerMode::SELECTED.token(true)),
         "genuine",
     )
@@ -2064,7 +2048,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     assert!(calls[0].had_checksum);
     assert!(!calls[0].had_authorization);
 
-    let mut spoofed = opening_request(ECHO_SERVICE_UNARY, None, "spoofed");
+    let mut spoofed = opening_request(UNARY_PATH, None, "spoofed");
     spoofed.extensions_mut().insert(captured);
     spoofed.extensions_mut().insert(forged);
     let rejected = timeout(WAIT, app.oneshot(spoofed)).await.unwrap().unwrap();
@@ -2486,7 +2470,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
         clippy::disallowed_methods,
         reason = "the loopback peer records the timeout it received over HTTP/2"
     )]
-    let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
+    let app = axum::Router::new().route(UNARY_PATH, axum::routing::post(peer));
     let server = BoundListener::bind(loopback()).unwrap().serve_h2(
         app,
         server_options(connection_limits()),
@@ -2509,7 +2493,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
             Client::with_timeout_policy(&destination, ClientSecurity::Plaintext, policy).unwrap();
         let mut request = http::Request::builder()
             .method("POST")
-            .uri(ECHO_SERVICE_UNARY)
+            .uri(UNARY_PATH)
             .header("content-type", "application/grpc")
             .body(tonic::body::Body::empty())
             .unwrap();
@@ -2659,7 +2643,7 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
 async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     let fixture = Fixture::plaintext().await;
     let address = fixture.address;
-    let call = tokio::spawn(async move { raw_call(address, ECHO_SERVICE_UNARY).await });
+    let call = tokio::spawn(async move { raw_call(address, UNARY_PATH).await });
     fixture.echo.hold.wait_for_entries(1).await;
     let status = timeout(WAIT, call)
         .await
@@ -2709,7 +2693,7 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
     status
 }
 
-const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
+const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 
 fn grpc_frame(message: &str) -> bytes::Bytes {
     use bytes::{BufMut as _, BytesMut};
@@ -2739,15 +2723,14 @@ async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
     let driver = tokio::spawn(connection);
     let frame = grpc_frame("padded");
     let padded = |budget: usize| {
-        let mut call =
-            http::Request::post(format!("http://{}{ECHO_SERVICE_UNARY}", fixture.address))
-                .header("content-type", "application/grpc")
-                .header("content-length", frame.len())
-                .header("te", "trailers")
-                .header("grpc-timeout", "5S")
-                .header("x-padding", "")
-                .body(Full::new(frame.clone()))
-                .unwrap();
+        let mut call = http::Request::post(format!("http://{}{UNARY_PATH}", fixture.address))
+            .header("content-type", "application/grpc")
+            .header("content-length", frame.len())
+            .header("te", "trailers")
+            .header("grpc-timeout", "5S")
+            .header("x-padding", "")
+            .body(Full::new(frame.clone()))
+            .unwrap();
         call.headers_mut()
             .extend(request(()).into_parts().0.into_headers());
         // RFC 9113 §6.5.2, SETTINGS_MAX_HEADER_LIST_SIZE
@@ -3362,7 +3345,7 @@ async fn both_reflection_versions_list_registered_services_and_close_idle_stream
         let MessageResponse::FileDescriptorResponse(files) = next().await else {
             panic!("a described symbol is answered with its file descriptor");
         };
-        assert!(!files.file_descriptor_proto.is_empty());
+        assert_matches!(files.file_descriptor_proto.as_slice(), [_, ..]);
     }
 
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
@@ -3579,7 +3562,7 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
 
-    assert_eq!(raw_call(fixture.address, ECHO_SERVICE_UNARY).await, "4");
+    assert_eq!(raw_call(fixture.address, UNARY_PATH).await, "4");
     assert_eq!(
         raw_call(fixture.address, "/example.v1.EchoService/Invented").await,
         "12"
@@ -3729,7 +3712,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(handler_1));
+        let app = axum::Router::new().route(UNARY_PATH, axum::routing::post(handler_1));
         let server = BoundListener::bind(loopback()).unwrap().serve_h2(
             app,
             server_options(connection_limits()),

@@ -1,4 +1,5 @@
 #![expect(
+    clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
     reason = "integration fixtures fail closed with their local setup context"
