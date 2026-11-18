@@ -164,7 +164,7 @@ impl Fixture {
         let publication = registry
             .declare_publication(&route, 1024)
             .expect("fixture route is valid");
-        if let Topology::WithDurable = topology {
+        if matches!(topology, Topology::WithDurable) {
             let mut handled = registry.clone();
             handled.register(&route, |_, _| async { Ok(()) }).unwrap();
             created
