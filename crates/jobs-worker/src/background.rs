@@ -1,17 +1,14 @@
-use std::sync::Arc;
-
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-#[derive(Clone)]
 pub(crate) struct Background {
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
     first_failure: watch::Sender<Option<&'static str>>,
-    aborts: Arc<Mutex<Vec<AbortHandle>>>,
+    aborts: Mutex<Vec<AbortHandle>>,
 }
 
 impl Background {
@@ -20,7 +17,7 @@ impl Background {
             cancel: CancellationToken::new(),
             tracker: TaskTracker::new(),
             first_failure: watch::Sender::new(None),
-            aborts: Arc::default(),
+            aborts: Mutex::default(),
         }
     }
 
@@ -61,8 +58,12 @@ impl Background {
         }
     }
 
+    pub(crate) fn subscribe_failures(&self) -> watch::Receiver<Option<&'static str>> {
+        self.first_failure.subscribe()
+    }
+
     pub(crate) async fn wait_for_failure(&self) -> &'static str {
-        let mut failures = self.first_failure.subscribe();
+        let mut failures = self.subscribe_failures();
         if let Ok(seen) = failures.wait_for(Option::is_some).await
             && let Some(name) = *seen
         {

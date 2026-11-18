@@ -136,8 +136,8 @@ pub(crate) enum BootstrapError {
     #[error("gRPC service registration: {0}")]
     GrpcRegistration(#[source] Box<dyn std::error::Error + Send + Sync>),
     // template:end grpc:bootstrap-grpc-error
-    #[error("background task {name} failed (panicked: {panicked})")]
-    Background { name: &'static str, panicked: bool },
+    #[error(transparent)]
+    Background(#[from] BackgroundFailure),
     #[error("startup {stage} blocking task failed: {source}")]
     BlockingStartup {
         stage: &'static str,
@@ -205,30 +205,22 @@ where
         Err(err) => return process_failure(format!("build tokio runtime: {err}")),
     };
 
-    let mut logger_installed = false;
-    let mut signals = None;
-    let mut deadline = None;
+    let mut exit = RuntimeExit::default();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(serve(
-            config,
-            &mut logger_installed,
-            registration,
-            &mut signals,
-            &mut deadline,
-        ))
+        runtime.block_on(serve(config, registration, &mut exit))
     }))
     .unwrap_or(Err(BootstrapError::Panicked));
-    let remaining = deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline: Instant| {
+    let remaining = exit.deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline| {
         RUNTIME_SHUTDOWN_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
     });
     runtime.shutdown_timeout(remaining);
-    drop(signals);
+    drop(exit.signals);
 
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
         Ok(Outcome::Degraded) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
         Err(err) => {
-            if logger_installed {
+            if exit.logger_installed {
                 ExitCode::FAILURE
             } else {
                 process_failure(&err)
@@ -237,18 +229,25 @@ where
     }
 }
 
+#[derive(Default)]
+struct RuntimeExit {
+    logger_installed: bool,
+    signals: Option<Signals>,
+    deadline: Option<Instant>,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "retained lifecycle state stays beside its single unwind and teardown boundary"
 )]
 async fn serve(
     config: Config,
-    logger_installed: &mut bool,
     registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
-    retained_signals: &mut Option<Signals>,
-    deadline: &mut Option<Instant>,
+    exit: &mut RuntimeExit,
 ) -> Result<Outcome, BootstrapError> {
-    let signals = retained_signals.insert(Signals::install().map_err(BootstrapError::Signals)?);
+    let signals = exit
+        .signals
+        .insert(Signals::install().map_err(BootstrapError::Signals)?);
     let config = Box::new(config);
     let http_config = config.http.clone();
     let mut background = Background::new(CancellationToken::new());
@@ -271,7 +270,7 @@ async fn serve(
                     },
                     tracer_provider: Some(provider),
                 })?);
-                *logger_installed = true;
+                exit.logger_installed = true;
                 install_panic_hook();
                 raise_open_file_limit(&config);
                 let metrics = telemetry::install_metrics()?;
@@ -297,7 +296,7 @@ async fn serve(
             tokio::select! {
                 biased;
                 stopped = signals.wait() => stopped.map(|()| None).map_err(BootstrapError::from),
-                failed = background_failure(&mut observer) => Err(background_error(failed)),
+                failed = background_failure(&mut observer) => Err(failed.into()),
                 started = startup => started.map(Some),
             }
         };
@@ -309,7 +308,7 @@ async fn serve(
         tokio::select! {
             biased;
             stopped = signals.wait() => stopped.map_err(BootstrapError::from),
-            failed = background_failure(&mut observer) => Err(background_error(failed)),
+            failed = background_failure(&mut observer) => Err(failed.into()),
         }
     })
     .catch_unwind()
@@ -317,7 +316,7 @@ async fn serve(
     .unwrap_or(Err(BootstrapError::Panicked))
     .err()
     .or_else(|| pending_failure(&background, &serving));
-    let deadline = *deadline.get_or_insert_with(|| {
+    let deadline = *exit.deadline.get_or_insert_with(|| {
         signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period
     });
     if let Some(error) = &failure
@@ -379,7 +378,7 @@ fn finish_startup(
 
 fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
     if let Some(failure) = background.failed() {
-        return Some(background_error(failure));
+        return Some(failure.into());
     }
     for (name, listener) in [
         ("http_accept", serving.app_listener.as_ref()),
@@ -391,20 +390,16 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
         if let Some(listener) = listener
             && let Some(failure) = listener.accept_failure().now_or_never()
         {
-            return Some(background_error(BackgroundFailure {
-                name,
-                panicked: failure == infra_http_transport::AcceptFailure::Panicked,
-            }));
+            return Some(
+                BackgroundFailure {
+                    name,
+                    panicked: failure == infra_http_transport::AcceptFailure::Panicked,
+                }
+                .into(),
+            );
         }
     }
     None
-}
-
-fn background_error(failure: BackgroundFailure) -> BootstrapError {
-    BootstrapError::Background {
-        name: failure.name,
-        panicked: failure.panicked,
-    }
 }
 
 #[allow(
@@ -748,10 +743,10 @@ mod tests {
                 &mut background,
                 &mut serving
             ),
-            Err(BootstrapError::Background {
+            Err(BootstrapError::Background(BackgroundFailure {
                 name: "startup_task",
                 panicked: false
-            })
+            }))
         );
         assert!(!serving.admitted);
         std::assert_matches!(

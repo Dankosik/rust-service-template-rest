@@ -3,7 +3,7 @@ use std::error::Error;
 use infra_http::HttpContract;
 // template:begin authn:service-api-authn-imports
 use utoipa::Modify;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 // template:end authn:service-api-authn-imports
 use utoipa::OpenApi;
 use utoipa::openapi::OpenApi as Document;
@@ -42,10 +42,10 @@ impl Modify for BearerAuth {
     fn modify(&self, document: &mut Document) {
         document
             .components
-            .get_or_insert_with(utoipa::openapi::Components::new)
+            .get_or_insert_default()
             .add_security_scheme(
                 "bearerAuth",
-                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
     }
 }

@@ -40,6 +40,23 @@ pub struct ServiceRegistration<C = ()> {
     // template:end grpc:service-grpc-registration-field
 }
 
+impl<C> ServiceRegistration<C> {
+    pub fn for_http_resource(
+        prepare: impl FnOnce(
+            &service_config::Config,
+            &mut BackgroundRegistration<'_>,
+        ) -> Result<C, Box<dyn std::error::Error + Send + Sync>>
+        + 'static,
+    ) -> Self {
+        Self {
+            http_resource: Some(Box::new(prepare)),
+            // template:begin grpc:service-http-resource-grpc-default
+            grpc: None,
+            // template:end grpc:service-http-resource-grpc-default
+        }
+    }
+}
+
 impl<C> Default for ServiceRegistration<C> {
     fn default() -> Self {
         Self {
