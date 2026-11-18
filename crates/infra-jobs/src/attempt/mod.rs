@@ -337,7 +337,7 @@ async fn run_attempt(
     record_on_span(&tracing::Span::current(), &transition);
     let handles = registered.metrics();
     if let Some(ran) = ran {
-        handles.duration.record(ran.as_secs_f64());
+        handles.duration.record(ran);
     }
     let terminal_summary = if let Transition::Fail { summary, .. } = &transition {
         Some(summary.as_str())

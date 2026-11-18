@@ -356,7 +356,7 @@ impl Exchange {
             "operation" => self.operation,
             "outcome" => outcome
         )
-        .record(self.started.elapsed().as_secs_f64());
+        .record(self.started.elapsed());
     }
 }
 

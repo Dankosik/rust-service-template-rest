@@ -55,8 +55,8 @@ aws-smithy-types = { workspace = true }
 axum = { workspace = true, features = ["tokio", "http1"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 metrics-exporter-prometheus = { workspace = true }
-rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util", "io-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

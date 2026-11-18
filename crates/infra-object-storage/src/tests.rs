@@ -1518,34 +1518,21 @@ impl aws_smithy_runtime_api::client::dns::ResolveDns for FixtureResolver {
 }
 
 fn tls_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, String) {
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
-        KeyPair, KeyUsagePurpose,
-    };
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 
-    let mut issuer_params = CertificateParams::default();
-    issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    issuer_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let issuer = CertifiedIssuer::self_signed(issuer_params, KeyPair::generate().unwrap()).unwrap();
-    let leaf_key = KeyPair::generate().unwrap();
-    let mut leaf = CertificateParams::new(vec![host.to_owned()]).unwrap();
-    leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let certificate = leaf.signed_by(&leaf_key, &issuer).unwrap();
+    let material = tls_test_support::TlsMaterial::new(host);
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
     let server = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .unwrap()
     .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(certificate.der().to_vec())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
-    )
+    .with_single_cert(vec![material.cert.into()], key)
     .unwrap();
     (
         tokio_rustls::TlsAcceptor::from(Arc::new(server)),
-        issuer.pem(),
+        material.root_pem,
     )
 }
 

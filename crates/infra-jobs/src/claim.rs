@@ -213,7 +213,7 @@ async fn send_claim(
         Ok(claim(&mut connection, shared.worker_id, policy, requested).await?)
     })
     .await;
-    metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed().as_secs_f64());
+    metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed());
     result.map(|rows| ClaimRound {
         claim_started_at,
         rows,
