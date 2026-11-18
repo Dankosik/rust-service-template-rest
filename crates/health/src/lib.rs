@@ -145,7 +145,7 @@ struct State {
 }
 
 struct RefreshLog {
-    late_by: Option<Duration>,
+    stale_age: Option<Duration>,
     absorbed_failure: Option<(ProbeFailure, u32)>,
     transition: Option<Result<(), ProbeFailure>>,
 }
@@ -173,7 +173,7 @@ impl State {
         let log = RefreshLog {
             transition: changed.then(|| next.verdict.clone()),
             absorbed_failure: absorbed.map(|reason| (reason, next.consecutive_failures)),
-            late_by: previous
+            stale_age: previous
                 .map(|check| at.duration_since(check.at))
                 .filter(|age| *age > stale_after),
         };
@@ -402,7 +402,7 @@ impl ReadinessRefresher {
             log.is_some()
         });
         let Some(log) = log else { return };
-        if let Some(age) = log.late_by {
+        if let Some(age) = log.stale_age {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
         if let Some((reason, consecutive_failures)) = log.absorbed_failure {
@@ -463,13 +463,14 @@ async fn check_probe(
 ) -> Result<(), ProbeFailure> {
     let probe_name = probe.name();
     let result = tokio::time::timeout_at(deadline, probe.check()).await;
-    let outcome = match result.ok().filter(|_| Instant::now() <= deadline) {
-        Some(Ok(())) => Ok(()),
-        Some(Err(error)) => Err(ProbeFailure::Failed {
-            probe: probe_name,
-            error,
-        }),
-        None => Err(ProbeFailure::TimedOut {
+    let outcome = match result {
+        Ok(outcome) if Instant::now() <= deadline => {
+            outcome.map_err(|error| ProbeFailure::Failed {
+                probe: probe_name,
+                error,
+            })
+        }
+        _ => Err(ProbeFailure::TimedOut {
             probe: probe_name,
             budget,
         }),

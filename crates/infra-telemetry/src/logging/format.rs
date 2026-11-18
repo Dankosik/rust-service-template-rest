@@ -533,24 +533,7 @@ impl FormatLayer {
                 }
             }
         }
-        match self.format {
-            LoggingFormat::Json => {
-                line.append(b"{\"level\":");
-                line.json(metadata.level().as_str());
-                line.append(b",\"target\":");
-                line.json(metadata.target());
-                line.append(b",\"timestamp\":\"");
-                write_timestamp(line);
-                line.append(b"\"");
-            }
-            LoggingFormat::Text => {
-                write_timestamp(line);
-                line.append(b" ");
-                line.append(metadata.level().as_str().as_bytes());
-                line.append(b" ");
-                line.json(metadata.target());
-            }
-        }
+        write_record_header(line, metadata, self.format);
         if let Some(span) = &span {
             self.write_trace_context_fields(&span.id(), line);
         }
@@ -671,6 +654,27 @@ where
         match self.format_record(event, &ctx) {
             Ok(record) => self.output.submit(record),
             Err(reason) => self.output.record_drop(reason),
+        }
+    }
+}
+
+fn write_record_header(line: &mut Bytes, metadata: &tracing::Metadata<'_>, format: LoggingFormat) {
+    match format {
+        LoggingFormat::Json => {
+            line.append(b"{\"level\":");
+            line.json(metadata.level().as_str());
+            line.append(b",\"target\":");
+            line.json(metadata.target());
+            line.append(b",\"timestamp\":\"");
+            write_timestamp(line);
+            line.append(b"\"");
+        }
+        LoggingFormat::Text => {
+            write_timestamp(line);
+            line.append(b" ");
+            line.append(metadata.level().as_str().as_bytes());
+            line.append(b" ");
+            line.json(metadata.target());
         }
     }
 }

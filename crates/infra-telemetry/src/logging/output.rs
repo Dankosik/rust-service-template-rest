@@ -430,10 +430,6 @@ impl Batch {
         self.ends.push(self.bytes.len());
     }
 
-    // `self.ends[0]` includes the leading `\n` pushed when `self.torn` was true.
-    // For a short write (`accepted < self.bytes.len()`), returns whether the sink
-    // was left mid-line and every record after the failed one (record 0 if even the
-    // separating `\n` prefix was not written).
     fn after_short_write(&self, accepted: usize) -> (bool, impl Iterator<Item = &[u8]>) {
         let prefix = usize::from(self.torn);
         let (torn, failed) = if accepted < prefix {
@@ -447,12 +443,9 @@ impl Batch {
             };
             (accepted > start, failed)
         };
-        let mut start = self.ends[failed];
-        let remaining = self.ends[failed + 1..].iter().map(move |&end| {
-            let line = &self.bytes[start..end];
-            start = end;
-            line
-        });
+        let remaining = self.ends[failed..]
+            .array_windows()
+            .map(|&[start, end]| &self.bytes[start..end]);
         (torn, remaining)
     }
 
@@ -1005,16 +998,22 @@ mod tests {
         assert_eq!(gathered.recv_timeout(TEST_TIMEOUT), Ok(DEEP_QUEUE_RECORDS));
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum WriteStep {
+        Accept(usize),
+        Fail,
+    }
+
     struct ScriptedSink {
-        accepts: std::collections::VecDeque<Option<usize>>,
+        steps: std::collections::VecDeque<WriteStep>,
         bytes: Vec<u8>,
     }
 
     impl Write for ScriptedSink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let accepted = match self.accepts.pop_front() {
-                Some(None) => return Err(io::Error::other("private test sink failure")),
-                Some(Some(limit)) => limit.min(bytes.len()),
+            let accepted = match self.steps.pop_front() {
+                Some(WriteStep::Fail) => return Err(io::Error::other("private test sink failure")),
+                Some(WriteStep::Accept(limit)) => limit.min(bytes.len()),
                 None => bytes.len(),
             };
             self.bytes.extend_from_slice(&bytes[..accepted]);
@@ -1028,23 +1027,24 @@ mod tests {
 
     #[test]
     fn a_batch_cut_short_loses_one_record_and_keeps_later_ones_on_their_own_lines() {
-        type Case = (bool, &'static [Option<usize>], &'static [u8]);
+        use WriteStep::{Accept, Fail};
+        type Case = (bool, &'static [WriteStep], &'static [u8]);
         let cases: [Case; 6] = [
-            (false, &[None], b"bb\ncc\ndd\n"),
-            (false, &[Some(3), None], b"aa\ncc\ndd\n"),
-            (false, &[Some(4), None], b"aa\nb\ncc\ndd\n"),
-            (false, &[Some(7), None], b"aa\nbb\nc\ndd\n"),
-            (true, &[None], b"\nbb\ncc\ndd\n"),
-            (true, &[Some(1), None], b"\nbb\ncc\ndd\n"),
+            (false, &[Fail], b"bb\ncc\ndd\n"),
+            (false, &[Accept(3), Fail], b"aa\ncc\ndd\n"),
+            (false, &[Accept(4), Fail], b"aa\nb\ncc\ndd\n"),
+            (false, &[Accept(7), Fail], b"aa\nbb\nc\ndd\n"),
+            (true, &[Fail], b"\nbb\ncc\ndd\n"),
+            (true, &[Accept(1), Fail], b"\nbb\ncc\ndd\n"),
         ];
-        for (after_torn_line, accepts, expected) in cases {
+        for (after_torn_line, steps, expected) in cases {
             let shared = Shared {
                 closed: RwLock::new(None),
                 drain: AtomicU32::new(0),
                 counters: Counters::new(),
             };
             let mut sink = ScriptedSink {
-                accepts: accepts.iter().copied().collect(),
+                steps: steps.iter().copied().collect(),
                 bytes: Vec::new(),
             };
             let mut batch = Batch {
@@ -1063,12 +1063,12 @@ mod tests {
             assert_eq!(
                 sink.bytes.as_slice(),
                 expected,
-                "after_torn_line={after_torn_line} accepts={accepts:?}"
+                "after_torn_line={after_torn_line} steps={steps:?}"
             );
             assert_eq!(
                 shared.counters.snapshot().sink_errors.into_array(),
                 [1, 0, 0],
-                "after_torn_line={after_torn_line} accepts={accepts:?}"
+                "after_torn_line={after_torn_line} steps={steps:?}"
             );
         }
     }
