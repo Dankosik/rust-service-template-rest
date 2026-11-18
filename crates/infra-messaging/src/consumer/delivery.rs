@@ -318,7 +318,7 @@ impl DeliveryHandler {
         let reason = reason.label();
 
         let context = OperationContext::new(
-            Some(Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET)),
+            Some(Deadline::after(BROKER_OPERATION_BUDGET)),
             cancel.clone(),
         );
         let result = send_publication(
@@ -385,7 +385,7 @@ async fn run_handler(
     envelope: wire::InboundEnvelope,
     cancel: &CancellationToken,
 ) -> Outcome {
-    let deadline = Deadline::new(Instant::now(), HANDLER_TIMEOUT);
+    let deadline = Deadline::after(HANDLER_TIMEOUT);
     let handler_cancel = cancel.child_token();
     let _ended = handler_cancel.clone().drop_guard();
     let context = OperationContext::new(Some(deadline), handler_cancel);

@@ -302,9 +302,11 @@ struct Window {
 
 impl Window {
     const fn admits(self, now: u64) -> Result<(), Reason> {
-        if shared_rules::rfc7519::is_expired(self.expires_at, now, LEEWAY_SECONDS) {
+        if let Some(latest_expired) = now.checked_sub(LEEWAY_SECONDS)
+            && self.expires_at <= latest_expired
+        {
             Err(Reason::Expired)
-        } else if shared_rules::rfc7519::is_not_yet_valid(self.valid_from, now, LEEWAY_SECONDS) {
+        } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
             Err(Reason::NotYetValid)
         } else {
             Ok(())
@@ -395,6 +397,19 @@ impl Audience<'_> {
 /// RFC 7519 §2
 struct NumericDate(u64);
 
+impl NumericDate {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "only a finite value inside the u64 range reaches the cast"
+    )]
+    fn from_f64(value: f64) -> Option<Self> {
+        (value.is_finite() && value >= 0.0 && value < u64::MAX as f64)
+            .then(|| Self(value.round() as u64))
+    }
+}
+
 impl<'de> Deserialize<'de> for NumericDate {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
@@ -407,9 +422,7 @@ impl<'de> Deserialize<'de> for NumericDate {
                 Ok(NumericDate(value))
             }
             fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                shared_rules::rfc7519::numeric_date_seconds(value)
-                    .map(NumericDate)
-                    .ok_or_else(|| E::custom("NumericDate out of range"))
+                NumericDate::from_f64(value).ok_or_else(|| E::custom("NumericDate out of range"))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -435,6 +448,57 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
     const TYPE: &str = "example-svc+jwt";
+
+    #[test]
+    fn the_lifetime_window_bounds_are_widened_by_the_leeway() {
+        for (valid_from, expires_at, now, expected) in [
+            (0, 100, 129, Ok(())),
+            (0, 100, 130, Err(Reason::Expired)),
+            (0, 0, 10, Ok(())),
+            (130, 200, 100, Ok(())),
+            (131, 200, 100, Err(Reason::NotYetValid)),
+            (u64::MAX, u64::MAX, u64::MAX - 1, Ok(())),
+        ] {
+            assert_eq!(
+                Window {
+                    valid_from,
+                    expires_at
+                }
+                .admits(now),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_fractional_date_rounds_to_the_nearest_second() {
+        for (value, seconds) in [
+            (0.0, 0),
+            (-0.0, 0),
+            (1_700_000_000.4, 1_700_000_000),
+            (1_700_000_000.5, 1_700_000_001),
+            (18_446_744_073_709_549_568.0, 18_446_744_073_709_549_568),
+        ] {
+            assert_eq!(
+                NumericDate::from_f64(value).map(|date| date.0),
+                Some(seconds)
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_infinite_or_oversized_number_is_no_date() {
+        for value in [
+            -1.0,
+            -0.6,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            18_446_744_073_709_551_616.0,
+        ] {
+            assert!(NumericDate::from_f64(value).is_none(), "{value}");
+        }
+    }
 
     type Changes<'a> = &'a [(&'a str, Option<serde_json::Value>)];
 
