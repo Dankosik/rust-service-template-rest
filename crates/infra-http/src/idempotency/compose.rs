@@ -1,4 +1,3 @@
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use axum::RequestExt;
@@ -65,8 +64,8 @@ where
                     match capture_attempt(operation_id, &fingerprint_headers, rules_link, request)
                         .await
                     {
-                        ControlFlow::Continue(captured) => captured,
-                        ControlFlow::Break(response) => return response,
+                        Ok(captured) => captured,
+                        Err(response) => return response,
                     };
                 match prepare(input, principal, delegation, state).await {
                     Ok(command) => attempt.run(command).await,
@@ -93,30 +92,36 @@ where
         .map_err(|error| CompositionError::contract(&operation.id, error))
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the middleware returns"
+)]
 async fn capture_attempt(
     operation_id: Arc<str>,
     fingerprint_headers: &[HeaderName],
     rules_link: HeaderValue,
     request: Request,
-) -> ControlFlow<Response, (CommandInput, VerifiedPrincipal, Attempt)> {
-    let Some(store) = request.extensions().get::<Store>().cloned() else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "store_missing"));
-    };
+) -> Result<(CommandInput, VerifiedPrincipal, Attempt), Response> {
+    let store = request
+        .extensions()
+        .get::<Store>()
+        .cloned()
+        .ok_or_else(|| wiring_failure(&operation_id, "store_missing"))?;
     let request = request.with_limited_body();
     let (parts, body) = request.into_parts();
-    let Some(deadline) = parts.extensions.get::<RequestDeadline>().copied() else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "deadline_missing"));
-    };
-    let Some(principal) = VerifiedPrincipal::from_extensions(&parts.extensions) else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "principal_missing"));
-    };
-    let Some(caller) = identity::caller_identity(
+    let deadline = parts
+        .extensions
+        .get::<RequestDeadline>()
+        .copied()
+        .ok_or_else(|| wiring_failure(&operation_id, "deadline_missing"))?;
+    let principal = VerifiedPrincipal::from_extensions(&parts.extensions)
+        .ok_or_else(|| wiring_failure(&operation_id, "principal_missing"))?;
+    let caller = identity::caller_identity(
         principal.issuer(),
         principal.subject(),
         principal.client_id(),
-    ) else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "caller_missing"));
-    };
+    )
+    .ok_or_else(|| wiring_failure(&operation_id, "caller_missing"))?;
     let Some(scope) = identity::decode_key(
         parts
             .headers
@@ -126,16 +131,12 @@ async fn capture_attempt(
     )
     .map(|key| ScopeKey::new(caller, &key)) else {
         Outcome::InvalidKey.record();
-        return ControlFlow::Break(invalid_key(rules_link));
+        return Err(invalid_key(rules_link));
     };
     let context = parts.extensions.get::<RequestContext>();
-    let collected = match buffer_body(context, body).await {
-        Ok(collected) => collected,
-        Err(refusal) => {
-            Outcome::NotStored.record();
-            return ControlFlow::Break(refusal);
-        }
-    };
+    let collected = buffer_body(context, body)
+        .await
+        .inspect_err(|_| Outcome::NotStored.record())?;
     let (input, fingerprint) = CommandInput::capture(parts, fingerprint_headers, collected);
     let attempt = Attempt {
         store,
@@ -145,7 +146,7 @@ async fn capture_attempt(
         rules_link,
         deadline,
     };
-    ControlFlow::Continue((input, principal, attempt))
+    Ok((input, principal, attempt))
 }
 
 #[expect(

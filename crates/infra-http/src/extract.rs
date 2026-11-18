@@ -117,14 +117,17 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let query = parts.uri.query().unwrap_or_default();
-        let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
-        std::future::ready(
-            serde_path_to_error::deserialize(fields)
-                .map(Self)
-                .map_err(|error| query_problem(error.path())),
-        )
+        std::future::ready(decode_query(parts.uri.query().unwrap_or_default()).map(Self))
     }
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "the extractor returns Problem by value"
+)]
+pub(crate) fn decode_query<T: DeserializeOwned>(query: &str) -> Result<T, Problem> {
+    let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
+    serde_path_to_error::deserialize(fields).map_err(|error| query_problem(error.path()))
 }
 
 #[derive(Clone, Copy, Debug, Default)]

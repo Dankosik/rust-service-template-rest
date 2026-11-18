@@ -192,17 +192,13 @@ pub(crate) async fn observe(
         || status.is_informational()
         || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED)
     {
-        DropGuard::dismiss(observation).record(None, None);
+        DropGuard::dismiss(observation).record(RequestEnd::Body(BodyEnd::Complete));
         return response;
     }
     let remaining = http1_response_length(version, &response);
     response.map(|body| {
         on_body_end(body, remaining, move |end| {
-            let error = match end {
-                BodyEnd::Complete => None,
-                BodyEnd::Error => Some("response_body_error"),
-            };
-            DropGuard::dismiss(observation).record(error, None);
+            DropGuard::dismiss(observation).record(RequestEnd::Body(end));
         })
     })
 }
@@ -228,6 +224,12 @@ struct ResponseHead {
     load_shed: bool,
 }
 
+enum RequestEnd {
+    Body(BodyEnd),
+    ClientClosed,
+    ServerShutdown,
+}
+
 struct RequestObservation {
     log_access: bool,
     series: Arc<Series>,
@@ -244,20 +246,26 @@ struct RequestObservation {
 
 impl RequestObservation {
     fn abandon(self) {
-        let (reason, log_status) = if self
+        let end = if self
             .connection
             .as_ref()
             .is_some_and(ConnectionInfo::was_forced)
         {
-            ("server_shutdown", 503)
+            RequestEnd::ServerShutdown
         } else {
-            ("client_closed", 499)
+            RequestEnd::ClientClosed
         };
-        self.record(Some(reason), Some(log_status));
+        self.record(end);
     }
 
-    fn record(self, interruption: Option<&'static str>, log_status: Option<u16>) {
+    fn record(self, end: RequestEnd) {
         let elapsed = self.started.elapsed();
+        let (interruption, log_status) = match end {
+            RequestEnd::Body(BodyEnd::Complete) => (None, None),
+            RequestEnd::Body(BodyEnd::Error) => (Some("response_body_error"), None),
+            RequestEnd::ClientClosed => (Some("client_closed"), Some(499)),
+            RequestEnd::ServerShutdown => (Some("server_shutdown"), Some(503)),
+        };
         let route = self.matched.as_ref().map(MatchedPath::as_str);
         let status = self.head.as_ref().map(|head| head.status);
         let error_type =
