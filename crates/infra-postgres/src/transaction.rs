@@ -133,19 +133,19 @@ impl OperationDeadline {
     }
 
     async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-        let remaining = self.remaining_ms().await.ok_or_else(elapsed)?;
+        let remaining_ms = self.remaining_ms().await.ok_or_else(elapsed)?;
         let result = sqlx::query_as::<_, (String, bool)>(
             "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
              WHERE name = 'statement_timeout') \
              SELECT set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
              ms = 0 OR $1 < ms OR (ms = $1 AND ms IS NOT DISTINCT FROM $2) FROM prior",
         )
-        .bind(remaining)
+        .bind(remaining_ms)
         .bind(self.caller_limit)
         .fetch_one(conn)
         .await;
-        let (_, caller_limited) = self.finish(result).await?;
-        self.caller_limit = caller_limited.then_some(remaining);
+        let (_, deadline_controls_statement_timeout) = self.finish(result).await?;
+        self.caller_limit = deadline_controls_statement_timeout.then_some(remaining_ms);
         self.remaining_ms().await.map(|_| ()).ok_or_else(elapsed)
     }
 

@@ -37,7 +37,7 @@ pub async fn refresh_password_periodically(
 
 #[derive(Default)]
 struct Refresh {
-    current: Option<Zeroizing<String>>,
+    last_installed: Option<Zeroizing<String>>,
     unreadable: bool,
 }
 
@@ -46,13 +46,13 @@ impl Refresh {
         match read(path).await {
             Ok(password) => {
                 self.unreadable = false;
-                if self.current.as_ref() == Some(&password) {
+                if self.last_installed.as_ref() == Some(&password) {
                     metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
                     return;
                 }
                 let options = (*pool.connect_options()).clone().password(&password);
                 pool.set_connect_options(options);
-                if self.current.replace(password).is_some() {
+                if self.last_installed.replace(password).is_some() {
                     tracing::info!("postgres_password_reloaded");
                 }
                 metrics::counter!(REFRESHES_METRIC, "outcome" => "installed").increment(1);
