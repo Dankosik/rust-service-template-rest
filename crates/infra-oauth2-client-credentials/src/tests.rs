@@ -298,8 +298,27 @@ impl Fixture {
         self.state.token_requests.lock().unwrap().clone()
     }
 
+    fn token_request_count(&self) -> usize {
+        self.state.token_requests.lock().unwrap().len()
+    }
+
     fn resource_requests(&self) -> Vec<CapturedRequest> {
         self.state.resource_requests.lock().unwrap().clone()
+    }
+
+    fn resource_request_count(&self) -> usize {
+        self.state.resource_requests.lock().unwrap().len()
+    }
+
+    async fn drive_until_token_received<F>(&self, operation: Pin<&mut F>)
+    where
+        F: Future,
+        F::Output: std::fmt::Debug,
+    {
+        tokio::select! {
+            () = self.token_received() => {}
+            result = operation => panic!("response must be gated: {result:?}"),
+        }
     }
 
     async fn finish(self) {

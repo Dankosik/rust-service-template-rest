@@ -14,13 +14,13 @@ async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
         .send_request(&client, fixture.on_behalf_of_request("alice"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     fixture.token_json(StatusCode::OK, &exchange_response("second"));
     fixture
         .send_request(&client, fixture.on_behalf_of_request("bob"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     let authorizations = fixture
         .resource_requests()
         .into_iter()
@@ -46,7 +46,7 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
             .await
             .unwrap();
     }
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     cache.run_pending_tasks().await;
     assert!(cache.entry_count() <= 1);
     for subject in ["alice", "bob"] {
@@ -56,7 +56,7 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
             .unwrap();
         cache.run_pending_tasks().await;
     }
-    assert!(fixture.token_requests().len() > 2);
+    assert!(fixture.token_request_count() > 2);
     assert!(cache.entry_count() <= 1);
     fixture.finish().await;
 }
@@ -81,7 +81,7 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
             cache.run_pending_tasks().await;
         }
     }
-    assert_eq!(fixture.token_requests().len(), SUBJECTS as usize);
+    assert_eq!(fixture.token_request_count(), SUBJECTS as usize);
     assert_eq!(cache.entry_count(), u64::from(SUBJECTS));
     fixture.finish().await;
 }
@@ -133,7 +133,7 @@ async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange
             .send_request(&client, fixture.on_behalf_of_request("alice"))
             .await
             .unwrap();
-        assert_eq!(fixture.token_requests().len(), expected_exchanges);
+        assert_eq!(fixture.token_request_count(), expected_exchanges);
     }
     fixture.finish().await;
 }
@@ -151,8 +151,8 @@ async fn an_exchanged_token_without_lifetime_is_request_only() {
             .await
             .unwrap();
     }
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 2);
     fixture.finish().await;
 }
 
@@ -170,13 +170,13 @@ async fn a_waiter_exchanges_again_instead_of_taking_its_leaders_request_only_tok
     let mut waiter =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
     poll_pending(waiter.as_mut()).await;
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     gate.add_permits(1);
     leader.await.unwrap();
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("waiter must exchange again: {result:?}"), }
     gate.add_permits(1);
     waiter.await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     fixture.finish().await;
 }
 
@@ -196,7 +196,7 @@ async fn an_exchanged_token_past_its_reuse_cutoff_is_exchanged_once_more() {
     fixture.token_json(StatusCode::OK, &exchange_response("second"));
     execute().await;
     execute().await;
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     let authorizations = fixture
         .resource_requests()
         .into_iter()
@@ -228,11 +228,11 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
-    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+    fixture.drive_until_token_received(leader.as_mut()).await;
     let mut waiter =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
     poll_pending(waiter.as_mut()).await;
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     gate.add_permits(2);
     let (leader, waiter) = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::join!(leader, waiter)
@@ -241,7 +241,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     .unwrap();
     leader.unwrap();
     waiter.unwrap();
-    assert_eq!(fixture.token_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 1);
     fixture.finish().await;
 }
 
@@ -297,13 +297,13 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    assert_eq!(fixture.token_requests().len(), 3);
-    assert_eq!(fixture.resource_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 3);
+    assert_eq!(fixture.resource_request_count(), 1);
     fixture
         .send_request(&client, fixture.on_behalf_of_request("cached"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), 3);
+    assert_eq!(fixture.token_request_count(), 3);
     gate.add_permits(2);
     let (service, exchange) = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::join!(service, exchange)
@@ -317,8 +317,8 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
         .send_request(&client, fixture.on_behalf_of_request("refused"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), 4);
-    assert_eq!(fixture.resource_requests().len(), 5);
+    assert_eq!(fixture.token_request_count(), 4);
+    assert_eq!(fixture.resource_request_count(), 5);
     fixture.finish().await;
 }
 
@@ -366,13 +366,13 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    assert_eq!(fixture.token_requests().len(), 1);
-    assert!(fixture.resource_requests().is_empty());
+    assert_eq!(fixture.token_request_count(), 1);
+    assert_eq!(fixture.resource_request_count(), 0);
     drop(leader);
     *fixture.state.token_gate.lock().unwrap() = None;
     fixture.send(&service_client).await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 1);
     drop(gate);
     fixture.finish().await;
 }
@@ -406,7 +406,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
         fixture.on_behalf_of_request("subject"),
         deadline(Duration::from_secs(4)),
     ));
-    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
+    fixture.drive_until_token_received(leader.as_mut()).await;
     let mut waiter =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
     poll_pending(waiter.as_mut()).await;
@@ -419,8 +419,8 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     advance(Duration::from_secs(2)).await;
     gate.add_permits(2);
     waiter.await.unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
-    assert_eq!(fixture.resource_requests().len(), 1);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 1);
     fixture.finish().await;
 }
 
@@ -437,7 +437,7 @@ async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
         .send_request(&client, fixture.on_behalf_of_request("bob"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     advance(EVICTION_MIN_AGE).await;
     fixture.resource_status(StatusCode::UNAUTHORIZED);
     fixture
@@ -445,17 +445,17 @@ async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
         .await
         .unwrap();
     fixture.resource_status(StatusCode::OK);
-    let before = fixture.token_requests().len();
+    let before = fixture.token_request_count();
     fixture
         .send_request(&client, fixture.on_behalf_of_request("alice"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), before + 1);
+    assert_eq!(fixture.token_request_count(), before + 1);
     fixture
         .send_request(&client, fixture.on_behalf_of_request("bob"))
         .await
         .unwrap();
-    assert_eq!(fixture.token_requests().len(), before + 1);
+    assert_eq!(fixture.token_request_count(), before + 1);
     fixture.finish().await;
 }
 
@@ -484,6 +484,6 @@ async fn a_failed_exchange_is_not_cached() {
             Err(Error::Acquisition(AcquisitionError::Unavailable))
         );
     }
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_request_count(), 2);
     fixture.finish().await;
 }

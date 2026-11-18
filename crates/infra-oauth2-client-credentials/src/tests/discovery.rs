@@ -33,7 +33,7 @@ async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
             StatusCode::OK
         );
     }
-    assert_eq!(provider.token_requests().len(), 2);
+    assert_eq!(provider.token_request_count(), 2);
     let requests = issuer_peer.resource_requests();
     assert_eq!(requests.len(), 1);
     let discovery = &requests[0];
@@ -77,7 +77,7 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
             matches!(result, Err(KeycloakError::Configuration(ConfigurationError { key, .. })) if key == invalid_key)
         );
     }
-    assert!(peer.resource_requests().is_empty());
+    assert_eq!(peer.resource_request_count(), 0);
     let metadata = |issuer: &str, endpoint: &str| {
         json_response(
             StatusCode::OK,
@@ -143,14 +143,14 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         ),
     ] {
         *peer.state.resource_response.lock().unwrap() = body;
-        let attempts = peer.resource_requests().len();
+        let attempts = peer.resource_request_count();
         let error = Registration::prepare_keycloak_for_test_http(options.clone())
             .await
             .unwrap_err();
         assert_discovery_error(&error, expected);
         assert_redacted(&error, &[peer.origin.as_str(), "private-response-body"]);
-        assert_eq!(peer.resource_requests().len(), attempts + 1);
-        assert!(peer.token_requests().is_empty());
+        assert_eq!(peer.resource_request_count(), attempts + 1);
+        assert_eq!(peer.token_request_count(), 0);
     }
     peer.finish().await;
 }

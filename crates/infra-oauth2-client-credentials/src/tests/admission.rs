@@ -242,7 +242,7 @@ fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
         algorithm: Algorithm::Es256,
         ..valid_options()
     };
-    let error = Signer::try_new(&options, UNIX_EPOCH - Duration::from_secs(1))
+    let error = Signer::try_new(options, UNIX_EPOCH - Duration::from_secs(1))
         .err()
         .unwrap();
     assert_eq!(error.key, "system_clock");

@@ -375,7 +375,7 @@ async fn plaintext_cannot_be_bound_to_oauth_credentials() {
     ] {
         assert_eq!(binding.unwrap_err().key, "grpc_resource");
     }
-    assert!(tokens.token_requests().is_empty());
+    assert_eq!(tokens.token_request_count(), 0);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -395,7 +395,7 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
         "resource_origin"
     );
     assert_eq!(other.calls(), 0);
-    assert!(tokens.token_requests().is_empty());
+    assert_eq!(tokens.token_request_count(), 0);
     other.finish().await;
     resource.root_pem = tls_test_support::new_issuer().pem();
     let error = resource
@@ -404,7 +404,7 @@ async fn bearer_is_withheld_when_the_resource_certificate_is_untrusted() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::Unavailable);
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -440,7 +440,7 @@ async fn caller_authorization_and_competing_bound_contexts_fail_before_io() {
         conflict.message(),
         "request operation context conflicts with client context"
     );
-    assert!(tokens.token_requests().is_empty());
+    assert_eq!(tokens.token_request_count(), 0);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -474,7 +474,7 @@ async fn oauth_opening_limit_refuses_before_acquiring_credentials_or_dispatching
         .unwrap()
         .unwrap_err();
     assert_eq!(error.code(), Code::ResourceExhausted);
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 0);
 
     gate.add_permits(2);
@@ -483,7 +483,7 @@ async fn oauth_opening_limit_refuses_before_acquiring_credentials_or_dispatching
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(resource.calls(), 2);
     resource.finish().await;
     tokens.finish().await;
@@ -549,7 +549,7 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
             .and_then(|source| source.downcast_ref::<AcquisitionError>());
         assert_eq!(source, Some(&reason));
     }
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -611,7 +611,7 @@ async fn dropping_registration_stops_a_bound_grpc_call_during_token_acquisition(
         .and_then(|source| source.downcast_ref::<AcquisitionError>());
     assert_eq!(error.code(), Code::Unavailable);
     assert_eq!(source, Some(&AcquisitionError::Unavailable));
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -654,9 +654,9 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
     let source = std::error::Error::source(&error)
         .and_then(|source| source.downcast_ref::<AcquisitionError>());
     assert_eq!(source, Some(&AcquisitionError::AtCapacity));
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 0);
-    assert!(tokens.resource_requests().is_empty());
+    assert_eq!(tokens.resource_request_count(), 0);
     drop(exchange);
     drop(gate);
     resource.finish().await;
@@ -691,7 +691,7 @@ async fn one_cached_bearer_is_sent_and_reused() {
         .into_inner();
     assert_eq!(first.message, "one");
     assert_eq!(second.message, "two");
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(
         resource.authorizations(),
         ["Bearer fixture-token", "Bearer fixture-token"]
@@ -717,7 +717,7 @@ async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
         ))
         .await
         .unwrap();
-    let token_requests = tokens.token_requests().len();
+    let token_requests = tokens.token_request_count();
     let resource_calls = resource.calls();
     drop(driver);
     let cancelled = OperationContext::unbounded();
@@ -739,7 +739,7 @@ async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
         let error = client.unary(request).await.unwrap_err();
         assert_eq!(error.code(), expected);
     }
-    assert_eq!(tokens.token_requests().len(), token_requests);
+    assert_eq!(tokens.token_request_count(), token_requests);
     assert_eq!(resource.calls(), resource_calls);
     resource.finish().await;
     tokens.finish().await;
@@ -765,7 +765,7 @@ async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
             .await
             .unwrap();
     }
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(51)).await;
     tokio::time::resume();
@@ -778,7 +778,7 @@ async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
         ))
         .await
         .unwrap();
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(resource.calls(), 3);
     resource.finish().await;
     tokens.finish().await;
@@ -842,7 +842,7 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     }
     let timeouts = resource.peer.timeouts.lock().unwrap().clone();
     assert_eq!(timeouts.len(), 4);
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     for (timeout, elapsed) in timeouts.iter().zip(elapsed).skip(1) {
         let minimum = Duration::from_secs(1).saturating_sub(elapsed + Duration::from_micros(1));
         assert!(
@@ -872,7 +872,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         ("permission-denied", Code::PermissionDenied, 0),
     ] {
         let credentials = resource.credentials(&tokens);
-        let before_tokens = tokens.token_requests().len();
+        let before_tokens = tokens.token_request_count();
         warm_and_age(&credentials).await;
         let before_calls = resource.calls();
         let parent = OperationContext::with_timeout(Duration::from_secs(10));
@@ -885,7 +885,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
             .await
             .unwrap_err();
         assert_eq!(error.code(), expected);
-        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        assert_eq!(tokens.token_request_count(), before_tokens + 1);
         assert_eq!(resource.calls(), before_calls + 1);
         client
             .unary(UnaryRequest {
@@ -894,7 +894,7 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
             .await
             .unwrap();
         assert_eq!(
-            tokens.token_requests().len(),
+            tokens.token_request_count(),
             before_tokens + 1 + extra_fetches
         );
         assert_eq!(resource.calls(), before_calls + 2);
@@ -933,7 +933,7 @@ async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
     .unwrap();
     assert_eq!(frame.trailers_ref().unwrap()["grpc-status"], "16");
     assert_eq!(resource.calls(), 1);
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
 
     tokens.token_json(
         StatusCode::OK,
@@ -945,7 +945,7 @@ async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
         .await
         .unwrap();
     assert_eq!(resource.calls(), 2);
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(
         resource.authorizations().last().unwrap(),
         "Bearer replacement"
@@ -996,7 +996,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         ))
         .await
         .unwrap();
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(resource.authorizations().last().unwrap(), "Bearer second");
     assert_eq!(resource.calls(), 2);
     resource.finish().await;
@@ -1026,7 +1026,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         ),
     ] {
         let credentials = resource.credentials(&tokens);
-        let before_tokens = tokens.token_requests().len();
+        let before_tokens = tokens.token_request_count();
         let before_calls = resource.calls();
         warm_and_age(&credentials).await;
         let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
@@ -1044,7 +1044,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         .expect("http fixture completes")
         .unwrap_err();
         assert_eq!(error.code(), expected);
-        assert_eq!(tokens.token_requests().len(), before_tokens + 1);
+        assert_eq!(tokens.token_request_count(), before_tokens + 1);
         assert_eq!(resource.calls(), before_calls + 1);
         resource
             .client(&credentials)
@@ -1057,7 +1057,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
             .await
             .unwrap();
         assert_eq!(
-            tokens.token_requests().len(),
+            tokens.token_request_count(),
             before_tokens + 1 + extra_fetches
         );
         assert_eq!(resource.calls(), before_calls + 2);
@@ -1086,7 +1086,7 @@ async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::Internal);
-    assert!(tokens.token_requests().is_empty());
+    assert_eq!(tokens.token_request_count(), 0);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
     tokens.finish().await;
@@ -1105,7 +1105,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
         .unary(rpc(message(), Duration::from_secs(10)))
         .await
         .unwrap();
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 1);
 
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
@@ -1125,7 +1125,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
         assert_eq!(error.code(), Code::Internal);
         assert_eq!(error.message(), "on-behalf-of subject is required");
     }
-    assert_eq!(tokens.token_requests().len(), 1);
+    assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 1);
 
     tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
@@ -1147,7 +1147,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
         client.unary(request).await.unwrap_err().code(),
         Code::Unavailable
     );
-    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(tokens.token_request_count(), 2);
     assert_eq!(resource.calls(), 2);
     resource.finish().await;
     tokens.finish().await;
@@ -1239,7 +1239,7 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
                     );
                 }
             }
-            assert_eq!(tokens.token_requests().len(), 1);
+            assert_eq!(tokens.token_request_count(), 1);
             assert_eq!(resource.calls(), 1);
             resource.finish().await;
             tokens.finish().await;

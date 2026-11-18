@@ -251,16 +251,7 @@ impl Verifier {
             .iter()
             .find(|key| key.kid.as_str() == kid)
             .ok_or(Reason::UnknownKey)?;
-        let mut signature_bytes = [0_u8; 64];
-        let length = URL_SAFE_NO_PAD
-            .decode_slice(signature, &mut signature_bytes)
-            .map_err(|_| Reason::Signature)?;
-        if length != signature_bytes.len() {
-            return Err(Reason::Signature);
-        }
-        key.key
-            .verify_sig(message, &signature_bytes)
-            .map_err(|_| Reason::Signature)?;
+        verify_signature(&key.key, message, signature)?;
         if claims.sub.as_deref() != Some(issuer) {
             return Err(Reason::Subject);
         }
@@ -271,19 +262,7 @@ impl Verifier {
         {
             return Err(Reason::Audience);
         }
-        let Some((NumericDate(issued_at), NumericDate(expires_at))) = claims.iat.zip(claims.exp)
-        else {
-            return Err(Reason::Claims);
-        };
-        if expires_at <= issued_at || expires_at - issued_at > MAX_TOKEN_LIFETIME_SECONDS {
-            return Err(Reason::Lifetime);
-        }
-        let window = Window {
-            valid_from: claims
-                .nbf
-                .map_or(issued_at, |not_before| not_before.max(issued_at)),
-            expires_at,
-        };
+        let window = claims.validity_window()?;
         window.admits(now)?;
         Ok((
             Caller {
@@ -298,6 +277,22 @@ impl Verifier {
 struct Window {
     valid_from: u64,
     expires_at: u64,
+}
+
+fn verify_signature(
+    key: &aws_lc_rs::signature::ParsedPublicKey,
+    message: &[u8],
+    encoded_signature: &[u8],
+) -> Result<(), Reason> {
+    let mut signature = [0_u8; 64];
+    let length = URL_SAFE_NO_PAD
+        .decode_slice(encoded_signature, &mut signature)
+        .map_err(|_| Reason::Signature)?;
+    if length != signature.len() {
+        return Err(Reason::Signature);
+    }
+    key.verify_sig(message, &signature)
+        .map_err(|_| Reason::Signature)
 }
 
 impl Window {
@@ -343,6 +338,23 @@ struct Claims<'a> {
     exp: Option<NumericDate>,
     #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<u64>,
+}
+
+impl Claims<'_> {
+    fn validity_window(self) -> Result<Window, Reason> {
+        let Some((NumericDate(issued_at), NumericDate(expires_at))) = self.iat.zip(self.exp) else {
+            return Err(Reason::Claims);
+        };
+        if expires_at <= issued_at || expires_at - issued_at > MAX_TOKEN_LIFETIME_SECONDS {
+            return Err(Reason::Lifetime);
+        }
+        Ok(Window {
+            valid_from: self
+                .nbf
+                .map_or(issued_at, |not_before| not_before.max(issued_at)),
+            expires_at,
+        })
+    }
 }
 
 /// RFC 7519 §4.1.3
