@@ -227,10 +227,7 @@ fn within(target: &str, root: &str) -> bool {
 }
 
 // template:begin object-storage:telemetry-sdk-log-cap
-type SdkCap =
-    tracing_subscriber::filter::FilterFn<Box<dyn Fn(&tracing::Metadata<'_>) -> bool + Send + Sync>>;
-
-fn sdk_log_cap(directive: &str) -> SdkCap {
+fn sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
     let named: Vec<String> = directive
         .split(',')
         .filter_map(|segment| {
@@ -238,12 +235,12 @@ fn sdk_log_cap(directive: &str) -> SdkCap {
             target.starts_with("aws_").then(|| target.to_owned())
         })
         .collect();
-    tracing_subscriber::filter::filter_fn(Box::new(move |metadata: &tracing::Metadata<'_>| {
+    tracing_subscriber::filter::filter_fn(move |metadata: &Metadata<'_>| {
         let target = metadata.target();
         *metadata.level() <= tracing::Level::INFO
             || !target.starts_with("aws_")
             || named.iter().any(|name| within(target, name))
-    }))
+    })
 }
 // template:end object-storage:telemetry-sdk-log-cap
 
