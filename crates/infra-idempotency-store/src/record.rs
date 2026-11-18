@@ -89,6 +89,25 @@ impl Record {
         if !status.is_success() {
             return Err(CaptureError::InvalidStatus);
         }
+        Self::capture_parts(status, headers, body)
+    }
+
+    pub fn capture_terminal_refusal(
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Result<Self, CaptureError> {
+        if !is_terminal_refusal(status) {
+            return Err(CaptureError::InvalidStatus);
+        }
+        Self::capture_parts(status, headers, body)
+    }
+
+    fn capture_parts(
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Result<Self, CaptureError> {
         if forbids_body(status) && !body.is_empty() {
             return Err(CaptureError::BodyForbidden);
         }
@@ -127,7 +146,7 @@ impl Record {
         let status = u16::try_from(status)
             .ok()
             .and_then(|status| StatusCode::from_u16(status).ok())
-            .filter(StatusCode::is_success)
+            .filter(|status| status.is_success() || is_terminal_refusal(*status))
             .ok_or(Undecodable::Status)?;
         let mut admitted = HeaderMap::new();
         let mut size = 0_usize;
@@ -158,6 +177,11 @@ impl Record {
 
     pub(crate) const fn status(&self) -> i16 {
         self.status.as_u16().cast_signed()
+    }
+
+    #[must_use]
+    pub fn is_terminal_refusal(&self) -> bool {
+        is_terminal_refusal(self.status)
     }
 
     pub(crate) fn encode_headers(&self) -> Vec<HeaderPair> {
@@ -195,6 +219,13 @@ fn header_size(name: &HeaderName, value: &HeaderValue) -> usize {
 
 fn forbids_body(status: StatusCode) -> bool {
     matches!(status, StatusCode::NO_CONTENT | StatusCode::RESET_CONTENT)
+}
+
+fn is_terminal_refusal(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+    )
 }
 
 #[cfg(test)]

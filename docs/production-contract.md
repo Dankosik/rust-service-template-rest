@@ -55,11 +55,29 @@ unable to serve, and budget every downstream deadline inside
   Measure the window from the client's first send to the database check on
   retry. Include transit, request processing and pool wait in the client's
   budget. Set `http_idempotency.retention` on every writer replica to at least
-  the published window. The database sets expiry when it writes the success,
+  the published window. The database sets expiry when it writes the outcome,
   before commit and delivery. Publish a longer window only after every writer
   supports it, with an effective time for new requests. Earlier requests keep
   their original window. When shortening retention or rolling back, honor
   requests first sent under the earlier promise until that window expires.
+  Keep the set of declared request headers used in the fingerprint stable on
+  each method and URL through rolling updates and rollbacks. When that set
+  changes, publish a versioned URL outside the old route's path pattern and
+  keep serving the previous contract through the latest retry deadline for
+  requests first sent to the old URL.
+  Clients retry on the original URL with the original key and use fresh keys
+  for new requests to the versioned URL.
+  Supply the absolute HTTP(S) URI of this policy when registering the operation
+  (`idempotent_route!(handler, docs = "...")` or OpenAPI `externalDocs.url`).
+  The service checks this at registration and returns that link on key errors.
+  Before enabling `FreshCommand::ALLOW_TERMINAL_REFUSALS`, apply the
+  migrations for stored 409 and 422 responses and deploy readers for those
+  responses on every replica. Use `Rollback::terminal(problem)` for the
+  definitive business decisions `Conflict`, `AlreadyExists` or
+  `UnprocessableContent`. When rolling back, stop creating new terminal
+  records first. Keep capable readers on the route until all existing terminal
+  records expire. An older reader returns an integrity error on a matching
+  live 4xx record and cannot replay its body.
 <!-- template:end http-idempotency:production-contract-retry-window -->
 <!-- template:begin inbound-webhooks:production-contract-receipt-recovery -->
 - In the PR that adds the service's first inbound webhook handler, include

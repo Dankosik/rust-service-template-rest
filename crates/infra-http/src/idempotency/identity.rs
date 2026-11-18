@@ -8,7 +8,7 @@ use sha2::{Digest as _, Sha256};
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
-pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string.";
+pub(super) const KEY_GRAMMAR: &str = "Send an IETF Structured Field string in double quotes, without parameters. Unquoted visible ASCII is also accepted for compatibility.";
 
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";

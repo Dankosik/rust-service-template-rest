@@ -229,7 +229,8 @@ mod idempotency_tests {
     }
 
     fn test_route() -> HttpContract<AppState> {
-        infra_http::idempotent_route!(idempotent).expect("test route composes")
+        infra_http::idempotent_route!(idempotent, docs = "https://docs.example/test#retry")
+            .expect("test route composes")
     }
 
     #[test]

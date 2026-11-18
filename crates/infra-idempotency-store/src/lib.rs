@@ -24,6 +24,7 @@ const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 pub struct Store {
     pool: PgPool,
     retention: Duration,
+    terminal_refusals: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -38,7 +39,14 @@ impl Store {
         Ok(Self {
             pool,
             retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
+            terminal_refusals: false,
         })
+    }
+
+    #[must_use]
+    pub fn with_terminal_refusals(mut self, enabled: bool) -> Self {
+        self.terminal_refusals = enabled;
+        self
     }
 }
 

@@ -70,10 +70,11 @@ const RESERVED_NAME: &str = "reserved";
 const HANDLER_TIMEOUT_COLOR: &str = "handler-timeout";
 const UNSERIALIZABLE_COLOR: &str = "unserializable";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
+const KEY_RULES_LINK: &str = "<https://docs.example/widgets#create>; rel=\"describedby\"";
 const KEY_REASON: &str = concat!(
-    "must be one Idempotency-Key field; An unquoted value is visible ASCII; ",
-    "a value beginning with `\"` is an IETF Structured Field string. ",
-    "The decoded value must contain 1 to 255 bytes",
+    "Supply exactly one Idempotency-Key field. Send an IETF Structured Field string in double quotes, ",
+    "without parameters. Unquoted visible ASCII is also accepted for compatibility. ",
+    "The decoded value must contain 1 to 255 bytes.",
 );
 
 const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -247,8 +248,26 @@ struct CreateWidget {
 }
 
 impl FreshCommand for CreateWidget {
+    const ALLOW_TERMINAL_REFUSALS: bool = true;
+
     async fn execute(self, tx: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
         let widget = self.widgets.create(tx, &self.input).await?;
+        if widget.color == "invalid-refusal" {
+            return Err(Rollback::refuse(StatusCode::NOT_MODIFIED));
+        }
+        if widget.color == "unique"
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM widgets WHERE name = $1 AND id <> $2)",
+            )
+            .bind(&widget.name)
+            .bind(widget.id)
+            .fetch_one(tx.connection())
+            .await?
+        {
+            return Err(Rollback::terminal(
+                Problem::new(Code::AlreadyExists).detail("the widget name is taken"),
+            ));
+        }
         created_response(&widget)
     }
 
@@ -534,9 +553,21 @@ fn options(budget: Duration) -> HardenOptions {
 
 fn widget_contract() -> HttpContract<WidgetState> {
     HttpContract::default()
-        .merge(infra_http::idempotent_route!(create_widget).expect("create composes"))
+        .merge(
+            infra_http::idempotent_route!(
+                create_widget,
+                docs = "https://docs.example/widgets#create"
+            )
+            .expect("create composes"),
+        )
         .unwrap()
-        .merge(infra_http::idempotent_route!(replace_widget).expect("replace composes"))
+        .merge(
+            infra_http::idempotent_route!(
+                replace_widget,
+                docs = "https://docs.example/widgets#replace"
+            )
+            .expect("replace composes"),
+        )
         .unwrap()
 }
 
@@ -1402,12 +1433,9 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
         for value in values {
             request = request.add_header(KEY, HeaderValue::from_bytes(value).expect("a field"));
         }
-        let body = problem(
-            &request.await,
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "req-key",
-        );
+        let response = request.await;
+        assert_eq!(response.header("link"), KEY_RULES_LINK);
+        let body = problem(&response, StatusCode::BAD_REQUEST, "bad_request", "req-key");
         assert_eq!(body["detail"], KEY_DETAIL);
         assert_eq!(
             body["invalid_params"],
@@ -1532,6 +1560,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         "req-changed",
     );
     assert!(retry_after(&mismatch).is_none());
+    assert_eq!(mismatch.header("link"), KEY_RULES_LINK);
     let other = mounted.create(BOB, "k-1", &input, "req-bob").await;
     assert_ne!(created(&other, "req-bob")["id"], widget["id"]);
     let again = mounted.create(ALICE, "k-1", &input, "req-again").await;
@@ -1743,6 +1772,77 @@ async fn p9_a_serialization_failure_rolls_back_the_widget_and_releases_the_key(p
     assert_eq!(
         count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
         1
+    );
+    mounted.finish().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
+    create_widgets(&pool).await;
+    pool.execute("INSERT INTO widgets (name, color) VALUES ('taken', 'seed')")
+        .await
+        .unwrap();
+    let (proxy, proxied) = CommitProxy::start_for(&pool).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let input = json!({"name": "taken", "color": "unique"});
+    let key = "k-refused";
+
+    proxy.arm(Fault::ForwardThenDrop);
+    let first = mounted.create(ALICE, key, &input, "req-lost").await;
+    assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
+    problem(
+        &first,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "idempotency_unavailable",
+        "req-lost",
+    );
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    let original: Vec<u8> =
+        sqlx::query_scalar("SELECT body FROM http_idempotency_records WHERE status = 409")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    pool.execute("DELETE FROM widgets WHERE color = 'seed'")
+        .await
+        .unwrap();
+    let changed = json!({"name": "other", "color": "unique"});
+    let mismatch = mounted.create(ALICE, key, &changed, "req-mismatch").await;
+    problem(
+        &mismatch,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-mismatch",
+    );
+    let replay = mounted.create(ALICE, key, &input, "req-replay").await;
+    let body = problem_body(&replay, StatusCode::CONFLICT, "already_exists");
+    assert_eq!(body["detail"], "the widget name is taken");
+    assert_eq!(replay.header(REQUEST_ID_HEADER), "req-replay");
+    assert_eq!(replay.header("idempotent-replayed"), "true");
+    assert_eq!(replay.as_bytes().as_ref(), original.as_slice());
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    let fresh = mounted.create(ALICE, "k-fresh", &input, "req-fresh").await;
+    created(&fresh, "req-fresh");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
+    mounted.finish().await;
+    proxy.shutdown().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn an_invalid_refusal_rolls_back_the_post(pool: PgPool) {
+    let mounted = Mounted::on(&pool, BUDGET).await;
+    let input = json!({"name": "wrong-status", "color": "invalid-refusal"});
+    let first = mounted.create(ALICE, "k-304", &input, "req-invalid").await;
+    let body = problem(
+        &first,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "req-invalid",
+    );
+    assert_eq!(body["detail"], "request failed");
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        0
     );
     mounted.finish().await;
 }

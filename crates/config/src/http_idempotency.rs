@@ -8,7 +8,7 @@ use crate::validate::{ValidationError, Violations, duration_range, required};
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpIdempotencyConfig {
-    /// How long a stored success stays live after the executing attempt
+    /// How long a stored outcome stays live after the executing attempt
     /// writes it, measured on the database clock
     /// (`APP__HTTP_IDEMPOTENCY__RETENTION`). Missing, empty, or
     /// whitespace-only is vacant (`None`). A set value must be between 1

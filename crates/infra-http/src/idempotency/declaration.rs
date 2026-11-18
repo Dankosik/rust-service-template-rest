@@ -47,6 +47,10 @@ enum Rule {
     Shape,
     #[error("the method must be POST, PUT, PATCH, or DELETE")]
     Method,
+    #[error(
+        "publish the operation's retry policy at an absolute HTTP(S) URI using externalDocs.url or the route's docs argument"
+    )]
+    RetryDocumentation,
     #[error("Idempotency-Key must be absent or one byte-equal generated header parameter")]
     KeyParameter,
     #[error(
@@ -76,9 +80,13 @@ pub(super) struct PreparedOperation {
     pub(super) id: String,
     pub(super) method: MethodFilter,
     pub(super) fingerprint_headers: Vec<HeaderName>,
+    pub(super) rules_link: axum::http::HeaderValue,
 }
 
-pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, CompositionError> {
+pub(super) fn prepare(
+    paths: &mut Paths,
+    route_docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
+) -> Result<PreparedOperation, CompositionError> {
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
@@ -117,10 +125,16 @@ pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, Compositio
     fingerprint_headers.dedup();
     prepare_problem_responses(operation, &operation_id)?;
     prepare_success_responses(operation, &operation_id)?;
+    if operation.external_docs.is_none() {
+        operation.external_docs = route_docs;
+    }
+    let rules_link = super::openapi::key_rules_link(operation.external_docs.as_ref())
+        .ok_or_else(|| CompositionError::new(&operation_id, Rule::RetryDocumentation))?;
     Ok(PreparedOperation {
         id: operation_id,
         method,
         fingerprint_headers,
+        rules_link,
     })
 }
 
@@ -338,7 +352,19 @@ mod tests {
     }
 
     fn route() -> UtoipaMethodRouter {
-        routes!(create_widget)
+        let mut route = routes!(create_widget);
+        route
+            .1
+            .paths
+            .get_mut(WIDGETS)
+            .unwrap()
+            .post
+            .as_mut()
+            .unwrap()
+            .external_docs = Some(utoipa::openapi::external_docs::ExternalDocs::new(
+            "https://docs.example/widgets#retry",
+        ));
+        route
     }
 
     struct TestCommand;
@@ -443,9 +469,21 @@ mod tests {
     }
 
     #[test]
+    fn an_operation_without_published_retry_rules_fails_registration() {
+        let (_, mut paths, _): UtoipaMethodRouter = routes!(create_widget);
+        assert_eq!(
+            prepare(&mut paths, None).unwrap_err().rule(),
+            &Rule::RetryDocumentation
+        );
+    }
+
+    #[test]
     fn preparation_generates_key_family_and_replay_metadata() {
         let (_, mut paths, _): UtoipaMethodRouter = route();
-        assert_eq!(prepare(&mut paths).unwrap().id, "infraHttpTestCreateWidget");
+        assert_eq!(
+            prepare(&mut paths, None).unwrap().id,
+            "infraHttpTestCreateWidget"
+        );
         let operation = paths.paths[WIDGETS].post.as_ref().expect("post");
         assert!(
             operation
@@ -485,7 +523,7 @@ mod tests {
                     .into(),
             );
             assert_eq!(
-                prepare(&mut paths).unwrap_err().rule(),
+                prepare(&mut paths, None).unwrap_err().rule(),
                 &Rule::CookieParameter("region".to_owned())
             );
         }
@@ -494,7 +532,10 @@ mod tests {
     #[test]
     fn preparation_rejects_unsupported_shape_and_successes() {
         let (_, mut unsupported, _): UtoipaMethodRouter = routes!(get_widget);
-        assert_eq!(prepare(&mut unsupported).unwrap_err().rule(), &Rule::Method);
+        assert_eq!(
+            prepare(&mut unsupported, None).unwrap_err().rule(),
+            &Rule::Method
+        );
 
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
         missing_success
@@ -508,7 +549,7 @@ mod tests {
             .responses
             .remove("201");
         assert_eq!(
-            prepare(&mut missing_success).unwrap_err().rule(),
+            prepare(&mut missing_success, None).unwrap_err().rule(),
             &Rule::NoSuccess
         );
 
@@ -527,7 +568,7 @@ mod tests {
                 utoipa::openapi::Ref::from_response_name("Created").into(),
             );
         assert_eq!(
-            prepare(&mut referenced).unwrap_err().to_string(),
+            prepare(&mut referenced, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201 must be inline so its replay metadata can be checked"
         );
 
@@ -546,7 +587,7 @@ mod tests {
                 utoipa::openapi::Ref::from_response_name("NotModified").into(),
             );
         assert_eq!(
-            prepare(&mut redirect).unwrap_err().to_string(),
+            prepare(&mut redirect, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: an idempotent operation must not declare informational or redirect response 304"
         );
     }
@@ -569,7 +610,7 @@ mod tests {
             );
 
         assert_eq!(
-            prepare(&mut paths).unwrap_err().to_string(),
+            prepare(&mut paths, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 409 conflicts with the idempotency response family"
         );
     }
@@ -595,7 +636,7 @@ mod tests {
             RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
-            prepare(&mut conflicting).unwrap_err().to_string(),
+            prepare(&mut conflicting, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201: Idempotent-Replayed is reserved for exact generated replay metadata"
         );
 
@@ -618,7 +659,7 @@ mod tests {
             RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
-            prepare(&mut unsupported).unwrap_err().to_string(),
+            prepare(&mut unsupported, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201 may declare only replayable headers: X-Trace cannot be replayed"
         );
     }

@@ -2679,6 +2679,7 @@ dependencies = [
  "infra-idempotency-store",
  "infra-object-storage",
  "infra-postgres",
+ "iri-string",
  "itertools 0.15.0",
  "metrics",
  "metrics-util",
@@ -3228,6 +3229,12 @@ name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
+
+[[package]]
+name = "iri-string"
+version = "0.7.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447"
 
 [[package]]
 name = "itertools"

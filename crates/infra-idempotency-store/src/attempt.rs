@@ -6,6 +6,7 @@ use infra_postgres::{
     sqlstate,
 };
 use sha2::{Digest as _, Sha256};
+use sqlx::Executor as _;
 
 use crate::record::HeaderPair;
 use crate::{READ_COMMITTED, Record, Store};
@@ -152,7 +153,33 @@ impl Store {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
                 return Err(Stop::Decided(decision));
             }
+            if self.terminal_refusals {
+                tx.execute("SAVEPOINT idempotency_command")
+                    .await
+                    .map_err(|err| {
+                        failed(&err, "savepoint", AttemptError::classify_sql(&err), None)
+                    })?;
+            }
             let record = work(tx).await.map_err(Stop::RolledBack)?;
+            if record.is_terminal_refusal() {
+                if !self.terminal_refusals {
+                    return Err(Stop::Failed(refused(
+                        "command",
+                        AttemptError::Internal,
+                        "undeclared_terminal_refusal",
+                    )));
+                }
+                tx.execute("ROLLBACK TO SAVEPOINT idempotency_command")
+                    .await
+                    .map_err(|err| {
+                        failed(
+                            &err,
+                            "rollback_command",
+                            AttemptError::classify_sql(&err),
+                            None,
+                        )
+                    })?;
+            }
             write(tx, scope, fingerprint, &record, self.retention).await?;
             Ok(record)
         };

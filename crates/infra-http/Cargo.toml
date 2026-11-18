@@ -36,6 +36,7 @@ infra-object-storage = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 const-hex = { workspace = true }
 infra-idempotency-store = { workspace = true }
+iri-string = { workspace = true }
 infra-postgres = { workspace = true }
 sha2 = { workspace = true }
 sfv = { workspace = true, features = ["parsed-types"] }

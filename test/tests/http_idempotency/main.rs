@@ -434,6 +434,34 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
+    create_effects(&pool).await;
+    let reader = Store::new(pool.clone(), RETENTION).unwrap();
+    let writer = reader.clone().with_terminal_refusals(true);
+    let work = Work::default();
+    let scope = ScopeKey::new(caller(SUBJECT), KEY);
+    let refusal = Record::capture_terminal_refusal(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &HeaderMap::new(),
+        Bytes::from_static(b"reserved"),
+    )
+    .unwrap();
+    let undeclared = execute(&reader, &scope, INPUT, &refusal, &work).await;
+    std::assert_matches!(undeclared, Err(AttemptError::Internal));
+    assert_eq!(records(&pool, &scope).await, 0);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+
+    assert_eq!(
+        committed(once_free(&writer, &scope, &refusal, &work).await),
+        refusal
+    );
+    let retry = execute(&reader, &scope, INPUT, &success("would execute"), &work).await;
+    assert_eq!(live(retry), Some(refusal));
+    assert_eq!(work.runs(), 2);
+    assert_eq!(count(&pool, EFFECTS).await, 0);
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(pool: PgPool) {
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;

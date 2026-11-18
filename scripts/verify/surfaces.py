@@ -431,6 +431,7 @@ def classify_report(
             "crates/infra-http/src/problem.rs", "crates/infra-http/src/idempotency/openapi.rs",
             "crates/infra-http/src/idempotency/declaration.rs",
             "crates/service/src/api.rs", "scripts/image/cargo_artifact.py", "scripts/checks/npx.py",
+            "scripts/checks/openapi_idempotency.py",
         ):
             mark("openapi")
 
@@ -518,6 +519,7 @@ def classify_report(
             file,
             "template.lock", "template-owned.paths", "Makefile", "make/*.mk",
             "scripts/verify/*", "scripts/checks/image_inputs.py", "scripts/checks/npx.py",
+            "scripts/checks/openapi_idempotency.py",
             "scripts/checks/tools.py", "scripts/image/cargo_artifact.py", "scripts/image/inventory.py",
             "scripts/image/scan.sh", "scripts/image/publish_metadata.py",
             "scripts/template/state.py", "scripts/template/sync.py", "scripts/template/init.py",
