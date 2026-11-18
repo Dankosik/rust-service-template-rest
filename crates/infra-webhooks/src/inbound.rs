@@ -87,8 +87,7 @@ impl Verifier for KeyRing {
         body: &[u8],
         now: SystemTime,
     ) -> Result<MessageId, Rejection> {
-        let verified = self.verify(headers, body, now)?;
-        Ok(verified.message_id().clone())
+        Ok(self.verify(headers, body, now)?.into_message_id())
     }
 }
 
