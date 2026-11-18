@@ -113,7 +113,7 @@ pub(crate) async fn observe(
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
-    let participant =
+    let trace_parent_accepted =
         infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
     let method = request.method();
     let method_label = request_method(method.as_str());
@@ -121,13 +121,13 @@ pub(crate) async fn observe(
     let scheme = url_scheme(request.uri(), connection.as_ref());
     let route = matched.as_ref().map(MatchedPath::as_str);
     let span = make_span(version, method_label, route, request_id_text, scheme);
-    let parent = if participant {
+    let parent = if trace_parent_accepted {
         otel_http::extract_context(request.headers())
     } else {
         opentelemetry::Context::new()
     };
     let fallback = set_parent_or_fallback(&span, parent);
-    let response_context = participant.then(|| {
+    let response_context = trace_parent_accepted.then(|| {
         fallback
             .clone()
             .unwrap_or_else(|| find_context_from_tracing(&span))
@@ -621,18 +621,25 @@ mod tests {
         use http_body_util::BodyExt as _;
         use tower::ServiceExt as _;
 
+        #[derive(Clone, Copy)]
+        enum Scenario {
+            Complete,
+            BodyError,
+            ClientClosed,
+        }
+
         let delay = Duration::from_secs(2);
-        for (fail, abandon, error_type) in [
-            (false, false, None),
-            (true, false, Some("response_body_error")),
-            (false, true, Some("client_closed")),
+        for (scenario, error_type) in [
+            (Scenario::Complete, None),
+            (Scenario::BodyError, Some("response_body_error")),
+            (Scenario::ClientClosed, Some("client_closed")),
         ] {
             let recorder = DebuggingRecorder::new();
             let snapshotter = recorder.snapshotter();
             let _recorder = metrics::set_default_local_recorder(&recorder);
             let handler = move || async move {
                 let initial = stream::iter([Ok(Bytes::from_static(b"initial"))]);
-                let result = if fail {
+                let result = if matches!(scenario, Scenario::BodyError) {
                     Err(std::io::Error::other("injected response body error"))
                 } else {
                     Ok(Bytes::from_static(b"tail"))
@@ -683,12 +690,12 @@ mod tests {
             );
             assert_eq!(*value, DebugValue::Gauge(1.0.into()));
 
-            if abandon {
+            if matches!(scenario, Scenario::ClientClosed) {
                 tokio::time::advance(delay).await;
                 drop(std::mem::take(&mut body));
             } else {
                 let frame = body.frame().await.unwrap();
-                if fail {
+                if matches!(scenario, Scenario::BodyError) {
                     assert!(frame.is_err());
                 } else {
                     assert_eq!(frame.unwrap().into_data().unwrap(), "tail");

@@ -12,7 +12,7 @@ use super::{FinalizeError, fixed_path_operations};
 use super::{Access, Policy};
 // template:end authn:http-outcomes-policy-import
 use crate::probes::ProbeRoutes;
-use crate::problem::responses;
+use crate::problem::{PROBLEM_MEDIA_TYPE, responses};
 
 const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
 const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
@@ -136,7 +136,7 @@ fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Co
     resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some_and(|response| {
         response
             .content
-            .get("application/problem+json")
+            .get(PROBLEM_MEDIA_TYPE)
             .is_none_or(|content| {
                 resolve(
                     content,
@@ -178,6 +178,17 @@ fn merge_response(
         }
     }
     append_description(&mut merged.description, &common.description);
+    merge_response_content(&mut merged, common, components)?;
+    merge_response_headers(&mut merged, common, components)?;
+    *slot = RefOr::T(merged);
+    Ok(())
+}
+
+fn merge_response_content(
+    merged: &mut Response,
+    common: &Response,
+    components: &Components,
+) -> Result<(), &'static str> {
     for (media_type, content) in &common.content {
         let Some(slot) = merged.content.get_mut(media_type) else {
             merged.content.insert(media_type.clone(), content.clone());
@@ -198,6 +209,14 @@ fn merge_response(
         union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }
+    Ok(())
+}
+
+fn merge_response_headers(
+    merged: &mut Response,
+    common: &Response,
+    components: &Components,
+) -> Result<(), &'static str> {
     for (name, header) in &common.headers {
         let Some((_, slot)) = merged
             .headers
@@ -221,7 +240,6 @@ fn merge_response(
         }
         *slot = RefOr::T(existing);
     }
-    *slot = RefOr::T(merged);
     Ok(())
 }
 

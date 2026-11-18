@@ -10,7 +10,7 @@ use serde::Serialize;
 use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
 use utoipa::{IntoResponses, PartialSchema};
 
-use crate::problem::{Code, Problem, http_status};
+use crate::problem::{Code, PROBLEM_MEDIA_TYPE, Problem, http_status};
 
 pub(super) use infra_idempotency_store::is_replayable_header_name;
 
@@ -79,10 +79,7 @@ impl TerminalProblem {
     pub(super) fn capture(&self) -> Result<Record, ReplayError> {
         let problem = self.0.as_ref();
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/problem+json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE));
         Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
             .map_err(ReplayError::from)
     }

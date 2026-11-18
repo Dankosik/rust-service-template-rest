@@ -448,19 +448,21 @@ mod tests {
         "found"
     }
 
-    fn route() -> UtoipaMethodRouter {
-        let mut route = routes!(create_widget);
-        route
-            .1
+    fn widget_post_mut(paths: &mut Paths) -> &mut Operation {
+        paths
             .paths
             .get_mut(WIDGETS)
-            .unwrap()
+            .expect("widget path")
             .post
             .as_mut()
-            .unwrap()
-            .external_docs = Some(utoipa::openapi::external_docs::ExternalDocs::new(
-            "https://docs.example/widgets#retry",
-        ));
+            .expect("widget POST operation")
+    }
+
+    fn route() -> UtoipaMethodRouter {
+        let mut route = routes!(create_widget);
+        widget_post_mut(&mut route.1).external_docs = Some(
+            utoipa::openapi::external_docs::ExternalDocs::new("https://docs.example/widgets#retry"),
+        );
         route
     }
 
@@ -499,15 +501,8 @@ mod tests {
                 document["security"] = security;
             }
             let mut carrier = route();
-            carrier
-                .1
-                .paths
-                .get_mut(WIDGETS)
-                .unwrap()
-                .post
-                .as_mut()
-                .unwrap()
-                .security = operation_security.map(|value| serde_json::from_value(value).unwrap());
+            widget_post_mut(&mut carrier.1).security =
+                operation_security.map(|value| serde_json::from_value(value).unwrap());
             let root = crate::HttpContract::application(serde_json::from_value(document).unwrap())
                 .expect("application metadata");
             let feature = OpenApiRouter::new().routes(carrier).into_openapi();
@@ -648,13 +643,7 @@ mod tests {
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
         assert_eq!(
             prepare_success_responses(
-                missing_success
-                    .paths
-                    .get_mut(WIDGETS)
-                    .unwrap()
-                    .post
-                    .as_mut()
-                    .unwrap(),
+                widget_post_mut(&mut missing_success),
                 BTreeMap::new(),
                 &BTreeMap::new(),
             )
@@ -674,7 +663,7 @@ mod tests {
             ),
         ] {
             let (_, mut paths, _): UtoipaMethodRouter = route();
-            let operation = paths.paths.get_mut(WIDGETS).unwrap().post.as_mut().unwrap();
+            let operation = widget_post_mut(&mut paths);
             let annotation =
                 serde_json::json!({"description": "conflicting success", "content": content});
             operation.responses.responses.insert(
@@ -690,38 +679,20 @@ mod tests {
         }
 
         let (_, mut referenced, _): UtoipaMethodRouter = route();
-        referenced
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .insert(
-                "201".to_owned(),
-                utoipa::openapi::Ref::from_response_name("Created").into(),
-            );
+        widget_post_mut(&mut referenced).responses.responses.insert(
+            "201".to_owned(),
+            utoipa::openapi::Ref::from_response_name("Created").into(),
+        );
         assert_eq!(
             prepare(&mut referenced, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201 must be inline so its replay metadata can be checked"
         );
 
         let (_, mut redirect, _): UtoipaMethodRouter = route();
-        redirect
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .insert(
-                "304".to_owned(),
-                utoipa::openapi::Ref::from_response_name("NotModified").into(),
-            );
+        widget_post_mut(&mut redirect).responses.responses.insert(
+            "304".to_owned(),
+            utoipa::openapi::Ref::from_response_name("NotModified").into(),
+        );
         assert_eq!(
             prepare(&mut redirect, None).unwrap_err().to_string(),
             "idempotent route composition is invalid: infraHttpTestCreateWidget: an idempotent operation must not declare informational or redirect response 304"
@@ -731,19 +702,10 @@ mod tests {
     #[test]
     fn preparation_names_the_conflicting_response_slot() {
         let (_, mut paths, _): UtoipaMethodRouter = route();
-        paths
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
-            .responses
-            .responses
-            .insert(
-                "409".to_owned(),
-                utoipa::openapi::Ref::from_response_name("Conflict").into(),
-            );
+        widget_post_mut(&mut paths).responses.responses.insert(
+            "409".to_owned(),
+            utoipa::openapi::Ref::from_response_name("Conflict").into(),
+        );
 
         assert_eq!(
             prepare(&mut paths, None).unwrap_err().to_string(),
@@ -782,13 +744,7 @@ mod tests {
             ],
         ] {
             let (_, mut conflicting, _): UtoipaMethodRouter = route();
-            let operation = conflicting
-                .paths
-                .get_mut(WIDGETS)
-                .unwrap()
-                .post
-                .as_mut()
-                .unwrap();
+            let operation = widget_post_mut(&mut conflicting);
             let Some(RefOr::T(response)) = operation.responses.responses.get_mut("201") else {
                 panic!("inline success");
             };
@@ -806,13 +762,7 @@ mod tests {
         }
 
         let (_, mut unsupported, _): UtoipaMethodRouter = route();
-        let Some(RefOr::T(response)) = unsupported
-            .paths
-            .get_mut(WIDGETS)
-            .expect("path")
-            .post
-            .as_mut()
-            .expect("post")
+        let Some(RefOr::T(response)) = widget_post_mut(&mut unsupported)
             .responses
             .responses
             .get_mut("201")

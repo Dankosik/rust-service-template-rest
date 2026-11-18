@@ -45,6 +45,8 @@ pub(crate) const fn http_status(code: Code) -> StatusCode {
     }
 }
 
+pub(crate) const PROBLEM_MEDIA_TYPE: &str = "application/problem+json";
+
 // RFC 9457 §4.2.1
 const ABOUT_BLANK: &str = "about:blank";
 
@@ -176,10 +178,7 @@ impl IntoResponse for Problem {
         let retry_after = self.retry_after;
         let mut response = (
             http_status(self.code),
-            [(
-                CONTENT_TYPE,
-                HeaderValue::from_static("application/problem+json"),
-            )],
+            [(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE))],
             axum::Json(&self),
         )
             .into_response();
