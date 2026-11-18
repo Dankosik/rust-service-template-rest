@@ -233,7 +233,7 @@ impl Client {
         context: RequestContext,
     ) -> Result<PreparedRequest<'_>, Error> {
         let stops = context.for_request(
-            Deadline::new(Instant::now(), self.limits.operation_timeout),
+            Deadline::after(self.limits.operation_timeout),
             request.extensions_mut().remove::<OperationContext>(),
         );
         stops.check()?;
@@ -345,7 +345,10 @@ impl PreparedRequest<'_> {
             reason = stops.wait_stopped() => Err(Error::from(reason)),
             result = exchange.instrument(span) => result,
         }
-        .and_then(|response| stops.check().map_err(Error::from).map(|()| response));
+        .and_then(|response| {
+            stops.check()?;
+            Ok(response)
+        });
         let status = attempt.status();
         std::mem::DropGuard::dismiss(attempt).finish(result.as_ref().err());
         result.map_err(|source| match status {

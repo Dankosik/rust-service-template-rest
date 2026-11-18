@@ -638,7 +638,6 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         "crates/shared-rules/src/rfc6749.rs",
         "crates/shared-rules/src/rfc6750.rs",
         "crates/shared-rules/src/rfc7515.rs",
-        "crates/shared-rules/src/rfc7519.rs",
         "crates/shared-rules/src/secret_file.rs",
     ))
     return nodes

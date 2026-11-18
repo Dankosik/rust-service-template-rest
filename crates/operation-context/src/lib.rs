@@ -17,6 +17,11 @@ impl Deadline {
     }
 
     #[must_use]
+    pub fn after(budget: Duration) -> Self {
+        Self::new(Instant::now(), budget)
+    }
+
+    #[must_use]
     pub fn at(cutoff: Instant) -> Self {
         let now = Instant::now();
         Self::new(cutoff.min(now), cutoff.saturating_duration_since(now))
@@ -90,7 +95,7 @@ impl OperationContext {
 
     #[must_use]
     pub fn with_timeout(budget: Duration) -> Self {
-        Self::from_deadline(Deadline::new(Instant::now(), budget))
+        Self::from_deadline(Deadline::after(budget))
     }
 
     #[must_use]
@@ -114,7 +119,7 @@ impl OperationContext {
 
     #[must_use]
     pub fn child(&self, ceiling: Duration) -> Self {
-        self.child_until(Deadline::new(Instant::now(), ceiling))
+        self.child_until(Deadline::after(ceiling))
     }
 
     #[must_use]
@@ -208,7 +213,7 @@ mod tests {
         assert_eq!(zero.remaining(), Duration::from_secs(10));
         assert!(!zero.expired());
 
-        let sooner = Deadline::new(Instant::now(), Duration::from_secs(5));
+        let sooner = Deadline::after(Duration::from_secs(5));
         assert_eq!(
             deadline.earlier(sooner).instant(),
             Some(Instant::now() + Duration::from_secs(5))
@@ -247,7 +252,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn huge_finite_deadline_can_wait_and_clamp_without_overflow() {
-        let deadline = Deadline::new(Instant::now(), Duration::MAX);
+        let deadline = Deadline::after(Duration::MAX);
         let parent = OperationContext::from_deadline(deadline);
         assert!(!deadline.expired());
         assert_eq!(

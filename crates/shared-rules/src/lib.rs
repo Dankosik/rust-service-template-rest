@@ -48,7 +48,6 @@ pub mod rfc6750;
 pub mod rfc6901;
 pub mod rfc7515;
 pub mod rfc7518;
-pub mod rfc7519;
 pub mod rfc9110;
 pub mod secret_file;
 pub mod uri;

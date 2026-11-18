@@ -75,8 +75,7 @@ tls-test-support = { workspace = true }
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "test-util"] }
-tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "test-util"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 metrics-util = { workspace = true, features = ["debugging"] }
 proptest = { workspace = true, features = ["std"] }

@@ -407,7 +407,7 @@ impl Link {
             &generation,
             reservation,
             query,
-            Deadline::new(Instant::now(), self.command_timeout),
+            Deadline::after(self.command_timeout),
         );
         let reply = tokio::select! {
             biased;
@@ -516,7 +516,7 @@ async fn ping_until(
         generation,
         &redis::Cmd::ping(),
         |value| matches!(value, redis::Value::SimpleString(pong) if pong == "PONG"),
-        || Deadline::new(Instant::now(), command_timeout),
+        || Deadline::after(command_timeout),
     )
     .await
     .map_err(|error| (error, Disposition::Retire))?;
@@ -843,7 +843,7 @@ impl<'a> Rotation<'a> {
             generation,
             &command,
             |value| matches!(value, redis::Value::Okay),
-            || Deadline::new(Instant::now(), command_timeout),
+            || Deadline::after(command_timeout),
         )
         .await
         .and_then(|reply| reply.map_err(|error| error_type(&error)));

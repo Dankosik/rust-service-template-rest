@@ -399,12 +399,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Semaphore;
-    use tokio::time::Instant;
 
     const BUDGET: Duration = Duration::from_secs(1);
 
     fn budget_deadline() -> Deadline {
-        Deadline::new(Instant::now(), BUDGET)
+        Deadline::after(BUDGET)
     }
 
     struct ProbeBody {

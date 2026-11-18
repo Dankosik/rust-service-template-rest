@@ -555,7 +555,6 @@ mod tests {
 
     use http_body_util::BodyExt as _;
     use operation_context::Deadline;
-    use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -775,7 +774,7 @@ mod tests {
             ClientObservation::Transport(sample_call()),
             ClientCustody {
                 lifetime: OperationContext::new(
-                    Some(Deadline::new(Instant::now(), TEST_BUDGET)),
+                    Some(Deadline::after(TEST_BUDGET)),
                     cancellation.clone(),
                 ),
                 watch_stop: true,
@@ -822,10 +821,8 @@ mod tests {
         let upload_dropped = Arc::clone(&upload_source.dropped);
         let (mut outgoing, upload_guard) = upload(tonic::body::Body::new(upload_source));
 
-        let lifetime = OperationContext::new(
-            Some(Deadline::new(Instant::now(), TEST_BUDGET)),
-            CancellationToken::new(),
-        );
+        let lifetime =
+            OperationContext::new(Some(Deadline::after(TEST_BUDGET)), CancellationToken::new());
         let mut body = ClientResponseBody::start(
             response_source,
             ClientObservation::Transport(sample_call()),
@@ -890,10 +887,8 @@ mod tests {
             move |code| wire_codes.lock().push(code)
         });
         let dropped = Arc::new(AtomicBool::new(false));
-        let lifetime = OperationContext::new(
-            Some(Deadline::new(Instant::now(), TEST_BUDGET)),
-            CancellationToken::new(),
-        );
+        let lifetime =
+            OperationContext::new(Some(Deadline::after(TEST_BUDGET)), CancellationToken::new());
         let mut body = ClientResponseBody::start(
             UnwindingBody(Arc::clone(&dropped)),
             ClientObservation::Decoded {
