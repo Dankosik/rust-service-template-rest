@@ -3,7 +3,7 @@ use std::fmt;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ParsedPublicKey};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use foldhash::HashSet;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, map::Entry};
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
     ThumbprintHash,
@@ -164,7 +164,9 @@ impl fmt::Debug for TrustRegistry {
     }
 }
 
-struct Entries(Result<Vec<(String, DuplicateCheckedJson)>, String>);
+struct Entries(
+    Result<IndexMap<String, DuplicateCheckedJson, foldhash::quality::RandomState>, String>,
+);
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -175,14 +177,17 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries: Vec<(String, DuplicateCheckedJson)> = Vec::new();
-                let mut seen: HashSet<String> = HashSet::default();
+                let mut entries = IndexMap::default();
                 let mut repeated = None;
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
-                    if repeated.is_none() && !seen.insert(name.clone()) {
-                        repeated = Some(name.clone());
+                    match entries.entry(name) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(value);
+                        }
+                        Entry::Occupied(entry) => {
+                            repeated.get_or_insert_with(|| entry.key().clone());
+                        }
                     }
-                    entries.push((name, value));
                 }
                 Ok(Entries(repeated.map_or(Ok(entries), Err)))
             }

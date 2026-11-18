@@ -3,6 +3,8 @@ use std::{error::Error as StdError, fmt};
 use http::StatusCode;
 use serde::Deserialize;
 
+use crate::request_admission::AdmissionRefusal;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
 pub struct ConfigurationError {
@@ -248,4 +250,15 @@ pub enum Error {
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]
     Resource(#[from] infra_outbound_http::Error),
+}
+
+impl From<AdmissionRefusal> for Error {
+    fn from(refusal: AdmissionRefusal) -> Self {
+        match refusal {
+            AdmissionRefusal::AuthorizationConflict => Self::AuthorizationConflict,
+            AdmissionRefusal::SubjectRequired => Self::SubjectRequired,
+            AdmissionRefusal::UnexpectedSubject => Self::UnexpectedSubject,
+            AdmissionRefusal::Acquisition(error) => Self::Acquisition(error),
+        }
+    }
 }
