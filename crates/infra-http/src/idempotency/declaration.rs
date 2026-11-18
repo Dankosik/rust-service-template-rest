@@ -105,41 +105,42 @@ pub(super) fn prepare(
     let mut fingerprint_headers = Vec::new();
     collect_fingerprint_headers(
         item.parameters.as_deref().unwrap_or_default(),
-        &subject,
         &mut fingerprint_headers,
-    )?;
+    )
+    .map_err(|rule| CompositionError::new(&subject, rule))?;
     let (method, operation) = one_operation_mut(item).ok_or_else(shape)?;
     let operation_id = operation
         .operation_id
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
+    let at_operation = |rule| CompositionError::new(&operation_id, rule);
     let method = match method {
         "POST" => MethodFilter::POST,
         "PUT" => MethodFilter::PUT,
         "PATCH" => MethodFilter::PATCH,
         "DELETE" => MethodFilter::DELETE,
-        _ => return Err(CompositionError::new(&operation_id, Rule::Method)),
+        _ => return Err(at_operation(Rule::Method)),
     };
 
-    prepare_key_parameter(operation, &operation_id)?;
+    prepare_key_parameter(operation).map_err(at_operation)?;
     collect_fingerprint_headers(
         operation.parameters.as_deref().unwrap_or_default(),
-        &operation_id,
         &mut fingerprint_headers,
-    )?;
+    )
+    .map_err(at_operation)?;
     fingerprint_headers.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
     fingerprint_headers.dedup();
-    prepare_problem_responses(operation, &operation_id)?;
+    prepare_problem_responses(operation).map_err(at_operation)?;
     let schemas = &mut document.components.get_or_insert_default().schemas;
     crate::contract::merge_map("schemas", schemas, success_schemas)
-        .map_err(|error| CompositionError::contract(&operation_id, error))?;
-    prepare_success_responses(operation, &operation_id, successes, schemas)?;
+        .map_err(|error| at_operation(Rule::Contract(error)))?;
+    prepare_success_responses(operation, successes, schemas).map_err(at_operation)?;
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
     }
     let rules_link = super::openapi::key_rules_link(operation.external_docs.as_ref())
-        .ok_or_else(|| CompositionError::new(&operation_id, Rule::RetryDocumentation))?;
+        .ok_or_else(|| at_operation(Rule::RetryDocumentation))?;
     Ok(PreparedOperation {
         id: operation_id,
         method,
@@ -150,24 +151,20 @@ pub(super) fn prepare(
 
 fn collect_fingerprint_headers(
     parameters: &[RefOr<Parameter>],
-    subject: &str,
     headers: &mut Vec<HeaderName>,
-) -> Result<(), CompositionError> {
-    let invalid = || CompositionError::new(subject, Rule::FingerprintParameter);
+) -> Result<(), Rule> {
     for parameter in parameters {
         let RefOr::T(parameter) = parameter else {
-            return Err(invalid());
+            return Err(Rule::FingerprintParameter);
         };
         if parameter.parameter_in == ParameterIn::Cookie {
-            return Err(CompositionError::new(
-                subject,
-                Rule::CookieParameter(parameter.name.clone()),
-            ));
+            return Err(Rule::CookieParameter(parameter.name.clone()));
         }
         if parameter.parameter_in == ParameterIn::Header
             && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         {
-            let name = HeaderName::from_bytes(parameter.name.as_bytes()).map_err(|_| invalid())?;
+            let name = HeaderName::from_bytes(parameter.name.as_bytes())
+                .map_err(|_| Rule::FingerprintParameter)?;
             if name != CONTENT_TYPE {
                 headers.push(name);
             }
@@ -176,10 +173,7 @@ fn collect_fingerprint_headers(
     Ok(())
 }
 
-fn prepare_key_parameter(
-    operation: &mut Operation,
-    operation_id: &str,
-) -> Result<(), CompositionError> {
+fn prepare_key_parameter(operation: &mut Operation) -> Result<(), Rule> {
     let generated_key = key_parameter();
     let existing_keys = operation
         .parameters
@@ -200,24 +194,18 @@ fn prepare_key_parameter(
             .get_or_insert_default()
             .push(generated_key.into()),
         Ok(Some(existing)) if existing == &generated_key => {}
-        _ => return Err(CompositionError::new(operation_id, Rule::KeyParameter)),
+        _ => return Err(Rule::KeyParameter),
     }
     Ok(())
 }
 
-fn prepare_problem_responses(
-    operation: &mut Operation,
-    operation_id: &str,
-) -> Result<(), CompositionError> {
+fn prepare_problem_responses(operation: &mut Operation) -> Result<(), Rule> {
     for (status, generated) in response_family() {
         if let Some(existing) = operation.responses.responses.get(&status)
             && existing != &generated
             && !can_replace_with_idempotency_response(&status, existing)
         {
-            return Err(CompositionError::new(
-                operation_id,
-                Rule::ProblemResponseConflict { status },
-            ));
+            return Err(Rule::ProblemResponseConflict { status });
         }
         operation.responses.responses.insert(status, generated);
     }
@@ -226,31 +214,22 @@ fn prepare_problem_responses(
 
 fn prepare_success_responses(
     operation: &mut Operation,
-    operation_id: &str,
     successes: BTreeMap<String, RefOr<Response>>,
     schemas: &BTreeMap<String, RefOr<Schema>>,
-) -> Result<(), CompositionError> {
+) -> Result<(), Rule> {
     let responses = &mut operation.responses.responses;
-    let conflict = |status: &str| {
-        CompositionError::new(
-            operation_id,
-            Rule::SuccessConflict {
-                status: status.to_owned(),
-            },
-        )
+    let conflict = |status: &str| Rule::SuccessConflict {
+        status: status.to_owned(),
     };
     if successes.is_empty() {
-        return Err(CompositionError::new(operation_id, Rule::NoSuccess));
+        return Err(Rule::NoSuccess);
     }
     for status in responses.keys() {
         match status.as_bytes().first() {
             Some(b'1' | b'3') => {
-                return Err(CompositionError::new(
-                    operation_id,
-                    Rule::InformationalOrRedirectResponse {
-                        status: status.clone(),
-                    },
-                ));
+                return Err(Rule::InformationalOrRedirectResponse {
+                    status: status.clone(),
+                });
             }
             Some(b'2') if !successes.contains_key(status) => return Err(conflict(status)),
             _ => {}
@@ -263,23 +242,18 @@ fn prepare_success_responses(
         {
             return Err(conflict(&status));
         }
-        let referenced = || {
-            CompositionError::new(
-                operation_id,
-                Rule::ReferencedSuccess {
-                    status: status.clone(),
-                },
-            )
+        let referenced = || Rule::ReferencedSuccess {
+            status: status.clone(),
         };
         let RefOr::T(mut response) = response else {
             return Err(referenced());
         };
-        prepare_success_headers(&mut response, operation_id, &status)?;
+        prepare_success_headers(&mut response, &status)?;
         if let Some(annotation) = responses.remove(&status) {
             let RefOr::T(mut annotation) = annotation else {
                 return Err(referenced());
             };
-            prepare_success_headers(&mut annotation, operation_id, &status)?;
+            prepare_success_headers(&mut annotation, &status)?;
             supplement_success(&mut response, annotation, schemas)
                 .ok_or_else(|| conflict(&status))?;
         }
@@ -359,11 +333,7 @@ fn supplement_success(
     Some(())
 }
 
-fn prepare_success_headers(
-    response: &mut Response,
-    operation_id: &str,
-    status: &str,
-) -> Result<(), CompositionError> {
+fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), Rule> {
     let replay_headers = response
         .headers
         .iter()
@@ -376,24 +346,18 @@ fn prepare_success_headers(
         }
         Ok(Some((_, header))) if same_definition(header, &replay_header()) => {}
         _ => {
-            return Err(CompositionError::new(
-                operation_id,
-                Rule::ReplayHeader {
-                    status: status.to_owned(),
-                },
-            ));
+            return Err(Rule::ReplayHeader {
+                status: status.to_owned(),
+            });
         }
     }
     if let Some(name) = response.headers.keys().find(|name| {
         !name.eq_ignore_ascii_case(REPLAYED_HEADER) && !stored::is_replayable_header_name(name)
     }) {
-        return Err(CompositionError::new(
-            operation_id,
-            Rule::UnreplayableHeader {
-                status: status.to_owned(),
-                name: name.clone(),
-            },
-        ));
+        return Err(Rule::UnreplayableHeader {
+            status: status.to_owned(),
+            name: name.clone(),
+        });
     }
     Ok(())
 }
@@ -644,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_declared_cookie_is_rejected_at_either_parameter_location() {
-        for path_level in [true, false] {
+        for (path_level, subject) in [(true, WIDGETS), (false, "infraHttpTestCreateWidget")] {
             let (_, mut paths, _): UtoipaMethodRouter = route();
             let item = paths.paths.get_mut(WIDGETS).unwrap();
             let parameters = if path_level {
@@ -660,8 +624,10 @@ mod tests {
                     .into(),
             );
             assert_eq!(
-                prepare(&mut paths, None).unwrap_err().rule(),
-                &Rule::CookieParameter("region".to_owned())
+                prepare(&mut paths, None).unwrap_err().to_string(),
+                format!(
+                    "idempotent route composition is invalid: {subject}: cookie parameter region is outside the idempotent request fingerprint"
+                )
             );
         }
     }
