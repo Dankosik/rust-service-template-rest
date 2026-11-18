@@ -136,10 +136,6 @@ fn fixtures() -> FixtureSet {
         .expect("Go fixture has the bridge record schema")
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep one Go-produced record's decode, DLQ identity, and restore assertions together with its provenance"
-)]
 fn verify_go_record_in_rust(fixture: &FixtureCase) {
     verify_inbound_record(fixture);
     verify_reencoded_record(fixture);
