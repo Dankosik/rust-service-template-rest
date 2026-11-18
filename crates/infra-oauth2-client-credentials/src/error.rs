@@ -248,10 +248,7 @@ impl Rejection {
 
 impl fmt::Display for Rejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Other => "no registered error code",
-            registered => registered.label(),
-        })
+        f.write_str(self.code().unwrap_or("no registered error code"))
     }
 }
 

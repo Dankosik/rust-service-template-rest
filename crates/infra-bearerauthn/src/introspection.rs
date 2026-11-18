@@ -19,7 +19,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     PreparationError, PresentedToken, Principal, VerificationError, VerificationReason, Verifier,
-    claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
+    claims::{ClaimPolicy, VerifiedClaims, validate_introspection_claims},
     provider::{CallerStop, ProviderClient},
 };
 
@@ -77,7 +77,7 @@ pub(crate) struct IntrospectionVerifier {
 }
 
 struct PositiveCache {
-    retained: Cache<TokenDigest, VerifiedIntrospection, foldhash::quality::RandomState>,
+    retained: Cache<TokenDigest, VerifiedClaims, foldhash::quality::RandomState>,
     fills: Mutex<HashMap<TokenDigest, Weak<RunningFill>>>,
 }
 
@@ -148,7 +148,7 @@ fn token_digest(token: &PresentedToken<'_>) -> TokenDigest {
 
 #[derive(Clone)]
 enum Fill {
-    Fresh(VerifiedIntrospection),
+    Fresh(VerifiedClaims),
     RecheckCache,
 }
 
@@ -204,7 +204,7 @@ impl IntrospectionVerifier {
             return self
                 .introspect(token.to_secret(), &|| context.stopped(), &now)
                 .await?
-                .deliver(now()?);
+                .deliver(Duration::from_secs(now()?));
         };
         let key = token_digest(token);
         loop {
@@ -234,7 +234,7 @@ impl IntrospectionVerifier {
                 })
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.deliver(now()?);
+                return value.deliver(Duration::from_secs(now()?));
             }
         }
     }
@@ -244,7 +244,7 @@ impl IntrospectionVerifier {
         token: SecretString,
         caller_stop: CallerStop<'_>,
         now: &impl Fn() -> Result<u64, VerificationError>,
-    ) -> Result<VerifiedIntrospection, VerificationError> {
+    ) -> Result<VerifiedClaims, VerificationError> {
         now()?;
         let _permit = self
             .permits
@@ -274,11 +274,11 @@ struct Retention {
     ttl: Duration,
 }
 
-impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
+impl Expiry<TokenDigest, VerifiedClaims> for Retention {
     fn expire_after_create(
         &self,
         _: &TokenDigest,
-        value: &VerifiedIntrospection,
+        value: &VerifiedClaims,
         _: std::time::Instant,
     ) -> Option<Duration> {
         Some(retention(&value.identity, self.ttl, SystemTime::now()))
@@ -287,7 +287,7 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     fn expire_after_update(
         &self,
         _: &TokenDigest,
-        value: &VerifiedIntrospection,
+        value: &VerifiedClaims,
         _: std::time::Instant,
         _: Option<Duration>,
     ) -> Option<Duration> {

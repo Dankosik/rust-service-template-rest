@@ -93,16 +93,17 @@ struct RawAct<'a> {
     client_id: Option<Cow<'a, str>>,
 }
 
-impl RawAct<'_> {
-    fn into_actor(self) -> Result<Actor, ()> {
-        if self.sub.is_empty() {
-            return Err(());
-        }
-        Ok(Actor::new(
-            self.sub.into_owned(),
-            self.client_id.map(Cow::into_owned),
-        ))
+fn optional_actor(raw: Option<JsonObject<RawAct<'_>>>) -> Result<Option<Actor>, ()> {
+    let Some(JsonObject(raw)) = raw else {
+        return Ok(None);
+    };
+    if raw.sub.is_empty() {
+        return Err(());
     }
+    Ok(Some(Actor::new(
+        raw.sub.into_owned(),
+        raw.client_id.map(Cow::into_owned),
+    )))
 }
 
 impl Values<'_> {
@@ -195,26 +196,26 @@ fn present_scope_string<'de: 'a, 'a, D: serde::Deserializer<'de>>(
 }
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
-// template:begin oidc-jwt:authn-claims-jwt-validation
 #[derive(Clone, Debug)]
-pub(crate) struct VerifiedJwt {
+pub(crate) struct VerifiedClaims {
     pub(crate) identity: Principal,
     not_before: Option<Duration>,
 }
 
-impl VerifiedJwt {
+impl VerifiedClaims {
     pub(crate) fn deliver(&self, now: Duration) -> Result<Principal, VerificationError> {
         check_lifetime(self.identity.expiry_from_epoch(), self.not_before, now)?;
         Ok(self.identity.clone())
     }
 }
 
+// template:begin oidc-jwt:authn-claims-jwt-validation
 pub(crate) fn validate_jwt_claims(
     payload: Vec<u8>,
     policy: &ClaimPolicy,
     token_profile: TokenProfile,
     now: Duration,
-) -> Result<VerifiedJwt, VerificationError> {
+) -> Result<VerifiedClaims, VerificationError> {
     let invalid = VerificationError::invalid;
     let payload =
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
@@ -258,12 +259,9 @@ pub(crate) fn validate_jwt_claims(
         return Err(invalid(VerificationReason::MissingClaim));
     }
     let scopes = Scopes::from_claim(scope).map_err(|()| invalid(VerificationReason::Scope))?;
-    let actor = claims
-        .act
-        .map(|JsonObject(actor)| actor.into_actor())
-        .transpose()
-        .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
-    Ok(VerifiedJwt {
+    let actor =
+        optional_actor(claims.act).map_err(|()| invalid(VerificationReason::MalformedClaims))?;
+    Ok(VerifiedClaims {
         not_before,
         identity: Principal::new(
             Identity {
@@ -346,25 +344,10 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
-#[derive(Clone, Debug)]
-pub(crate) struct VerifiedIntrospection {
-    pub(crate) identity: Principal,
-    not_before: Option<Duration>,
-}
-
-impl VerifiedIntrospection {
+impl VerifiedClaims {
     pub(crate) fn reusable_at(&self, now: u64) -> bool {
         now < self.identity.expires_at()
             && !not_yet_valid(self.not_before, Duration::from_secs(now))
-    }
-
-    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
-        check_lifetime(
-            Duration::from_secs(self.identity.expires_at()),
-            self.not_before,
-            Duration::from_secs(now),
-        )?;
-        Ok(self.identity.clone())
     }
 }
 
@@ -373,7 +356,7 @@ pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
     now: u64,
-) -> Result<VerifiedIntrospection, VerificationError> {
+) -> Result<VerifiedClaims, VerificationError> {
     let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
     let payload = std::str::from_utf8(bytes)
@@ -397,12 +380,8 @@ pub(crate) fn validate_introspection_claims(
     require_identity(subject.as_deref(), client_id.as_deref())?;
     let scopes = Scopes::from_claim(claims.scope.map(Values::One).or(claims.scp))
         .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
-    let actor = claims
-        .act
-        .map(|JsonObject(actor)| actor.into_actor())
-        .transpose()
-        .map_err(|()| malformed())?;
-    Ok(VerifiedIntrospection {
+    let actor = optional_actor(claims.act).map_err(|()| malformed())?;
+    Ok(VerifiedClaims {
         not_before,
         identity: Principal::new(
             Identity {

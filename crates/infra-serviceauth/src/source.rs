@@ -78,7 +78,7 @@ impl TokenSource {
             name: options.name,
         };
         signer
-            .sign(signer.name.as_str(), 0)
+            .sign(&signer.name, 0)
             .map_err(|_| SigningError::InvalidKey)?;
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
@@ -179,7 +179,7 @@ impl ActiveReceiver {
         if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
             return Ok(authorization);
         }
-        let token = self.signer.sign(self.audience.as_str(), now)?;
+        let token = self.signer.sign(&self.audience, now)?;
         let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
         let mut authorization =
             HeaderValue::from_str(bearer.as_str()).map_err(|_| SigningError::Signing)?;
@@ -208,11 +208,11 @@ struct Claims<'a> {
 }
 
 impl Signer {
-    fn sign(&self, audience: &str, now: u64) -> Result<Zeroizing<String>, SigningError> {
+    fn sign(&self, audience: &ServiceName, now: u64) -> Result<Zeroizing<String>, SigningError> {
         let claims = Claims {
             iss: self.name.as_str(),
             sub: self.name.as_str(),
-            aud: audience,
+            aud: audience.as_str(),
             iat: now,
             exp: now + MAX_TOKEN_LIFETIME_SECONDS,
         };
