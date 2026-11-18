@@ -1,7 +1,15 @@
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("gRPC file descriptor set is invalid")]
-    InvalidFileDescriptorSet,
+    #[error("decode gRPC file descriptor set: {0}")]
+    DecodeDescriptorSet(#[source] prost::DecodeError),
+    #[error("inspect gRPC reflection file descriptor: {0}")]
+    InspectReflectionFile(#[source] prost::DecodeError),
+    #[error("inspect gRPC reflection file descriptor: missing file name")]
+    MissingReflectionFileName,
+    #[error("build gRPC v1 reflection service: {0}")]
+    BuildReflectionV1(#[source] tonic_reflection::server::Error),
+    #[error("build gRPC v1alpha reflection service: {0}")]
+    BuildReflectionV1Alpha(#[source] tonic_reflection::server::Error),
     #[error("gRPC descriptors disagree on the methods of service {0}")]
     ConflictingServiceDescription(String),
     #[error("gRPC reflection descriptors disagree on the contents of file {0}")]

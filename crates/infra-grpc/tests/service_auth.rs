@@ -8,7 +8,14 @@
     reason = "no panic! call in every projection of this integration fixture"
 )]
 
-use std::{fmt::Write as _, net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    fmt::Write as _,
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
@@ -19,10 +26,10 @@ use grpc_contracts::example::v1::{
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Authentication, Caller, Error, Limits, Services, require_caller, server_options};
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
-use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
-    test_support::{TestKey, now_secs, registry},
+    test_support::{TestKey, has_cached_authorization, now_secs, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
 use parking_lot::Mutex;
@@ -215,13 +222,18 @@ fn certificate() -> &'static tls_test_support::TlsMaterial {
 }
 
 fn resource(address: SocketAddr) -> Client {
-    Client::try_new(
+    resource_with_limit(address, None)
+}
+
+fn resource_with_limit(address: SocketAddr, limit: Option<NonZeroUsize>) -> Client {
+    Client::with_opening_limit(
         &format!("https://{address}"),
         ClientSecurity::Tls(ClientTlsMaterial {
             ca_certificate_pem: Some(certificate().root_pem.clone()),
             identity: None,
         }),
-        Duration::from_secs(10),
+        ClientTimeout::FullRpc(Duration::from_secs(10)),
+        limit,
     )
     .unwrap()
 }
@@ -381,11 +393,38 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     })
     .unwrap();
     let origin: http::Uri = format!("https://{address}").parse().unwrap();
+    let resource = resource_with_limit(address, Some(NonZeroUsize::MIN));
     let bound = |source: &TokenSource, receiver| {
         let tokens = source.receiver(receiver, origin.clone()).unwrap();
-        EchoServiceClient::new(resource(address).with_service_tokens(tokens).unwrap())
+        EchoServiceClient::new(resource.with_service_tokens(tokens).unwrap())
     };
-    let mut catalog = bound(&source, "catalog");
+    let catalog_tokens = source.receiver("catalog", origin.clone()).unwrap();
+    let mut catalog = EchoServiceClient::new(
+        resource
+            .with_service_tokens(catalog_tokens.clone())
+            .unwrap(),
+    );
+    assert!(!has_cached_authorization(&catalog_tokens));
+    let held = resource
+        .prepare_call(http::Request::new(tonic::body::Body::empty()))
+        .unwrap();
+    let status = tokio::time::timeout(
+        Duration::from_secs(3),
+        catalog.unary(UnaryRequest::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    let status = catalog
+        .unary(with_token(UnaryRequest::default(), Some("caller-supplied")))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::ResourceExhausted);
+    assert_eq!(echo.seen(), Vec::<Seen>::new());
+    assert!(!has_cached_authorization(&catalog_tokens));
+    drop(held);
+
     for _ in 0..2 {
         let response = catalog
             .unary(UnaryRequest {
@@ -395,6 +434,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
             .unwrap();
         assert_eq!(response.into_inner().message, "signed");
     }
+    assert!(has_cached_authorization(&catalog_tokens));
     assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
     let mut elsewhere = bound(&source, "billing");
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
@@ -445,7 +485,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         Authentication::None,
         limits(),
     );
-    assert_eq!(refused.err(), Some(Error::CallerRulesRequireServiceTokens));
+    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
     // template:begin oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     let verifier = infra_bearerauthn::test_support::JwtFixture::shared().verifier();
     let refused = infra_grpc::router(
@@ -454,7 +494,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         Authentication::Bearer(verifier),
         limits(),
     );
-    assert_eq!(refused.err(), Some(Error::CallerRulesRequireServiceTokens));
+    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
     // template:end oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     // template:begin authn:grpc-service-auth-test-without-verifier-bearer
     let readiness = readiness();
@@ -464,7 +504,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         Authentication::None,
         limits(),
     );
-    assert_eq!(refused.err(), Some(Error::UnauthenticatedBusinessCalls));
+    std::assert_matches!(refused, Err(Error::UnauthenticatedBusinessCalls));
     // template:end authn:grpc-service-auth-test-without-verifier-bearer
     if bearer_retained() {
         return;
@@ -483,8 +523,10 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
 
 #[tokio::test]
 async fn service_token_authentication_requires_a_tls_listener() {
+    let mut services = echo_services(&Echo::default());
+    services.set_listener_layer(tower::layer::util::Identity::new());
     let app = infra_grpc::router(
-        echo_services(&Echo::default()),
+        services,
         readiness().reader(),
         Authentication::ServiceTokens(Keys::new().verifier()),
         limits(),
@@ -495,7 +537,7 @@ async fn service_token_authentication_requires_a_tls_listener() {
         max_connections: NonZeroU32::new(1),
         max_connection_age: None,
     });
-    assert_eq!(
+    std::assert_matches!(
         app.serve(listener, options, None).err(),
         Some(Error::ServiceTokensRequireTls)
     );
@@ -520,7 +562,7 @@ async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
             Authentication::ServiceTokens(keys.verifier()),
             limits(),
         );
-        assert_eq!(refused.unwrap_err(), Error::ScopesWithServiceTokens);
+        std::assert_matches!(refused, Err(Error::ScopesWithServiceTokens));
     }
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
@@ -538,9 +580,9 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     services
         .add(EchoServiceServer::new(Echo::default()))
         .unwrap();
-    assert_eq!(
+    std::assert_matches!(
         build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(format!("{ECHO}/Unary"))),
+        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/Unary"),
         "a verifier without any rule"
     );
     let mut services = Services::new();
@@ -553,29 +595,24 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     services
         .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
         .unwrap();
-    assert_eq!(
+    std::assert_matches!(
         build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(format!("{ECHO}/ClientStream"))),
+        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/ClientStream"),
         "every method requires an explicit rule"
     );
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.add_reflection().unwrap();
-    assert_eq!(
+    std::assert_matches!(
         build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(
-            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo".to_owned()
-        ))
+        Err(Error::MissingCallerRule(path)) if path == "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
     );
     let mut services = echo_services(&echo);
     services.add_reflection().unwrap();
     for path in infra_grpc::REFLECTION_PATHS {
         services.allow_callers(path, &[]).unwrap();
     }
-    assert_eq!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Ok(())
-    );
+    build(services, Authentication::ServiceTokens(keys.verifier())).unwrap();
 }
 
 #[test]
@@ -584,9 +621,9 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .unwrap();
-    assert_eq!(
+    std::assert_matches!(
         services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
-        Err(Error::UnregisteredCallerRule(format!("{ECHO}/Unary"))),
+        Err(Error::UnregisteredCallerRule(path)) if path == format!("{ECHO}/Unary"),
         "before the service is added"
     );
     services
@@ -599,33 +636,33 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         "/example.v1.Other/Unary",
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     ] {
-        assert_eq!(
+        std::assert_matches!(
             services.allow_callers(path, &["orders"]),
-            Err(Error::UnregisteredCallerRule(path.to_owned())),
+            Err(Error::UnregisteredCallerRule(rejected)) if rejected == path,
             "{path}"
         );
     }
     let unary = format!("{ECHO}/Unary");
     for callers in [&["Orders"], &["a b"]] {
-        assert_eq!(
+        std::assert_matches!(
             services.allow_callers(&unary, callers),
             Err(Error::InvalidCallerRule {
-                path: unary.clone(),
+                path,
                 source: infra_serviceauth::InvalidServiceName,
-            }),
+            }) if path == unary,
             "{callers:?}"
         );
     }
-    assert_eq!(
+    std::assert_matches!(
         services.allow_callers(&unary, &["orders", "orders"]),
-        Err(Error::DuplicateCallerName(unary.clone()))
+        Err(Error::DuplicateCallerName(path)) if path == unary
     );
     services
         .allow_callers(&unary, &["orders", "billing"])
         .unwrap();
-    assert_eq!(
+    std::assert_matches!(
         services.allow_callers(&unary, &["orders"]),
-        Err(Error::DuplicateCallerRule(unary))
+        Err(Error::DuplicateCallerRule(path)) if path == unary
     );
 }
 

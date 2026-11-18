@@ -2042,6 +2042,7 @@ version = "0.1.0"
 dependencies = [
  "derive-where",
  "prost",
+ "prost-types",
  "tonic",
  "tonic-prost",
 ]
@@ -5250,6 +5251,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-health",
+ "tonic-reflection",
  "tower",
  "tracing",
  "ureq",

@@ -16,14 +16,20 @@ const MAX_AGGREGATE_BYTES: usize = 1024;
 #[derive(Clone, Debug, Default)]
 struct Echo;
 
-pub(super) fn register(services: &mut Services) -> Result<(), infra_grpc::Error> {
+pub(super) fn register(
+    services: &mut Services,
+    mut apply_caller_rule: impl FnMut(&mut Services, &str) -> Result<(), infra_grpc::Error>,
+) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))?;
-    // template:begin grpc-authn:grpc-example-scope-requirements
+    let service_name = <EchoServiceServer<Echo> as tonic::server::NamedService>::NAME;
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-        services.require_scopes(&format!("/example.v1.EchoService/{method}"), &[])?;
+        let path = format!("/{service_name}/{method}");
+        // template:begin grpc-authn:grpc-example-scope-requirements
+        services.require_scopes(&path, &[])?;
+        // template:end grpc-authn:grpc-example-scope-requirements
+        apply_caller_rule(services, &path)?;
     }
-    // template:end grpc-authn:grpc-example-scope-requirements
     Ok(())
 }
 

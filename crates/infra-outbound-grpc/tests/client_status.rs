@@ -4,10 +4,11 @@
     reason = "integration fixtures fail closed with their local setup context"
 )]
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
+use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
-use infra_outbound_grpc::{Client, ClientSecurity};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
 use tower::Service as _;
 
 const CLIENT_METHOD_LIMIT: usize = 256;
@@ -262,12 +263,33 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     assert!(handle.render().contains(empty_ok));
     drop(empty);
     drop(generated);
-    let refusing = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
-    let status = refusing
-        .prepare_call(client_request(
+    let mut refusing = Client::with_opening_limit(
+        &destination,
+        ClientSecurity::Plaintext,
+        ClientTimeout::FullRpc(WAIT),
+        Some(NonZeroUsize::MIN),
+    )
+    .unwrap();
+    let unary_request = || {
+        client_request(
             "/example.v1.EchoService/Unary",
             Some(("example.v1.EchoService", "Unary")),
-        ))
+        )
+    };
+    let abandoned = refusing.call(unary_request());
+    let at_capacity = refusing
+        .clone()
+        .call(unary_request())
+        .now_or_never()
+        .unwrap();
+    assert_eq!(
+        at_capacity.unwrap_err().code(),
+        tonic::Code::ResourceExhausted
+    );
+    drop(abandoned);
+    let status = refusing
+        .prepare_call(unary_request())
+        .unwrap()
         .refuse(tonic::Status::unavailable("credentials unavailable"));
     assert_eq!(status.code(), tonic::Code::Unavailable);
     let mut proxied = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
@@ -363,7 +385,7 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     }
     let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
     assert!(
-        rendered.contains(&format!("grpc_client_started_total{{{unary}}} 8")),
+        rendered.contains(&format!("grpc_client_started_total{{{unary}}} 10")),
         "{rendered}"
     );
     let handled_prefix = format!("grpc_client_handled_total{{{unary},");
@@ -372,12 +394,14 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
             .lines()
             .filter(|line| line.starts_with(&handled_prefix))
             .count(),
-        5,
+        7,
         "{rendered}"
     );
     for (code, count) in [
+        ("Canceled", 1),
         ("InvalidArgument", 1),
         ("Internal", 3),
+        ("ResourceExhausted", 1),
         ("Unknown", 2),
         ("Unimplemented", 1),
         ("Unavailable", 1),

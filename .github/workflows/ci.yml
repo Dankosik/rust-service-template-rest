@@ -133,6 +133,36 @@ jobs:
           else
             GRPC_BASE_REF=HEAD make grpc-check
           fi
+      - name: Generate and compile a Timestamp contract
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/grpc-codegen
+        run: |
+          set -euo pipefail
+          mkdir -p api/proto/schema_probe/v1
+          cat > api/proto/schema_probe/v1/timestamp.proto <<'PROTO'
+          syntax = "proto3";
+
+          package schema_probe.v1;
+
+          import "google/protobuf/timestamp.proto";
+
+          message TimestampProbe {
+            google.protobuf.Timestamp observed_at = 1;
+          }
+          PROTO
+          make grpc-generate
+          mkdir -p crates/grpc-contracts/examples
+          cat > crates/grpc-contracts/examples/timestamp_probe.rs <<'RUST'
+          use grpc_contracts::{prost_types::Timestamp, schema_probe::v1::TimestampProbe};
+
+          fn main() {
+              let probe = TimestampProbe {
+                  observed_at: Some(Timestamp { seconds: 1, nanos: 0 }),
+              };
+              assert_eq!(probe.observed_at.map(|timestamp| timestamp.seconds), Some(1));
+          }
+          RUST
+          cargo check --locked -p grpc-contracts --example timestamp_probe
   # template:end grpc:ci-grpc-job
 
   monitoring-rules:
