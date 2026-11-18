@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -7,10 +6,7 @@ use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
 use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::{Tx, TxMode};
 use operation_context::{Deadline, OperationContext};
-use serde::de::IntoDeserializer as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::base64::Base64;
-use serde_with::{DeserializeAs, SerializeAs, serde_as};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 use uuid::NonNilUuid;
@@ -247,33 +243,37 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
 #[cfg_attr(test, derive(Debug))]
 struct InvalidBase64;
 
-struct Base64Payload;
+mod base64_payload {
+    use std::borrow::Cow;
 
-impl SerializeAs<Result<Bytes, InvalidBase64>> for Base64Payload {
-    fn serialize_as<S: Serializer>(
+    use bytes::Bytes;
+    use serde::de::IntoDeserializer as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_with::{As, base64::Base64};
+
+    use super::InvalidBase64;
+
+    pub(super) fn serialize<S: Serializer>(
         source: &Result<Bytes, InvalidBase64>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match source {
-            Ok(bytes) => <Base64 as SerializeAs<Bytes>>::serialize_as(bytes, serializer),
+            Ok(bytes) => As::<Base64>::serialize(bytes, serializer),
             Err(InvalidBase64) => Err(serde::ser::Error::custom("payload is not base64")),
         }
     }
-}
 
-impl<'de> DeserializeAs<'de, Result<Bytes, InvalidBase64>> for Base64Payload {
-    fn deserialize_as<D: Deserializer<'de>>(
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
         let encoded = Cow::<str>::deserialize(deserializer)?;
-        Ok(<Base64 as DeserializeAs<'_, Bytes>>::deserialize_as(
-            encoded.as_ref().into_deserializer(),
+        Ok(
+            As::<Base64>::deserialize(encoded.as_ref().into_deserializer())
+                .map_err(|_: serde::de::value::Error| InvalidBase64),
         )
-        .map_err(|_: serde::de::value::Error| InvalidBase64))
     }
 }
 
-#[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Debug))]
 struct PublishDomainEvent {
@@ -286,8 +286,7 @@ struct PublishDomainEvent {
     schema_version: u16,
     occurred_at_unix_seconds: i64,
     occurred_at_nanosecond: u32,
-    #[serde(rename = "payload_base64")]
-    #[serde_as(as = "Base64Payload")]
+    #[serde(rename = "payload_base64", with = "base64_payload")]
     payload: Result<Bytes, InvalidBase64>,
 }
 

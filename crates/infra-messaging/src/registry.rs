@@ -200,7 +200,6 @@ pub struct Registry {
 
 #[derive(Clone)]
 pub(crate) struct RegisteredRoute {
-    pub(crate) key: RouteKey<'static>,
     pub(crate) subject: async_nats::Subject,
     pub(crate) schema: Option<PayloadSchema>,
     payload: TypeId,
@@ -274,7 +273,6 @@ impl Registry {
             });
         };
         entry.insert(RegisteredRoute {
-            key,
             subject: route.subject.clone(),
             schema: route.schema,
             payload: TypeId::of::<T>(),
@@ -349,12 +347,14 @@ impl Registry {
         Ok(())
     }
 
-    pub(crate) fn routes(&self) -> impl Iterator<Item = &RegisteredRoute> {
-        self.routes.values()
+    pub(crate) fn routes(&self) -> impl Iterator<Item = (&RouteKey<'static>, &RegisteredRoute)> {
+        self.routes.iter()
     }
 
-    pub(crate) fn handled_routes(&self) -> impl Iterator<Item = &RegisteredRoute> {
-        self.routes.values().filter(|entry| entry.handler.is_some())
+    pub(crate) fn handled_routes(
+        &self,
+    ) -> impl Iterator<Item = (&RouteKey<'static>, &RegisteredRoute)> {
+        self.routes().filter(|(_, entry)| entry.handler.is_some())
     }
 
     pub(crate) async fn dispatch(

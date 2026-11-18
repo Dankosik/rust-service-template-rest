@@ -39,13 +39,7 @@ impl Registry {
 
         let mut routes: Vec<_> = self
             .handled_routes()
-            .map(|route| {
-                (
-                    route.subject.as_str(),
-                    route.key.event_type,
-                    route.key.schema_version,
-                )
-            })
+            .map(|(key, route)| (route.subject.as_str(), key.event_type, key.schema_version))
             .collect();
         routes.sort_unstable();
         let mut hash = Sha256::new();
@@ -102,8 +96,8 @@ impl DeadLetterTopology {
         let subject_bytes = if filter.contains(['*', '>']) {
             registry
                 .routes()
-                .filter(|route| wire::matches_filter(filter, &route.subject))
-                .map(|route| route.subject.len())
+                .filter(|(_, route)| wire::matches_filter(filter, &route.subject))
+                .map(|(_, route)| route.subject.len())
                 .fold(WILDCARD_SUBJECT_BYTES, usize::max)
         } else {
             filter.len()
