@@ -354,9 +354,9 @@ enum Audience<'a> {
 
 impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor<'a>(std::marker::PhantomData<Audience<'a>>);
-        impl<'de: 'a, 'a> de::Visitor<'de> for Visitor<'a> {
-            type Value = Audience<'a>;
+        struct Visitor;
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = Audience<'de>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a string or an array of strings")
@@ -381,7 +381,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
                 Ok(Audience::Other)
             }
         }
-        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+        deserializer.deserialize_any(Visitor)
     }
 }
 

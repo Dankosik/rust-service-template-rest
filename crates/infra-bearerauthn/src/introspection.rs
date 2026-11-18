@@ -18,12 +18,19 @@ use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
 use crate::{
-    PreparationError, PresentedToken, Principal, VerificationError, VerificationReason, Verifier,
+    PreparationError, PresentedToken, Principal, ProviderFailure, VerificationError,
+    VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedClaims, validate_introspection_claims},
     provider::{CallerStop, ProviderClient},
 };
 
 const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
+
+impl From<ProviderFailure> for VerificationError {
+    fn from(failure: ProviderFailure) -> Self {
+        Self::unavailable(VerificationReason::Provider(failure.reason()))
+    }
+}
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("IntrospectionOptions([REDACTED])")]
@@ -195,11 +202,7 @@ impl IntrospectionVerifier {
         context: &OperationContext,
         now: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
-        context.check().map_err(|_| {
-            VerificationError::unavailable(VerificationReason::Provider(
-                crate::ProviderFailure::Timeout.reason(),
-            ))
-        })?;
+        context.check().map_err(|_| ProviderFailure::Timeout)?;
         let Some(cache) = &self.cache else {
             return self
                 .introspect(token.to_secret(), &|| context.stopped(), &now)
@@ -262,10 +265,7 @@ impl IntrospectionVerifier {
                 ],
                 caller_stop,
             )
-            .await
-            .map_err(|failure| {
-                VerificationError::unavailable(VerificationReason::Provider(failure.reason()))
-            })?;
+            .await?;
         validate_introspection_claims(&response, &self.policy, now()?)
     }
 }

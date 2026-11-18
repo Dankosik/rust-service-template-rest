@@ -11,11 +11,18 @@ pub struct Principal {
 
 pub(crate) struct Identity {
     pub(crate) issuer: String,
-    pub(crate) subject: Option<String>,
-    pub(crate) client_id: Option<String>,
+    pub(crate) identifiers: Identifiers,
     pub(crate) scopes: Scopes,
     pub(crate) payload: String,
     pub(crate) actor: Option<Actor>,
+}
+
+pub(crate) enum Identifiers {
+    Subject {
+        subject: String,
+        client_id: Option<String>,
+    },
+    ClientOnly(String),
 }
 
 impl Principal {
@@ -37,12 +44,18 @@ impl Principal {
 
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
-        self.identity.subject.as_deref()
+        match &self.identity.identifiers {
+            Identifiers::Subject { subject, .. } => Some(subject),
+            Identifiers::ClientOnly(_) => None,
+        }
     }
 
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
-        self.identity.client_id.as_deref()
+        match &self.identity.identifiers {
+            Identifiers::Subject { client_id, .. } => client_id.as_deref(),
+            Identifiers::ClientOnly(client_id) => Some(client_id),
+        }
     }
 
     #[must_use]
@@ -81,7 +94,7 @@ impl Principal {
     pub(crate) fn fields(&self) -> impl PartialEq + std::fmt::Debug + '_ {
         let identity = &*self.identity;
         (
-            (&identity.issuer, &identity.subject, &identity.client_id),
+            (&identity.issuer, self.subject(), self.client_id()),
             (self.scopes(), &identity.payload),
             (&identity.actor, self.expiry_from_epoch),
         )
