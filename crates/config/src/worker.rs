@@ -49,7 +49,7 @@ impl WorkerInput {
         self.runtime.validate(v);
         self.observability.validate(v);
         // template:begin messaging:worker-messaging-admit
-        let messaging = self.messaging.admit(&self.app.env, v);
+        let messaging = self.messaging.admit(self.app.is_local_development(), v);
         // template:end messaging:worker-messaging-admit
         // template:begin jobs:worker-postgres-admit
         let postgres = self.postgres.admit(v);

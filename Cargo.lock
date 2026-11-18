@@ -3051,6 +3051,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "metrics-process",
  "metrics-util",
+ "nix",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-proto",

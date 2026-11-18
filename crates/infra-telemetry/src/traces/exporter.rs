@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ pub(super) const CLIENT_KEY_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
     "OTEL_EXPORTER_OTLP_CLIENT_KEY",
 ];
+const TRUST_FILE_MAX_BYTES: u64 = 1024 * 1024;
 
 fn is_blank(value: &OsStr) -> bool {
     value.to_string_lossy().trim().is_empty()
@@ -197,12 +199,38 @@ pub(super) struct TrustFile {
 impl TrustFile {
     #[expect(
         clippy::disallowed_methods,
+        clippy::disallowed_types,
         reason = "startup exporter client construction owns TLS file reads on its scoped thread"
     )]
     fn read(&self) -> Result<Vec<u8>, TracingError> {
-        std::fs::read(&self.path).map_err(|_| TracingError::TrustRead {
-            name: self.variable,
-        })
+        let name = self.variable;
+        let read_error = |error: io::Error| TracingError::TrustRead {
+            name,
+            kind: error.kind(),
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+        }
+        let file = options.open(&self.path).map_err(read_error)?;
+        if !file.metadata().map_err(read_error)?.is_file() {
+            return Err(TracingError::TrustFileType { name });
+        }
+        let mut pem = Vec::new();
+        file.take(TRUST_FILE_MAX_BYTES + 1)
+            .read_to_end(&mut pem)
+            .map_err(read_error)?;
+        if pem.len() as u64 > TRUST_FILE_MAX_BYTES {
+            return Err(TracingError::TrustFileTooLarge {
+                name,
+                max_bytes: TRUST_FILE_MAX_BYTES,
+            });
+        }
+        Ok(pem)
     }
 }
 
@@ -320,8 +348,10 @@ fn trusting_client(
     match (&trust.client_certificate, &trust.client_key) {
         (Some(certificate), Some(key)) => {
             let mut pem = key.read()?;
-            pem.push(b'\n');
-            pem.extend(certificate.read()?);
+            if certificate.path.as_os_str() != key.path.as_os_str() {
+                pem.push(b'\n');
+                pem.extend(certificate.read()?);
+            }
             let identity =
                 reqwest::Identity::from_pem(&pem).map_err(|_| TracingError::IdentityPem)?;
             builder = builder.identity(identity);

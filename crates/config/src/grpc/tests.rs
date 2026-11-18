@@ -197,6 +197,7 @@ fn admitted_debug_names_the_mode_but_not_the_material() {
 fn grpc_environment_enables_an_explicit_plaintext_listener() {
     let cfg = load_env(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
@@ -210,6 +211,7 @@ fn grpc_environment_enables_an_explicit_plaintext_listener() {
 fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     let listener = [
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
@@ -279,6 +281,7 @@ fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
         BUILD,
         env(&[
             ("APP__APP__ENV", "local"),
+            ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
             ("APP__GRPC__PRIVATE_KEY", "private-key-material"),
         ]),
     )

@@ -28,7 +28,9 @@ pub enum DsnError {
     MultipleHosts,
     #[error("postgres dsn sslmode must be one of disable, require, verify-ca, verify-full")]
     SslMode,
-    #[error("postgres dsn requires sslmode=verify-full outside local development")]
+    #[error(
+        "postgres dsn requires sslmode=verify-full unless insecure development is explicitly allowed"
+    )]
     ServerVerification,
     #[error("postgres dsn sslrootcert must be an absolute file path")]
     RootCertPath,

@@ -14,14 +14,14 @@ fn jwt(extra: &str) -> ServiceAuthInput {
 
 fn admit(
     input: ServiceAuthInput,
-    app_env: &str,
+    insecure_development: bool,
     grpc_enabled: bool,
 ) -> Result<ServiceAuthConfig, ValidationErrors> {
-    admit_with(|v| input.admit(app_env, grpc_enabled, v))
+    admit_with(|v| input.admit(insecure_development, grpc_enabled, v))
 }
 
-fn rejected_keys(input: ServiceAuthInput, app_env: &str) -> Vec<String> {
-    admit(input, app_env, true)
+fn rejected_keys(input: ServiceAuthInput, insecure_development: bool) -> Vec<String> {
+    admit(input, insecure_development, true)
         .unwrap_err()
         .iter()
         .map(|error| error.key.clone())
@@ -30,18 +30,14 @@ fn rejected_keys(input: ServiceAuthInput, app_env: &str) -> Vec<String> {
 
 #[test]
 fn none_admits_unauthenticated_grpc_only_in_development() {
-    for env in ["local", "development"] {
-        assert_matches!(
-            admit(ServiceAuthInput::default(), env, true),
-            Ok(ServiceAuthConfig::None)
-        );
-    }
-    for env in ["production", "staging", "Production", "dev"] {
-        let errors = admit(ServiceAuthInput::default(), env, true).unwrap_err();
-        assert!(errors.names("service_auth.mode"), "{env}");
-    }
     assert_matches!(
-        admit(ServiceAuthInput::default(), "production", false),
+        admit(ServiceAuthInput::default(), true, true),
+        Ok(ServiceAuthConfig::None)
+    );
+    let errors = admit(ServiceAuthInput::default(), false, true).unwrap_err();
+    assert!(errors.names("service_auth.mode"));
+    assert_matches!(
+        admit(ServiceAuthInput::default(), false, false),
         Ok(ServiceAuthConfig::None)
     );
 }
@@ -49,7 +45,7 @@ fn none_admits_unauthenticated_grpc_only_in_development() {
 #[test]
 fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
     assert_matches!(
-        admit(jwt(""), "production", true),
+        admit(jwt(""), false, true),
         Ok(ServiceAuthConfig::Jwt {
             signing_key: None,
             ..
@@ -60,7 +56,7 @@ fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
         ..
     }) = admit(
         jwt("key_id = \"catalog/1\"\nprivate_key = \"pem\""),
-        "production",
+        false,
         true,
     )
     else {
@@ -82,14 +78,14 @@ fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
         ),
     ] {
         let input: ServiceAuthInput = toml::from_str(&format!("mode = \"jwt\"\n{body}")).unwrap();
-        assert_eq!(rejected_keys(input, "production"), [key]);
+        assert_eq!(rejected_keys(input, false), [key]);
     }
     assert_eq!(
-        rejected_keys(jwt("key_id = \"catalog/1\""), "local"),
+        rejected_keys(jwt("key_id = \"catalog/1\""), true),
         ["service_auth.private_key"]
     );
     assert_eq!(
-        rejected_keys(jwt("private_key = \"pem\"\nkey_id = \" \""), "local"),
+        rejected_keys(jwt("private_key = \"pem\"\nkey_id = \" \""), true),
         ["service_auth.key_id"]
     );
 }
@@ -98,7 +94,7 @@ fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
 fn every_violated_jwt_rule_is_reported_together() {
     let input: ServiceAuthInput = toml::from_str("mode = \"jwt\"\nkey_id = \"catalog/1\"").unwrap();
     assert_eq!(
-        rejected_keys(input, "production"),
+        rejected_keys(input, false),
         [
             "service_auth.name",
             "service_auth.jwt_type",
@@ -111,13 +107,13 @@ fn every_violated_jwt_rule_is_reported_together() {
 #[test]
 fn none_accepts_no_dormant_input_and_debug_names_only_the_mode() {
     let dormant: ServiceAuthInput = toml::from_str("mode = \"none\"\nname = \"x\"\n").unwrap();
-    assert_eq!(rejected_keys(dormant, "local"), ["service_auth.name"]);
+    assert_eq!(rejected_keys(dormant, true), ["service_auth.name"]);
     let all_dormant: ServiceAuthInput = toml::from_str(
         "mode = \"none\"\nname = \"x\"\njwt_type = \"t\"\ntrust = \"{}\"\nkey_id = \"k\"\nprivate_key = \"p\"\n",
     )
     .unwrap();
     assert_eq!(
-        rejected_keys(all_dormant, "local"),
+        rejected_keys(all_dormant, true),
         [
             "service_auth.name",
             "service_auth.jwt_type",
@@ -128,7 +124,7 @@ fn none_accepts_no_dormant_input_and_debug_names_only_the_mode() {
     );
     let config = admit(
         jwt("key_id = \"catalog/1\"\nprivate_key = \"-----BEGIN PRIVATE KEY-----\""),
-        "production",
+        false,
         true,
     )
     .unwrap();
@@ -189,14 +185,21 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
     ];
-    let development = [("APP__APP__ENV", "development")];
+    let development = [
+        ("APP__APP__ENV", "development"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+    ];
     load_from(
         &LoadOptions::default(),
         BUILD,
         env(&[listener.as_slice(), development.as_slice()].concat()),
     )
     .unwrap();
-    for environment in [None, Some(("APP__APP__ENV", "private-environment-value"))] {
+    for environment in [
+        None,
+        Some(("APP__APP__ENV", "development")),
+        Some(("APP__APP__ENV", "private-environment-value")),
+    ] {
         let err = load_from(
             &LoadOptions::default(),
             BUILD,

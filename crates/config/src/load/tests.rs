@@ -25,6 +25,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
     assert_eq!(cfg.app.env, "unspecified");
+    assert!(!cfg.app.is_local_development());
     assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app.version, "1.2.3");
     assert_eq!(cfg.app.commit, "abc123");
@@ -81,6 +82,29 @@ fn shipped_local_configuration_loads_without_environment_overrides() {
     )
     .unwrap();
     assert_eq!(cfg.log.format, LogFormat::Text);
+    assert!(cfg.app.is_local_development());
+}
+
+#[test]
+fn insecure_development_refuses_unrecognized_environment_names() {
+    for name in [
+        "production",
+        "dev",
+        "Development",
+        "private-environment-value",
+    ] {
+        let error = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__APP__ENV", name),
+                ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+            ]),
+        )
+        .unwrap_err();
+        assert_matches!(&error, Error::Validate(errors) if errors.names("app.allow_insecure_development"));
+        assert!(!error.to_string().contains("private-environment-value"));
+    }
 }
 
 #[test]
@@ -406,6 +430,7 @@ fn service_counts_finite_caps_of_enabled_listeners(
 ) {
     let cfg = load_env(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__HTTP__MAX_CONNECTIONS", http_max_connections),
         ("APP__OBSERVABILITY__METRICS__ADDR", diagnostics_addr),
         ("APP__GRPC__ENABLED", grpc_enabled),

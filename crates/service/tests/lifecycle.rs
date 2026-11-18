@@ -317,6 +317,7 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 fn missing_grpc_verifier_lists_only_the_supported_modes() {
     let (code, stdout, stderr) = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__GRPC__ENABLED", "true"),
         ("APP__GRPC__ADDR", "127.0.0.1:0"),
         ("APP__GRPC__SECURITY", "plaintext"),
@@ -392,6 +393,7 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
     let dsn = format!("redis://{}", available_address());
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__CACHE__DSN", &dsn),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
@@ -433,6 +435,7 @@ fn a_cache_password_fifo_is_rejected_before_binding_the_listener() {
     nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
@@ -463,6 +466,7 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
         format!("postgres://service:startup-fixture@127.0.0.1:{port}/service?sslmode=disable");
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
         ("APP__POSTGRES__ENABLED", "true"),
         ("APP__POSTGRES__DSN", &dsn),
     ]);
@@ -531,17 +535,27 @@ fn a_mounted_postgres_password_fifo_is_rejected_before_binding_the_listener() {
 }
 
 #[test]
-fn production_refuses_unverified_postgres_and_keeps_the_dsn_private() {
-    for (query, reason) in [
-        ("sslmode=require", "requires sslmode=verify-full"),
+fn postgres_refuses_unverified_connections_without_opt_in_and_keeps_the_dsn_private() {
+    for (environment, query, reason) in [
         (
+            "production",
+            "sslmode=require",
+            "requires sslmode=verify-full",
+        ),
+        (
+            "development",
+            "sslmode=disable",
+            "requires sslmode=verify-full",
+        ),
+        (
+            "production",
             "sslmode=verify-full&private-marker=x",
             "unsupported parameter",
         ),
     ] {
         let dsn = format!("postgres://service:private-marker@127.0.0.1:1/service?{query}");
         let (code, stdout, stderr) = Service::spawn(&[
-            ("APP__APP__ENV", "production"),
+            ("APP__APP__ENV", environment),
             ("APP__POSTGRES__ENABLED", "true"),
             ("APP__POSTGRES__DSN", &dsn),
         ])
@@ -576,7 +590,9 @@ fn storage_env<'a>(
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
     let endpoint = format!("http://{}", available_address());
-    let service = Service::spawn(&storage_env("local", "local", &endpoint));
+    let mut config = storage_env("local", "local", &endpoint).to_vec();
+    config.push(("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"));
+    let service = Service::spawn(&config);
     let configured = service.await_record("object_storage_configured");
     assert_eq!(
         configured["object_storage.provider"], "local",
@@ -599,18 +615,20 @@ fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
 }
 
 #[test]
-fn production_emulator_provider_exits_before_the_listener() {
-    let (code, stderr) =
-        Service::spawn(&storage_env("production", "local", "http://127.0.0.1:7070")).wait();
-    assert_eq!(code, Some(1), "stderr: {stderr}");
-    assert!(
-        stderr.contains("object_storage.provider"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("hunter2-object-storage"),
-        "stderr: {stderr}"
-    );
+fn the_emulator_provider_exits_before_the_listener_without_development_opt_in() {
+    for environment in ["production", "local"] {
+        let (code, stderr) =
+            Service::spawn(&storage_env(environment, "local", "http://127.0.0.1:7070")).wait();
+        assert_eq!(code, Some(1), "stderr: {stderr}");
+        assert!(
+            stderr.contains("object_storage.provider"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("hunter2-object-storage"),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[test]

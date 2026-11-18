@@ -46,11 +46,32 @@ impl Pki {
         self.file(CERTIFICATE_VARS[1], "ca.pem", &self.issuer.pem())
     }
 
-    fn client_files(&self) -> (TrustFile, TrustFile) {
+    fn client_files(&self, bundled: bool) -> (TrustFile, TrustFile) {
         let key = KeyPair::generate().expect("client key");
         let mut params = CertificateParams::new(vec!["exporter".to_owned()]).expect("client names");
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
+        if bundled {
+            let certificate = self.file(
+                CLIENT_CERTIFICATE_VARS[1],
+                "client-bundle.pem",
+                &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
+            );
+            #[cfg(unix)]
+            let certificate = {
+                let path = self.files.path().join("mounted-client.pem");
+                std::os::unix::fs::symlink(&certificate.path, &path).expect("link to the bundle");
+                TrustFile {
+                    path,
+                    ..certificate
+                }
+            };
+            let key = TrustFile {
+                variable: CLIENT_KEY_VARS[1],
+                path: certificate.path.clone(),
+            };
+            return (certificate, key);
+        }
         (
             self.file(CLIENT_CERTIFICATE_VARS[1], "client.pem", &certificate.pem()),
             self.file(CLIENT_KEY_VARS[1], "client.key", &key.serialize_pem()),
@@ -138,14 +159,14 @@ fn a_client_certificate_is_presented_to_a_collector_that_requires_one() {
     };
     export(&collector, &anonymous).expect_err("the collector requires a client certificate");
 
-    let (client_certificate, client_key) = pki.client_files();
-    let identified = CollectorTrust {
-        client_certificate: Some(client_certificate),
-        client_key: Some(client_key),
-        ..anonymous
-    };
     let endpoint = format!("https://{}/v1/traces", collector.addr);
-    for typed in ["", &endpoint] {
+    for (typed, bundled) in [("", false), (&endpoint, false), (&endpoint, true)] {
+        let (client_certificate, client_key) = pki.client_files(bundled);
+        let identified = CollectorTrust {
+            client_certificate: Some(client_certificate),
+            client_key: Some(client_key),
+            ..anonymous.clone()
+        };
         let handle = tracer_provider(
             &options(typed),
             env(&[(

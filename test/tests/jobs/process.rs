@@ -107,6 +107,7 @@ impl Worker {
             .env("APP__POSTGRES__ENABLED", "true")
             .env("APP__POSTGRES__DSN", database_url)
             .env("APP__APP__ENV", "local")
+            .env("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true")
             // template:begin outbox:test-jobs-process-nats-environment
             .env("APP__POSTGRES__MAX_CONNECTIONS", "6")
             .env("APP__MESSAGING__URLS", &nats.url)

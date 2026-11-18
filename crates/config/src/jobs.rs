@@ -18,6 +18,8 @@ pub(crate) struct JobsOperatorInput {
 struct OperatorAppInput {
     #[serde(deserialize_with = "crate::de::string")]
     env: String,
+    #[serde(deserialize_with = "crate::de::boolean")]
+    allow_insecure_development: bool,
     #[serde(rename = "version")]
     _version: serde::de::IgnoredAny,
     #[serde(rename = "commit")]
@@ -41,7 +43,12 @@ impl JobsOperatorConfig {
 impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let mut violations = Violations::default();
-        let local_development = crate::app::is_local_development(&self.app.env);
+        let local_development = violations
+            .take(crate::app::insecure_development(
+                &self.app.env,
+                self.app.allow_insecure_development,
+            ))
+            .unwrap_or(false);
         let postgres = self.postgres.admit(local_development, &mut violations);
         let postgres = violations
             .finish(postgres)

@@ -227,20 +227,39 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         path: files.path().join(name),
     };
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
+    std::fs::write(files.path().join("large.pem"), vec![0; 1024 * 1024 + 1])
+        .expect("write an oversized file");
+    #[cfg(unix)]
+    std::fs::create_dir(files.path().join("directory.pem")).expect("create a directory");
     for (trust, diagnostic) in [
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
                 ..CollectorTrust::default()
             },
-            CERTIFICATE_VARS[0],
+            "could not read the OTLP trust file",
+        ),
+        (
+            CollectorTrust {
+                certificate: Some(file(CERTIFICATE_VARS[0], "large.pem")),
+                ..CollectorTrust::default()
+            },
+            "exceeds the 1048576-byte limit",
+        ),
+        #[cfg(unix)]
+        (
+            CollectorTrust {
+                certificate: Some(file(CERTIFICATE_VARS[0], "directory.pem")),
+                ..CollectorTrust::default()
+            },
+            "must select a regular OTLP trust file",
         ),
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            CERTIFICATE_VARS[1],
+            "must select a usable PEM certificate bundle",
         ),
         (
             CollectorTrust {
@@ -276,9 +295,20 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
             &trust,
         )
         .unwrap_err();
-        assert!(error.to_string().contains(diagnostic), "{error}");
-        let records = format!("{error:?} {error}");
-        for value in ["absent.pem", "text.pem", ENDPOINT, HEADER_VALUE] {
+        let message = error.to_string();
+        assert!(message.contains(diagnostic), "{message}");
+        if let Some(certificate) = &trust.certificate {
+            assert!(message.contains(certificate.variable), "{message}");
+        }
+        let records = format!("{error:?} {message}");
+        for value in [
+            "absent.pem",
+            "directory.pem",
+            "large.pem",
+            "text.pem",
+            ENDPOINT,
+            HEADER_VALUE,
+        ] {
             assert!(!records.contains(value), "{records}");
         }
     }

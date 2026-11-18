@@ -130,8 +130,15 @@ pub enum TracingError {
     UnboundCredential { name: &'static str },
     #[error("{name} requires an HTTPS collector endpoint")]
     InsecureCollector { name: &'static str },
-    #[error("could not read the OTLP trust file selected by {name}")]
-    TrustRead { name: &'static str },
+    #[error("could not read the OTLP trust file selected by {name} ({kind:?})")]
+    TrustRead {
+        name: &'static str,
+        kind: std::io::ErrorKind,
+    },
+    #[error("{name} must select a regular OTLP trust file")]
+    TrustFileType { name: &'static str },
+    #[error("the OTLP trust file selected by {name} exceeds the {max_bytes}-byte limit")]
+    TrustFileTooLarge { name: &'static str, max_bytes: u64 },
     #[error("{name} must select a usable PEM certificate bundle")]
     TrustPem { name: &'static str },
     #[error("the OTLP client certificate and key must form a usable PEM identity")]

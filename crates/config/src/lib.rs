@@ -175,17 +175,21 @@ impl ConfigInput {
         self.runtime.validate(v);
         self.observability.validate(v);
         // template:begin cache:config-admit
-        let cache = self.cache.admit(&self.app.env, v);
+        let cache = self.cache.admit(self.app.is_local_development(), v);
         // template:end cache:config-admit
         // template:begin object-storage:config-admit
-        let object_storage = self.object_storage.admit(&self.app.env, v);
+        let object_storage = self
+            .object_storage
+            .admit(self.app.is_local_development(), v);
         // template:end object-storage:config-admit
         // template:begin authn:config-admit
         let authn = self.authn.admit(v);
         // template:end authn:config-admit
         // template:begin service-auth:config-service-auth-admit
         let grpc_enabled = !matches!(grpc, Ok(None));
-        let service_auth = self.service_auth.admit(&self.app.env, grpc_enabled, v);
+        let service_auth =
+            self.service_auth
+                .admit(self.app.is_local_development(), grpc_enabled, v);
         // template:end service-auth:config-service-auth-admit
         // template:begin postgres:config-admit
         let postgres = self.postgres.admit(v);

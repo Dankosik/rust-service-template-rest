@@ -74,6 +74,16 @@ unable to serve, and budget every downstream deadline inside
   diagnostics port unreachable from untrusted networks).
 - Egress, identity, and authorization authorities (trusted issuers, audiences,
   callers, and destination origins): Unresolved.
+- For any connection carrying credentials over application-level plaintext,
+  identify what authenticates the intended peer and protects the whole route,
+  including the hop after any TLS termination. Use verified TLS when the
+  deployment cannot establish those properties.
+- For each rotating credential, record the issuer and consumers, how a new
+  authentication with the replacement is confirmed, when the old credential
+  is revoked, and how existing sessions are handled during emergency revocation.
+  Set the permitted revocation delay from the service's threat model.
+  Grant each process access only to the credentials it uses. A role-specific
+  configuration snapshot cannot restrict access to a shared volume or environment.
 
 <!-- template:begin authn:production-bearer-delegation -->
 When migrating a handler that used `VerifiedPrincipal::access_token()`, keep

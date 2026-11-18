@@ -29,3 +29,9 @@ collector, the effective standard trace destination must match it, including
 the path. Both the certificate and key must be bound to that destination.
 A private CA used solely to verify a typed HTTPS collector needs no additional
 endpoint setting.
+
+When a platform projects a rotating client identity, point both client
+certificate and key settings at its combined PEM bundle, or use paths pinned to
+one release. The publisher can switch generations between two separate opens.
+Reload this startup identity by replacing the replica.
+[Kubernetes projected certificates](https://kubernetes.io/docs/concepts/storage/projected-volumes/#podcertificate-projected-volumes)

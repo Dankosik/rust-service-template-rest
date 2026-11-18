@@ -49,6 +49,7 @@ run_migrate() {
 		--network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__APP__ENV=local \
+		-e APP__APP__ALLOW_INSECURE_DEVELOPMENT=true \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
 		--entrypoint "${2:-/migrate}" "${image}"
@@ -65,6 +66,7 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 		--network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__APP__ENV=local \
+		-e APP__APP__ALLOW_INSECURE_DEVELOPMENT=true \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
 		"${image}")
@@ -133,6 +135,7 @@ echo "migration rehearsal: embedded set applied, replay is no_change"
 
 RUNTIME_IMAGE_NETWORK="${COMPOSE_NETWORK}" \
 	RUNTIME_IMAGE_APP_ENV=local \
+	RUNTIME_IMAGE_ALLOW_INSECURE_DEVELOPMENT=true \
 	RUNTIME_IMAGE_POSTGRES_DSN="${dsn}" \
 	bash "${ROOT_DIR}/scripts/image/check.sh" "${image}" "${expected_commit}"
 
