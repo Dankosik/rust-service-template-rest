@@ -201,6 +201,7 @@ async fn prepare_tracer_provider(
         Some(collector) => {
             let (compression, ignored_compression) = compression(&env);
             let trust_files = trust.clone();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             let preparation = tokio::task::spawn_blocking(move || {
                 span_exporter(
                     collector.url.as_str(),
@@ -210,10 +211,12 @@ async fn prepare_tracer_provider(
                     compression,
                 )
             });
-            let span_exporter = tokio::time::timeout(Duration::from_secs(5), preparation)
-                .await
-                .map_err(|_| TracingError::PreparationTimeout)?
-                .map_err(|_| TracingError::ClientThread)??;
+            let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
+                Ok(result) if tokio::time::Instant::now() < deadline => {
+                    result.map_err(|_| TracingError::ClientThread)??
+                }
+                _ => return Err(TracingError::PreparationTimeout),
+            };
             builder = builder.with_span_processor(
                 sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                     inner: span_exporter,

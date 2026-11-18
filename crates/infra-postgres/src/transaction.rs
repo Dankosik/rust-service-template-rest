@@ -75,17 +75,29 @@ impl TxMode for OperationDeadline {
     }
 }
 
-trait TransactionMode<E>: TxMode {
+trait TransactionMode<E: From<TxError>>: TxMode {
+    fn acquisition_failure(&self, error: TxError) -> E {
+        error.into()
+    }
+
     fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E>;
 }
 
-impl<E> TransactionMode<E> for () {
+impl<E: From<TxError>> TransactionMode<E> for () {
     fn check_expiry(&self, _: &mut TransactionObservation) -> Result<(), E> {
         Ok(())
     }
 }
 
-impl<E: From<OperationDeadlineElapsed>> TransactionMode<E> for OperationDeadline {
+impl<E: From<TxError> + From<OperationDeadlineElapsed>> TransactionMode<E> for OperationDeadline {
+    fn acquisition_failure(&self, error: TxError) -> E {
+        if matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at
+        {
+            return OperationDeadlineElapsed.into();
+        }
+        error.into()
+    }
+
     fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E> {
         if self.expired {
             observation.end(TransactionOutcome::RolledBack);
@@ -415,7 +427,7 @@ async fn transaction<M: TransactionMode<E>, T, E, F>(
     pool: &PgPool,
     options: TxOptions,
     deadline: Option<tokio::time::Instant>,
-    mut mode: M,
+    mode: M,
     f: F,
 ) -> Result<T, E>
 where
@@ -433,13 +445,8 @@ where
         })
         .await;
         observed.waited();
-        if matches!(acquired, Err(sqlx::Error::PoolTimedOut))
-            && let Some(budget) = mode.operation_deadline()
-        {
-            budget.expired = Instant::now() >= budget.at;
-            mode.check_expiry(&mut observed)?;
-        }
-        let connection = acquired.map_err(|err| observed.fail(TxError::Acquire(err)))?;
+        let connection = acquired
+            .map_err(|err| mode.acquisition_failure(observed.fail(TxError::Acquire(err))))?;
         let mut guard = DiscardOnDrop {
             connection,
             discard: true,

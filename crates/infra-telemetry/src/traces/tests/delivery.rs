@@ -347,7 +347,7 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
             .with_simple_exporter(spans.clone())
             .build(),
     );
-    for expire in [false, true] {
+    for (expire, result_ready) in [(false, false), (true, false), (true, true)] {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
@@ -363,17 +363,23 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
             assert!(futures_util::poll!(&mut pending).is_pending());
             if expire {
                 tokio::time::advance(Duration::from_secs(5)).await;
+                if result_ready {
+                    release.send(()).unwrap();
+                    tokio::task::spawn_blocking(|| ()).await.unwrap();
+                }
                 std::assert_matches!(pending.await, Err(TracingError::PreparationTimeout));
             }
         });
-        release.send(()).unwrap();
+        if !result_ready {
+            release.send(()).unwrap();
+        }
         runtime.block_on(gate).unwrap();
         drop(runtime);
         global::tracer("startup witness")
             .start("original provider")
             .end();
     }
-    assert_eq!(spans.0.lock().len(), 2);
+    assert_eq!(spans.0.lock().len(), 3);
 }
 
 #[test]

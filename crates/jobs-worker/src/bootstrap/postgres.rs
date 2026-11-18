@@ -66,11 +66,14 @@ async fn open_pool(
     resources: &mut Resources,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
+    let deadline = tokio::time::Instant::now() + CREDENTIAL_PREPARATION_TIMEOUT;
     let preparation = tokio::task::spawn_blocking(prepare);
-    let dsn = tokio::time::timeout(CREDENTIAL_PREPARATION_TIMEOUT, preparation)
-        .await
-        .map_err(|_| WorkerError::PostgresPreparationTimeout)?
-        .map_err(|_| WorkerError::PostgresPreparationJoin)??;
+    let dsn = match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => {
+            result.map_err(|_| WorkerError::PostgresPreparationJoin)??
+        }
+        _ => return Err(WorkerError::PostgresPreparationTimeout),
+    };
     let application_name = application_name(&config.observability.otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
@@ -172,10 +175,11 @@ mod tests {
     fn stopped_or_expired_preparation_cannot_admit_a_late_pool() {
         let config = config();
         let postgres = config.postgres.as_ref().unwrap();
-        for expired in [false, true] {
+        for (expired, result_ready) in [(false, false), (true, false), (true, true)] {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .start_paused(true)
+                .max_blocking_threads(1)
                 .build()
                 .unwrap();
             let (began, started) = mpsc::channel();
@@ -198,6 +202,10 @@ mod tests {
                     tokio::time::advance(Duration::from_secs(4)).await;
                     assert!(futures_util::poll!(&mut admission).is_pending());
                     tokio::time::advance(Duration::from_millis(1001)).await;
+                    if result_ready {
+                        release.send(()).unwrap();
+                        tokio::task::spawn_blocking(|| ()).await.unwrap();
+                    }
                     std::assert_matches!(
                         admission.await,
                         Err(WorkerError::PostgresPreparationTimeout)
@@ -211,7 +219,9 @@ mod tests {
                 }
             });
             assert!(resources.pool.is_none());
-            release.send(()).unwrap();
+            if !result_ready {
+                release.send(()).unwrap();
+            }
             drop(runtime);
             assert!(resources.pool.is_none());
             assert!(probe(&resources).is_none());
