@@ -44,8 +44,8 @@ impl VerifiedPrincipal {
         self.0.scopes()
     }
 
-    pub fn claims<T: serde::de::DeserializeOwned>(
-        &self,
+    pub fn claims<'a, T: serde::Deserialize<'a>>(
+        &'a self,
     ) -> Result<T, infra_bearerauthn::ClaimAccessError> {
         self.0.claims()
     }

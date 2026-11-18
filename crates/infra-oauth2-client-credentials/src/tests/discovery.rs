@@ -1,4 +1,5 @@
 use super::*;
+use crate::{ConfigurationError, KeycloakError, TransportFailure, verify_keycloak_metadata};
 
 #[tokio::test]
 async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
@@ -44,29 +45,27 @@ async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
 
 #[tokio::test]
 async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
+    use KeycloakError::{Discovery, DiscoveryStatus, DiscoveryTransport};
+
     let peer = Fixture::new().await;
     let issuer = peer.origin.join("realms/operations").unwrap().to_string();
     let options = Options {
         assertion_audience: issuer.clone(),
         ..peer.options()
     };
-    assert_eq!(
-        Registration::prepare_keycloak(options.clone())
-            .await
-            .unwrap_err()
-            .key,
-        "assertion_audience"
-    );
-    assert_eq!(
-        Registration::prepare_keycloak(Options {
-            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
+    for (audience, invalid_key) in [
+        (issuer.as_str(), "assertion_audience"),
+        (ASSERTION_AUDIENCE, "token_url"),
+    ] {
+        let result = Registration::prepare_keycloak(Options {
+            assertion_audience: audience.to_owned(),
             ..options.clone()
         })
-        .await
-        .unwrap_err()
-        .key,
-        "token_url"
-    );
+        .await;
+        assert!(
+            matches!(result, Err(KeycloakError::Configuration(ConfigurationError { key, .. })) if key == invalid_key)
+        );
+    }
     assert!(peer.resource_requests().is_empty());
     let metadata = |issuer: &str, endpoint: &str| {
         json_response(
@@ -80,40 +79,49 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         peer.endpoint
     );
-    for (body, reason) in [
+    let oversized_unavailable = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        TOKEN_LIMITS.response_body_bytes + 1,
+    );
+    for (body, expected) in [
         (
             metadata(&issuer.replacen("http:", "HTTP:", 1), &options.token_url),
-            "issuer differs from assertion_audience",
+            Discovery("issuer differs from assertion_audience"),
         ),
         (
             metadata(&issuer, peer.origin.join("other").unwrap().as_str()),
-            "token_endpoint is invalid or differs from token_url",
+            Discovery("token_endpoint is invalid or differs from token_url"),
         ),
         (
             metadata(&issuer, &options.token_url.replacen("://", "://@", 1)),
-            "token_endpoint is invalid or differs from token_url",
+            Discovery("token_endpoint is invalid or differs from token_url"),
         ),
         (
             json_response(StatusCode::OK, &serde_json::json!({"issuer": issuer})),
-            "invalid issuer metadata",
+            Discovery("invalid issuer metadata"),
         ),
         (
             json_response(
                 StatusCode::OK,
                 &serde_json::json!([issuer, options.token_url]),
             ),
-            "invalid issuer metadata",
+            Discovery("invalid issuer metadata"),
+        ),
+        (redirect.into_bytes(), DiscoveryStatus(StatusCode::FOUND)),
+        (
+            response(StatusCode::NOT_FOUND, b"private-response-body"),
+            DiscoveryStatus(StatusCode::NOT_FOUND),
         ),
         (
-            redirect.into_bytes(),
-            "issuer discovery did not return HTTP 200",
+            oversized_unavailable.into_bytes(),
+            DiscoveryStatus(StatusCode::SERVICE_UNAVAILABLE),
         ),
         (
             response(
                 StatusCode::OK,
                 &vec![b' '; TOKEN_LIMITS.response_body_bytes + 1],
             ),
-            "issuer discovery request failed",
+            DiscoveryTransport(TransportFailure::ResponseLimit),
         ),
     ] {
         *peer.state.resource_response.lock().unwrap() = body;
@@ -121,9 +129,79 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         let error = Registration::prepare_keycloak_for_test_http(options.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.reason, reason);
+        assert_eq!(error, expected);
+        assert!(error.to_string().contains("discovery"));
+        if let DiscoveryStatus(status) = expected {
+            assert!(error.to_string().contains(status.as_str()));
+        }
+        assert_redacted(&error, &[peer.origin.as_str(), "private-response-body"]);
         assert_eq!(peer.resource_requests().len(), attempts + 1);
         assert!(peer.token_requests().is_empty());
     }
     peer.finish().await;
+}
+
+#[tokio::test]
+async fn discovery_deadline_is_a_distinct_transport_category() {
+    let peer = Fixture::new().await;
+    let options = Options {
+        assertion_audience: peer.origin.join("realms/operations").unwrap().to_string(),
+        ..peer.options()
+    };
+    let _gate = peer.block_resources();
+    let setup = Registration::prepare_keycloak_for_test_http(options);
+    tokio::pin!(setup);
+    poll_pending(setup.as_mut()).await;
+    tokio::select! {
+        () = peer.resource_received() => {}
+        result = &mut setup => panic!("discovery completed before receiving the request: {result:?}"),
+    }
+    advance(FETCH_TIMEOUT).await;
+    let error = setup.await.unwrap_err();
+    assert_eq!(
+        error,
+        KeycloakError::DiscoveryTransport(TransportFailure::Timeout)
+    );
+    assert!(error.to_string().contains("timed out"));
+    peer.finish().await;
+}
+
+#[tokio::test]
+async fn preflight_reports_a_safe_category_when_connection_closes_before_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let issuer = format!("https://{address}/realms/private-realm");
+    let endpoint = format!("{issuer}/token");
+    let close_connection = async {
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(socket);
+    };
+    let (result, ()) = tokio::join!(
+        verify_keycloak_metadata(&issuer, &endpoint),
+        close_connection
+    );
+    let error = result.unwrap_err();
+    assert_eq!(
+        error,
+        KeycloakError::DiscoveryTransport(TransportFailure::Transport)
+    );
+    assert!(error.to_string().contains("transport failed"));
+    assert_eq!(
+        std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<TransportFailure>()),
+        Some(&TransportFailure::Transport),
+    );
+    assert_redacted(&error, &[&address.to_string(), "private-realm"]);
+}
+
+fn assert_redacted(error: &KeycloakError, values: &[&str]) {
+    for error in shared_rules::error_chain::causes(error) {
+        for &value in values {
+            assert!(!error.to_string().contains(value));
+            assert!(!format!("{error:?}").contains(value));
+        }
+    }
 }

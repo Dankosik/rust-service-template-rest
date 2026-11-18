@@ -1,5 +1,6 @@
 use std::fmt;
 
+use http::StatusCode;
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -14,6 +15,43 @@ impl ConfigurationError {
         Self {
             key: "resource_origin",
             reason: "must match the transport origin registered for these credentials",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum KeycloakError {
+    #[error(transparent)]
+    Configuration(#[from] ConfigurationError),
+    #[error("OAuth2 discovery: {0}")]
+    Discovery(&'static str),
+    #[error("OAuth2 discovery: issuer discovery returned HTTP {0}")]
+    DiscoveryStatus(StatusCode),
+    #[error("OAuth2 discovery: issuer discovery request failed: {0}")]
+    DiscoveryTransport(#[source] TransportFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TransportFailure {
+    #[error("operation timed out")]
+    Timeout,
+    #[error("operation was cancelled")]
+    Cancelled,
+    #[error("response body exceeded its limit")]
+    ResponseLimit,
+    #[error("transport failed")]
+    Transport,
+}
+
+impl From<infra_outbound_http::Error> for TransportFailure {
+    fn from(error: infra_outbound_http::Error) -> Self {
+        match error {
+            infra_outbound_http::Error::Timeout => Self::Timeout,
+            infra_outbound_http::Error::Cancelled => Self::Cancelled,
+            infra_outbound_http::Error::ResponseBodyTooLarge => Self::ResponseLimit,
+            infra_outbound_http::Error::InvalidTarget
+            | infra_outbound_http::Error::DispatchRefused
+            | infra_outbound_http::Error::Transport { .. } => Self::Transport,
         }
     }
 }
@@ -52,6 +90,17 @@ impl AcquisitionError {
             Self::Rejected(rejection) => rejection.label(),
             Self::InvalidResponse => "invalid",
             Self::Assertion => "assertion",
+        }
+    }
+}
+
+impl From<TransportFailure> for AcquisitionError {
+    fn from(failure: TransportFailure) -> Self {
+        match failure {
+            TransportFailure::Timeout => Self::Timeout,
+            TransportFailure::Cancelled => Self::Cancelled,
+            TransportFailure::ResponseLimit => Self::ResponseLimit,
+            TransportFailure::Transport => Self::Transport,
         }
     }
 }

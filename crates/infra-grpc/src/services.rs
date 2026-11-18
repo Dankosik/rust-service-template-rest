@@ -273,6 +273,15 @@ impl Services {
         if self.scopes.contains_key(path) {
             return Err(Error::DuplicateScopeRequirement(path.to_owned()));
         }
+        if let Some(index) = scopes
+            .iter()
+            .position(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+        {
+            return Err(Error::InvalidScopeToken {
+                path: path.to_owned(),
+                index,
+            });
+        }
         let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
         self.scopes.insert(
             path.to_owned(),
