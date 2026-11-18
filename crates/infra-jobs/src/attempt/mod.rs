@@ -166,13 +166,13 @@ pub(crate) struct ClaimFence {
     pub(crate) token: uuid::Uuid,
 }
 
-pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
+pub(crate) fn record_exhausted(attempt: &AttemptId, summary: String) {
     observe_attempt(
         None,
         attempt,
         &Transition::Fail {
             reason: FailureReason::Exhausted,
-            summary: summary.unwrap_or("").to_owned(),
+            summary,
         },
     );
 }
@@ -319,7 +319,7 @@ async fn run_attempt(
             (ended, Some(started.elapsed()))
         }
     };
-    let transition = map_outcome(&attempt, policy, registered.recover_at_exhaustion, ended);
+    let transition = map_outcome(&attempt, policy, registered.is_outbox, ended);
     if matches!(transition, Transition::Release) {
         shared
             .lifecycle

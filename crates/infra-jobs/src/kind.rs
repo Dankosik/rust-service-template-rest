@@ -225,9 +225,12 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
 
 struct TransactionFailure(JobError);
 
-impl TransactionFailure {
-    fn completion(error: &sqlx::Error) -> Self {
-        Self(JobError::postgres("job completion failed: postgres", error))
+impl From<sqlx::Error> for TransactionFailure {
+    fn from(error: sqlx::Error) -> Self {
+        Self(JobError::postgres(
+            "job completion failed: postgres",
+            &error,
+        ))
     }
 }
 
@@ -318,7 +321,7 @@ impl KindsBuilder {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
-            recover_at_exhaustion: false,
+            is_outbox: crate::RESERVED_OUTBOX_KIND == Some(K::NAME),
             running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
@@ -337,11 +340,7 @@ impl KindsBuilder {
 
     pub fn validate(self) -> Result<Kinds, KindError> {
         // template:begin outbox:jobs-outbox-registry-guard
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.name == crate::outbox::KIND)
-        {
+        if self.entries.iter().any(|entry| entry.is_outbox) {
             return Err(KindError::OutboxKind);
         }
         // template:end outbox:jobs-outbox-registry-guard
@@ -349,12 +348,9 @@ impl KindsBuilder {
     }
 
     // template:begin outbox:jobs-outbox-registry
-    pub(crate) fn validate_outbox(mut self) -> Result<Kinds, KindError> {
-        match self.entries.as_mut_slice() {
-            [entry] if entry.name == crate::outbox::KIND => {
-                entry.recover_at_exhaustion = true;
-                self.validate_kinds()
-            }
+    pub(crate) fn validate_outbox(self) -> Result<Kinds, KindError> {
+        match self.entries.as_slice() {
+            [entry] if entry.is_outbox => self.validate_kinds(),
             _ => Err(KindError::OutboxKind),
         }
     }
@@ -409,9 +405,7 @@ async fn run_transactional<K: JobKind>(
         async move |tx| {
             handler.run(job, tx).await.map_err(TransactionFailure)?;
             let complete = crate::attempt::complete_query(fence);
-            let rows = observed("complete job", complete.execute(&mut *tx))
-                .await
-                .map_err(|error| TransactionFailure::completion(&error))?;
+            let rows = observed("complete job", complete.execute(&mut *tx)).await?;
             if rows.rows_affected() == 0 {
                 return Err(TransactionFailure(JobError::retryable(
                     "job claim is stale",
@@ -517,7 +511,7 @@ pub const fn assert_valid_kind_name(name: &str) {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
-    pub(crate) recover_at_exhaustion: bool,
+    pub(crate) is_outbox: bool,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<Dispatch>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
@@ -852,7 +846,7 @@ mod tests {
     fn transaction_diagnostics_preserve_the_stage_and_withhold_driver_text() {
         use infra_postgres::TxError;
         let TransactionFailure(completion) =
-            TransactionFailure::completion(&sqlx::Error::Protocol("private-test-value".to_owned()));
+            TransactionFailure::from(sqlx::Error::Protocol("private-test-value".to_owned()));
         assert_eq!(completion.disposition, Disposition::Retry);
         assert_eq!(
             completion.to_string(),
