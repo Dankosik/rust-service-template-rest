@@ -49,11 +49,18 @@ pub struct TransportBuildFailure {
 }
 
 impl TransportBuildFailure {
-    pub(crate) const fn new(
-        endpoint: &'static str,
-        cause: infra_outbound_http::BuildError,
-    ) -> Self {
-        Self { endpoint, cause }
+    pub(crate) const fn token_url(cause: infra_outbound_http::BuildError) -> Self {
+        Self {
+            endpoint: "token_url",
+            cause,
+        }
+    }
+
+    pub(crate) const fn assertion_audience(cause: infra_outbound_http::BuildError) -> Self {
+        Self {
+            endpoint: "assertion_audience",
+            cause,
+        }
     }
 }
 

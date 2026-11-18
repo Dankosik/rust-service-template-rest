@@ -260,8 +260,7 @@ async fn preflight_reports_a_safe_category_when_connection_closes_before_headers
 fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
     const PRIVATE_DETAIL: &str = "sensitive-provider-detail";
     let source = || Box::new(std::io::Error::other(PRIVATE_DETAIL));
-    let build_failure = PreparationError::from(TransportBuildFailure::new(
-        "token_url",
+    let build_failure = PreparationError::from(TransportBuildFailure::token_url(
         infra_outbound_http::BuildError::Tls { source: source() },
     ));
     assert!(

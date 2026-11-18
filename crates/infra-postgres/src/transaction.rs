@@ -3,6 +3,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
+use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt as _, TryFutureExt as _};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
@@ -334,8 +336,8 @@ pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result
     Ok(())
 }
 
-type DriverFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
-type DriverStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
+type DriverFuture<'e, T> = BoxFuture<'e, Result<T, sqlx::Error>>;
+type DriverStream<'e, T> = BoxStream<'e, Result<T, sqlx::Error>>;
 
 impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     type Database = Postgres;

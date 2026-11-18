@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::slots::{Queue, Slot, Slots};
 
+use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -292,7 +292,7 @@ pub async fn acquire_until(
 fn ping_if_idle(
     conn: &mut PgConnection,
     meta: PoolConnectionMetadata,
-) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
+) -> BoxFuture<'_, Result<bool, sqlx::Error>> {
     Box::pin(async move {
         if meta.idle_for <= PING_IDLE_AFTER {
             return Ok(true);

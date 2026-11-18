@@ -14,7 +14,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{GRPC_MESSAGE, GRPC_STATUS, GRPC_STATUS_DETAILS, header_status_code};
+use crate::protocol::header_status_code;
 use crate::status::internal_status;
 
 #[derive(Default)]
@@ -37,7 +37,7 @@ pub(crate) fn server_stopped(reason: Stopped) -> tonic::Status {
 }
 
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
-    headers.get(GRPC_STATUS_DETAILS)?;
+    headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
     tonic::Status::from_header_map(headers)
         .as_ref()
         .and_then(crate::status::catalog_code)
@@ -188,7 +188,11 @@ where
 {
     let initial = if custody.deadline.is_some_and(Deadline::expired) {
         let status = deadline_status();
-        for header in [GRPC_STATUS, GRPC_MESSAGE, GRPC_STATUS_DETAILS] {
+        for header in [
+            tonic::Status::GRPC_STATUS,
+            tonic::Status::GRPC_MESSAGE,
+            tonic::Status::GRPC_STATUS_DETAILS,
+        ] {
             response.headers_mut().remove(header);
         }
         let _ = status.add_header(response.headers_mut());

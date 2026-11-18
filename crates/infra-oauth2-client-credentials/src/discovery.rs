@@ -42,8 +42,8 @@ impl Registration {
             client,
         )
         .await?;
-        let token_http = client(&admitted.endpoint, TOKEN_LIMITS)
-            .map_err(|cause| TransportBuildFailure::new("token_url", cause))?;
+        let token_http =
+            client(&admitted.endpoint, TOKEN_LIMITS).map_err(TransportBuildFailure::token_url)?;
         Self::build(admitted, token_http).map_err(KeycloakError::from)
     }
 }
@@ -60,11 +60,13 @@ async fn verify_metadata(
     endpoint: &Url,
     client: fn(&Url, Limits) -> Result<Client, BuildError>,
 ) -> Result<(), KeycloakError> {
-    let discovery_transport = |cause| TransportBuildFailure::new("assertion_audience", cause);
     if issuer_url.scheme() == "https" {
-        prepare_tls().await.map_err(discovery_transport)?;
+        prepare_tls()
+            .await
+            .map_err(TransportBuildFailure::assertion_audience)?;
     }
-    let discovery_http = client(issuer_url, TOKEN_LIMITS).map_err(discovery_transport)?;
+    let discovery_http =
+        client(issuer_url, TOKEN_LIMITS).map_err(TransportBuildFailure::assertion_audience)?;
     let metadata = fetch_metadata(issuer_url, &discovery_http).await?;
     if metadata.issuer != issuer {
         return Err(KeycloakError::Discovery(

@@ -13,10 +13,7 @@ use tokio_util::sync::DropGuard;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{
-    GRPC_MESSAGE, GRPC_STATUS, GRPC_STATUS_DETAILS, decoded_header_status_code, header_status_code,
-    http_status_code,
-};
+use crate::protocol::{decoded_header_status_code, header_status_code, http_status_code};
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
 type FramePoll = Poll<Option<Result<Frame<Bytes>, tonic::Status>>>;
@@ -234,7 +231,11 @@ where
     let initial = if let Some(reason) = custody.lifetime.stopped() {
         let status = client_stopped(reason);
         observation.record_local_stop(&status);
-        for name in [GRPC_STATUS, GRPC_MESSAGE, GRPC_STATUS_DETAILS] {
+        for name in [
+            tonic::Status::GRPC_STATUS,
+            tonic::Status::GRPC_MESSAGE,
+            tonic::Status::GRPC_STATUS_DETAILS,
+        ] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());

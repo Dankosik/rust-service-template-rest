@@ -4,10 +4,6 @@ use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use shared_rules::grpc::{MAX_TIMEOUT_DIGITS, encode_timeout, parse_timeout};
 
 pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
-pub(crate) const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
-pub(crate) const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
-pub(crate) const GRPC_STATUS_DETAILS: HeaderName =
-    HeaderName::from_static("grpc-status-details-bin");
 
 #[must_use]
 pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
@@ -39,7 +35,9 @@ pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
 }
 
 pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    if headers.contains_key(GRPC_MESSAGE) || headers.contains_key(GRPC_STATUS_DETAILS) {
+    if headers.contains_key(tonic::Status::GRPC_MESSAGE)
+        || headers.contains_key(tonic::Status::GRPC_STATUS_DETAILS)
+    {
         return tonic::Status::from_header_map(headers).map(|status| status.code());
     }
     header_status_code(headers)
@@ -47,7 +45,7 @@ pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::C
 
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
-        .get(GRPC_STATUS)
+        .get(tonic::Status::GRPC_STATUS)
         .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 
@@ -79,12 +77,12 @@ mod tests {
             Some(tonic::Code::Unavailable)
         );
         let mut headers = HeaderMap::new();
-        headers.insert(GRPC_STATUS, HeaderValue::from_static("14"));
+        headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("14"));
         assert_eq!(
             decoded_header_status_code(&headers),
             Some(tonic::Code::Unavailable)
         );
-        headers.insert(GRPC_MESSAGE, HeaderValue::from_static("%FF"));
+        headers.insert(tonic::Status::GRPC_MESSAGE, HeaderValue::from_static("%FF"));
         assert_eq!(
             decoded_header_status_code(&headers),
             Some(tonic::Code::Unknown)
