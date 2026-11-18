@@ -12,8 +12,16 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use crate::Failure;
 use crate::call::server_stopped;
 use crate::router::reject_with_budget;
+use crate::status::internal_status;
 
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
+
+pub fn require_caller<T>(request: &tonic::Request<T>) -> Result<&Caller, tonic::Status> {
+    request
+        .extensions()
+        .get::<Caller>()
+        .ok_or_else(internal_status)
+}
 
 pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
     extensions.remove::<Caller>();

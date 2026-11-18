@@ -8,13 +8,10 @@
 use std::{net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
 // template:begin oidc-introspection:grpc-transport-test-auth-std-imports
-use std::{
-    sync::atomic::AtomicUsize,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 // template:end oidc-introspection:grpc-transport-test-auth-std-imports
 // template:begin authn:grpc-transport-test-auth-atomic-types
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 // template:end authn:grpc-transport-test-auth-atomic-types
 
 use futures_util::StreamExt as _;
@@ -33,7 +30,7 @@ use infra_bearerauthn::{
 // template:end oidc-introspection:grpc-transport-test-auth-imports
 // template:begin authn:grpc-transport-test-verifier-import
 use infra_bearerauthn::Verifier;
-use infra_grpc::DelegationCredential;
+use infra_grpc::{DelegationCredential, VerifiedPrincipal};
 // template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
@@ -43,6 +40,15 @@ use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, Tls
 use infra_outbound_grpc::{
     Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
+// template:begin authn:grpc-scope-trace-test-imports
+use axum::extract::State;
+use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use infra_http::extract::Path;
+use infra_http::{HardenOptions, HttpContract, Problem};
+use opentelemetry::Value;
+use opentelemetry::trace::TracerProvider as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+// template:end authn:grpc-scope-trace-test-imports
 use parking_lot::Mutex;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -96,6 +102,7 @@ const UNSCOPED: &str = "unscoped";
 // template:end oidc-introspection:grpc-transport-test-introspection-tokens
 // template:begin authn:grpc-transport-test-unary-path
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
+const ORDERS_READ: &str = "orders.read";
 // template:end authn:grpc-transport-test-unary-path
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -165,6 +172,20 @@ type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
 
 // template:begin authn:grpc-transport-test-admitted-identity
 type AdmittedIdentity = (infra_grpc::VerifiedPrincipal, Option<DelegationCredential>);
+
+#[derive(Clone, Default)]
+struct Orders(Arc<AtomicUsize>);
+
+impl Orders {
+    fn read_order(&self, subject: Option<&str>, order: &str) -> Option<&'static str> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        (subject == Some("subject") && order == "order-42").then_some("order-42")
+    }
+
+    fn reads(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 // template:end authn:grpc-transport-test-admitted-identity
 
 #[derive(Clone)]
@@ -176,6 +197,7 @@ struct Echo {
     upload_abort_recorded: Arc<Notify>,
     // template:begin authn:grpc-transport-test-principals-field
     identities: Arc<Mutex<Vec<AdmittedIdentity>>>,
+    orders: Orders,
     // template:end authn:grpc-transport-test-principals-field
 }
 
@@ -189,6 +211,7 @@ impl Echo {
             upload_abort_recorded: Arc::new(Notify::new()),
             // template:begin authn:grpc-transport-test-principals-init
             identities: Arc::new(Mutex::new(Vec::new())),
+            orders: Orders::default(),
             // template:end authn:grpc-transport-test-principals-init
         }
     }
@@ -256,7 +279,19 @@ impl EchoService for Echo {
         request: Request<UnaryRequest>,
     ) -> Result<Response<UnaryResponse>, Status> {
         self.observe(&request, Seen::Unary);
-        match request.into_inner().message.as_str() {
+        match request.get_ref().message.as_str() {
+            // template:begin authn:grpc-scope-trace-test-handlers
+            order if order.starts_with("order-") => {
+                let principal = VerifiedPrincipal::require_from_request(&request)?;
+                let message = self
+                    .orders
+                    .read_order(principal.subject(), order)
+                    .ok_or_else(|| Failure::new(FailureCode::Forbidden))?;
+                Ok(Response::new(UnaryResponse {
+                    message: message.to_owned(),
+                }))
+            }
+            // template:end authn:grpc-scope-trace-test-handlers
             "panic" => panic!("panic detail: do not leak"),
             "classified" => Err(Failure::new(FailureCode::BadRequest)
                 .field_violation("message", "is reserved")
@@ -428,6 +463,7 @@ struct Fixture {
     address: SocketAddr,
     // template:begin authn:grpc-transport-test-auth-provider-field
     bearer: BearerFixture,
+    verifier: Verifier,
     // template:end authn:grpc-transport-test-auth-provider-field
 }
 
@@ -506,7 +542,7 @@ impl Fixture {
         let authentication = infra_grpc::Authentication::None;
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, bearer) = BearerFixture::start().await;
-        let authentication = infra_grpc::Authentication::Bearer(verifier);
+        let authentication = infra_grpc::Authentication::Bearer(verifier.clone());
         // template:end authn:grpc-transport-test-auth-fixture
         let readiness = Readiness::new(
             Vec::new(),
@@ -538,7 +574,7 @@ impl Fixture {
             .expect("echo registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
         services
-            .require_scopes_for_delegation(UNARY_PATH, &["echo.read"])
+            .require_scopes_for_delegation(UNARY_PATH, &[ORDERS_READ])
             .expect("unary scopes register once");
         // template:end authn:grpc-transport-test-scope-requirement
         let app = infra_grpc::router(services, control.reader(), authentication, limits)
@@ -569,6 +605,7 @@ impl Fixture {
             address,
             // template:begin authn:grpc-transport-test-auth-provider-init
             bearer,
+            verifier,
             // template:end authn:grpc-transport-test-auth-provider-init
         }
     }
@@ -923,12 +960,10 @@ fn unscoped<T>(message: T) -> Request<T> {
     request
 }
 
-#[tokio::test]
-async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
-    let fixture = Fixture::plaintext().await;
+async fn verify_grpc_order_reads(fixture: &Fixture) {
     let mut echo = fixture.echo_client();
 
-    let denied = timeout(WAIT, echo.unary(unscoped(unary("denied"))))
+    let denied = timeout(WAIT, echo.unary(unscoped(unary("order-42"))))
         .await
         .expect("unscoped unary")
         .unwrap_err();
@@ -939,8 +974,14 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
     );
     assert_eq!(reason(&denied), "FORBIDDEN");
     assert!(fixture.echo.calls.lock().is_empty());
+    assert_eq!(fixture.echo.orders.reads(), 0);
 
-    echo.unary(request(unary("delegated"))).await.unwrap();
+    let delegated = timeout(WAIT, echo.unary(request(unary("order-42"))))
+        .await
+        .expect("scoped unary")
+        .unwrap()
+        .into_inner();
+    assert_eq!(delegated.message, "order-42");
     let (_, credential) = fixture.echo.identities.lock().pop().unwrap();
     let credential = credential.expect("the opted-in RPC receives the presented token");
     assert_eq!(
@@ -969,8 +1010,176 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
         "admitted"
     );
     assert!(fixture.echo.identities.lock().pop().unwrap().1.is_none());
-    drop(echo);
+
+    let denied = timeout(WAIT, echo.unary(request(unary("order-73"))))
+        .await
+        .expect("handler refusal")
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    assert_eq!(reason(&denied), "FORBIDDEN");
+    assert_seen(
+        &fixture.echo,
+        &[Seen::Unary, Seen::ServerStream, Seen::Unary],
+    );
+    assert_eq!(fixture.echo.orders.reads(), 2);
+}
+
+#[utoipa::path(
+    get,
+    path = "/orders/{id}",
+    security(("bearerAuth" = [ORDERS_READ])),
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, description = "order", body = String),
+        infra_http::authn::ProtectedOperationProblemResponses
+    )
+)]
+async fn read_http_order(
+    State(orders): State<Orders>,
+    Path(id): Path<String>,
+    principal: infra_http::VerifiedPrincipal,
+    headers: http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    assert!(!headers.contains_key(AUTHORIZATION));
+    match orders.read_order(principal.subject(), &id) {
+        Some(order) => order.into_response(),
+        None => Problem::new(FailureCode::Forbidden).into_response(),
+    }
+}
+
+async fn verify_http_order_reads(fixture: &Fixture) {
+    use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+    use utoipa::openapi::{Components, OpenApiBuilder};
+
+    let mut components = Components::new();
+    components.add_security_scheme(
+        "bearerAuth",
+        SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+    );
+    let document = OpenApiBuilder::new().components(Some(components)).build();
+    let app = HttpContract::application(document)
+        .unwrap()
+        .merge(infra_http::http_route!(read_http_order).unwrap())
+        .unwrap()
+        .build(
+            fixture.echo.orders.clone(),
+            infra_http::Authentication::Bearer(Box::new(fixture.verifier.clone())),
+            &HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: WAIT,
+                max_in_flight: None,
+                admission_wait: Duration::ZERO,
+                log_health_probes: false,
+                draining: None,
+            },
+        )
+        .unwrap();
+    let read = |id, scoped| {
+        app.clone().oneshot(
+            http::Request::get(format!("/orders/{id}"))
+                .header(
+                    AUTHORIZATION,
+                    format!("Bearer {}", BearerMode::SELECTED.token(scoped)),
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+    };
+    for (id, scoped, expected_reads, challenge) in [
+        (
+            "order-42",
+            false,
+            2,
+            Some("Bearer error=\"insufficient_scope\""),
+        ),
+        ("order-73", true, 3, None),
+    ] {
+        let denied = read(id, scoped).await.unwrap();
+        assert_eq!(denied.status(), http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            denied.extensions().get::<Problem>().unwrap().code(),
+            FailureCode::Forbidden
+        );
+        assert_eq!(
+            denied
+                .headers()
+                .get(WWW_AUTHENTICATE)
+                .map(|value| value.to_str().unwrap()),
+            challenge
+        );
+        assert_eq!(fixture.echo.orders.reads(), expected_reads);
+    }
+    let admitted = read("order-42", true).await.unwrap();
+    assert_eq!(admitted.status(), http::StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(admitted.into_body(), 1024)
+            .await
+            .unwrap(),
+        "order-42"
+    );
+    assert_eq!(fixture.echo.orders.reads(), 4);
+}
+
+#[tokio::test]
+async fn order_reads_distinguish_scope_refusals_from_handler_refusals_in_both_transports() {
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let _registration_anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let fixture = Fixture::plaintext().await;
+    verify_grpc_order_reads(&fixture).await;
+    verify_http_order_reads(&fixture).await;
     fixture.stop().await;
+
+    let spans = exporter.get_finished_spans().unwrap();
+    for (method, status_key, forbidden) in [
+        (
+            "example.v1.EchoService/Unary",
+            "rpc.status_code",
+            Value::from("PERMISSION_DENIED"),
+        ),
+        (
+            "GET /orders/{id}",
+            "http.response.status_code",
+            Value::I64(403),
+        ),
+    ] {
+        let denials: Vec<_> = spans
+            .iter()
+            .filter(|span| {
+                span.name == method
+                    && span.span_kind == opentelemetry::trace::SpanKind::Server
+                    && span.attributes.iter().any(|attribute| {
+                        attribute.key.as_str() == status_key && attribute.value == forbidden
+                    })
+            })
+            .map(|span| {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key.as_str() == "authz.reason")
+                    .map(|attribute| attribute.value.as_str())
+            })
+            .collect();
+        assert_eq!(
+            denials,
+            [Some(std::borrow::Cow::Borrowed("insufficient_scope")), None],
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn a_handler_requiring_a_principal_reports_a_missing_identity_as_internal() {
+    let status = VerifiedPrincipal::require_from_request(&Request::new(())).unwrap_err();
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(reason(&status), "INTERNAL_ERROR");
 }
 
 #[test]
@@ -1725,7 +1934,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     assert!(credential.is_none());
     assert_eq!(captured.issuer(), "https://issuer.example");
     assert_eq!(captured.subject(), Some("subject"));
-    assert_eq!(captured.scopes(), ["echo.read"]);
+    assert_eq!(captured.scopes(), ["orders.read"]);
     let calls = echo.calls.lock().clone();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].had_checksum);
@@ -3515,7 +3724,7 @@ async fn answer_introspection(
 }
 
 fn introspection_response(unscoped: bool) -> http::Response<http_body_util::Full<bytes::Bytes>> {
-    let scope = if unscoped { "" } else { "echo.read" };
+    let scope = if unscoped { "" } else { ORDERS_READ };
     let expiry = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -3554,8 +3763,8 @@ async fn introspection_classifies_the_complete_decoded_token() {
     for (suffix, scope) in [
         ("unscoped", ""),
         ("%75nscoped&other=1", ""),
-        ("unscoped-longer", "echo.read"),
-        ("accepted&other_token=unscoped", "echo.read"),
+        ("unscoped-longer", "orders.read"),
+        ("accepted&other_token=unscoped", "orders.read"),
     ] {
         let length = "token=".len() + suffix.len();
         let prefix = format!(

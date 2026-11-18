@@ -26,7 +26,7 @@ pub use router::{
     Application, Authentication, Limits, ResponseContext, request_operation, router, server_options,
 };
 // template:begin service-auth:grpc-service-auth-exports
-pub use service_auth::Caller;
+pub use service_auth::{Caller, require_caller};
 // template:end service-auth:grpc-service-auth-exports
 pub use services::{REFLECTION_PATHS, Services};
 pub use status::{ERROR_DOMAIN, Failure};

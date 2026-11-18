@@ -515,6 +515,15 @@ fn finish_call(
             attach_server(response, call, fallback, custody).map(axum::body::Body::new)
         }
         OpeningOutcome::Rejected(response) => {
+            // template:begin authn:grpc-router-scope-refusal-span
+            if response
+                .extensions()
+                .get::<crate::authn::InsufficientScope>()
+                .is_some()
+            {
+                call.record_insufficient_scope();
+            }
+            // template:end authn:grpc-router-scope-refusal-span
             drop(custody);
             attach_server(response, call, fallback, ServerCustody::default())
                 .map(axum::body::Body::new)

@@ -17,7 +17,7 @@ use grpc_contracts::example::v1::{
     echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
-use infra_grpc::{Authentication, Caller, Error, Limits, Services, server_options};
+use infra_grpc::{Authentication, Caller, Error, Limits, Services, require_caller, server_options};
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server};
 use infra_outbound_grpc::{Client, ClientSecurity};
 use infra_serviceauth::{
@@ -68,6 +68,11 @@ impl EchoService for Echo {
         request: Request<UnaryRequest>,
     ) -> Result<Response<UnaryResponse>, Status> {
         self.observe(&request);
+        if request.get_ref().message == "verified-caller" {
+            return Ok(Response::new(UnaryResponse {
+                message: require_caller(&request)?.name().as_str().to_owned(),
+            }));
+        }
         Ok(Response::new(UnaryResponse {
             message: request.into_inner().message,
         }))
@@ -258,6 +263,13 @@ fn reason(status: &Status) -> String {
         .map_or_default(|info| info.reason)
 }
 
+#[test]
+fn a_handler_requiring_a_caller_reports_a_missing_identity_as_internal() {
+    let status = require_caller(&Request::new(())).unwrap_err();
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(reason(&status), "INTERNAL_ERROR");
+}
+
 #[tokio::test]
 async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let keys = Keys::new();
@@ -268,7 +280,17 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     );
 
     let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
-    assert_eq!(unary(address, Some(&valid)).await.unwrap(), "hello");
+    let admitted = client(address)
+        .unary(with_token(
+            UnaryRequest {
+                message: "verified-caller".to_owned(),
+            },
+            Some(&valid),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(admitted.message, "orders");
     assert_eq!(echo.seen(), [(Some("orders".to_owned()), false)]);
 
     for (label, token) in [

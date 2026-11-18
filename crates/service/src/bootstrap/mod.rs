@@ -837,12 +837,9 @@ mod tests {
                 &self,
                 request: Request<UnaryRequest>,
             ) -> Result<Response<UnaryResponse>, Status> {
-                let caller = request
-                    .extensions()
-                    .get::<infra_grpc::Caller>()
-                    .map(|caller| caller.name().as_str());
+                let caller = infra_grpc::require_caller(&request)?;
                 Ok(Response::new(UnaryResponse {
-                    message: caller.unwrap_or("none").to_owned(),
+                    message: caller.name().as_str().to_owned(),
                 }))
             }
 

@@ -123,6 +123,13 @@ impl Call {
         &self.span
     }
 
+    // template:begin authn:grpc-observe-scope-refusal
+    pub(crate) fn record_insufficient_scope(&self) {
+        self.span
+            .set_attribute("authz.reason", "insufficient_scope");
+    }
+    // template:end authn:grpc-observe-scope-refusal
+
     pub(crate) fn record_failure(&self, failure: service_failure::Code) {
         self.span.set_attribute("failure.code", failure.as_str());
         self.metrics.record_failure(failure);
