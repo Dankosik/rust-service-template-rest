@@ -320,10 +320,11 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
 
 #[tokio::test]
 async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
-    use operation_context::{OperationContext, Stopped};
+    use operation_context::OperationContext;
 
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let client = fixture_client("127.0.0.1:0".parse().unwrap(), &material);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = fixture_client(listener.local_addr().unwrap(), &material);
     for cancelled in 0..3 {
         let scopes = [(); 3].map(|()| OperationContext::unbounded());
         let mut outer = request();
@@ -331,13 +332,20 @@ async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
         let parent = client.prepare(outer, &scopes[0]).unwrap();
         let mut inner = request();
         inner.extensions_mut().insert(scopes[2].clone());
-        let nested = client.prepare(inner, parent.context().clone()).unwrap();
-        let (reason, ()) = tokio::join!(nested.wait_stopped(), async {
-            tokio::task::yield_now().await;
-            scopes[cancelled].cancel();
-        });
-        assert_eq!(reason, Stopped::Cancelled);
-        assert_eq!(nested.stopped(), Some(reason));
+        let exchange = client.execute_buffered(inner, parent.context().clone());
+        let (result, _connection) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(exchange, async {
+                let (connection, _) = listener.accept().await.unwrap();
+                scopes[cancelled].cancel();
+                connection
+            })
+        })
+        .await
+        .expect("a cancelled exchange must finish during the TLS handshake");
+        std::assert_matches!(
+            result,
+            Err(crate::ExchangeError::BeforeResponse(Error::Cancelled))
+        );
     }
 }
 

@@ -190,7 +190,7 @@ impl Client {
         request: Request<Bytes>,
         context: impl Into<RequestContext>,
     ) -> Result<Response<Bytes>, ExchangeError> {
-        self.prepare(request, context)
+        self.prepare_scoped(request, context.into())
             .map_err(ExchangeError::BeforeResponse)?
             .send_with_response(|| true, |_| {}, buffer_response)
             .await
@@ -224,10 +224,18 @@ impl Client {
 
     pub fn prepare(
         &self,
-        mut request: Request<Bytes>,
-        context: impl Into<RequestContext>,
+        request: Request<Bytes>,
+        context: &OperationContext,
     ) -> Result<PreparedRequest<'_>, Error> {
-        let stops = context.into().for_request(
+        self.prepare_scoped(request, context.into())
+    }
+
+    fn prepare_scoped(
+        &self,
+        mut request: Request<Bytes>,
+        context: RequestContext,
+    ) -> Result<PreparedRequest<'_>, Error> {
+        let stops = context.for_request(
             Deadline::new(Instant::now(), self.limits.operation_timeout),
             request.extensions_mut().remove::<OperationContext>(),
         );
