@@ -244,12 +244,12 @@ impl Services {
         if self.reflection && REFLECTION_PATHS.contains(&path) {
             return true;
         }
-        split_method_path(path).is_some_and(|(service, method)| {
-            self.names.contains(service)
+        split_method_path(path).is_some_and(|rpc| {
+            self.names.contains(rpc.service)
                 && self
                     .described
-                    .get(service)
-                    .is_some_and(|methods| methods.iter().any(|(known, _)| known == method))
+                    .get(rpc.service)
+                    .is_some_and(|methods| methods.iter().any(|(known, _)| known == rpc.method))
         })
     }
 

@@ -6,7 +6,7 @@ use foldhash::HashMap;
 use metrics::SharedString;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
-use shared_rules::grpc::{STATUS_CODE_COUNT, split_method_path, status_code_names};
+use shared_rules::grpc::{RpcName, STATUS_CODE_COUNT, split_method_path, status_code_names};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
@@ -172,8 +172,8 @@ impl Series {
     }
 
     fn resolve<B>(&self, request: &http::Request<B>) -> Arc<MethodMetrics> {
-        if let Some((path, service, method)) = verified_client_path(request)
-            && let Some(admitted) = self.admit_path(path, service, method)
+        if let Some((path, rpc)) = verified_client_path(request)
+            && let Some(admitted) = self.admit_path(path, rpc)
         {
             return admitted;
         }
@@ -183,7 +183,7 @@ impl Series {
         )
     }
 
-    fn admit_path(&self, path: &str, service: &str, method: &str) -> Option<Arc<MethodMetrics>> {
+    fn admit_path(&self, path: &str, rpc: RpcName<'_>) -> Option<Arc<MethodMetrics>> {
         let snapshot = self.admitted.load();
         if let Some(existing) = snapshot.get(path) {
             return Some(Arc::clone(existing));
@@ -197,7 +197,7 @@ impl Series {
         if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        let metrics = Arc::new(MethodMetrics::for_method(service, method));
+        let metrics = Arc::new(MethodMetrics::for_method(rpc));
         let mut next = (**current).clone();
         next.insert(path.into(), Arc::clone(&metrics));
         self.admitted.store(Arc::new(next));
@@ -206,12 +206,12 @@ impl Series {
 }
 
 impl MethodMetrics {
-    fn for_method(service: &str, method: &str) -> Self {
-        let rpc_method: Arc<str> = format!("{service}/{method}").into();
+    fn for_method(rpc: RpcName<'_>) -> Self {
+        let rpc_method: Arc<str> = rpc.to_string().into();
         Self::build(
             Some(rpc_method),
-            SharedString::from(Arc::<str>::from(service)),
-            SharedString::from(Arc::<str>::from(method)),
+            SharedString::from(Arc::<str>::from(rpc.service)),
+            SharedString::from(Arc::<str>::from(rpc.method)),
         )
     }
 
@@ -263,7 +263,7 @@ impl MethodMetrics {
     }
 }
 
-fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, &str, &str)> {
+fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, RpcName<'_>)> {
     let declared = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
     if declared.service().len() > CLIENT_COMPONENT_LIMIT
         || declared.method().len() > CLIENT_COMPONENT_LIMIT
@@ -271,9 +271,8 @@ fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, &str, &s
         return None;
     }
     let path = request.uri().path();
-    let (service, method) = split_method_path(path)?;
-    (service == declared.service() && method == declared.method())
-        .then_some((path, service, method))
+    let rpc = split_method_path(path)?;
+    (rpc.service == declared.service() && rpc.method == declared.method()).then_some((path, rpc))
 }
 
 fn describe_client_metrics() {

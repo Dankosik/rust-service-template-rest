@@ -58,5 +58,5 @@ metrics-exporter-prometheus = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tls-test-support = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util", "io-util"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "test-util", "io-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

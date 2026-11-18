@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::services::{CallType, Method};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
-use shared_rules::grpc::{STATUS_CODE_COUNT, status_code_names};
+use shared_rules::grpc::{RpcName, STATUS_CODE_COUNT, status_code_names};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
@@ -52,14 +52,17 @@ pub(crate) struct MethodMetrics {
 impl MethodMetrics {
     fn build(path: &str, call_type: Option<CallType>) -> Self {
         let parsed = call_type.and_then(|_| crate::protocol::split_method_path(path));
-        let (service, method) = parsed.unwrap_or(("unknown", "unknown"));
+        let rpc = parsed.unwrap_or(RpcName {
+            service: "unknown",
+            method: "unknown",
+        });
         let labels = vec![
             metrics::Label::new("grpc_type", call_type.map_or("unknown", CallType::label)),
-            metrics::Label::new("grpc_service", service.to_owned()),
-            metrics::Label::new("grpc_method", method.to_owned()),
+            metrics::Label::new("grpc_service", rpc.service.to_owned()),
+            metrics::Label::new("grpc_method", rpc.method.to_owned()),
         ];
         Self {
-            rpc_method: parsed.map(|(svc, rpc)| Arc::from(format!("{svc}/{rpc}"))),
+            rpc_method: parsed.map(|rpc| Arc::from(rpc.to_string())),
             started: metrics::counter!(SERVER_STARTED_METRIC, labels.clone()),
             handling_seconds: metrics::histogram!(SERVER_HANDLING_METRIC, labels.clone()),
             base_labels: labels.into_boxed_slice(),
