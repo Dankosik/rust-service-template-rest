@@ -198,6 +198,48 @@ registration during a planned replacement until the new one passes. The
 resource origin and recipient scope are configured separately for each
 downstream service.
 [Keycloak OIDC endpoints](https://www.keycloak.org/securing-apps/oidc-layers)
+
+### Rotating the Keycloak client's signing key
+
+Keep the same confidential client ID, grant and recipient scope. Generate a
+new key pair with a distinct `kid`. During planned rotation, register both
+public keys on that client, verify a fresh grant with the replacement, switch
+the signers and remove the retired public key. During emergency withdrawal
+remove the compromised key immediately. Preserve the client's existing
+scopes, audience mappers and authentication settings when updating its keys.
+
+Verify two independent outcomes in a rehearsal with controlled keys. First,
+a fresh client assertion signed with
+the withdrawn key receives `invalid_client` and a fresh assertion with the
+replacement obtains a token. Use an acquisition path with an empty token
+cache. Second, introspect the original, previously active access token as
+its intended recipient. Repeat until it becomes inactive, using an active
+replacement token as a positive control. Record the remaining access window
+and the provider and resource revocation policies. If the incident requires
+immediate denial at the resource, invoke its access-token revocation or
+isolation procedure and verify it there.
+
+On 2026-11-18 two isolated Keycloak 26.8.0 runs kept one ES256 client, its
+service account and its catalog scope throughout each rotation. Both keys
+obtained fresh access tokens during overlap. Times below start at the admin
+request that removed the old JWK. The original catalog bearer had a
+client-specific 20 s lifetime.
+
+| Run | Key update acknowledged by | Fresh old assertion returned `invalid_client` by | Last active probe started | First inactive reply received by |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 4 ms | 8 ms | 19.875 s | 20.155 s |
+| 2 | 5 ms | 9 ms | 20.306 s | 20.584 s |
+
+Catalog still accepted a freshly issued new-key token after the old bearer
+became inactive in both runs. The final two columns bracket the observed
+transition with 250 ms between probes. Client-key withdrawal closed issuance
+while the previously issued access token remained usable until around its own expiry.
+Repeat for each deployment's token lifetime, resource validation policy and
+cache settings.
+
+```sh
+ALLOW_HEAVY=1 REQUIRE_DOCKER=1 RUST_TEST_NOCAPTURE=1 make test-integration-oauth
+```
 <!-- template:end outbound-auth:production-keycloak-registration -->
 
 <!-- template:begin service-auth:production-service-key-rotation -->
@@ -209,6 +251,22 @@ time to revoke new calls and who can take a stale replica out of service.
 Keep private keys in their secret store. Use distinct key material and
 `kid` values for the old and replacement keys.
 
+Save a trusted copy of the previous public registry. A receiver's new
+registry must have a unique SHA-256 JWK thumbprint for each public key,
+including keys assigned to different callers. Distinct callers may use
+the same `kid` for different keys. Before retiring a key, check that its
+material is absent throughout the candidate. The comparison accepts aliases
+in a historical registry so operators can remove them during an upgrade.
+[RFC 7638 §3](https://www.rfc-editor.org/rfc/rfc7638.html#section-3)
+
+```sh
+cargo run --locked -p infra-serviceauth --example check_key_withdrawal -- "$PREVIOUS_REGISTRY" "$CANDIDATE_REGISTRY" "$CALLER" "$OLD_KID"
+```
+
+Omit the final argument to withdraw all of that caller's previous keys. Use
+the same check for rollback and future replica configurations to prevent a
+retired key from returning under another name.
+
 1. For a planned rotation, publish both public keys under the caller's existing
    issuer. Roll the receivers and confirm that each replica accepts a
    correctly signed call using either key for the same authorized method.
@@ -217,9 +275,9 @@ Keep private keys in their secret store. Use distinct key material and
    old tokens to pass their latest expiry plus the receiver's clock allowance.
    Then remove the old public key, roll the receivers again and confirm that
    only the replacement key grants new calls.
-3. For emergency withdrawal, disable the old signer and remove its public key
-   from the authoritative trust registry immediately. Start the revocation
-   clock when withdrawal is ordered, before distributing the change. Roll
+3. For emergency withdrawal with a trusted standby, disable the old signer and
+   remove its public key from the authoritative trust registry immediately.
+   Start the revocation clock when withdrawal is ordered, before distributing the change. Roll
    receivers from the revised registry and retire every old process. A replica
    that has loaded the previous registry can still accept fresh signatures.
    Isolate any replica that cannot be replaced within the service's budget.
@@ -268,6 +326,45 @@ The local rollout replaced one receiver at a time with a prebuilt Rust 1.100.0
 binary, one runtime worker per receiver, a 300 ms readiness propagation delay
 and unary probe traffic only. Input changes were passed directly to child
 processes. A production revocation budget remains a service-owned decision.
+
+### Emergency withdrawal without a standby
+
+When removing the last trusted key leaves the receiver without a usable
+registry, fence all receivers that trust the compromised key. Prevent the
+deployment controller from recreating the old configuration. Start the clock
+at the withdrawal order. Confirm that every old process has exited or is
+isolated from all callers, including clients with existing connections.
+Record the elapsed time when no old instance can admit a call. During this
+interval the protected service can be unavailable.
+
+Generate the replacement, distribute the new public registry, install the
+signer and restore the receivers. Record a second elapsed time from the same
+withdrawal order when all intended replicas are reachable, accept a valid
+new-key call and refuse a valid old-key call with `UNAUTHENTICATED`. Track
+the containment and restoration budgets separately.
+
+```sh
+cargo run --release --locked --manifest-path crates/service/Cargo.toml --example service_auth_rotation -- --cold
+```
+
+On 2026-11-18 three release-build trials on macOS arm64 started with only
+the old key trusted. The local operator sent `SIGKILL` to the three owned
+receivers. At containment all three processes had exited, old calls on
+established channels returned `UNAVAILABLE` and every direct TCP endpoint
+refused connections. At restoration three healthy TLS replacements rejected
+fresh old-key calls with `UNAUTHENTICATED` and accepted new-key calls.
+
+| Trial | Contained, 0 of 3 serving | Restored, 3 of 3 serving |
+| --- | ---: | ---: |
+| 1 | 13 ms | 692 ms |
+| 2 | 14 ms | 695 ms |
+| 3 | 12 ms | 691 ms |
+
+Both columns are cumulative upper bounds from withdrawal, rounded up to the
+next millisecond. Replacement signing material was generated only after
+containment. Recovery included starting three prebuilt receivers, readiness,
+TLS and direct unary probes. Production traffic switching, an external
+secret manager and operator response time were outside this loopback drill.
 <!-- template:end service-auth:production-service-key-rotation -->
 
 ## Operation and recovery
