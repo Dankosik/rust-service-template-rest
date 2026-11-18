@@ -72,8 +72,8 @@ const UNSERIALIZABLE_COLOR: &str = "unserializable";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const KEY_RULES_LINK: &str = "<https://docs.example/widgets#create>; rel=\"describedby\"";
 const KEY_REASON: &str = concat!(
-    "Supply exactly one Idempotency-Key field. Send an IETF Structured Field string in double quotes, ",
-    "without parameters. Unquoted visible ASCII is also accepted for compatibility. ",
+    "Supply exactly one Idempotency-Key field. Send an IETF Structured Field string in double quotes. ",
+    "Parameters on the string do not change the key. Unquoted visible ASCII is also accepted for compatibility. ",
     "The decoded value must contain 1 to 255 bytes.",
 );
 
@@ -1516,7 +1516,9 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         counts(&[("executed", 1), ("key_mismatch", 1), ("not_stored", 1)])
     );
 
-    let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
+    let exact = mounted
+        .create(ALICE, "\"k-1\";extension=1", &input, "req-exact")
+        .await;
     created(&exact, "req-exact");
     assert_eq!(
         exact.maybe_header("idempotent-replayed"),
