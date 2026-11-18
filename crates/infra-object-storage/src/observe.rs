@@ -179,7 +179,11 @@ impl OperationGuard {
         failure.error
     }
 
-    pub(crate) fn fail_mutation(&mut self, failure: &Failure<MutationError>) -> MutationError {
+    pub(crate) fn fail_mutation(
+        &mut self,
+        failure: impl Into<Failure<MutationError>>,
+    ) -> MutationError {
+        let failure = failure.into();
         let outcome = match failure.error {
             MutationError::OutcomeUnknown(_) => Outcome::Unknown,
             MutationError::NotApplied(reason) => match reason {
@@ -192,7 +196,7 @@ impl OperationGuard {
                 MutationFailure::Rejected => Outcome::Rejected,
             },
         };
-        self.record_failure(outcome, failure);
+        self.record_failure(outcome, &failure);
         failure.error
     }
 

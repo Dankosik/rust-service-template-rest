@@ -6,7 +6,7 @@ use foldhash::HashMap;
 use metrics::SharedString;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
-use shared_rules::grpc::{split_method_path, status_code_names};
+use shared_rules::grpc::{STATUS_CODE_COUNT, split_method_path, status_code_names};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
@@ -149,7 +149,7 @@ struct MethodMetrics {
     method: SharedString,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
-    handled: [OnceLock<metrics::Counter>; 17],
+    handled: [OnceLock<metrics::Counter>; STATUS_CODE_COUNT],
 }
 
 impl Series {

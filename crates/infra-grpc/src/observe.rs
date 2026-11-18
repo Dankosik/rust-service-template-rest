@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::services::{CallType, Method};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
-use shared_rules::grpc::status_code_names;
+use shared_rules::grpc::{STATUS_CODE_COUNT, status_code_names};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
@@ -45,7 +45,7 @@ pub(crate) struct MethodMetrics {
     base_labels: Box<[metrics::Label]>,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
-    handled: [OnceLock<metrics::Counter>; 17],
+    handled: [OnceLock<metrics::Counter>; STATUS_CODE_COUNT],
     failed: [OnceLock<metrics::Counter>; service_failure::Code::ALL.len()],
 }
 

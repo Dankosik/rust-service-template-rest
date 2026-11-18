@@ -48,24 +48,22 @@ pub(super) async fn open(
         postgres.max_connections = postgres.max_connections,
         "postgres_pool_opened"
     );
-    background.spawn(
-        "postgres_metrics",
+    background.spawn_with_token("postgres_metrics", |stop| {
         infra_postgres::record_metrics_periodically(
             pool.clone(),
             "postgres",
             METRICS_MAINTENANCE_INTERVAL,
-            background.child_token(),
-        ),
-    );
+            stop,
+        )
+    });
     if let Some(password_file) = dsn.password_file() {
-        background.spawn(
-            "postgres_password_refresh",
+        background.spawn_with_token("postgres_password_refresh", |stop| {
             infra_postgres::refresh_password_periodically(
                 pool.clone(),
                 password_file.to_owned(),
-                background.child_token(),
-            ),
-        );
+                stop,
+            )
+        });
     }
     Ok(())
 }

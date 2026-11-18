@@ -231,22 +231,21 @@ impl ObjectStorage {
     ) -> Result<(), MutationError> {
         let (context, mut guard) = self.begin_mutation(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
-            return Err(guard.fail_mutation(&Failure::not_applied(
-                MutationFailure::TooLarge,
-                "too_large",
-            )));
+            return Err(
+                guard.fail_mutation(Failure::not_applied(MutationFailure::TooLarge, "too_large"))
+            );
         }
         let _permit = self.admit_mutation(&mut guard)?;
         let outcomes = body.outcomes.take();
         let body = within(&context, body.normalize_empty_stream())
             .await
             .map_err(|interrupted| {
-                guard.fail_mutation(&Failure::mutation_stopped(
+                guard.fail_mutation(Failure::mutation_stopped(
                     interrupted.stopped,
                     MutationError::NotApplied,
                 ))
             })?
-            .map_err(|failure| guard.fail_mutation(&failure.into()))?;
+            .map_err(|failure| guard.fail_mutation(failure))?;
         let checksum = self
             .inner
             .checksum
@@ -296,17 +295,15 @@ impl ObjectStorage {
                 Ok(())
             }
             Ok((Err(sdk_error), stopped_on_reply)) => {
-                Err(guard.fail_mutation(&error::from_sdk_mutation(
+                Err(guard.fail_mutation(error::from_sdk_mutation(
                     &sdk_error,
                     call,
                     body.source.mismatched(),
                     stopped_on_reply,
                 )))
             }
-            Err(_) if body.source.mismatched() => {
-                Err(guard.fail_mutation(&UploadFailure::Length.into()))
-            }
-            Err(interrupted) => Err(guard.fail_mutation(&interrupted.into())),
+            Err(_) if body.source.mismatched() => Err(guard.fail_mutation(UploadFailure::Length)),
+            Err(interrupted) => Err(guard.fail_mutation(interrupted)),
         };
         if let Some(dispatched) = dispatched
             && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
@@ -417,10 +414,10 @@ impl ObjectStorage {
             .send();
         let (result, stopped_on_reply) = within_mutation(&context, request)
             .await
-            .map_err(|interrupted| guard.fail_mutation(&interrupted.into()))?;
+            .map_err(|interrupted| guard.fail_mutation(interrupted))?;
         guard.answered_by(&result);
         error::interpret_delete_result(&result, stopped_on_reply)
-            .map_err(|failure| guard.fail_mutation(&failure))?;
+            .map_err(|failure| guard.fail_mutation(failure))?;
         guard.succeed();
         Ok(())
     }
@@ -488,7 +485,7 @@ impl ObjectStorage {
     ) -> Result<OwnedSemaphorePermit, MutationError> {
         Arc::clone(&self.inner.admission)
             .try_acquire_owned()
-            .map_err(|_| guard.fail_mutation(&Failure::not_applied(MutationFailure::Busy, "busy")))
+            .map_err(|_| guard.fail_mutation(Failure::not_applied(MutationFailure::Busy, "busy")))
     }
 
     fn begin(
@@ -510,7 +507,7 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(operation);
         if let Some(stopped) = context.stopped() {
-            return Err(guard.fail_mutation(&Failure::mutation_stopped(
+            return Err(guard.fail_mutation(Failure::mutation_stopped(
                 stopped,
                 MutationError::NotApplied,
             )));

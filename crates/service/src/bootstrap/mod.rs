@@ -277,18 +277,13 @@ async fn serve(
                 let metrics = telemetry::install_metrics()?;
                 metrics.record_trace_exporter(Some(&provider.exporter_state));
                 telemetry::log_startup_summary(&config, &provider.exporter_state);
-                background.spawn(
-                    "metrics_upkeep",
-                    metrics.clone().upkeep(background.child_token()),
-                );
-                background.spawn(
-                    "runtime_progress",
-                    metrics.clone().runtime_progress(background.child_token()),
-                );
-                background.spawn(
-                    "runtime_metrics",
-                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, background.child_token()),
-                );
+                background.spawn_with_token("metrics_upkeep", |stop| metrics.clone().upkeep(stop));
+                background.spawn_with_token("runtime_progress", |stop| {
+                    metrics.clone().runtime_progress(stop)
+                });
+                background.spawn_with_token("runtime_metrics", |stop| {
+                    runtime_metrics(METRICS_MAINTENANCE_INTERVAL, stop)
+                });
                 start(
                     &config,
                     registration,
@@ -376,10 +371,7 @@ fn finish_startup(
     {
         let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
         serving.admitted = true;
-        background.spawn(
-            "readiness",
-            refresher.refresh_until(background.child_token()),
-        );
+        background.spawn_with_token("readiness", |stop| refresher.refresh_until(stop));
         tracing::info!("service_ready");
     }
     Ok(())

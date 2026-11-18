@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 use crate::admission::Admitted;
 use crate::credentials::{PasswordFile, ReadFailure};
-use crate::dial::{Dial, Dialed};
+use crate::dial::{Dialed, Tls};
 use crate::error::{CommandError, CommandFailure, ErrorType, error_type};
 use crate::namespace::Operation;
 use crate::observe::{
@@ -345,7 +345,7 @@ impl Link {
     ) -> Self {
         let Admitted {
             server,
-            dial,
+            tls,
             settings,
             password_file,
         } = admitted;
@@ -370,7 +370,7 @@ impl Link {
             .tasks
             .spawn(supervise(
                 exit,
-                dial,
+                tls,
                 settings,
                 password_file,
                 command_timeout,
@@ -582,7 +582,7 @@ fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
 
 async fn supervise(
     exit: SupervisorExit,
-    dial: Dial,
+    tls: Option<Tls>,
     settings: redis::RedisConnectionInfo,
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
@@ -590,7 +590,7 @@ async fn supervise(
     run_supervisor(
         &exit.shared,
         &exit.server,
-        &dial,
+        tls.as_ref(),
         &settings,
         password_file.as_ref(),
         command_timeout,
@@ -601,7 +601,7 @@ async fn supervise(
 async fn run_supervisor(
     shared: &Shared,
     server: &ServerEndpoint,
-    dial: &Dial,
+    tls: Option<&Tls>,
     settings: &redis::RedisConnectionInfo,
     password_file: Option<&PasswordFile>,
     command_timeout: Duration,
@@ -614,7 +614,7 @@ async fn run_supervisor(
             return;
         }
         let retired = CancellationToken::new();
-        match setup_attempt(server, dial, settings, password_file, &retired, shared).await {
+        match setup_attempt(server, tls, settings, password_file, &retired, shared).await {
             Ok((dialed, rotation)) => {
                 let _driver = dialed.driver;
                 let (abandoned, replies) = mpsc::unbounded_channel();
@@ -683,7 +683,7 @@ async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedR
 
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
-    dial: &Dial,
+    tls: Option<&Tls>,
     settings: &redis::RedisConnectionInfo,
     password_file: Option<&'a PasswordFile>,
     retired: &CancellationToken,
@@ -692,7 +692,7 @@ async fn setup_attempt<'a>(
     let setup = async {
         let (settings, rotation) =
             credentialed_settings(server, settings, password_file, &shared.tasks).await?;
-        let dialed = connect(dial, &settings, retired.clone(), shared).await?;
+        let dialed = connect(server, tls, &settings, retired.clone(), shared).await?;
         Ok((dialed, rotation))
     };
     match timeout(SETUP_TIMEOUT, setup).await {
@@ -732,7 +732,8 @@ fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
 }
 
 async fn connect(
-    dial: &Dial,
+    server: &ServerEndpoint,
+    tls: Option<&Tls>,
     settings: &redis::RedisConnectionInfo,
     retired: CancellationToken,
     shared: &Shared,
@@ -747,7 +748,8 @@ async fn connect(
             }
             Ok::<(), redis::aio::SendError>(())
         });
-    dial.connect(settings, config, &shared.tasks)
+    server
+        .connect(tls, settings, config, &shared.tasks)
         .await
         .map_err(|error| error_type(&error))
 }

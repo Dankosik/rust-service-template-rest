@@ -6,7 +6,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
 
 use crate::credentials::{PasswordFile, read_regular_file};
-use crate::dial::{Dial, Tls};
+use crate::dial::Tls;
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 
 const PEM_CHAIN_BYTES: usize = 1024 * 1024;
@@ -14,7 +14,7 @@ const PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
-    pub(crate) dial: Dial,
+    pub(crate) tls: Option<Tls>,
     pub(crate) settings: redis::RedisConnectionInfo,
     pub(crate) password_file: Option<PasswordFile>,
 }
@@ -63,12 +63,8 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
         .clone()
         .set_protocol(redis::ProtocolVersion::RESP3);
     Ok(Admitted {
-        dial: Dial {
-            host: server.host.clone(),
-            port: server.port,
-            tls,
-        },
         server,
+        tls,
         settings,
         password_file,
     })
