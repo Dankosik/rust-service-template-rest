@@ -225,8 +225,8 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
 
 struct TransactionFailure(JobError);
 
-impl TransactionFailure {
-    fn completion(error: sqlx::Error) -> Self {
+impl From<sqlx::Error> for TransactionFailure {
+    fn from(error: sqlx::Error) -> Self {
         Self(JobError::postgres(
             "job completion failed: postgres",
             &error,
@@ -405,9 +405,7 @@ async fn run_transactional<K: JobKind>(
         async move |tx| {
             handler.run(job, tx).await.map_err(TransactionFailure)?;
             let complete = crate::attempt::complete_query(fence);
-            let rows = observed("complete job", complete.execute(&mut *tx))
-                .await
-                .map_err(TransactionFailure::completion)?;
+            let rows = observed("complete job", complete.execute(&mut *tx)).await?;
             if rows.rows_affected() == 0 {
                 return Err(TransactionFailure(JobError::retryable(
                     "job claim is stale",
@@ -848,7 +846,7 @@ mod tests {
     fn transaction_diagnostics_preserve_the_stage_and_withhold_driver_text() {
         use infra_postgres::TxError;
         let TransactionFailure(completion) =
-            TransactionFailure::completion(sqlx::Error::Protocol("private-test-value".to_owned()));
+            TransactionFailure::from(sqlx::Error::Protocol("private-test-value".to_owned()));
         assert_eq!(completion.disposition, Disposition::Retry);
         assert_eq!(
             completion.to_string(),
