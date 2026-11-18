@@ -431,33 +431,42 @@ impl Readiness {
     async fn check_probes(&self) -> Result<(), ProbeFailure> {
         let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
-        let outcomes = join_all(self.probes.iter().map(|probe| async move {
-            let probe_name = probe.name();
-            let result = tokio::time::timeout_at(deadline, probe.check()).await;
-            let outcome = match result.ok().filter(|_| Instant::now() <= deadline) {
-                Some(Ok(())) => Ok(()),
-                Some(Err(error)) => Err(ProbeFailure::Failed {
-                    probe: probe_name,
-                    error,
-                }),
-                None => Err(ProbeFailure::TimedOut {
-                    probe: probe_name,
-                    budget,
-                }),
-            };
-            metrics::counter!(
-                PROBE_CHECKS_METRIC,
-                "probe" => probe_name,
-                "outcome" => outcome_label(&outcome)
-            )
-            .increment(1);
-            outcome
-        }))
-        .await;
+        let checks = self
+            .probes
+            .iter()
+            .map(|probe| check_probe(probe.as_ref(), deadline, budget));
+        let outcomes = join_all(checks).await;
         let observed = outcomes.into_iter().collect();
         metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         observed
     }
+}
+
+async fn check_probe(
+    probe: &dyn Probe,
+    deadline: Instant,
+    budget: Duration,
+) -> Result<(), ProbeFailure> {
+    let probe_name = probe.name();
+    let result = tokio::time::timeout_at(deadline, probe.check()).await;
+    let outcome = match result.ok().filter(|_| Instant::now() <= deadline) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(ProbeFailure::Failed {
+            probe: probe_name,
+            error,
+        }),
+        None => Err(ProbeFailure::TimedOut {
+            probe: probe_name,
+            budget,
+        }),
+    };
+    metrics::counter!(
+        PROBE_CHECKS_METRIC,
+        "probe" => probe_name,
+        "outcome" => outcome_label(&outcome)
+    )
+    .increment(1);
+    outcome
 }
 
 fn apply_failure_threshold(

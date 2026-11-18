@@ -63,10 +63,14 @@ impl<O: OutcomeLabel> Outcomes<O> {
     }
 }
 
-pub(crate) fn record_span_outcome(span: &tracing::Span, label: &'static str, failed: bool) {
-    span.record("outcome", label);
-    if failed {
-        span.record("error.type", label);
+pub(crate) fn record_span_outcome(
+    span: &tracing::Span,
+    outcome: &'static str,
+    error_type: Option<&'static str>,
+) {
+    span.record("outcome", outcome);
+    if let Some(error_type) = error_type {
+        span.record("error.type", error_type);
         span.record("otel.status_code", "ERROR");
     }
 }
