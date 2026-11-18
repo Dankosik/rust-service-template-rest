@@ -692,19 +692,21 @@ mod tests {
                 "ordinary",
             );
             let claimed = claim::Claimed {
-                registered: Arc::clone(shared.registry.get("ordinary").unwrap()),
-                attempt: crate::attempt::AttemptId {
-                    job_id,
-                    kind: "ordinary",
-                    number: 1,
+                job: claim::RunningJob {
+                    registered: Arc::clone(shared.registry.get("ordinary").unwrap()),
+                    attempt: crate::attempt::AttemptId {
+                        job_id,
+                        kind: "ordinary",
+                        number: 1,
+                    },
+                    fence: crate::attempt::ClaimFence {
+                        job_id,
+                        generation: 1,
+                        token: uuid::Uuid::nil(),
+                    },
+                    payload: Ok(b"null".to_vec()),
+                    trace: crate::trace_context::Carrier::default(),
                 },
-                fence: crate::attempt::ClaimFence {
-                    job_id,
-                    generation: 1,
-                    token: uuid::Uuid::nil(),
-                },
-                payload: Ok(b"null".to_vec()),
-                trace: crate::trace_context::Carrier::default(),
                 slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
                 kind_slot: None,
             };
@@ -912,19 +914,21 @@ mod tests {
             let future = crate::attempt::supervise(
                 Arc::clone(&engine.shared),
                 crate::claim::Claimed {
-                    registered: Arc::clone(registered),
-                    attempt: crate::attempt::AttemptId {
-                        job_id: crate::JobId(uuid::Uuid::nil()),
-                        kind: "ordinary",
-                        number: 1,
+                    job: claim::RunningJob {
+                        registered: Arc::clone(registered),
+                        attempt: crate::attempt::AttemptId {
+                            job_id: crate::JobId(uuid::Uuid::nil()),
+                            kind: "ordinary",
+                            number: 1,
+                        },
+                        fence: crate::attempt::ClaimFence {
+                            job_id: crate::JobId(uuid::Uuid::nil()),
+                            generation: 1,
+                            token: uuid::Uuid::nil(),
+                        },
+                        payload: Ok(b"null".to_vec()),
+                        trace: crate::trace_context::Carrier::default(),
                     },
-                    fence: crate::attempt::ClaimFence {
-                        job_id: crate::JobId(uuid::Uuid::nil()),
-                        generation: 1,
-                        token: uuid::Uuid::nil(),
-                    },
-                    payload: Ok(b"null".to_vec()),
-                    trace: crate::trace_context::Carrier::default(),
                     slot: Arc::clone(&engine.shared.slots)
                         .try_acquire_owned()
                         .unwrap(),

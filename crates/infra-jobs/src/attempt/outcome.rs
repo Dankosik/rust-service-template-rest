@@ -5,7 +5,7 @@ use tokio::time::Instant;
 use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 use crate::kind::{
-    Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
+    Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
     saturating_micros,
 };
 use crate::state::FailureReason;
@@ -14,7 +14,7 @@ const OUTBOX_MAX_RETRY_BASE_SECONDS: i64 = 54;
 
 #[derive(Debug)]
 pub(super) enum Transition {
-    Complete,
+    Complete(Completion),
     Retry {
         summary: String,
         base_micros: i64,
@@ -33,9 +33,11 @@ pub(super) enum Transition {
 }
 
 impl Transition {
+    pub(super) const COMPLETED_LABEL: &str = "completed";
+
     pub(super) const fn label(&self) -> &'static str {
         match self {
-            Self::Complete => "completed",
+            Self::Complete(_) => Self::COMPLETED_LABEL,
             Self::Retry {
                 cause: RetryCause::Timeout,
                 ..
@@ -105,7 +107,7 @@ pub(super) struct Unacknowledged;
 
 pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
     Some(match transition {
-        Transition::Complete => return None,
+        Transition::Complete(_) => return None,
         Transition::Retry {
             summary,
             base_micros,
@@ -248,7 +250,7 @@ async fn execute(
 
 #[derive(Debug)]
 pub(super) enum Ended {
-    Success(crate::kind::Completion),
+    Success(Completion),
     Error(JobError),
     Panic,
     Payload(serde_json::Error),
@@ -266,7 +268,7 @@ pub(super) fn map_outcome(
     let exhausted = number >= policy.max_attempts;
     let retry_budget_spent = exhausted && !is_outbox;
     match ended {
-        Ended::Success(_) => Transition::Complete,
+        Ended::Success(completion) => Transition::Complete(completion),
         Ended::Cancelled => Transition::Release,
         Ended::Error(error) => match error.disposition {
             Disposition::Snooze { delay_micros } => Transition::Snooze {
@@ -416,8 +418,8 @@ mod tests {
     #[test]
     fn dispositions_preserve_cap_and_snooze() {
         std::assert_matches!(
-            outcome(Ended::Success(crate::kind::Completion::Pending), 25),
-            Transition::Complete
+            outcome(Ended::Success(Completion::Pending), 25),
+            Transition::Complete(Completion::Pending)
         );
         std::assert_matches!(
             outcome(Ended::Error(JobError::retryable("fail")), 25),
@@ -522,7 +524,7 @@ mod tests {
 
     #[test]
     fn a_completed_attempt_selects_no_single_row_write() {
-        assert!(write_of(&Transition::Complete).is_none());
+        assert!(write_of(&Transition::Complete(Completion::Pending)).is_none());
         std::assert_matches!(write_of(&Transition::Release), Some(Write::Release));
     }
 

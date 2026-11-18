@@ -103,7 +103,7 @@ pub(crate) struct KindMetrics {
 impl KindMetrics {
     pub(crate) fn new(kind: &'static str) -> Self {
         Self {
-            completed: attempts_counter(kind, Transition::Complete.label()),
+            completed: attempts_counter(kind, Transition::COMPLETED_LABEL),
             duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
             applied: persistence_counter(kind, Persistence::Applied),
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
@@ -180,14 +180,14 @@ pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
 
 fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transition: &Transition) {
     match handles {
-        Some(handles) if matches!(transition, Transition::Complete) => {
+        Some(handles) if matches!(transition, Transition::Complete(_)) => {
             handles.completed.increment(1);
         }
         _ => attempts_counter(attempt.kind, transition.label()).increment(1),
     }
     let outcome = transition.label();
     match transition {
-        Transition::Complete => {
+        Transition::Complete(_) => {
             tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
@@ -219,22 +219,20 @@ pub(crate) fn supervise(
     supervisor_deadline: Instant,
     mut guard: crate::engine::SupervisorGuard,
 ) -> impl Future<Output = ()> + Send + 'static {
-    let crate::claim::Claimed {
+    let crate::claim::RunningJob {
         registered,
         attempt,
         fence,
         payload,
         trace,
-        slot,
-        kind_slot,
-    } = claimed;
+    } = claimed.job;
     let span = attempt_span(&attempt);
     crate::trace_context::link(&span, &trace);
     drop(trace);
     let slots = Arc::new(AttemptSlots {
         _membership: shared.owned_attempts.join(),
-        _global: slot,
-        _kind: kind_slot,
+        _global: claimed.slot,
+        _kind: claimed.kind_slot,
     });
     async move {
         run_attempt(
@@ -269,7 +267,7 @@ fn record_on_span(span: &tracing::Span, transition: &Transition) {
     span.record("outcome", transition.label());
     match transition {
         Transition::Retry { .. } | Transition::Fail { .. } => {}
-        Transition::Complete | Transition::Snooze { .. } | Transition::Release => return,
+        Transition::Complete(_) | Transition::Snooze { .. } | Transition::Release => return,
     }
     span.record("otel.status_code", "ERROR");
 }
@@ -322,7 +320,6 @@ async fn run_attempt(
             (ended, Some(started.elapsed()))
         }
     };
-    let committed = matches!(ended, Ended::Success(Completion::Committed));
     let transition = map_outcome(&attempt, policy, registered.recover_at_exhaustion, ended);
     if matches!(transition, Transition::Release) {
         shared
@@ -348,7 +345,7 @@ async fn run_attempt(
         observe_attempt(Some(handles), &attempt, &transition);
         None
     };
-    if committed {
+    if matches!(transition, Transition::Complete(Completion::Committed)) {
         observe_acknowledged(
             shared,
             handles,
