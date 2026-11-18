@@ -1,6 +1,4 @@
-use std::error::Error as StdError;
-
-use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
@@ -67,14 +65,14 @@ pub(crate) fn require_json_content_type(
     }
 }
 
-#[expect(
-    clippy::disallowed_types,
-    reason = "the native JSON decoder retains the deserialization path"
-)]
 pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<Problem>> {
-    axum::Json::<T>::from_bytes(bytes)
-        .map(|axum::Json(value)| value)
-        .map_err(|rejection| Box::new(json_problem(&rejection, bytes)))
+    let mut input = serde_json::Deserializer::from_slice(bytes);
+    let value = serde_path_to_error::deserialize(&mut input)
+        .map_err(|error| Box::new(json_problem(&error, bytes)))?;
+    input
+        .end()
+        .map_err(|_| Box::new(Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)))?;
+    Ok(value)
 }
 
 impl<T> IntoResponse for Json<T>
@@ -158,22 +156,17 @@ where
     }
 }
 
-fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
-    match rejection {
-        JsonRejection::JsonDataError(_)
-            if !std::str::from_utf8(bytes)
-                .is_ok_and(|text| serde_json::from_str::<IgnoredAny>(text).is_ok()) =>
-        {
-            Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
-        }
-        JsonRejection::JsonDataError(error) => with_param(
+fn json_problem(error: &serde_path_to_error::Error<serde_json::Error>, bytes: &[u8]) -> Problem {
+    if error.inner().is_data()
+        && std::str::from_utf8(bytes)
+            .is_ok_and(|text| serde_json::from_str::<IgnoredAny>(text).is_ok())
+    {
+        with_param(
             Problem::new(Code::UnprocessableContent).detail_static(BODY_SCHEMA_DETAIL),
-            failed_member::<serde_json::Error>(error).and_then(body_pointer),
-        ),
-        JsonRejection::JsonSyntaxError(_) => {
-            Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
-        }
-        _ => wiring_failure("json"),
+            body_pointer(error.path()),
+        )
+    } else {
+        Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
     }
 }
 
@@ -297,17 +290,6 @@ fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {
         }
         _ => problem,
     }
-}
-
-fn failed_member<'a, E>(
-    rejection: &'a (dyn StdError + 'static),
-) -> Option<&'a serde_path_to_error::Path>
-where
-    E: StdError + 'static,
-{
-    shared_rules::error_chain::causes(rejection)
-        .find_map(|error| error.downcast_ref::<serde_path_to_error::Error<E>>())
-        .map(serde_path_to_error::Error::path)
 }
 
 fn body_pointer(path: &serde_path_to_error::Path) -> Option<CompactString> {
@@ -615,9 +597,11 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_is_a_400() {
         for input in [
-            r#"{"slug": submitted-secret"#,
-            r#"{"slug":1,"lines":[]} ]"#,
-            r#"{"slug":1,"lines":[}"#,
+            br#"{"slug": submitted-secret"#.as_slice(),
+            br#"{"slug":1,"lines":[]} ]"#,
+            br#"{"slug":1,"lines":[}"#,
+            br#"{"slug":"a","lines":[]} ]"#,
+            b"{\"slug\":1,\"lines\":[{\"quantity\":\"\xff\"}]}",
         ] {
             let response = app().oneshot(post_json(input)).await.unwrap();
             let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;

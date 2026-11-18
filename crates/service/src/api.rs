@@ -177,8 +177,9 @@ mod tests {
 // template:begin http-idempotency:service-api-idempotent-test-route
 #[cfg(test)]
 mod idempotency_tests {
-    use axum::http::StatusCode;
-    use infra_http::idempotency::{self, FreshCommand, ReplayableResponse, Rollback, Tx};
+    use std::convert::Infallible;
+
+    use infra_http::idempotency::{self, CreatedText, FreshCommand, Rollback, Tx};
 
     use super::*;
 
@@ -195,10 +196,7 @@ mod idempotency_tests {
                 "rationale": "test-only route proving the production idempotency composition seam"
             }))
         ),
-        responses(
-            (status = 201, description = "created", content_type = "text/plain", body = String),
-            infra_http::authn::ProtectedOperationProblemResponses,
-        )
+        responses(infra_http::authn::ProtectedOperationProblemResponses)
     )]
     async fn idempotent(
         _input: idempotency::CommandInput,
@@ -212,19 +210,17 @@ mod idempotency_tests {
     struct Create;
 
     impl FreshCommand for Create {
+        type Success = CreatedText;
+        type Terminal = Infallible;
+
         fn execute(
             self,
             _: &mut Tx<'_>,
-        ) -> impl Future<Output = Result<ReplayableResponse, Rollback>> + Send {
-            let headers = axum::http::HeaderMap::from_iter([(
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("text/plain"),
-            )]);
-            std::future::ready(ReplayableResponse::bytes(
-                StatusCode::CREATED,
-                &headers,
-                "created".into(),
-            ))
+        ) -> impl Future<Output = Result<Self::Success, Rollback<Self::Terminal>>> + Send {
+            std::future::ready(Ok(CreatedText {
+                body: "created".into(),
+                headers: axum::http::HeaderMap::new(),
+            }))
         }
     }
 
@@ -274,6 +270,10 @@ mod idempotency_tests {
             assert!(response["headers"].get(header).is_some());
         }
         assert_eq!(operation["responses"]["201"]["description"], "created");
+        assert_eq!(
+            operation["responses"]["201"]["content"]["text/plain"]["schema"]["type"],
+            "string"
+        );
         assert_eq!(
             operation["responses"]["201"]["headers"]["Idempotent-Replayed"]["schema"],
             serde_json::json!({ "type": "string", "enum": ["true"] })

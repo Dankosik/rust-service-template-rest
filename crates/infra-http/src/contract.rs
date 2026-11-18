@@ -337,9 +337,14 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     // template:begin http-idempotency:http-typed-registration
     pub(crate) fn from_idempotent(
-        metadata: OpenApi,
-        route: UtoipaMethodRouter<S>,
+        mut metadata: OpenApi,
+        mut route: UtoipaMethodRouter<S>,
     ) -> Result<Self, FinalizeError> {
+        components::merge_map(
+            "schemas",
+            &mut metadata.components.get_or_insert_default().schemas,
+            std::mem::take(&mut route.0),
+        )?;
         let mut contract = Self::feature_route(metadata, route)?;
         for (path, item) in &contract.routes.get_openapi().paths.paths {
             for (method, op) in self::fixed_path_operations!(item, as_ref) {

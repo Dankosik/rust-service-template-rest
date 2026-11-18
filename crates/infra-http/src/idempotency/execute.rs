@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt;
 use std::mem::DropGuard;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use tokio::time::Instant;
 
-use super::stored::ReplayableResponse;
+use super::stored::{ReplayError, ReplaySuccess, ReplayableResponse, TerminalProblem};
 use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
@@ -79,12 +80,13 @@ pub(super) struct Attempt {
 }
 
 pub trait FreshCommand: Send {
-    const ALLOW_TERMINAL_REFUSALS: bool = false;
+    type Success: ReplaySuccess;
+    type Terminal: TerminalMode;
 
     fn execute(
         self,
         tx: &mut Tx<'_>,
-    ) -> impl Future<Output = Result<ReplayableResponse, Rollback>> + Send;
+    ) -> impl Future<Output = Result<Self::Success, Rollback<Self::Terminal>>> + Send;
 
     fn attempt_timeout(&self) -> Option<Duration> {
         None
@@ -118,16 +120,17 @@ impl Attempt {
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
-                let store = store.with_terminal_refusals(C::ALLOW_TERMINAL_REFUSALS);
+                let store = store.with_terminal_refusals(C::Terminal::ENABLED);
                 let command_cutoff = command_end.filter(|end| *end <= attempt_end);
                 let attempt = store.attempt_with_deadline(
                     &scope,
                     &fingerprint,
                     command_cutoff.unwrap_or(attempt_end),
                     async |tx: &mut Tx<'_>| match command.execute(tx).await {
-                        Ok(response) => Ok(response.into_record()),
+                        Ok(success) => Ok(success.capture()?.into_record()),
                         Err(Rollback::Terminal(problem)) => {
-                            ReplayableResponse::terminal_problem(&problem)
+                            let terminal: TerminalProblem = problem.into();
+                            Ok(terminal.capture()?)
                         }
                         Err(rollback) => Err(rollback),
                     },
@@ -158,46 +161,55 @@ fn command_timeout() -> Response {
         .into_response()
 }
 
+mod sealed {
+    pub trait TerminalMode {}
+}
+
+pub trait TerminalMode: sealed::TerminalMode + Into<TerminalProblem> + Send {
+    const ENABLED: bool;
+}
+
+impl sealed::TerminalMode for Infallible {}
+impl TerminalMode for Infallible {
+    const ENABLED: bool = false;
+}
+
+impl sealed::TerminalMode for TerminalProblem {}
+impl TerminalMode for TerminalProblem {
+    const ENABLED: bool = true;
+}
+
+impl From<Infallible> for TerminalProblem {
+    fn from(never: Infallible) -> Self {
+        match never {}
+    }
+}
+
 #[derive(thiserror::Error)]
-pub enum Rollback {
+pub enum Rollback<T = Infallible> {
     #[error("operation refused")]
     Refused(Box<Response>),
     #[error("terminal business refusal")]
-    Terminal(Box<Problem>),
+    Terminal(T),
     #[error("database")]
     Database(SqlError),
-    #[error("status")]
-    InvalidStatus,
-    #[error("body_limit")]
-    BodyLimit,
-    #[error("body_forbidden")]
-    BodyForbidden,
-    #[error("content_encoding")]
-    ContentEncoding,
-    #[error("header_limit")]
-    HeaderLimit,
-    #[error("serialization")]
-    Serialization,
+    #[error(transparent)]
+    Unstorable(#[from] ReplayError),
 }
 
-impl fmt::Debug for Rollback {
+impl<T> fmt::Debug for Rollback<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
     }
 }
 
-impl From<SqlError> for Rollback {
+impl<T> From<SqlError> for Rollback<T> {
     fn from(error: SqlError) -> Self {
         Self::Database(error)
     }
 }
 
-impl Rollback {
-    #[must_use]
-    pub fn terminal(problem: Problem) -> Self {
-        Self::Terminal(Box::new(problem))
-    }
-
+impl<T> Rollback<T> {
     #[must_use]
     pub fn refuse(response: impl IntoResponse) -> Self {
         Self::Refused(Box::new(response.into_response()))
@@ -237,8 +249,8 @@ impl Answer {
     }
 }
 
-fn map_attempted(
-    attempted: Result<Attempted<Rollback>, AttemptError>,
+fn map_attempted<T>(
+    attempted: Result<Attempted<Rollback<T>>, AttemptError>,
     scope: &ScopeKey,
     operation_id: &str,
 ) -> Answer {
@@ -378,7 +390,10 @@ mod tests {
     struct UnreachableCommand;
 
     impl FreshCommand for UnreachableCommand {
-        async fn execute(self, _: &mut Tx<'_>) -> Result<ReplayableResponse, Rollback> {
+        type Success = super::super::CreatedText;
+        type Terminal = Infallible;
+
+        async fn execute(self, _: &mut Tx<'_>) -> Result<Self::Success, Rollback> {
             panic!("exhausted requests must not execute work");
         }
     }
@@ -423,7 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_internal_store_failure_is_a_sanitized_500() {
-        let answer = map_attempted(Err(AttemptError::Internal), &scope(), "test");
+        let answer = map_attempted::<Infallible>(Err(AttemptError::Internal), &scope(), "test");
         assert_eq!(answer.outcome, Outcome::Internal);
         assert_eq!(answer.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
@@ -451,7 +466,7 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ] {
-            let rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
+            let rollback: Rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
             let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), "test");
             assert_eq!(answer.response.status(), expected);
             assert!(!answer.response.headers().contains_key(REPLAYED_HEADER));

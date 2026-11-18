@@ -19,10 +19,12 @@ macro_rules! idempotent_route {
 
 pub use compose::route;
 pub use declaration::CompositionError;
-pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback};
+pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalMode};
 pub use infra_postgres::BudgetedTx as Tx;
 pub use input::CommandInput;
-pub use stored::ReplayableResponse;
+pub use stored::{
+    CreatedJson, CreatedText, ReplayError, ReplaySuccess, ReplayableResponse, TerminalProblem,
+};
 
 pub(crate) const KEY_HEADER: &str = "Idempotency-Key";
 pub(crate) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
