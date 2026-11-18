@@ -294,7 +294,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
             handle.finish(deadline()).await,
             Err(ConsumerError::ConsumerLost)
         );
-        if let Change::IdleExpiry = change {
+        if matches!(change, Change::IdleExpiry) {
             assert_durable_refusal(&logged, "bind_consumer", "durable_inactive_threshold");
             assert_durable_refusal(&logged, "consumer_info", "durable_inactive_threshold");
         }

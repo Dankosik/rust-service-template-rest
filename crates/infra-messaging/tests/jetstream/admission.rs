@@ -24,7 +24,8 @@ fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> 
 
 #[tokio::test]
 async fn admission_requires_streams_that_accept_and_retain_acknowledged_publications() {
-    let cases: [(&str, fn(&mut stream::Config)); 5] = [
+    type ConfigureStream = fn(&mut stream::Config);
+    let cases: [(&str, ConfigureStream); 5] = [
         ("stream_no_ack", |config| config.no_ack = true),
         ("stream_memory_storage", |config| {
             config.storage = stream::StorageType::Memory;
@@ -33,7 +34,7 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
             config.persist_mode = Some(stream::PersistenceMode::Async);
         }),
         ("stream_interest_retention", |config| {
-            config.retention = stream::RetentionPolicy::Interest
+            config.retention = stream::RetentionPolicy::Interest;
         }),
         ("stream_sealed", |config| config.sealed = true),
     ];
