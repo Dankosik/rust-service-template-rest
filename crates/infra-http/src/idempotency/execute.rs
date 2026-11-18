@@ -10,7 +10,7 @@ use infra_idempotency_store::{AttemptError, Attempted, Digest, ScopeKey, Store};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use tokio::time::Instant;
 
-use super::stored::{ReplayError, ReplaySuccess, ReplayableResponse, TerminalProblem};
+use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
 use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
@@ -280,7 +280,7 @@ fn map_attempted<T>(
         }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => {
-            let mut response = ReplayableResponse::from_record(record).into_response();
+            let mut response = response_from_record(record);
             response
                 .headers_mut()
                 .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
@@ -295,10 +295,7 @@ fn map_attempted<T>(
             } else {
                 Outcome::Executed
             };
-            Answer::operation_response(
-                ReplayableResponse::from_record(record).into_response(),
-                outcome,
-            )
+            Answer::operation_response(response_from_record(record), outcome)
         }
     }
 }

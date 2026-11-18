@@ -155,18 +155,14 @@ impl ReplayableResponse {
     pub(super) fn into_record(self) -> Record {
         self.0
     }
+}
 
-    pub(super) fn from_record(record: Record) -> Self {
-        Self(record)
-    }
-
-    pub(super) fn into_response(self) -> Response {
-        let (status, headers, body) = self.0.into_parts();
-        let mut response = Response::new(Body::from(body));
-        *response.status_mut() = status;
-        *response.headers_mut() = headers;
-        response
-    }
+pub(super) fn response_from_record(record: Record) -> Response {
+    let (status, headers, body) = record.into_parts();
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
 }
 
 fn set_uncoded_content_type(
@@ -308,13 +304,13 @@ mod tests {
             );
         }
 
-        let response = ReplayableResponse::json(
+        let captured = ReplayableResponse::json(
             StatusCode::OK,
             header_map(&[("content-encoding", "IDENTITY")]),
             &1,
         )
-        .unwrap()
-        .into_response();
+        .unwrap();
+        let response = response_from_record(captured.into_record());
         assert!(!response.headers().contains_key(CONTENT_ENCODING));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(
@@ -349,7 +345,7 @@ mod tests {
             let captured = ReplayableResponse::bytes(
                 StatusCode::from_u16(status).unwrap(), &header_map(&pairs), Bytes::from(body.clone())
             ).unwrap();
-            let response = ReplayableResponse::from_record(captured.into_record()).into_response();
+            let response = response_from_record(captured.into_record());
 
             proptest::prop_assert_eq!(response.status().as_u16(), status);
             let allowed = [
