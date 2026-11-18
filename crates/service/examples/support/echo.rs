@@ -78,11 +78,7 @@ impl EchoService for Echo {
         &self,
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
-        let context = request
-            .extensions()
-            .get::<ResponseContext>()
-            .cloned()
-            .ok_or_else(|| Failure::new(Code::InternalServerError))?;
+        let context = ResponseContext::require_from_request(&request)?.clone();
         let responses = request
             .into_inner()
             .map(|item| {

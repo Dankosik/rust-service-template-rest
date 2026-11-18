@@ -58,6 +58,10 @@ pub fn request_operation<T>(
 pub struct ResponseContext(OperationContext);
 
 impl ResponseContext {
+    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
+        request.extensions().get().ok_or_else(internal_status)
+    }
+
     #[must_use]
     pub const fn operation(&self) -> &OperationContext {
         &self.0
@@ -250,12 +254,9 @@ async fn native_grpc(request: Request, next: Next) -> Response {
     response
 }
 
-enum OpeningOutcome {
-    Admitted {
-        response: Response,
-        permit: Option<OwnedSemaphorePermit>,
-    },
-    Rejected(Response),
+struct Admitted {
+    response: Response,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 async fn business_call(
@@ -309,49 +310,50 @@ async fn business_call(
     request.extensions_mut().insert(opening_context.clone());
     request.extensions_mut().insert(response_context);
 
+    #[allow(clippy::result_large_err, reason = "the panic fallback returns the same refusal response")]
     let outcome = run_in_span(
         async {
             let outcome = tokio::select! {
                 biased;
                 reason = opening_context.wait_stopped() => {
-                    OpeningOutcome::Rejected(server_stopped(reason).into_http())
+                    Err(server_stopped(reason).into_http())
                 }
                 outcome = open_business(&state, &opening_context, call_type, request, next) => outcome,
             };
             if let Some(reason) = opening_context.stopped() {
-                return OpeningOutcome::Rejected(server_stopped(reason).into_http());
+                return Err(server_stopped(reason).into_http());
             }
             outcome
         },
         call.span(),
         fallback.as_ref(),
-        || OpeningOutcome::Rejected(internal_status().into_http()),
+        || Err(internal_status().into_http()),
     )
     .await;
 
     finish_call(outcome, call, fallback, custody)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the call returns"
+)]
 async fn open_business(
     state: &BusinessState,
     opening_context: &OperationContext,
     call_type: Option<CallType>,
     request: Request,
     next: Next,
-) -> OpeningOutcome {
+) -> Result<Admitted, Response> {
     let mut remaining_wait = state.limits.max_admission_wait;
-    let (_opening_permit, request) = match acquire_permit(
+    let (_opening_permit, request) = acquire_permit(
         state.opening_permits.as_ref(),
         &mut remaining_wait,
         opening_context,
         request,
     )
-    .await
-    {
-        Ok(acquired) => acquired,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
-    let admission = match &state.authentication {
+    .await?;
+    let admission: Result<_, Response> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
         Authentication::Bearer(verifier) => {
             crate::authn::authenticate(verifier, &state.scopes, opening_context, request).await
@@ -376,32 +378,23 @@ async fn open_business(
             Ok(request)
         }
     };
-    let request = match admission {
-        Ok(request) => request,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
+    let request = admission?;
     if call_type.is_none() {
         let status = tonic::Status::unimplemented("");
-        return OpeningOutcome::Rejected(
-            reject_with_budget(opening_context, request, status).await,
-        );
+        return Err(reject_with_budget(opening_context, request, status).await);
     }
-    let (call_permit, request) = match acquire_permit(
+    let (call_permit, request) = acquire_permit(
         state.call_permits.as_ref(),
         &mut remaining_wait,
         opening_context,
         request,
     )
-    .await
-    {
-        Ok(acquired) => acquired,
-        Err(response) => return OpeningOutcome::Rejected(response),
-    };
+    .await?;
     let response = next.run(request.map(without_trailer_credentials)).await;
-    OpeningOutcome::Admitted {
+    Ok(Admitted {
         response,
         permit: call_permit,
-    }
+    })
 }
 
 #[expect(
@@ -544,17 +537,17 @@ async fn run_in_span<T>(
 }
 
 fn finish_call(
-    outcome: OpeningOutcome,
+    outcome: Result<Admitted, Response>,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
     mut custody: ServerCustody,
 ) -> Response {
     match outcome {
-        OpeningOutcome::Admitted { response, permit } => {
+        Ok(Admitted { response, permit }) => {
             custody.permit = permit;
             attach_server(response, call, fallback, custody).map(axum::body::Body::new)
         }
-        OpeningOutcome::Rejected(response) => {
+        Err(response) => {
             // template:begin authn:grpc-router-scope-refusal-span
             if response
                 .extensions()
