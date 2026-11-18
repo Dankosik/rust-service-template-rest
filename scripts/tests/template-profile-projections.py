@@ -1417,7 +1417,7 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
         ("none", "none", "none", "none", False),
         ("postgres-only", "postgres", "none", "none", True),
         ("nats-only", "none", "nats-jetstream", "none", False),
-        ("s3-only", "none", "none", "s3", False),
+        ("s3-only", "none", "none", "s3", True),
     ):
         inputs = _inputs(initializer, database, "none", "none", "none", "none", "none", "none", "core",
                          messaging=messaging, object_storage=storage)

@@ -44,6 +44,15 @@ pub(crate) enum Outcome {
     Degraded,
 }
 
+impl Outcome {
+    fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Graceful, Self::Graceful) => Self::Graceful,
+            (Self::Degraded, _) | (_, Self::Degraded) => Self::Degraded,
+        }
+    }
+}
+
 struct Budget {
     async_deadline: Instant,
 }
@@ -85,7 +94,7 @@ impl Dependencies {
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
         deadline: Instant,
-    ) -> impl std::future::Future<Output = bool> {
+    ) -> impl std::future::Future<Output = Outcome> {
         let Self {
             // template:begin postgres:shutdown-dependencies-postgres-destructure
             postgres,
@@ -107,16 +116,16 @@ impl Dependencies {
                     return match cache.close(deadline).await {
                         infra_cache::CloseOutcome::Complete => {
                             tracing::info!("cache_closed");
-                            false
+                            Outcome::Graceful
                         }
                         infra_cache::CloseOutcome::TimedOut => {
                             tracing::warn!("cache outlived its close budget");
-                            true
+                            Outcome::Degraded
                         }
                     };
                 }
                 // template:end cache:service-shutdown-dependencies-cache-close
-                false
+                Outcome::Graceful
             };
             let postgres_close = async {
                 // template:begin postgres:shutdown-dependencies-postgres-close
@@ -129,19 +138,19 @@ impl Dependencies {
                     {
                         CloseOutcome::Complete => {
                             tracing::info!("postgres_pool_closed");
-                            false
+                            Outcome::Graceful
                         }
                         CloseOutcome::TimedOut => {
                             tracing::warn!("postgres pool outlived its close budget");
-                            true
+                            Outcome::Degraded
                         }
                     };
                 }
                 // template:end postgres:shutdown-dependencies-postgres-close
-                false
+                Outcome::Graceful
             };
-            let (cache_degraded, postgres_degraded) = tokio::join!(cache_close, postgres_close);
-            cache_degraded || postgres_degraded
+            let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
+            cache_outcome.combine(postgres_outcome)
         }
     }
 }
@@ -168,16 +177,16 @@ pub(crate) struct Plan<'a> {
     pub(crate) logger: Option<LoggerGuard>,
 }
 
-async fn stage(name: &'static str, future: impl Future<Output = bool>) -> bool {
-    if let Ok(degraded) = AssertUnwindSafe(future).catch_unwind().await {
-        degraded
+async fn stage(name: &'static str, future: impl Future<Output = Outcome>) -> Outcome {
+    if let Ok(outcome) = AssertUnwindSafe(future).catch_unwind().await {
+        outcome
     } else {
         tracing::error!(
             stage = name,
             outcome = "unconfirmed",
             "shutdown_stage_panicked"
         );
-        true
+        Outcome::Degraded
     }
 }
 
@@ -193,58 +202,62 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         logger,
     } = plan;
     let budget = Budget::until(deadline);
-    let mut degraded = stage("listeners", async {
+    let mut outcome = stage("listeners", async {
         tracing::info!(grace = ?http_config.grace_period, "shutdown_started");
         stop_serving(&mut serving, http_config, signals, &budget).await
     })
     .await;
-    degraded |= stage(
+    let diagnostics_outcome = stage(
         "diagnostics",
         stop_diagnostics(serving.diagnostics.take(), &budget),
     )
     .await;
+    outcome = outcome.combine(diagnostics_outcome);
     drop(serving);
 
     background.cancel();
-    degraded |= stage("background", async {
+    let background_outcome = stage("background", async {
         match background
             .join_until(budget.stage_deadline(BACKGROUND_JOIN))
             .await
         {
             JoinOutcome::Complete => {
                 tracing::info!("background_joined");
-                false
+                Outcome::Graceful
             }
             JoinOutcome::Failed => {
                 tracing::warn!("background_failed");
-                true
+                Outcome::Degraded
             }
             JoinOutcome::Unconfirmed => {
                 background.abort_all();
                 tracing::warn!("background_abort_requested");
-                true
+                Outcome::Degraded
             }
         }
     })
     .await;
+    outcome = outcome.combine(background_outcome);
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
-    degraded |= stage("background_forced", async {
+    let forced_background_outcome = stage("background_forced", async {
         if background.is_empty() {
-            return false;
+            return Outcome::Graceful;
         }
         background.abort_all();
         match background.join_until(dependency_deadline).await {
             JoinOutcome::Unconfirmed => tracing::warn!("background_unconfirmed"),
             JoinOutcome::Complete | JoinOutcome::Failed => tracing::warn!("background_forced"),
         }
-        true
+        Outcome::Degraded
     })
     .await;
-    degraded |= stage("dependencies", async {
+    outcome = outcome.combine(forced_background_outcome);
+    let dependencies_outcome = stage("dependencies", async {
         dependencies.close(dependency_deadline).await
     })
     .await;
-    finish_telemetry(tracer_provider, logger, signals, &budget, degraded).await
+    outcome = outcome.combine(dependencies_outcome);
+    finish_telemetry(tracer_provider, logger, signals, &budget, outcome).await
 }
 
 async fn finish_telemetry(
@@ -252,7 +265,7 @@ async fn finish_telemetry(
     logger: Option<LoggerGuard>,
     signals: &mut Signals,
     budget: &Budget,
-    mut degraded: bool,
+    mut outcome: Outcome,
 ) -> Outcome {
     let telemetry_deadline =
         budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK));
@@ -265,14 +278,14 @@ async fn finish_telemetry(
         Duration::ZERO
     };
     let trace_deadline = telemetry_deadline - log_reserve;
-    degraded |= stage("telemetry", async {
+    let trace_outcome = stage("telemetry", async {
         let Some(provider) = tracer_provider else {
-            return false;
+            return Outcome::Graceful;
         };
         match provider.shutdown(trace_deadline).await {
             ProviderShutdown::Completed => {
                 tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
-                false
+                Outcome::Graceful
             }
             ProviderShutdown::Incomplete(reasons) => {
                 tracing::warn!(
@@ -280,41 +293,35 @@ async fn finish_telemetry(
                     reason_flags = ?reasons,
                     "trace_shutdown_incomplete"
                 );
-                true
+                Outcome::Degraded
             }
         }
     })
     .await;
+    outcome = outcome.combine(trace_outcome);
     if let Err(error) = signals.pending() {
-        degraded = true;
+        outcome = Outcome::Degraded;
         tracing::error!(%error, "signal_owner_failed");
     }
-    let mut outcome = if degraded {
-        Outcome::Degraded
-    } else {
-        Outcome::Graceful
-    };
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = logger {
-        let incomplete = stage("logger", async {
+        let logger_outcome = stage("logger", async {
             let close =
                 tokio::task::spawn_blocking(move || logger.shutdown(telemetry_deadline.into_std()));
-            !matches!(
-                tokio::time::timeout_at(telemetry_deadline, close).await,
-                Ok(Ok(LoggerShutdown::Completed(_)))
-            )
+            match tokio::time::timeout_at(telemetry_deadline, close).await {
+                Ok(Ok(LoggerShutdown::Completed(_))) => Outcome::Graceful,
+                _ => Outcome::Degraded,
+            }
         })
         .await;
-        if incomplete {
-            outcome = Outcome::Degraded;
-        }
+        outcome = outcome.combine(logger_outcome);
     }
     outcome
 }
 
-async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> bool {
+async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> Outcome {
     let Some(listener) = listener else {
-        return false;
+        return Outcome::Graceful;
     };
     match listener.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
@@ -324,10 +331,10 @@ async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> bool {
         ),
         Err(error) => {
             tracing::warn!(%error, "diagnostics_shutdown_failed");
-            return true;
+            return Outcome::Degraded;
         }
     }
-    false
+    Outcome::Graceful
 }
 
 async fn stop_serving(
@@ -335,13 +342,13 @@ async fn stop_serving(
     http_config: &HttpConfig,
     signals: &mut Signals,
     budget: &Budget,
-) -> bool {
+) -> Outcome {
     if let Some(readiness) = &serving.readiness {
         readiness.start_drain();
         tracing::info!("readiness_disabled");
     }
     let drain_deadline = budget.stage_deadline(http_config.drain_timeout);
-    let mut degraded = false;
+    let mut outcome = Outcome::Graceful;
     if serving.admitted {
         let delay = budget.remaining(http_config.readiness_propagation_delay);
         if !delay.is_zero() {
@@ -350,7 +357,10 @@ async fn stop_serving(
                 () = tokio::time::sleep(delay) => {},
                 signal = signals.wait() => match signal {
                     Ok(()) => tracing::warn!("second stop signal: skipping propagation delay"),
-                    Err(error) => { degraded = true; tracing::error!(%error, "signal_owner_failed"); }
+                    Err(error) => {
+                        outcome = Outcome::Degraded;
+                        tracing::error!(%error, "signal_owner_failed");
+                    }
                 },
             }
         }
@@ -366,16 +376,16 @@ async fn stop_serving(
         .min(graceful_deadline + FORCED_LISTENER_JOIN);
     let drain_budget = graceful_deadline.saturating_duration_since(Instant::now());
     tracing::info!(budget = ?drain_budget, "drain_started");
-    let drain_failed = drain_listener(
+    let drain = drain_listener(
         serving.app_listener.take(),
         graceful_deadline,
         confirmation_deadline,
         ListenerKind::Http,
     );
     // template:begin grpc:shutdown-concurrent-grpc-drain
-    let drain_failed = async {
-        let (http_failed, grpc_failed) = tokio::join!(
-            drain_failed,
+    let drain = async {
+        let (http_outcome, grpc_outcome) = tokio::join!(
+            drain,
             drain_listener(
                 serving.grpc_listener.take(),
                 graceful_deadline,
@@ -383,10 +393,10 @@ async fn stop_serving(
                 ListenerKind::Grpc
             )
         );
-        http_failed || grpc_failed
+        http_outcome.combine(grpc_outcome)
     };
     // template:end grpc:shutdown-concurrent-grpc-drain
-    degraded | drain_failed.await
+    outcome.combine(drain.await)
 }
 
 #[derive(Clone, Copy)]
@@ -427,9 +437,9 @@ async fn drain_listener(
     graceful_deadline: Instant,
     confirmation_deadline: Instant,
     kind: ListenerKind,
-) -> bool {
+) -> Outcome {
     let Some(listener) = listener else {
-        return false;
+        return Outcome::Graceful;
     };
     let events = kind.drain_events();
     let (drained, residue) = listener
@@ -438,7 +448,7 @@ async fn drain_listener(
     match drained {
         Ok(Drained::Complete) => {
             tracing::info!("{}", events.completed);
-            false
+            Outcome::Graceful
         }
         Ok(Drained::TimedOut {
             remaining_connections,
@@ -452,7 +462,7 @@ async fn drain_listener(
                 "{}",
                 events.forced
             );
-            true
+            Outcome::Degraded
         }
         Err(error) => {
             tracing::error!(
@@ -462,7 +472,7 @@ async fn drain_listener(
                 remaining_delegated_tasks = residue.remaining_delegated_tasks,
                 "{}", events.failed
             );
-            true
+            Outcome::Degraded
         }
     }
 }

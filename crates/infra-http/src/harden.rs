@@ -192,7 +192,7 @@ async fn admit(
         Err(waited) => Some(*waited),
     };
     if let Some(waited) = waited {
-        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited.as_secs_f64());
+        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
     }
     let Ok((_permit, _)) = acquired else {
         return shed_response();

@@ -190,7 +190,7 @@ impl Metrics {
             }
             let observed = Instant::now();
             let lag = observed.saturating_duration_since(expected);
-            metrics::histogram!(SCHEDULER_LAG_METRIC).record(lag.as_secs_f64());
+            metrics::histogram!(SCHEDULER_LAG_METRIC).record(lag);
             metrics::counter!(SCHEDULER_SAMPLES_METRIC).increment(1);
             let completed = Instant::now();
             let max_lag = self.progress.record(completed, lag);

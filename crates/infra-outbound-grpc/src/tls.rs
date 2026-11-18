@@ -125,19 +125,14 @@ mod tests {
     use std::assert_matches;
     use std::error::Error as _;
 
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
-        KeyPair, KeyUsagePurpose,
-    };
+    use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair};
     use secrecy::SecretString;
+    use tls_test_support::new_issuer;
 
     use super::*;
 
     fn test_pki() -> (String, ClientIdentity, SecretString) {
-        let mut ca_params = CertificateParams::default();
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let issuer = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+        let issuer = new_issuer();
         let client_key = KeyPair::generate().unwrap();
         let mut leaf_params = CertificateParams::new(vec!["client.test".to_owned()]).unwrap();
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];

@@ -483,12 +483,9 @@ fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
 mod tests {
     use std::assert_matches;
 
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
-        KeyPair, KeyUsagePurpose,
-    };
     use rustls::ServerConfig;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tls_test_support::TlsMaterial;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
@@ -650,26 +647,15 @@ mod tests {
 
     #[tokio::test]
     async fn tls_connector_rejects_peer_without_h2_alpn() {
-        let mut ca_params = CertificateParams::default();
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let issuer = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
-        let server_key = KeyPair::generate().unwrap();
-        let mut server_params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
-        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let server_cert = server_params.signed_by(&server_key, &issuer).unwrap();
-
-        let certs = CertificateDer::pem_slice_iter(server_cert.pem().as_bytes())
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let key = PrivateKeyDer::from_pem_slice(server_key.serialize_pem().as_bytes()).unwrap();
+        let material = TlsMaterial::new("127.0.0.1");
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
         let mut server_config = ServerConfig::builder_with_provider(
             rustls::crypto::aws_lc_rs::default_provider().into(),
         )
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
+        .with_single_cert(vec![material.cert.into()], key)
         .unwrap();
         server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -684,7 +670,7 @@ mod tests {
         let mut client = Client::try_new(
             &format!("https://{address}"),
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(issuer.pem()),
+                ca_certificate_pem: Some(material.root_pem),
                 identity: None,
             }),
             Duration::from_secs(5),

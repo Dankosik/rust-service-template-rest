@@ -52,5 +52,6 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:outbound-grpc-service-auth-test-dependency
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
+tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
 tracing-subscriber = { workspace = true, features = ["registry"] }

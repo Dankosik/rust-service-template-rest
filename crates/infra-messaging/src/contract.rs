@@ -31,7 +31,7 @@ pub enum ContractError {
     #[error("schema name {0} is used by two different types")]
     SchemaName(String),
     #[error("payload schema cannot be rendered")]
-    Render(#[source] serde_json::Error),
+    Render(#[from] serde_json::Error),
 }
 
 impl Registry {
@@ -52,7 +52,7 @@ impl Registry {
             let payload = schema(&mut rendered);
             let mut definitions = BTreeMap::new();
             for (name, schema) in rendered {
-                let schema = serde_json::to_value(schema).map_err(ContractError::Render)?;
+                let schema = serde_json::to_value(schema)?;
                 if schemas
                     .insert(name.clone(), schema.clone())
                     .is_some_and(|earlier| earlier != schema)
