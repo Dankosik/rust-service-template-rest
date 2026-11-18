@@ -144,7 +144,43 @@ struct State {
     last_check: Option<Check>,
 }
 
+struct RefreshLog {
+    late_by: Option<Duration>,
+    absorbed_failure: Option<(ProbeFailure, u32)>,
+    transition: Option<Result<(), ProbeFailure>>,
+}
+
 impl State {
+    fn apply_round(
+        &mut self,
+        observed: Result<(), ProbeFailure>,
+        failure_threshold: NonZeroU32,
+        stale_after: Duration,
+    ) -> Option<RefreshLog> {
+        if self.draining {
+            return None;
+        }
+        let at = Instant::now();
+        let previous = self.last_check.as_ref();
+        let was_ready = previous.is_some_and(|check| check.is_ready_at(at, stale_after));
+        let (next, absorbed) =
+            apply_failure_threshold(previous, observed, failure_threshold, at, was_ready);
+        let changed = if next.verdict.is_ok() {
+            !was_ready
+        } else {
+            previous.is_some_and(|check| check.verdict.is_ok())
+        };
+        let log = RefreshLog {
+            transition: changed.then(|| next.verdict.clone()),
+            absorbed_failure: absorbed.map(|reason| (reason, next.consecutive_failures)),
+            late_by: previous
+                .map(|check| at.duration_since(check.at))
+                .filter(|age| *age > stale_after),
+        };
+        self.last_check = Some(next);
+        Some(log)
+    }
+
     fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
         if self.draining {
             return Err(NotReady::Draining);
@@ -360,38 +396,16 @@ impl ReadinessRefresher {
         let observed = self.readiness.check_probes().await;
         let failure_threshold = control.policy.failure_threshold;
         let stale_after = control.policy.stale_after();
-        let mut transition_to_log = None;
-        let mut absorbed_failure = None;
-        let mut late_by = None;
+        let mut log = None;
         control.tx.send_if_modified(|state| {
-            if state.draining {
-                return false;
-            }
-            let at = Instant::now();
-            let previous = state.last_check.as_ref();
-            let was_ready = previous.is_some_and(|check| check.is_ready_at(at, stale_after));
-            let (next, absorbed) =
-                apply_failure_threshold(previous, observed, failure_threshold, at, was_ready);
-            let now_ready = next.verdict.is_ok();
-            let changed = if now_ready {
-                !was_ready
-            } else {
-                previous.is_some_and(|check| check.verdict.is_ok())
-            };
-            if changed {
-                transition_to_log = Some(next.verdict.clone());
-            }
-            absorbed_failure = absorbed.map(|reason| (reason, next.consecutive_failures));
-            late_by = previous
-                .map(|previous| at.duration_since(previous.at))
-                .filter(|age| *age > stale_after);
-            state.last_check = Some(next);
-            true
+            log = state.apply_round(observed, failure_threshold, stale_after);
+            log.is_some()
         });
-        if let Some(age) = late_by {
+        let Some(log) = log else { return };
+        if let Some(age) = log.late_by {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
-        if let Some((reason, consecutive_failures)) = absorbed_failure {
+        if let Some((reason, consecutive_failures)) = log.absorbed_failure {
             let reason = NotReady::from(reason);
             tracing::warn!(
                 %reason,
@@ -400,7 +414,7 @@ impl ReadinessRefresher {
                 "readiness_check_failed"
             );
         }
-        match transition_to_log {
+        match log.transition {
             Some(Ok(())) => tracing::info!("readiness_recovered"),
             Some(Err(reason)) => {
                 let reason = NotReady::from(reason);

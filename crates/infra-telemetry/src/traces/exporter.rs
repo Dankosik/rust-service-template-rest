@@ -47,10 +47,22 @@ pub(super) struct CollectorConfig {
     pub(super) headers: HashMap<String, String>,
 }
 
-type Setting<'a> = (&'static str, &'a OsStr);
+#[derive(Clone, Copy)]
+struct Setting<'a> {
+    name: &'static str,
+    raw: &'a OsStr,
+}
 
-fn setting_text((name, raw): Setting<'_>) -> Result<&str, TracingError> {
-    raw.to_str().ok_or(TracingError::NonUnicode { name })
+impl<'a> Setting<'a> {
+    fn borrowed((name, raw): &'a (&'static str, OsString)) -> Self {
+        Self { name, raw }
+    }
+
+    fn text(self) -> Result<&'a str, TracingError> {
+        self.raw
+            .to_str()
+            .ok_or(TracingError::NonUnicode { name: self.name })
+    }
 }
 
 impl CollectorConfig {
@@ -59,34 +71,37 @@ impl CollectorConfig {
         trust: &CollectorTrust,
         env: &impl Fn(&str) -> Option<OsString>,
     ) -> Result<Option<Self>, TracingError> {
-        let setting = |name| env(name).and_then(non_blank);
+        let setting = |name: &'static str| Some((name, env(name).and_then(non_blank)?));
         let signal = setting(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
         let common = setting(OTEL_EXPORTER_OTLP_ENDPOINT);
-        let signal = signal
-            .as_deref()
-            .map(|raw| (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, raw));
-        let common = common
-            .as_deref()
-            .map(|raw| (OTEL_EXPORTER_OTLP_ENDPOINT, raw));
+        let signal = signal.as_ref().map(Setting::borrowed);
+        let common = common.as_ref().map(Setting::borrowed);
         let standard_headers = [
             OTEL_EXPORTER_OTLP_TRACES_HEADERS,
             OTEL_EXPORTER_OTLP_HEADERS,
         ]
         .into_iter()
-        .find_map(|name| Some((name, setting(name)?)));
+        .find_map(setting);
+        let standard_headers = standard_headers.as_ref().map(Setting::borrowed);
         let typed = options
             .otlp_endpoint
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .map(|raw| (TYPED_ENDPOINT, OsStr::new(raw)));
+            .map(|raw| Setting {
+                name: TYPED_ENDPOINT,
+                raw: OsStr::new(raw),
+            });
         let typed_headers = options
             .otlp_headers
             .as_ref()
             .map(ExposeSecret::expose_secret)
             .filter(|value| !value.trim().is_empty())
-            .map(|raw| (TYPED_HEADERS, OsStr::new(raw)));
+            .map(|raw| Setting {
+                name: TYPED_HEADERS,
+                raw: OsStr::new(raw),
+            });
         if typed.is_some()
-            && let Some((name, _)) = standard_headers.as_ref()
+            && let Some(Setting { name, .. }) = standard_headers
         {
             return Err(TracingError::AmbientCredential { name });
         }
@@ -95,12 +110,8 @@ impl CollectorConfig {
                 name: TYPED_HEADERS,
             });
         }
-        let headers = typed_headers.or_else(|| {
-            standard_headers
-                .as_ref()
-                .map(|(name, raw)| (*name, raw.as_os_str()))
-        });
-        let mut credential_names = headers.map(|(name, _)| name).into_iter().chain(
+        let headers = typed_headers.or(standard_headers);
+        let mut credential_names = headers.map(|header| header.name).into_iter().chain(
             [trust.client_certificate.as_ref(), trust.client_key.as_ref()]
                 .into_iter()
                 .flatten()
@@ -125,7 +136,7 @@ impl CollectorConfig {
                 return Err(TracingError::InsecureCollector { name });
             }
             if name != TYPED_HEADERS {
-                verify_standard_recipient(name, signal.or(common), common, endpoint.0, &url)?;
+                verify_standard_recipient(name, signal.or(common), common, endpoint.name, &url)?;
             }
         }
         Ok(Some(Self {
@@ -135,10 +146,7 @@ impl CollectorConfig {
                 EndpointSource::Environment
             },
             url,
-            headers: headers
-                .map(|header| parse_headers(header.0, setting_text(header)?))
-                .transpose()?
-                .unwrap_or_default(),
+            headers: headers.map(parse_headers).transpose()?.unwrap_or_default(),
         }))
     }
 }
@@ -151,7 +159,7 @@ fn verify_standard_recipient(
     destination: &reqwest::Url,
 ) -> Result<(), TracingError> {
     let active = active.ok_or(TracingError::UnboundCredential { name })?;
-    if active.0 != selected_name && collector_url(active)? != *destination {
+    if active.name != selected_name && collector_url(active)? != *destination {
         return Err(TracingError::UnboundCredential { name });
     }
     if [
@@ -160,7 +168,7 @@ fn verify_standard_recipient(
         CLIENT_KEY_VARS[1],
     ]
     .contains(&name)
-        && let Some(common) = common.filter(|common| common.0 != active.0)
+        && let Some(common) = common.filter(|common| common.name != active.name)
         && collector_url(common)? != *destination
     {
         return Err(TracingError::UnboundCredential { name });
@@ -169,8 +177,8 @@ fn verify_standard_recipient(
 }
 
 fn collector_url(setting: Setting<'_>) -> Result<reqwest::Url, TracingError> {
-    let name = setting.0;
-    let raw = setting_text(setting)?;
+    let name = setting.name;
+    let raw = setting.text()?;
     let invalid = || TracingError::InvalidEndpoint { name };
     let uri = raw.parse::<Uri>().map_err(|_| invalid())?;
     if !matches!(uri.scheme_str(), Some("http" | "https"))
@@ -366,14 +374,15 @@ pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duratio
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
-fn parse_headers(source: &'static str, raw: &str) -> Result<HashMap<String, String>, TracingError> {
+fn parse_headers(setting: Setting<'_>) -> Result<HashMap<String, String>, TracingError> {
+    let raw = setting.text()?;
     let mut headers = HashMap::new();
     for (index, entry) in raw.split(',').enumerate() {
         if entry.trim().is_empty() {
             continue;
         }
         let invalid = TracingError::InvalidHeader {
-            name: source,
+            name: setting.name,
             position: index + 1,
         };
         let Some((name, value)) = entry.split_once('=') else {

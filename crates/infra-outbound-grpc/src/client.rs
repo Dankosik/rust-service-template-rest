@@ -83,7 +83,7 @@ pub struct Client {
     #[debug(skip)]
     origin: http::Uri,
     #[debug(skip)]
-    destination: crate::observe::Destination,
+    destination: Option<crate::observe::Destination>,
     timeout: ClientTimeout,
     openings: Option<Arc<Semaphore>>,
     series: &'static crate::observe::Series,
@@ -122,7 +122,7 @@ impl Client {
             .keep_alive_timeout(Duration::from_secs(20))
             .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
             .initial_stream_window_size(HTTP2_STREAM_WINDOW);
-        let destination = crate::observe::Destination::new(endpoint.uri());
+        let destination = crate::observe::Destination::from_uri(endpoint.uri());
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
@@ -180,7 +180,7 @@ impl Client {
             cancellation.clone(),
         );
         let watch_stop = has_parent || lifetime.deadline().is_some();
-        let call = crate::observe::Call::start(self.series, &request, &self.destination);
+        let call = crate::observe::Call::start(self.series, &request, self.destination.as_ref());
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -214,7 +214,7 @@ impl Client {
 
     #[must_use]
     pub fn refuse_call(&self, request: &Request<Body>, status: tonic::Status) -> tonic::Status {
-        crate::observe::Call::start(self.series, request, &self.destination).refuse(status)
+        crate::observe::Call::start(self.series, request, self.destination.as_ref()).refuse(status)
     }
 }
 
