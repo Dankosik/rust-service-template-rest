@@ -18,12 +18,10 @@ pub(crate) struct Origin {
 }
 
 impl Origin {
-    fn try_new(url: &Url) -> Result<Self, BuildError> {
-        let scheme = match url.scheme() {
-            "https" => Scheme::HTTPS,
-            "http" => Scheme::HTTP,
-            _ => return Err(BuildError::InvalidOrigin),
-        };
+    fn for_scheme(url: &Url, scheme: Scheme) -> Result<Self, BuildError> {
+        if url.scheme() != scheme.as_str() || has_userinfo(url) {
+            return Err(BuildError::InvalidOrigin);
+        }
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
             return Err(BuildError::InvalidOrigin);
         };
@@ -63,10 +61,7 @@ impl Origin {
 }
 
 pub(crate) fn admit_origin(url: &Url) -> Result<Origin, BuildError> {
-    if url.scheme() != "https" || has_userinfo(url) {
-        return Err(BuildError::InvalidOrigin);
-    }
-    Origin::try_new(url)
+    Origin::for_scheme(url, Scheme::HTTPS)
 }
 
 #[cfg(feature = "test-support")]
@@ -76,10 +71,10 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Origin, BuildError> {
         Some(Host::Ipv6(address)) => address.is_loopback(),
         _ => false,
     };
-    if url.scheme() != "http" || !loopback || has_userinfo(url) {
+    if !loopback {
         return Err(BuildError::InvalidOrigin);
     }
-    Origin::try_new(url)
+    Origin::for_scheme(url, Scheme::HTTP)
 }
 
 pub(crate) fn admit_request(
