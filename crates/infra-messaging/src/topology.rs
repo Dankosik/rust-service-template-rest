@@ -296,17 +296,7 @@ fn preserves_subject(transform: &SubjectTransform) -> bool {
         };
         if token == "*" {
             capture += 1;
-            let index = output.strip_prefix('$').or_else(|| {
-                let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
-                let argument = function
-                    .strip_prefix("wildcard")
-                    .or_else(|| function.strip_prefix("Wildcard"))?
-                    .trim_ascii_start()
-                    .strip_prefix('(')?
-                    .strip_suffix(')')?;
-                Some(argument.trim_matches(' '))
-            });
-            if index.and_then(|value| value.parse::<usize>().ok()) != Some(capture) {
+            if wildcard_index(output) != Some(capture) {
                 return false;
             }
         } else if output != token
@@ -319,6 +309,20 @@ fn preserves_subject(transform: &SubjectTransform) -> bool {
         }
     }
     destination.next().is_none()
+}
+
+fn wildcard_index(output: &str) -> Option<usize> {
+    let index = output.strip_prefix('$').or_else(|| {
+        let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
+        let argument = function
+            .strip_prefix("wildcard")
+            .or_else(|| function.strip_prefix("Wildcard"))?
+            .trim_ascii_start()
+            .strip_prefix('(')?
+            .strip_suffix(')')?;
+        Some(argument.trim_matches(' '))
+    });
+    index.and_then(|value| value.parse::<usize>().ok())
 }
 
 pub(crate) async fn recheck_outbox_source(

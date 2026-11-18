@@ -17,7 +17,12 @@ use crate::wire::{InboundEnvelope, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
 type ErasedHandler = Arc<
-    dyn Fn(Event<Bytes>, OperationContext) -> Result<HandlerFuture, serde_json::Error>
+    dyn Fn(
+            String,
+            time::UtcDateTime,
+            Bytes,
+            OperationContext,
+        ) -> Result<HandlerFuture, serde_json::Error>
         + Send
         + Sync,
 >;
@@ -303,11 +308,11 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(move |encoded, context| {
-            let payload = serde_json::from_slice::<T>(&encoded.payload)?;
+        entry.handler = Some(Arc::new(move |id, occurred_at, encoded, context| {
+            let payload = serde_json::from_slice::<T>(&encoded)?;
             let event = Event {
-                id: encoded.id,
-                occurred_at: encoded.occurred_at,
+                id,
+                occurred_at,
                 payload,
             };
             Ok(handler(event, context).boxed())
@@ -372,12 +377,13 @@ impl Registry {
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let encoded = Event {
-            id: envelope.message_id,
-            occurred_at: envelope.occurred_at.to_utc(),
-            payload: envelope.payload,
-        };
-        let run = handler(encoded, context).map_err(|_| DispatchError::Undecodable)?;
+        let run = handler(
+            envelope.message_id,
+            envelope.occurred_at.to_utc(),
+            envelope.payload,
+            context,
+        )
+        .map_err(|_| DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }

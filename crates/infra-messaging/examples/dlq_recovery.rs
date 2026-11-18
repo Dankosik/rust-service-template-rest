@@ -541,7 +541,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Ok(());
     }
     if state.publication != Publication::Confirmed {
-        let rejected = state.publication.after_rejection();
+        let publication_after_rejection = state.publication.after_rejection();
         let startup = Messaging::prepare(
             MessagingOptions {
                 connection_name: "dlq-recovery-redrive".into(),
@@ -565,7 +565,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             return Err("publisher_configuration");
         };
         let Ok(messaging) = startup.admit().await else {
-            state.publication = rejected;
+            state.publication = publication_after_rejection;
             finish(&state_path, &state)?;
             return Ok(());
         };
@@ -589,7 +589,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                     duplicate: ack.duplicate,
                 });
             }
-            Err(PublishError::Rejected(_)) => state.publication = rejected,
+            Err(PublishError::Rejected(_)) => state.publication = publication_after_rejection,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
         save(&state_path, &state, Persist::Replace)?;

@@ -174,21 +174,20 @@ impl PreparedEvent {
             infra_jobs::json_payload_len(&PublishDomainEvent::for_metadata_sizing(self))
                 .map_err(infra_jobs::EnqueueError::Serialize)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        for field in self.outbox_text().fields() {
-            let mut offset = 0;
-            while offset < field.len() {
-                let end = field.floor_char_boundary(offset + budget);
-                if end == offset {
+        for mut rest in self.outbox_text().fields() {
+            while !rest.is_empty() {
+                let end = rest.floor_char_boundary(budget);
+                if end == 0 {
                     tokio::task::yield_now().await;
                     budget = PREFLIGHT_BYTES_PER_POLL;
                     continue;
                 }
-                let chunk = field.get(offset..end).unwrap_or_default();
+                let (chunk, tail) = rest.split_at(end);
                 total += infra_jobs::json_payload_len(chunk)
                     .map_err(infra_jobs::EnqueueError::Serialize)?
                     - 2;
-                budget -= end - offset;
-                offset = end;
+                budget -= chunk.len();
+                rest = tail;
             }
         }
         Ok(total)
@@ -244,8 +243,6 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
 struct InvalidBase64;
 
 mod base64_payload {
-    use std::borrow::Cow;
-
     use bytes::Bytes;
     use serde::de::IntoDeserializer as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -266,9 +263,9 @@ mod base64_payload {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
-        let encoded = Cow::<str>::deserialize(deserializer)?;
+        let encoded = String::deserialize(deserializer)?;
         Ok(
-            As::<Base64>::deserialize(encoded.as_ref().into_deserializer())
+            As::<Base64>::deserialize(encoded.as_str().into_deserializer())
                 .map_err(|_: serde::de::value::Error| InvalidBase64),
         )
     }
