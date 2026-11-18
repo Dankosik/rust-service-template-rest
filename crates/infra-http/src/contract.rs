@@ -117,6 +117,17 @@ async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Re
 }
 
 // template:begin http-idempotency:http-mounted-operations
+pub(crate) use components::{merge_map, same_definition};
+
+pub(crate) fn resolve_schema<'a>(
+    schema: &'a RefOr<utoipa::openapi::Schema>,
+    schemas: &'a BTreeMap<String, RefOr<utoipa::openapi::Schema>>,
+) -> Option<&'a utoipa::openapi::Schema> {
+    outcomes::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
+        *reference == utoipa::openapi::Ref::new(&reference.ref_location)
+    })
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
 

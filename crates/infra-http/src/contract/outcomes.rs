@@ -250,16 +250,26 @@ fn union_schema(existing: &mut Option<RefOr<Schema>>, addition: Option<&RefOr<Sc
 }
 
 pub(super) fn resolve<'a, T>(
+    value: &'a RefOr<T>,
+    components: &'a BTreeMap<String, RefOr<T>>,
+    prefix: &str,
+) -> Option<&'a T> {
+    resolve_when(value, components, prefix, |_| true)
+}
+
+pub(super) fn resolve_when<'a, T>(
     mut value: &'a RefOr<T>,
     components: &'a BTreeMap<String, RefOr<T>>,
     prefix: &str,
+    accept: impl Fn(&Ref) -> bool,
 ) -> Option<&'a T> {
     for _ in 0..=components.len() {
         match value {
             RefOr::T(resolved) => return Some(resolved),
-            RefOr::Ref(reference) => {
+            RefOr::Ref(reference) if accept(reference) => {
                 value = components.get(reference.ref_location.strip_prefix(prefix)?)?;
             }
+            RefOr::Ref(_) => return None,
         }
     }
     None

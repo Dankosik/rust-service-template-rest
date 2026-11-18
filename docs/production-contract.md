@@ -133,11 +133,14 @@ unable to serve, and budget every downstream deadline inside
   Supply the absolute HTTP(S) URI of this policy when registering the operation
   (`idempotent_route!(handler, docs = "...")` or OpenAPI `externalDocs.url`).
   The service checks this at registration and returns that link on key errors.
-  Before enabling `FreshCommand::ALLOW_TERMINAL_REFUSALS`, apply the
+  When adopting typed command outcomes, declare a JSON creation response with
+  `created_json_response!(CreatedWidget(Widget))` and use `CreatedWidget` as
+  the command's `Success`. Give utoipa the concrete payload type, including
+  any container such as `Vec<Widget>`, so it can register referenced schemas.
+  Before setting `FreshCommand::Terminal` to `TerminalProblem`, apply the
   migrations for stored 409 and 422 responses and deploy readers for those
-  responses on every replica. Use `Rollback::terminal(problem)` for the
-  definitive business decisions `Conflict`, `AlreadyExists` or
-  `UnprocessableContent`. When rolling back, stop creating new terminal
+  responses on every replica. Keep `Terminal = Infallible` on commands that
+  only store successes. When rolling back, stop creating new terminal
   records first. Keep capable readers on the route until all existing terminal
   records expire. An older reader returns an integrity error on a matching
   live 4xx record and cannot replay its body.

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::body::{Body, Bytes};
 use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -5,42 +7,148 @@ use axum::response::Response;
 use bytes::{BufMut as _, BytesMut};
 use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
 use serde::Serialize;
+use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
+use utoipa::{IntoResponses, PartialSchema};
 
-use super::execute::Rollback;
 use crate::problem::{Code, Problem, http_status};
 
 pub(super) use infra_idempotency_store::is_replayable_header_name;
+
+const JSON: &str = "application/json";
+const TEXT: &str = "text/plain";
+
+pub trait ReplaySuccess: IntoResponses {
+    #[must_use]
+    fn schemas() -> Vec<(String, RefOr<Schema>)> {
+        Vec::new()
+    }
+
+    fn capture(self) -> Result<ReplayableResponse, ReplayError>;
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn created_json_responses(schema: RefOr<Schema>) -> BTreeMap<String, RefOr<ApiResponse>> {
+    created_response(JSON, schema)
+}
+
+#[derive(Debug)]
+pub struct CreatedText {
+    pub body: String,
+    pub headers: HeaderMap,
+}
+
+impl IntoResponses for CreatedText {
+    fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
+        created_response(TEXT, String::schema())
+    }
+}
+
+impl ReplaySuccess for CreatedText {
+    fn capture(mut self) -> Result<ReplayableResponse, ReplayError> {
+        set_uncoded_content_type(&mut self.headers, TEXT)?;
+        ReplayableResponse::bytes(StatusCode::CREATED, &self.headers, self.body.into())
+    }
+}
+
+fn created_response(
+    media_type: &str,
+    schema: RefOr<Schema>,
+) -> BTreeMap<String, RefOr<ApiResponse>> {
+    let response = ApiResponse::builder()
+        .description("created")
+        .content(media_type, Content::new(Some(schema)))
+        .build();
+    BTreeMap::from([(StatusCode::CREATED.as_str().to_owned(), response.into())])
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    #[error("content_encoding")]
+    ContentEncoding,
+    #[error("serialization")]
+    Serialization,
+}
+
+#[derive(Debug)]
+pub struct TerminalProblem(Box<Problem>);
+
+impl TerminalProblem {
+    pub(super) fn capture(&self) -> Result<Record, ReplayError> {
+        let problem = self.0.as_ref();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
+            .map_err(ReplayError::from)
+    }
+
+    #[must_use]
+    pub fn conflict() -> Self {
+        Self(Box::new(Problem::new(Code::Conflict)))
+    }
+
+    #[must_use]
+    pub fn already_exists() -> Self {
+        Self(Box::new(Problem::new(Code::AlreadyExists)))
+    }
+
+    #[must_use]
+    pub fn unprocessable_content() -> Self {
+        Self(Box::new(Problem::new(Code::UnprocessableContent)))
+    }
+
+    #[must_use]
+    pub fn detail(mut self, detail: impl Into<compact_str::CompactString>) -> Self {
+        *self.0 = self.0.detail(detail);
+        self
+    }
+
+    #[must_use]
+    pub fn instance(mut self, instance: impl Into<compact_str::CompactString>) -> Self {
+        *self.0 = self.0.instance(instance);
+        self
+    }
+
+    #[must_use]
+    pub fn invalid_param(
+        mut self,
+        name: impl Into<compact_str::CompactString>,
+        reason: impl Into<compact_str::CompactString>,
+    ) -> Self {
+        *self.0 = self.0.invalid_param(name, reason);
+        self
+    }
+}
 
 #[derive(Debug)]
 pub struct ReplayableResponse(Record);
 
 impl ReplayableResponse {
-    pub fn bytes(status: StatusCode, headers: &HeaderMap, body: Bytes) -> Result<Self, Rollback> {
+    pub fn bytes(
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: Bytes,
+    ) -> Result<Self, ReplayError> {
         Record::capture(status, headers, body)
             .map(Self)
-            .map_err(Rollback::from)
+            .map_err(ReplayError::from)
     }
 
     pub fn json<T: Serialize + ?Sized>(
         status: StatusCode,
         mut headers: HeaderMap,
         value: &T,
-    ) -> Result<Self, Rollback> {
-        if headers
-            .get_all(CONTENT_ENCODING)
-            .iter()
-            .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
-            .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(Rollback::ContentEncoding);
-        }
-        headers.remove(CONTENT_ENCODING);
-
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    ) -> Result<Self, ReplayError> {
+        set_uncoded_content_type(&mut headers, JSON)?;
         Self::bytes(status, &headers, json_body(value)?)
     }
 
-    pub fn empty(status: StatusCode, headers: &HeaderMap) -> Result<Self, Rollback> {
+    pub fn empty(status: StatusCode, headers: &HeaderMap) -> Result<Self, ReplayError> {
         Self::bytes(status, headers, Bytes::new())
     }
 
@@ -52,22 +160,6 @@ impl ReplayableResponse {
         Self(record)
     }
 
-    pub(super) fn terminal_problem(problem: &Problem) -> Result<Record, Rollback> {
-        if !matches!(
-            problem.code(),
-            Code::Conflict | Code::AlreadyExists | Code::UnprocessableContent
-        ) {
-            return Err(Rollback::InvalidStatus);
-        }
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/problem+json"),
-        );
-        Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
-            .map_err(Rollback::from)
-    }
-
     pub(super) fn into_response(self) -> Response {
         let (status, headers, body) = self.0.into_parts();
         let mut response = Response::new(Body::from(body));
@@ -77,36 +169,94 @@ impl ReplayableResponse {
     }
 }
 
-fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, Rollback> {
+fn set_uncoded_content_type(
+    headers: &mut HeaderMap,
+    media_type: &'static str,
+) -> Result<(), ReplayError> {
+    if headers
+        .get_all(CONTENT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err(ReplayError::ContentEncoding);
+    }
+    headers.remove(CONTENT_ENCODING);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
+    Ok(())
+}
+
+fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
     let mut body = BytesMut::new();
     let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
     serde_json::to_writer(&mut writer, value).map_err(|error| {
         if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
-            Rollback::BodyLimit
+            CaptureError::BodyLimit.into()
         } else {
-            Rollback::Serialization
+            ReplayError::Serialization
         }
     })?;
     Ok(body.freeze())
-}
-
-impl From<CaptureError> for Rollback {
-    fn from(error: CaptureError) -> Self {
-        match error {
-            CaptureError::InvalidStatus => Self::InvalidStatus,
-            CaptureError::BodyForbidden => Self::BodyForbidden,
-            CaptureError::BodyLimit => Self::BodyLimit,
-            CaptureError::HeaderLimit => Self::HeaderLimit,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderName;
     use http_body_util::BodyExt as _;
+    use utoipa::ToSchema;
 
     use super::*;
+
+    #[test]
+    fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
+        #[derive(Serialize, ToSchema)]
+        struct Address {
+            street: String,
+        }
+        #[derive(Serialize, ToSchema)]
+        struct Customer {
+            address: Address,
+            #[schema(no_recursion)]
+            children: Vec<Customer>,
+        }
+
+        crate::created_json_response!(CreatedAddress(Box<Address>));
+        crate::created_json_response!(CreatedCustomer(Box<Customer>));
+        crate::created_json_response!(CreatedCustomers(Vec<Customer>));
+
+        fn document<R: ReplaySuccess>() -> serde_json::Value {
+            serde_json::json!({
+                "responses": R::responses(),
+                "components": {"schemas": R::schemas().into_iter().collect::<BTreeMap<_, _>>()},
+            })
+        }
+
+        let root = "/responses/201/content/application~1json/schema";
+        assert_eq!(
+            document::<CreatedAddress>().pointer(root).unwrap()["$ref"],
+            "#/components/schemas/Address"
+        );
+        for (doc, path) in [
+            (document::<CreatedCustomer>(), root.to_owned()),
+            (document::<CreatedCustomers>(), format!("{root}/items")),
+        ] {
+            assert_eq!(
+                doc.pointer(&path).unwrap()["$ref"],
+                "#/components/schemas/Customer"
+            );
+            let props = &doc["components"]["schemas"]["Customer"]["properties"];
+            let child = props["children"]["items"]["$ref"].as_str().unwrap();
+            assert_eq!(
+                doc.pointer(child.strip_prefix('#').unwrap()).unwrap(),
+                &doc["components"]["schemas"]["Customer"]
+            );
+            let address = props["address"]["$ref"].as_str().unwrap();
+            assert_eq!(
+                doc.pointer(address.strip_prefix('#').unwrap()).unwrap()["properties"]["street"]["type"],
+                "string"
+            );
+        }
+    }
 
     fn header_map(headers: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -123,7 +273,7 @@ mod tests {
     fn admission_reports_invalid_status_and_oversized_headers_as_rollback() {
         std::assert_matches!(
             ReplayableResponse::empty(StatusCode::CONFLICT, &HeaderMap::new()),
-            Err(Rollback::InvalidStatus)
+            Err(ReplayError::Capture(CaptureError::InvalidStatus))
         );
         let large = "x".repeat(8192);
         std::assert_matches!(
@@ -131,7 +281,7 @@ mod tests {
                 StatusCode::OK,
                 &header_map(&[("content-type", large.as_str())])
             ),
-            Err(Rollback::HeaderLimit)
+            Err(ReplayError::Capture(CaptureError::HeaderLimit))
         );
     }
 
@@ -140,7 +290,7 @@ mod tests {
         for status in [StatusCode::NO_CONTENT, StatusCode::RESET_CONTENT] {
             std::assert_matches!(
                 ReplayableResponse::bytes(status, &HeaderMap::new(), Bytes::from_static(b"body")),
-                Err(Rollback::BodyForbidden)
+                Err(ReplayError::Capture(CaptureError::BodyForbidden))
             );
         }
     }
@@ -154,7 +304,7 @@ mod tests {
         ] {
             std::assert_matches!(
                 ReplayableResponse::json(StatusCode::OK, headers, &1),
-                Err(Rollback::ContentEncoding)
+                Err(ReplayError::ContentEncoding)
             );
         }
 

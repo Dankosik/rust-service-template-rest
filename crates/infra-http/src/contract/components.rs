@@ -40,7 +40,15 @@ pub(super) fn merge(target: &mut Components, incoming: Components) -> Result<(),
     Ok(())
 }
 
-pub(super) fn merge_map<T: PartialEq>(
+pub(crate) fn same_definition<T: PartialEq + serde::Serialize>(left: &T, right: &T) -> bool {
+    left == right
+        || matches!(
+            (serde_json::to_value(left), serde_json::to_value(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
+pub(crate) fn merge_map<T: PartialEq + serde::Serialize>(
     kind: &'static str,
     target: &mut BTreeMap<String, T>,
     incoming: impl IntoIterator<Item = (String, T)>,
@@ -50,7 +58,7 @@ pub(super) fn merge_map<T: PartialEq>(
             Entry::Vacant(entry) => {
                 entry.insert(value);
             }
-            Entry::Occupied(entry) if entry.get() != &value => {
+            Entry::Occupied(entry) if !same_definition(entry.get(), &value) => {
                 return Err(FinalizeError::ConflictingComponent {
                     kind,
                     name: entry.key().clone(),
