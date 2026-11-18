@@ -293,13 +293,13 @@ fn service_rejects_a_misspelled_webhook_section_key() {
         &LoadOptions::default(),
         BUILD,
         env(&[(
-            "APP__WEBHOOKS__ENDPONTS__PARTNER__URL",
+            "APP__WEBHOOKS__ENDPOINT__PARTNER__URL",
             "https://partner.example/fixture-private-path",
         )]),
     )
     .unwrap_err();
     assert_matches!(&err, Error::Deserialize(_), "{err}");
     let message = err.to_string();
-    assert!(message.contains("unknown field `endponts`"), "{err}");
+    assert!(message.contains("unknown field `endpoint`"), "{err}");
     assert!(!message.contains("fixture-private-path"), "{err}");
 }

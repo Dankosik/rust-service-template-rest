@@ -273,7 +273,7 @@ where
     let variables =
         collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
             errors.push(error);
-            Default::default()
+            BTreeMap::new()
         });
     let mut files = Vec::new();
     for path in options.files() {

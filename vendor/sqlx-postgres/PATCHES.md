@@ -1,5 +1,7 @@
 # PostgreSQL connection diagnostics
 
+Upstream reviewed: 0.9.1
+
 The published `sqlx-postgres-0.9.0.crate` has SHA-256
 `87a2bdd6e83f6b3ea525ca9fee568030508b58355a43d0b2c1674d5f79dcd65e`
 and records upstream revision `003b698e99e024f3621b8043a2426fde5b741171`.

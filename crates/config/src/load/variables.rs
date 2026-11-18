@@ -290,6 +290,10 @@ fn read_secret_file(path: &Path) -> io::Result<String> {
 }
 
 #[cfg(all(test, unix))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fixture rotates the mount after the reader selects a generation"
+)]
 mod tests {
     use std::os::unix::fs::symlink;
 
@@ -298,10 +302,6 @@ mod tests {
     #[rstest::rstest]
     #[case::previous_generation_present(false)]
     #[case::previous_generation_removed(true)]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the fixture rotates the mount after the reader selects a generation"
-    )]
     fn projected_snapshot_retries_after_publication_changes(#[case] remove_previous: bool) {
         let dir = tempfile::tempdir().unwrap();
         let old = "..2026_11_18_01_00_00.10000001";
