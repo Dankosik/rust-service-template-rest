@@ -207,9 +207,7 @@ async fn send_claim(
 ) -> Result<ClaimRound, OperationError> {
     let claim_started_at = Instant::now();
     let result = backstop(async {
-        let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
-            .await
-            .map_err(OperationError::Acquire)?;
+        let mut connection = shared.acquire("claim jobs").await?;
         Ok(claim(&mut connection, shared.worker_id, policy, requested).await?)
     })
     .await;

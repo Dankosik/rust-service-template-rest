@@ -216,9 +216,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
             &shared.lifecycle.cleanup,
             deadline,
             backstop(Box::pin(async {
-                let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
-                    .await
-                    .map_err(OperationError::Acquire)?;
+                let mut connection = shared.acquire("complete jobs batch").await?;
                 if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
                     return Err(OperationError::TimedOut);
                 }

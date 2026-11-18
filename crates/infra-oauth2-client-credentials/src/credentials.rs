@@ -248,6 +248,18 @@ pub(crate) enum TokenSource<Subject = ()> {
     Exchange(ExchangeTokens, Subject),
 }
 
+impl From<&ServiceTokens> for TokenSource {
+    fn from(tokens: &ServiceTokens) -> Self {
+        Self::Service(tokens.clone())
+    }
+}
+
+impl From<&ExchangeTokens> for TokenSource {
+    fn from(tokens: &ExchangeTokens) -> Self {
+        Self::Exchange(tokens.clone(), ())
+    }
+}
+
 impl<Subject> TokenSource<Subject> {
     pub(crate) fn resource_origin(&self) -> &http::Uri {
         match self {

@@ -28,7 +28,7 @@ use infra_grpc::{Authentication, Caller, Error, Limits, Services, require_caller
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
 use infra_serviceauth::{
-    JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
+    JwtType, ServiceName, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, has_cached_authorization, now_secs, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
@@ -392,13 +392,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         echo_services(&echo),
         Authentication::ServiceTokens(keys.verifier()),
     );
-    let source = TokenSource::try_new(SigningOptions {
-        name: ServiceName::parse("orders").unwrap(),
-        jwt_type: JwtType::parse(TYPE).unwrap(),
-        key_id: KeyId::parse(keys.orders.kid()).unwrap(),
-        private_key: keys.orders.pem().into(),
-    })
-    .unwrap();
+    let source = TokenSource::try_new(keys.orders.signing_options("orders", TYPE)).unwrap();
     let origin: http::Uri = format!("https://{address}").parse().unwrap();
     let resource = resource_with_limit(address, Some(NonZeroUsize::MIN));
     let bound = |source: &TokenSource, receiver| {

@@ -135,9 +135,7 @@ pub(super) async fn send_outcome(
     deadline: Instant,
 ) -> Result<Written, Unacknowledged> {
     let result = backstop(Box::pin(async {
-        let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
-            .await
-            .map_err(OperationError::Acquire)?;
+        let mut connection = shared.acquire("record job outcome").await?;
         if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
             return Err(OperationError::TimedOut);
         }

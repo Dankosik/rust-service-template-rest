@@ -29,13 +29,13 @@ pub struct AuthenticatedClient {
 
 impl ServiceTokens {
     pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(TokenSource::Service(self.clone()), resource)
+        AuthenticatedClient::new(self.into(), resource)
     }
 }
 
 impl ExchangeTokens {
     pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(TokenSource::Exchange(self.clone(), ()), resource)
+        AuthenticatedClient::new(self.into(), resource)
     }
 }
 
