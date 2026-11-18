@@ -17,8 +17,8 @@ use secrecy::SecretString;
 
 use self::connection::Link;
 pub use self::error::{MutationError, OperationError, SetError};
+pub use self::namespace::{CacheLookup, CacheNamespace, Namespace};
 pub use self::observe::HISTOGRAMS;
-use self::observe::NamespaceHistograms;
 
 #[derive(Debug)]
 pub struct CacheOptions {
@@ -141,47 +141,4 @@ impl Cache {
     pub async fn close(&self, deadline: tokio::time::Instant) -> CloseOutcome {
         self.link.close(deadline).await
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Namespace(&'static str);
-
-impl Namespace {
-    #[must_use]
-    pub const fn new(name: &'static str) -> Option<Self> {
-        if namespace::valid_namespace(name) {
-            Some(Self(name))
-        } else {
-            None
-        }
-    }
-}
-
-/// ```
-/// const SESSIONS: infra_cache::Namespace = infra_cache::namespace!("sessions");
-/// ```
-/// ```compile_fail,E0080
-/// let _ = infra_cache::namespace!("Sessions");
-/// ```
-#[macro_export]
-macro_rules! namespace {
-    ($name:literal) => {
-        const {
-            $crate::Namespace::new($name)
-                .expect("cache namespace must match ^[a-z][a-z0-9_]{0,63}$")
-        }
-    };
-}
-
-#[derive(Clone, Debug)]
-pub struct CacheNamespace {
-    cache: Cache,
-    name: &'static str,
-    histograms: Arc<NamespaceHistograms>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CacheLookup {
-    namespace: Option<CacheNamespace>,
-    source_reserve: Duration,
 }

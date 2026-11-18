@@ -8,10 +8,51 @@ use tokio::time::Instant;
 
 use crate::connection::reply_data;
 use crate::error::{CommandError, ErrorType};
-use crate::observe::{LocalSizeRefusal, OperationGuard, Outcome};
-use crate::{
-    Cache, CacheLookup, CacheNamespace, MutationError, Namespace, OperationError, SetError,
-};
+use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, Outcome};
+use crate::{Cache, MutationError, OperationError, SetError};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Namespace(&'static str);
+
+impl Namespace {
+    #[must_use]
+    pub const fn new(name: &'static str) -> Option<Self> {
+        if valid_namespace(name) {
+            Some(Self(name))
+        } else {
+            None
+        }
+    }
+}
+
+/// ```
+/// const SESSIONS: infra_cache::Namespace = infra_cache::namespace!("sessions");
+/// ```
+/// ```compile_fail,E0080
+/// let _ = infra_cache::namespace!("Sessions");
+/// ```
+#[macro_export]
+macro_rules! namespace {
+    ($name:literal) => {
+        const {
+            $crate::Namespace::new($name)
+                .expect("cache namespace must match ^[a-z][a-z0-9_]{0,63}$")
+        }
+    };
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheNamespace {
+    cache: Cache,
+    name: &'static str,
+    histograms: Arc<NamespaceHistograms>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheLookup {
+    namespace: Option<CacheNamespace>,
+    source_reserve: Duration,
+}
 
 impl Cache {
     #[must_use]
@@ -257,7 +298,7 @@ struct ExtraCommandCapacity {
     extra_bytes: usize,
 }
 
-pub(crate) const fn valid_namespace(name: &str) -> bool {
+const fn valid_namespace(name: &str) -> bool {
     let [first, rest @ ..] = name.as_bytes() else {
         return false;
     };
