@@ -38,6 +38,7 @@ impl LoadOptions {
 }
 
 #[cfg(test)]
+#[warn(clippy::assertions_on_result_states)]
 mod tests {
     use super::*;
 
@@ -82,24 +83,15 @@ mod tests {
 
     #[test]
     fn rejects_positional_and_unknown_arguments() {
-        assert!(LoadOptions::try_parse_from(["service", "stray"]).is_err());
-        assert!(LoadOptions::try_parse_from(["service", "--unknown"]).is_err());
-        assert!(LoadOptions::try_parse_from(["service", "--config"]).is_err());
-        assert!(
-            LoadOptions::try_parse_from(["service", "--version"]).is_err(),
-            "version is not a loader flag"
-        );
-        assert_eq!(
-            LoadOptions::try_parse_from(["service", "--help"])
-                .unwrap_err()
-                .exit_code(),
-            0
-        );
-        assert_eq!(
-            LoadOptions::try_parse_from(["service", "--unknown"])
-                .unwrap_err()
-                .exit_code(),
-            2
-        );
+        for (argument, code) in [
+            ("stray", 2),
+            ("--unknown", 2),
+            ("--config", 2),
+            ("--version", 2),
+            ("--help", 0),
+        ] {
+            let error = LoadOptions::try_parse_from(["service", argument]).unwrap_err();
+            assert_eq!(error.exit_code(), code, "{argument}");
+        }
     }
 }
