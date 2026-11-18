@@ -29,6 +29,7 @@ pub use probe::{PostgresProbe, SessionProperties, session_properties};
 pub use sqlx::Error as SqlError;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{
-    Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline,
+    BudgetedTx, Isolation, OperationDeadline, OperationDeadlineElapsed, Tx, TxError, TxMode,
+    TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline, in_tx_with_deadline,
     set_statement_timeout,
 };

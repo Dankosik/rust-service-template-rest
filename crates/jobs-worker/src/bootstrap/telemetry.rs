@@ -8,14 +8,14 @@ use super::{METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
 use crate::resources::Resources;
 
-pub(super) fn install_observability(
+pub(super) async fn install_observability(
     config: &WorkerConfig,
     identity: &str,
     resources: &mut Resources,
 ) -> Result<(Metrics, ExporterState), WorkerError> {
     let tracer_provider = resources
         .tracer_provider
-        .insert(install_tracer_provider(&tracing_options(config, identity))?);
+        .insert(install_tracer_provider(&tracing_options(config, identity)).await?);
     resources.logger = Some(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {

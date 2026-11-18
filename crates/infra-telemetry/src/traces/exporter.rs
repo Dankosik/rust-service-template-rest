@@ -200,7 +200,7 @@ impl TrustFile {
     #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
-        reason = "startup exporter client construction owns TLS file reads on its scoped thread"
+        reason = "the blocking exporter preparation task owns TLS file reads"
     )]
     fn read(&self) -> Result<Vec<u8>, TracingError> {
         let name = self.variable;
@@ -302,28 +302,11 @@ pub(super) fn compression(
 }
 
 #[expect(
-    clippy::disallowed_types,
-    reason = "startup hands the blocking HTTP client to the SDK-owned exporter thread"
-)]
-fn collector_client(
-    trust: &CollectorTrust,
-    timeout: Duration,
-) -> Result<reqwest::blocking::Client, TracingError> {
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .spawn_scoped(scope, || trusting_client(trust, timeout))
-            .map_err(|_| TracingError::ClientThread)?
-            .join()
-            .map_err(|_| TracingError::ClientThread)?
-    })
-}
-
-#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "startup scoped thread constructs the exporter client; request execution stays on the SDK worker"
+    reason = "the blocking preparation task constructs the client for the SDK exporter thread"
 )]
-fn trusting_client(
+fn collector_client(
     trust: &CollectorTrust,
     timeout: Duration,
 ) -> Result<reqwest::blocking::Client, TracingError> {

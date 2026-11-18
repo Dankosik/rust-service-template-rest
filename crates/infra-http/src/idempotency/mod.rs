@@ -20,7 +20,7 @@ macro_rules! idempotent_route {
 pub use compose::route;
 pub use declaration::CompositionError;
 pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback};
-pub use infra_postgres::Tx;
+pub use infra_postgres::BudgetedTx as Tx;
 pub use input::CommandInput;
 pub use stored::ReplayableResponse;
 

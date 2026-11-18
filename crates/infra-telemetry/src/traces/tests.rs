@@ -3,6 +3,21 @@ use super::*;
 
 mod delivery;
 
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+}
+
+pub(super) fn tracer_provider(
+    options: &TracingOptions,
+    env: impl Fn(&str) -> Option<OsString>,
+    trust: &CollectorTrust,
+) -> Result<TracerProviderHandle, TracingError> {
+    runtime().block_on(prepare_tracer_provider(options, env, trust))
+}
+
 #[derive(Debug)]
 struct ShutdownExporter {
     attempted: Mutex<Option<tokio::sync::oneshot::Sender<Duration>>>,

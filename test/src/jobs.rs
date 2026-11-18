@@ -109,8 +109,6 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     }
 }
 
-pub const BACKGROUND_TASK_RETURNS: &str = "JOBS_WORKER_FIXTURE_BACKGROUND_TASK_RETURNS";
-
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
@@ -131,8 +129,5 @@ pub fn register(
         })?;
     }
     // template:end outbox:test-jobs-deferred-messages-fixture
-    if std::env::var_os(BACKGROUND_TASK_RETURNS).is_some() {
-        registration.spawn("fixture", |_cancel| async {});
-    }
     Ok(())
 }
