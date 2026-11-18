@@ -236,8 +236,10 @@ pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<Soc
 where
     D: serde::Deserializer<'de>,
 {
-    blank_as_none::<_, String>(deserializer)?
+    optional_string(deserializer)?
         .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(parse_listen_addr)
         .transpose()
 }

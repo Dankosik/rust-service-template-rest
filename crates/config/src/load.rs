@@ -259,7 +259,9 @@ fn merge<T: DeserializeOwned>(
     let mut table_keys = BTreeSet::new();
     let mut datetime_keys = BTreeMap::new();
     for file in files {
-        if let Some(key) = first_table_override(&file.table, &mut table_keys, &mut Vec::new()) {
+        if let Some(key) =
+            record_tables_and_find_override(&file.table, &mut table_keys, &mut Vec::new())
+        {
             return Err(Error::TableOverride {
                 key,
                 input: file.path.display().to_string(),
@@ -427,19 +429,19 @@ fn contains_datetime(value: &toml::Value) -> bool {
     }
 }
 
-fn first_table_override<'a>(
+fn record_tables_and_find_override<'a>(
     table: &'a toml::Table,
     table_keys: &mut BTreeSet<String>,
     path: &mut Vec<&'a str>,
 ) -> Option<String> {
-    for (key, value) in table {
-        path.push(key);
-        let key = path.join(".");
+    for (segment, value) in table {
+        path.push(segment);
+        let dotted_key = path.join(".");
         let found = if let Some(nested) = value.as_table() {
-            table_keys.insert(key);
-            first_table_override(nested, table_keys, path)
+            table_keys.insert(dotted_key);
+            record_tables_and_find_override(nested, table_keys, path)
         } else {
-            table_keys.contains(&key).then_some(key)
+            table_keys.contains(&dotted_key).then_some(dotted_key)
         };
         path.pop();
         if found.is_some() {

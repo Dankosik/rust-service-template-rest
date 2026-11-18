@@ -41,7 +41,7 @@ fn a_disabled_profile_may_keep_its_dsn_placeholder() {
 }
 
 #[test]
-fn an_enabled_profile_carries_its_dsn() {
+fn enabled_profile_uses_default_pool_size_and_notifications() {
     let input = PostgresInput {
         enabled: true,
         dsn: Some(dsn()),

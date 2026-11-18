@@ -9,7 +9,7 @@ use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 
 use crate::de::{StrictString, optional_string};
-use crate::validate::{Rejected, ValidationError, Violations, required, required_when};
+use crate::validate::{Rejected, ValidationError, Violations, missing, required, required_when};
 
 /// Exact audiences accepted by an authentication profile.
 ///
@@ -260,6 +260,8 @@ where
 {
     use serde::de::IntoDeserializer as _;
 
+    const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
+
     #[derive(Deserialize)]
     #[serde(transparent)]
     struct StrictAlgorithm(#[serde(deserialize_with = "crate::de::string_enum")] JwtAlgorithm);
@@ -274,7 +276,7 @@ where
     let Some(input) = Option::<Input>::deserialize(deserializer).map_err(|_| {
         serde::de::Error::invalid_value(
             Unexpected::Other("an unsupported algorithm list"),
-            &"a list of supported JWT algorithms or a comma-separated string",
+            &EXPECTED,
         )
     })?
     else {
@@ -291,7 +293,7 @@ where
             .map_err(|_| {
                 serde::de::Error::invalid_value(
                     Unexpected::Other("an unsupported JWT algorithm"),
-                    &"a list of supported JWT algorithms or a comma-separated string",
+                    &EXPECTED,
                 )
             }),
     }
@@ -334,7 +336,7 @@ fn admit_audience(
             "cannot be set together with authn.audience",
         ))),
         (Some(audience), None) | (None, Some(audience)) => Ok(audience),
-        (None, None) => v.take(required("authn.audience", None, condition)),
+        (None, None) => Err(v.reject(missing("authn.audience", condition))),
     }
 }
 

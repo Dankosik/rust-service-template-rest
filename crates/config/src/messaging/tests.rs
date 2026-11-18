@@ -170,7 +170,7 @@ fn every_invalid_url_is_reported() {
 }
 
 #[test]
-fn plaintext_and_unauthenticated_are_only_available_in_local_development() {
+fn plaintext_and_unauthenticated_exceptions_require_insecure_development() {
     let local = [
         ("APP__APP__ENV", "development"),
         ("APP__MESSAGING__URLS", "nats://127.0.0.1:4222"),
@@ -460,7 +460,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
 }
 
 #[test]
-fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
+fn messaging_credentials_preserve_scalar_looking_strings() {
     for secret in ["00123", "TRUE"] {
         let cfg = load_worker_env(&[
             ("APP__MESSAGING__URLS", "tls://nats.example:4222"),

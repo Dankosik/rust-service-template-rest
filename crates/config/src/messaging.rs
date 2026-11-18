@@ -160,18 +160,18 @@ impl MessagingInput {
             (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
             (None, None) => Ok(None),
         };
-        let urls = validate_urls(
+        let url_check = validate_urls(
             &self.urls,
             self.tls_first,
             self.allow_plaintext || self.trusted_network,
             v,
         );
-        let payload = v.take(int_range(
+        let payload_size_check = v.take(int_range(
             "messaging.max_payload_bytes",
             self.max_payload_bytes.as_u64(),
             1..=MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
         ));
-        let concurrency = payload.and_then(|()| {
+        let resident_delivery_check = payload_size_check.and_then(|()| {
             v.take(resident_delivery_bound(
                 self.max_payload_bytes,
                 self.consumer_concurrency,
@@ -179,8 +179,8 @@ impl MessagingInput {
         });
         plaintext?;
         unauthenticated?;
-        urls?;
-        concurrency?;
+        url_check?;
+        resident_delivery_check?;
         Ok(MessagingConfig {
             urls: self.urls,
             credentials: credentials?,
