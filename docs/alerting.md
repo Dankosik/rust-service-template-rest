@@ -417,6 +417,15 @@ retirement are available through the recovery controller for its own
 isolated broker sessions. Use your deployment's recovery procedure for
 other brokers.
 
+Before a redrive, identify every durable subscription matching the original
+subject. Redrive publishes a new stream record with the original logical
+`Message-Id`. A subscriber that already acknowledged the event can receive
+it again. For each subscriber with a side effect, verify that repeating the
+operation is safe or that its idempotency record still covers this event.
+Set the maximum redrive age within those protection windows. If any window
+has expired or cannot be verified, reconcile the effects already applied or
+repair the failed subscriber directly before considering a shared redrive.
+
 If the DLQ was sealed during delivery, the worker stops with the source
 sequence still unacknowledged. Provision a writable DLQ and follow the
 durable subscription change procedure above to bind it before resuming.
