@@ -17,7 +17,7 @@ use uuid::NonNilUuid;
 
 use crate::error::{PublishError, PublishRejection};
 use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
-use crate::{EnvelopeError, OutboxProducer, Producer, PublicationRoute};
+use crate::{EnvelopeError, OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
@@ -52,10 +52,19 @@ pub enum OutboxEnqueueError {
     Jobs(#[from] infra_jobs::EnqueueError),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OutboxRoute<T: EventPayload> {
     publication: PublicationRoute<T>,
     publisher_id: NonNilUuid,
+}
+
+impl<T: EventPayload> Clone for OutboxRoute<T> {
+    fn clone(&self) -> Self {
+        Self {
+            publication: self.publication.clone(),
+            publisher_id: self.publisher_id,
+        }
+    }
 }
 
 impl<T: EventPayload> PublicationRoute<T> {
@@ -81,12 +90,7 @@ impl<T: EventPayload + Serialize> OutboxRoute<T> {
 }
 
 pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
-    job_outbox::publisher_kinds(
-        POLICY,
-        Publisher {
-            producer: producer.0,
-        },
-    )
+    job_outbox::publisher_kinds(POLICY, producer)
 }
 
 #[derive(Default)]
@@ -204,21 +208,18 @@ impl PreparedEvent {
     }
 }
 
-struct Publisher {
-    producer: Producer,
-}
-
-impl Handler<PublishDomainEvent> for Publisher {
+impl Handler<PublishDomainEvent> for OutboxProducer {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
+        let Self(producer) = self;
         let event = job.payload().to_prepared().map_err(JobError::permanent)?;
         let deadline = crate::budget::within_operation_budget(job.deadline());
         let context = OperationContext::new(Some(Deadline::at(deadline)), job.cancellation());
         let admission = crate::topology::recheck_outbox_source(
-            &self.producer.shared,
+            &producer.shared,
             deadline,
             context.cancellation(),
         );
-        self.producer
+        producer
             .publish_after_admission(&event, &context, admission)
             .await
             .map(|_| ())

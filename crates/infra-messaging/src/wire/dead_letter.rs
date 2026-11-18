@@ -122,24 +122,16 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
     if !valid_subject(&subject) {
         return Err(EnvelopeError::DeadLetterSubject);
     }
-    let message_id = required_header(&record.headers, header_name::MESSAGE_ID, MESSAGE_ID)?;
+    let message_id = required_header(&record.headers, MESSAGE_ID)?;
     validate_outbound_identity(message_id)?;
     let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     if has_ambiguous_original_id(&record.headers, message_id, stored_publication_id) {
         return Err(EnvelopeError::DeadLetterMessageIdMissing);
     }
-    let event_type = required_header(&record.headers, header_name::EVENT_TYPE, EVENT_TYPE)?;
+    let event_type = required_header(&record.headers, EVENT_TYPE)?;
     validate_outbound_identity(event_type)?;
-    let schema_version = parse_schema(required_header(
-        &record.headers,
-        header_name::EVENT_SCHEMA,
-        EVENT_SCHEMA,
-    )?)?;
-    let occurred_at = parse_timestamp(required_header(
-        &record.headers,
-        header_name::CREATED_AT,
-        CREATED_AT,
-    )?)?;
+    let schema_version = parse_schema(required_header(&record.headers, EVENT_SCHEMA)?)?;
+    let occurred_at = parse_timestamp(required_header(&record.headers, CREATED_AT)?)?;
     if is_zero_time(occurred_at) {
         return Err(EnvelopeError::DeadLetterCreatedAtRequired);
     }
