@@ -142,7 +142,10 @@ impl From<Interrupted> for Failure {
 }
 
 impl Failure<MutationError> {
-    pub(crate) fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
+    pub(crate) const TOO_LARGE: Self = Self::not_applied(MutationFailure::TooLarge, "too_large");
+    pub(crate) const BUSY: Self = Self::not_applied(MutationFailure::Busy, "busy");
+
+    const fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
         Self::with_label(MutationError::NotApplied(reason), error_type)
     }
 
