@@ -268,7 +268,7 @@ fn map_attempted<T>(
             );
             attempt_failure(class, scope, operation_id)
         }
-        Ok(Attempted::RolledBack(error)) => {
+        Ok(Attempted::RolledBack(error @ (Rollback::Terminal(_) | Rollback::Unstorable(_)))) => {
             tracing::warn!(
                 operation = operation_id,
                 failure = %error,

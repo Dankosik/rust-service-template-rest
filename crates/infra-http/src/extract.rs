@@ -196,7 +196,9 @@ fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Pro
             | ErrorKind::InvalidUtf8InPathParam { key }
             | ErrorKind::DeserializeError { key, .. } => Some(key.as_str()),
             ErrorKind::ParseErrorAtIndex { index, .. } => nth(*index),
-            ErrorKind::ParseError { .. } => nth(0).filter(|_| nth(1).is_none()),
+            ErrorKind::ParseError { .. } => {
+                names.and_then(|params| params.iter().exactly_one().ok().map(|(name, _)| name))
+            }
             _ => None,
         },
         _ => None,
@@ -220,14 +222,23 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
             Err(error) => error,
         };
         let message = error.inner().to_string();
-        let mut path = error.path().iter();
-        match (path.next(), path.next()) {
+        match PathIssue::classify(error.path(), &message) {
+            Some(issue) => Ok(Self(Err(issue))),
+            None => Err(error.into_inner()),
+        }
+    }
+}
+
+impl PathIssue {
+    fn classify(path: &serde_path_to_error::Path, message: &str) -> Option<Self> {
+        let mut segments = path.iter();
+        match (segments.next(), segments.next()) {
             (None, _) => {
                 if let Some(field) = message.strip_circumfix("missing field `", '`') {
-                    return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
+                    return Some(Self::MissingField(field.to_owned()));
                 }
                 if message.strip_circumfix("duplicate field `", '`').is_some() {
-                    return Ok(Self(Err(PathIssue::DuplicateField)));
+                    return Some(Self::DuplicateField);
                 }
             }
             (Some(Segment::Map { key }), None)
@@ -236,18 +247,15 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
                     .and_then(|field| field.strip_prefix(key.as_str()))
                     .is_some_and(|suffix| suffix.starts_with("`, ")) =>
             {
-                return Ok(Self(Err(PathIssue::UnknownField)));
+                return Some(Self::UnknownField);
             }
             _ => {}
         }
-        if message.starts_with("unknown variant `") {
-            return Ok(Self(Err(PathIssue::UnknownVariant(error.path().clone()))));
-        }
-        Err(error.into_inner())
+        message
+            .starts_with("unknown variant `")
+            .then(|| Self::UnknownVariant(path.clone()))
     }
-}
 
-impl PathIssue {
     fn problem(&self, params: Option<&RawPathParams>) -> Problem {
         let Some(params) = params else {
             return invalid_path(None);

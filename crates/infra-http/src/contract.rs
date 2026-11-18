@@ -674,10 +674,11 @@ fn compile_operation(
     let access =
         Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
     // template:begin http-idempotency:http-contract-idempotency-policy
-    if mounted.contains(path, method) && matches!(access, Access::Public) {
+    let is_mounted = mounted.contains(path, method);
+    if is_mounted && matches!(access, Access::Public) {
         return Err(invalid("idempotency_requires_authentication"));
     }
-    if !mounted.contains(path, method) && declares_idempotency(document, path, operation) {
+    if !is_mounted && declares_idempotency(document, path, operation) {
         return Err(invalid("idempotency_requires_registration"));
     }
     // template:end http-idempotency:http-contract-idempotency-policy
@@ -829,7 +830,6 @@ impl Policy {
         let mut first_protected = None;
         for (path, item) in &document.paths.paths {
             let path = path.as_str();
-            let mut ordered_methods = BTreeMap::new();
             if item.query.is_some() || !item.additional_operations.is_empty() {
                 let methods = documented_methods(item)
                     .chain((item.get.is_some() && item.head.is_none()).then_some("HEAD"))
@@ -838,13 +838,14 @@ impl Policy {
                     .map_err(|_| FinalizeError::InvalidRegistration)?;
                 extension_allow.insert(path.into(), allow);
             }
+            let mut methods = HashMap::<Box<str>, Access>::default();
             let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;
                 };
-                ordered_methods.insert(
-                    method.to_owned(),
+                methods.insert(
+                    method.into(),
                     compile_operation(
                         document, path, method, operation,
                         // template:begin http-idempotency:http-fixed-operation-mounts
@@ -864,8 +865,8 @@ impl Policy {
                         fault: "fixed_method_in_additional_operations",
                     });
                 }
-                ordered_methods.insert(
-                    method.clone(),
+                methods.insert(
+                    method.as_str().into(),
                     compile_operation(
                         document, path, method, operation,
                         // template:begin http-idempotency:http-additional-operation-mounts
@@ -875,16 +876,14 @@ impl Policy {
                 );
             }
             if first_protected.is_none()
-                && let Some((method, _)) = ordered_methods
+                && let Some(method) = methods
                     .iter()
-                    .find(|(_, access)| matches!(access, Access::Protected(..)))
+                    .filter(|(_, access)| matches!(access, Access::Protected(..)))
+                    .map(|(method, _)| method)
+                    .min()
             {
-                first_protected = Some((path.into(), method.as_str().into()));
+                first_protected = Some((path.into(), method.clone()));
             }
-            let methods = ordered_methods
-                .into_iter()
-                .map(|(method, access)| (method.into_boxed_str(), access))
-                .collect();
             routes.insert(path.into(), methods);
         }
         Ok(Self(Arc::new(CompiledPolicy {

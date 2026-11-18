@@ -187,11 +187,11 @@ pub(crate) async fn observe(
     if let Some(context) = response_context {
         otel_http::inject_context(&context, headers);
     }
-    if method_label == "HEAD"
+    let ends_at_headers = method_label == "HEAD"
         || method_label == "CONNECT" && status.is_success()
         || status.is_informational()
-        || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED)
-    {
+        || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED);
+    if ends_at_headers {
         DropGuard::dismiss(observation).record(RequestEnd::Body(BodyEnd::Complete));
         return response;
     }
@@ -261,28 +261,31 @@ impl RequestObservation {
 
     fn record(self, end: RequestEnd) {
         let elapsed = self.started.elapsed();
-        let (interruption, log_status) = match end {
+        let (interruption, fallback_log_status) = match end {
             RequestEnd::Body(BodyEnd::Complete) => (None, None),
             RequestEnd::Body(BodyEnd::Error) => (Some("response_body_error"), None),
             RequestEnd::ClientClosed => (Some("client_closed"), Some(499)),
             RequestEnd::ServerShutdown => (Some("server_shutdown"), Some(503)),
         };
         let route = self.matched.as_ref().map(MatchedPath::as_str);
-        let status = self.head.as_ref().map(|head| head.status);
-        let error_type =
-            interruption.or_else(|| status.filter(StatusCode::is_server_error).map(status_label));
+        let response_status = self.head.as_ref().map(|head| head.status);
+        let error_type = interruption.or_else(|| {
+            response_status
+                .filter(StatusCode::is_server_error)
+                .map(status_label)
+        });
         self.gauge.decrement(1);
         self.series.record_duration(
             route,
             DurationLabels {
                 method: self.method_label,
                 scheme: self.scheme,
-                status,
+                status: response_status,
                 error_type,
             },
             elapsed,
         );
-        if let Some(status) = status {
+        if let Some(status) = response_status {
             self.span
                 .set_attribute("http.response.status_code", i64::from(status.as_u16()));
         }
@@ -294,7 +297,9 @@ impl RequestObservation {
         if !self.log_access {
             return;
         }
-        let status = status.map(|value| value.as_u16()).or(log_status);
+        let access_status = response_status
+            .map(|value| value.as_u16())
+            .or(fallback_log_status);
         let termination = interruption.or_else(|| {
             self.head
                 .as_ref()
@@ -314,7 +319,7 @@ impl RequestObservation {
             tracing::info!(
                 method = self.method_label,
                 route = route.unwrap_or(UNMATCHED_ROUTE),
-                status,
+                status = access_status,
                 duration_ms,
                 problem_code,
                 termination,
