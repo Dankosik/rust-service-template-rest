@@ -25,9 +25,9 @@ invariants, ordering, error modes, lifetimes, cost—broader than a signature),
   `OperationContext`, `service_failure::Code`, `infra_http::Problem`, `&mut
   Tx<'_>`). Keep a new structure only when deleting it scatters an invariant or
   breaks a dependency, compile-time, or lifecycle constraint.
-- **Seam discipline & replace-don't-layer:** *one adapter is a hypothetical
-  seam; two real adapters (or a true external seam) make a real seam.* Keep
-  tests crossing the public seam with zero `pub` internal leaks, and list
+- **Seam discipline & replace-don't-layer:** use the dependency categories below
+  to decide whether a trait is warranted. Preserve public proving surfaces
+  without exposing internals solely for tests, and list
   superseded shallow modules, wrappers, and internal tests to delete.
 
 ## Dependency Categories
@@ -66,9 +66,7 @@ invariants, ordering, error modes, lifetimes, cost—broader than a signature),
   `FromRequestParts`, `tower::Layer`/`Service`, `utoipa::ToSchema` on
   generic/newtype wrappers, and `sqlx::query!` custom types. Route any
   statically unproved bound or runtime quirk through [Technical
-  Design](../technical-design.md#steps) step 2's uncertainty disposition
-  (`Assumptions and reopen triggers` + `Planning hooks: integration-first` or a
-  read-only probe).
+  Design](../technical-design.md#steps) step 2's uncertainty disposition.
 - **Workspace graph & profiles:** reconcile crate placement, dependency edges,
   `allow_dependents`, `crates/shared-rules` (`std`-only), optional profiles
   (`template/profiles.json`), and canonical generated-contract writers
