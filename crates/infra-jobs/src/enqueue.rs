@@ -77,11 +77,19 @@ pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &K,
 ) -> Result<JobId, EnqueueError> {
-    enqueue_delayed(tx, payload, Duration::ZERO).await
+    enqueue_unkeyed(tx, payload, Duration::ZERO).await
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue_delayed<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+) -> Result<JobId, EnqueueError> {
+    enqueue_unkeyed(tx, payload, delay).await
+}
+
+async fn enqueue_unkeyed<K: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &K,
     delay: Duration,
