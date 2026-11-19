@@ -7,7 +7,6 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, Method};
 use http_body_util::Collected;
 use infra_idempotency_store::RequestFingerprint;
-use itertools::Itertools as _;
 use serde::de::DeserializeOwned;
 
 use super::identity::request_fingerprint;
@@ -37,17 +36,16 @@ impl CommandInput {
         if let Some(original) = parts.extensions.remove::<OriginalUri>() {
             parts.uri = original.0;
         }
-        parts.headers = select_headers(
+        parts.headers = select_sensitive_headers(
             &parts.headers,
             std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers),
         );
         let trailers = collected.trailers().map_or_else(HeaderMap::new, |fields| {
-            select_headers(
-                fields,
-                fields
-                    .keys()
-                    .sorted_unstable_by(|a, b| a.as_str().cmp(b.as_str())),
-            )
+            let mut trailers = fields.clone();
+            for value in trailers.values_mut() {
+                value.set_sensitive(true);
+            }
+            trailers
         });
         let input = Self {
             parts,
@@ -110,7 +108,7 @@ impl CommandInput {
     }
 }
 
-fn select_headers<'a>(
+fn select_sensitive_headers<'a>(
     source: &HeaderMap,
     names: impl IntoIterator<Item = &'a HeaderName>,
 ) -> HeaderMap {

@@ -32,7 +32,11 @@ macro_rules! created_json_response {
         }
 
         const _: () = {
-            #[derive(::serde::Serialize, ::utoipa::ToSchema)]
+            #[derive(::utoipa::ToSchema)]
+            #[expect(
+                dead_code,
+                reason = "The schema wrapper exists only for the OpenAPI derive"
+            )]
             struct __InfraHttpCreatedBody($body);
 
             impl ::utoipa::IntoResponses for $name {
@@ -63,7 +67,7 @@ macro_rules! created_json_response {
                     $crate::idempotency::ReplayableResponse::json(
                         ::axum::http::StatusCode::CREATED,
                         self.headers,
-                        &__InfraHttpCreatedBody(self.body),
+                        &self.body,
                     )
                 }
             }

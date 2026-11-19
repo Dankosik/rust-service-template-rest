@@ -147,6 +147,7 @@ impl Problem {
         self
     }
 
+    #[cfg(test)]
     #[must_use]
     fn with_request_id(mut self, id: &str) -> Self {
         self.request_id = Some(CompactString::from(id));
@@ -175,32 +176,33 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let retry_after = self.retry_after;
         let mut response = (
             http_status(self.code),
             [(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE))],
             axum::Json(&self),
         )
             .into_response();
-        response.extensions_mut().insert(self);
-        if let Some(after) = retry_after {
+        if let Some(after) = self.retry_after {
             response
                 .headers_mut()
                 .insert(RETRY_AFTER, retry_after_value(after));
         }
+        response.extensions_mut().insert(self);
         response
     }
 }
 
 pub(crate) fn complete_problem(response: &mut Response, request_id: &str) {
-    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
+    let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
         return;
     };
-    let problem = problem.with_request_id(request_id);
-    *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    problem.request_id = Some(CompactString::from(request_id));
+    let body = axum::Json(&*problem).into_response().into_body();
+    *response.body_mut() = body;
     response.headers_mut().remove(CONTENT_LENGTH);
-    response.extensions_mut().insert(problem);
 }
+
+const U64_MAX_PLUS_ONE_SECS: &str = "18446744073709551616";
 
 fn retry_after_value(after: Duration) -> HeaderValue {
     let seconds = after
@@ -208,7 +210,7 @@ fn retry_after_value(after: Duration) -> HeaderValue {
         .checked_add(u64::from(after.subsec_nanos() != 0));
     match seconds {
         Some(seconds) => HeaderValue::from(seconds.max(1)),
-        None => HeaderValue::from_static("18446744073709551616"),
+        None => HeaderValue::from_static(U64_MAX_PLUS_ONE_SECS),
     }
 }
 

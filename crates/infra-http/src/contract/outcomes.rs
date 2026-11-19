@@ -39,9 +39,12 @@ pub(super) fn compose(
                 .map(|(method, operation)| (method.as_str(), operation)),
         ) {
             // template:begin authn:http-outcomes-operation-policy
-            let methods = policy.0.routes.get(path);
             let protected = matches!(
-                methods.and_then(|methods| methods.get(method)),
+                policy
+                    .0
+                    .routes
+                    .get(path)
+                    .and_then(|route| route.methods.get(method)),
                 Some(Access::Protected(..))
             );
             // template:end authn:http-outcomes-operation-policy
@@ -56,7 +59,7 @@ pub(super) fn compose(
             .map_err(|(status, fault)| FinalizeError::InvalidResponse {
                 path: path.to_owned(),
                 method: method.to_owned(),
-                status: status.to_owned(),
+                status,
                 fault,
             })?;
         }
@@ -71,28 +74,9 @@ fn add_outcomes(
     protected: bool,
     // template:end authn:http-outcomes-protected-parameter
     probe: bool,
-) -> Result<(), (&'static str, &'static str)> {
+) -> Result<(), (String, &'static str)> {
     let declares_request_body = operation.request_body.is_some();
-    let declares_json_body = operation
-        .request_body
-        .as_ref()
-        .and_then(|body| {
-            resolve(
-                body,
-                &components.request_bodies,
-                "#/components/requestBodies/",
-            )
-        })
-        .is_some_and(|body| {
-            !body.content.is_empty()
-                && body.content.keys().all(|key| {
-                    key.parse::<mime::Mime>().is_ok_and(|media_type| {
-                        media_type.essence_str() == mime::APPLICATION_JSON.essence_str()
-                            || (media_type.type_() == mime::APPLICATION
-                                && media_type.suffix() == Some(mime::JSON))
-                    })
-                })
-        });
+    let declares_json_body = declares_json_body(operation, components);
     let responses = &mut operation.responses.responses;
     if declares_json_body
         && responses
@@ -100,13 +84,13 @@ fn add_outcomes(
             .is_none_or(|response| can_merge_json_media_type_outcome(response, components))
     {
         let (_, common) = responses::UnsupportedMediaType::response();
-        merge_response(responses, components, "415", common.clone(), &common)
-            .map_err(|fault| ("415", fault))?;
+        merge_response(responses, components, "415", common)
+            .map_err(|fault| ("415".to_owned(), fault))?;
     }
-    let mut add = |status, (name, common): (&str, RefOr<Response>)| {
+    let mut add = |status: &str, (name, _): (&str, RefOr<Response>)| {
         let reference = Ref::from_response_name(name).into();
-        merge_response(responses, components, status, reference, &common)
-            .map_err(|fault| (status, fault))
+        merge_response(responses, components, status, reference)
+            .map_err(|fault| (status.to_owned(), fault))
     };
     add("413", responses::RequestEntityTooLarge::response())?;
     add("500", responses::InternalServerError::response())?;
@@ -119,17 +103,38 @@ fn add_outcomes(
     }
     // template:begin authn:http-protected-response-composition
     if protected {
-        use crate::authn::{
-            AuthenticationForbidden, AuthenticationMalformed, AuthenticationUnauthorized,
-            AuthenticationUnavailable,
-        };
-        add("400", AuthenticationMalformed::response())?;
-        add("401", AuthenticationUnauthorized::response())?;
-        add("403", AuthenticationForbidden::response())?;
-        add("503", AuthenticationUnavailable::response())?;
+        use utoipa::IntoResponses as _;
+
+        for (status, reference) in crate::authn::ProtectedOperationProblemResponses::responses() {
+            if status == "504" {
+                continue;
+            }
+            merge_response(responses, components, &status, reference)
+                .map_err(|fault| (status, fault))?;
+        }
     }
     // template:end authn:http-protected-response-composition
     Ok(())
+}
+
+fn declares_json_body(operation: &Operation, components: &Components) -> bool {
+    operation
+        .request_body
+        .as_ref()
+        .and_then(|body| {
+            resolve(
+                body,
+                &components.request_bodies,
+                "#/components/requestBodies/",
+            )
+        })
+        .is_some_and(|body| {
+            !body.content.is_empty()
+                && body
+                    .content
+                    .keys()
+                    .all(|key| crate::extract::is_json_media_type(key))
+        })
 }
 
 fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Components) -> bool {
@@ -152,18 +157,17 @@ fn merge_response(
     responses: &mut BTreeMap<String, RefOr<Response>>,
     components: &Components,
     status: &str,
-    when_missing: RefOr<Response>,
-    common: &RefOr<Response>,
+    common: RefOr<Response>,
 ) -> Result<(), &'static str> {
     let slot = match responses.entry(status.to_owned()) {
         Entry::Vacant(slot) => {
-            slot.insert(when_missing);
+            slot.insert(common);
             return Ok(());
         }
-        Entry::Occupied(slot) if slot.get() == &when_missing => return Ok(()),
+        Entry::Occupied(slot) if slot.get() == &common => return Ok(()),
         Entry::Occupied(slot) => slot.into_mut(),
     };
-    let Some(common) = resolve(common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
+    let Some(common) = resolve(&common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
         return Err("shared response could not be resolved");
     };
     let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)

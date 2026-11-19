@@ -682,7 +682,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
         .layer(middleware::from_fn_with_state(
             Arc::new(Admission {
                 permits: Arc::new(Semaphore::new(1)),
-                patience,
+                max_wait: patience,
                 probes: ProbeRoutes::default(),
             }),
             admit,

@@ -19,12 +19,8 @@ pub(crate) fn on_body_end(
     remaining: Option<u64>,
     finish: impl FnOnce(BodyEnd) + Send + Unpin + 'static,
 ) -> Body {
-    if body.is_end_stream() || remaining == Some(0) {
-        finish(if remaining.is_none_or(|length| length == 0) {
-            BodyEnd::Complete
-        } else {
-            BodyEnd::Error
-        });
+    if let Some(end) = body_end(body.is_end_stream(), remaining) {
+        finish(end);
         return body;
     }
     Body::new(GuardedBody {
@@ -32,6 +28,14 @@ pub(crate) fn on_body_end(
         remaining,
         finish: Some(finish),
     })
+}
+
+fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
+    match (end_stream, remaining) {
+        (_, Some(0)) | (true, None) => Some(BodyEnd::Complete),
+        (true, Some(_)) => Some(BodyEnd::Error),
+        (false, _) => None,
+    }
 }
 
 struct GuardedBody<F> {
@@ -84,10 +88,6 @@ impl<F> GuardedBody<F> {
                 frame.is_trailers() || self.body.is_end_stream()
             }
         };
-        match (end_stream, self.remaining) {
-            (_, Some(0)) | (true, None) => Some(BodyEnd::Complete),
-            (true, Some(_)) => Some(BodyEnd::Error),
-            (false, _) => None,
-        }
+        body_end(end_stream, self.remaining)
     }
 }

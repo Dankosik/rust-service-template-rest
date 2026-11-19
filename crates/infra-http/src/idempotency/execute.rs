@@ -12,6 +12,7 @@ use infra_idempotency_store::{
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use tokio::time::Instant;
 
+use super::compose::wiring_failure;
 use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
 use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
@@ -134,7 +135,9 @@ impl Attempt {
                             let terminal: TerminalProblem = problem.into();
                             Ok(terminal.capture()?)
                         }
-                        Err(rollback) => Err(rollback),
+                        Err(Rollback::Refused(response)) => Err(AttemptRollback::Refused(response)),
+                        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
+                        Err(Rollback::Unstorable(error)) => Err(AttemptRollback::Unstorable(error)),
                     },
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
@@ -246,18 +249,33 @@ impl Answer {
     }
 }
 
-fn map_attempted<T>(
-    attempted: Result<Attempted<Rollback<T>>, AttemptError>,
+enum AttemptRollback {
+    Refused(Box<Response>),
+    Database(SqlError),
+    Unstorable(ReplayError),
+}
+
+impl From<ReplayError> for AttemptRollback {
+    fn from(error: ReplayError) -> Self {
+        Self::Unstorable(error)
+    }
+}
+
+fn map_attempted(
+    attempted: Result<Attempted<AttemptRollback>, AttemptError>,
     scope: &ScopeKey,
     operation_id: &str,
     rules_link: HeaderValue,
 ) -> Answer {
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
-        Ok(Attempted::RolledBack(Rollback::Refused(response))) => {
-            Answer::operation_response(refusal(*response), Outcome::NotStored)
+        Ok(Attempted::RolledBack(AttemptRollback::Refused(response))) => {
+            Answer::operation_response(
+                sanitize_refusal(*response, operation_id),
+                Outcome::NotStored,
+            )
         }
-        Ok(Attempted::RolledBack(Rollback::Database(error))) => {
+        Ok(Attempted::RolledBack(AttemptRollback::Database(error))) => {
             let class = AttemptError::classify_sql(&error);
             tracing::warn!(
                 operation = operation_id,
@@ -268,7 +286,7 @@ fn map_attempted<T>(
             );
             attempt_failure(class, scope, operation_id)
         }
-        Ok(Attempted::RolledBack(error @ (Rollback::Terminal(_) | Rollback::Unstorable(_)))) => {
+        Ok(Attempted::RolledBack(AttemptRollback::Unstorable(error))) => {
             tracing::warn!(
                 operation = operation_id,
                 failure = %error,
@@ -320,13 +338,9 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
     }
 }
 
-fn refusal(mut response: Response) -> Response {
+fn sanitize_refusal(mut response: Response, operation_id: &str) -> Response {
     if !(response.status().is_client_error() || response.status().is_server_error()) {
-        tracing::error!(
-            failure = "invalid_refusal_status",
-            "http_idempotency_wiring_failed"
-        );
-        return sanitized_internal_error();
+        return wiring_failure(operation_id, "invalid_refusal_status");
     }
     response.headers_mut().remove(REPLAYED_HEADER);
     response
@@ -439,12 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_internal_store_failure_is_a_sanitized_500() {
-        let answer = map_attempted::<Infallible>(
-            Err(AttemptError::Internal),
-            &scope(),
-            "test",
-            rules_link(),
-        );
+        let answer = map_attempted(Err(AttemptError::Internal), &scope(), "test", rules_link());
         assert_eq!(answer.outcome, Outcome::Internal);
         assert_eq!(answer.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
@@ -472,7 +481,9 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ] {
-            let rollback: Rollback = Rollback::refuse((status, [(REPLAYED_HEADER, "true")]));
+            let rollback = AttemptRollback::Refused(Box::new(
+                (status, [(REPLAYED_HEADER, "true")]).into_response(),
+            ));
             let answer = map_attempted(
                 Ok(Attempted::RolledBack(rollback)),
                 &scope(),

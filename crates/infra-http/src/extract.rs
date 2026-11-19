@@ -47,15 +47,19 @@ where
     }
 }
 
+pub(crate) fn is_json_media_type(value: &str) -> bool {
+    value.parse::<mime::Mime>().is_ok_and(|media_type| {
+        media_type.type_() == mime::APPLICATION
+            && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
+    })
+}
+
 pub(crate) fn require_json_content_type(
     content_type: Option<&HeaderValue>,
 ) -> Result<(), Box<Problem>> {
     let json = content_type
-        .and_then(|value| value.to_str().ok()?.parse::<mime::Mime>().ok())
-        .is_some_and(|media_type| {
-            media_type.type_() == mime::APPLICATION
-                && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
-        });
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_media_type);
     if json {
         Ok(())
     } else {
@@ -148,12 +152,12 @@ where
         match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
             Ok(axum::extract::Path(TrackedPath(Err(issue)))) => {
-                let names = RawPathParams::from_request_parts(parts, state).await.ok();
-                Err(issue.problem(names.as_ref()))
+                let params = RawPathParams::from_request_parts(parts, state).await.ok();
+                Err(issue.problem(params.as_ref()))
             }
             Err(rejection) => {
-                let names = RawPathParams::from_request_parts(parts, state).await.ok();
-                Err(path_problem(&rejection, names.as_ref()))
+                let params = RawPathParams::from_request_parts(parts, state).await.ok();
+                Err(path_problem(&rejection, params.as_ref()))
             }
         }
     }
@@ -183,24 +187,25 @@ fn query_problem(path: &serde_path_to_error::Path) -> Problem {
     )
 }
 
-fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Problem {
+fn path_problem(rejection: &PathRejection, params: Option<&RawPathParams>) -> Problem {
     use axum::extract::path::ErrorKind;
 
     if rejection.status() != StatusCode::BAD_REQUEST {
         return wiring_failure("path");
     }
-    let nth = |index: usize| names?.iter().nth(index).map(|(name, _)| name);
-    let name = match rejection {
-        PathRejection::FailedToDeserializePathParams(failed) => match failed.kind() {
-            ErrorKind::ParseErrorAtKey { key, .. }
-            | ErrorKind::InvalidUtf8InPathParam { key }
-            | ErrorKind::DeserializeError { key, .. } => Some(key.as_str()),
-            ErrorKind::ParseErrorAtIndex { index, .. } => nth(*index),
-            ErrorKind::ParseError { .. } => {
-                names.and_then(|params| params.iter().exactly_one().ok().map(|(name, _)| name))
-            }
-            _ => None,
-        },
+    let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
+        return invalid_path(None);
+    };
+    let name = match failed.kind() {
+        ErrorKind::ParseErrorAtKey { key, .. }
+        | ErrorKind::InvalidUtf8InPathParam { key }
+        | ErrorKind::DeserializeError { key, .. } => Some(key.as_str()),
+        ErrorKind::ParseErrorAtIndex { index, .. } => params
+            .and_then(|params| params.iter().nth(*index))
+            .map(|(name, _)| name),
+        ErrorKind::ParseError { .. } => params
+            .and_then(|params| params.iter().exactly_one().ok())
+            .map(|(name, _)| name),
         _ => None,
     };
     invalid_path(name)
