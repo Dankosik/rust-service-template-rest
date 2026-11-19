@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
-use super::{AcquisitionDeadline, RegistrationState, provider_timeout};
+use super::{AcquisitionDeadline, RegistrationState, timeout_as_unavailable};
 use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
@@ -40,12 +40,11 @@ impl ExchangeOwner {
         if let Some(error) = deadline.stopped_error() {
             return Err(error);
         }
-        if let Ok(token) = &result
-            && token.is_reusable(Instant::now())
-        {
+        let token = result.map_err(timeout_as_unavailable)?;
+        if token.is_reusable(Instant::now()) {
             self.state.cache.insert(key, token.clone()).await;
         }
-        result.map_err(provider_timeout)
+        Ok(token)
     }
 }
 
@@ -220,7 +219,7 @@ impl ExchangeTokens {
                 self.acquire_exchange(key, subject, deadline),
             )
             .await
-            .map_err(|_| deadline.expiry)?
+            .map_err(|_| deadline.expiry_error)?
         };
         registration.check_admission(deadline)?;
         result

@@ -24,7 +24,7 @@ impl ConfigurationError {
 
 #[derive(derive_more::Debug, thiserror::Error)]
 pub enum PreparationError {
-    #[error("{0}")]
+    #[error(transparent)]
     Configuration(#[from] ConfigurationError),
     #[error(transparent)]
     Transport(#[from] TransportBuildFailure),

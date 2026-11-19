@@ -17,7 +17,9 @@ use crate::{JwtType, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, TrustRegistry, uni
 
 const LEEWAY_SECONDS: u64 = 30;
 
-const MAX_REMEMBERED: u64 = 1024;
+const MAX_CACHED_TOKENS: u64 = 1024;
+
+const ES256_SIGNATURE_BYTES: usize = 64;
 
 const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
 
@@ -120,7 +122,7 @@ struct Inner {
     trust: TrustRegistry,
     verified: metrics::Counter,
     refused: EnumMap<Reason, OnceLock<metrics::Counter>>,
-    remembered: Cache<Box<[u8]>, (Caller, Window), foldhash::quality::RandomState>,
+    cache: Cache<Box<[u8]>, (Caller, Window), foldhash::quality::RandomState>,
 }
 
 impl fmt::Debug for Verifier {
@@ -147,8 +149,8 @@ impl Verifier {
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
             refused: EnumMap::default(),
-            remembered: Cache::builder()
-                .max_capacity(MAX_REMEMBERED)
+            cache: Cache::builder()
+                .max_capacity(MAX_CACHED_TOKENS)
                 .time_to_live(std::time::Duration::from_secs(
                     MAX_TOKEN_LIFETIME_SECONDS + 2 * LEEWAY_SECONDS,
                 ))
@@ -165,7 +167,9 @@ impl Verifier {
                 NoBearer::Missing => Reason::Missing,
                 NoBearer::Malformed => Reason::Malformed,
             })
-            .and_then(|token| self.verify_at(token.as_bytes(), unix_now()?));
+            .and_then(|token| {
+                self.verify_at(token.as_bytes(), unix_seconds().ok_or(Reason::Clock)?)
+            });
         match result {
             Ok(caller) => {
                 self.0.verified.increment(1);
@@ -184,20 +188,18 @@ impl Verifier {
     }
 
     fn verify_at(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
-        if let Some((caller, window)) = self.0.remembered.get(token) {
-            return match window.admits(now) {
+        if let Some((caller, window)) = self.0.cache.get(token) {
+            return match window.check(now) {
                 Ok(()) => Ok(caller),
-                Err(Reason::Expired) => {
-                    self.0.remembered.invalidate(token);
+                Err(WindowRejection::Expired) => {
+                    self.0.cache.invalidate(token);
                     Err(Reason::Expired)
                 }
-                Err(reason) => Err(reason),
+                Err(WindowRejection::NotYetValid) => Err(Reason::NotYetValid),
             };
         }
         let (caller, window) = self.verify_uncached(token, now)?;
-        self.0
-            .remembered
-            .insert(token.into(), (caller.clone(), window));
+        self.0.cache.insert(token.into(), (caller.clone(), window));
         Ok(caller)
     }
 
@@ -222,7 +224,7 @@ impl Verifier {
         // RFC 7515 §5.2
         let header = std::str::from_utf8(&header).map_err(|_| Reason::Header)?;
         let header: TokenHeader<'_> = serde_json::from_str(header).map_err(|_| Reason::Header)?;
-        if header.crit {
+        if header.has_crit {
             return Err(Reason::Header);
         }
         if header.alg != "ES256" {
@@ -251,7 +253,7 @@ impl Verifier {
             .iter()
             .find(|key| key.kid.as_str() == kid)
             .ok_or(Reason::UnknownKey)?;
-        verify_signature(&key.key, message, signature)?;
+        verify_signature(&key.public_key, message, signature)?;
         if claims.sub.as_deref() != Some(issuer) {
             return Err(Reason::Subject);
         }
@@ -263,7 +265,7 @@ impl Verifier {
             return Err(Reason::Audience);
         }
         let window = claims.validity_window()?;
-        window.admits(now)?;
+        window.check(now)?;
         Ok((
             Caller {
                 name: caller.clone(),
@@ -284,7 +286,7 @@ fn verify_signature(
     message: &[u8],
     encoded_signature: &[u8],
 ) -> Result<(), Reason> {
-    let mut signature = [0_u8; 64];
+    let mut signature = [0_u8; ES256_SIGNATURE_BYTES];
     let length = URL_SAFE_NO_PAD
         .decode_slice(encoded_signature, &mut signature)
         .map_err(|_| Reason::Signature)?;
@@ -295,22 +297,33 @@ fn verify_signature(
         .map_err(|_| Reason::Signature)
 }
 
-impl Window {
-    const fn admits(self, now: u64) -> Result<(), Reason> {
-        if let Some(latest_expired) = now.checked_sub(LEEWAY_SECONDS)
-            && self.expires_at <= latest_expired
-        {
-            Err(Reason::Expired)
-        } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
-            Err(Reason::NotYetValid)
-        } else {
-            Ok(())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowRejection {
+    Expired,
+    NotYetValid,
+}
+
+impl From<WindowRejection> for Reason {
+    fn from(rejection: WindowRejection) -> Self {
+        match rejection {
+            WindowRejection::Expired => Self::Expired,
+            WindowRejection::NotYetValid => Self::NotYetValid,
         }
     }
 }
 
-fn unix_now() -> Result<u64, Reason> {
-    unix_seconds().ok_or(Reason::Clock)
+impl Window {
+    const fn check(self, now: u64) -> Result<(), WindowRejection> {
+        if let Some(latest_expired) = now.checked_sub(LEEWAY_SECONDS)
+            && self.expires_at <= latest_expired
+        {
+            Err(WindowRejection::Expired)
+        } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
+            Err(WindowRejection::NotYetValid)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// RFC 7515 §4.1.1
@@ -322,8 +335,8 @@ struct TokenHeader<'a> {
     typ: Option<Cow<'a, str>>,
     #[serde(borrow)]
     kid: Option<Cow<'a, str>>,
-    #[serde(default, deserialize_with = "present")]
-    crit: bool,
+    #[serde(rename = "crit", default, deserialize_with = "present")]
+    has_crit: bool,
 }
 
 #[derive(Deserialize)]
@@ -465,10 +478,10 @@ mod tests {
     fn the_lifetime_window_bounds_are_widened_by_the_leeway() {
         for (valid_from, expires_at, now, expected) in [
             (0, 100, 129, Ok(())),
-            (0, 100, 130, Err(Reason::Expired)),
+            (0, 100, 130, Err(WindowRejection::Expired)),
             (0, 0, 10, Ok(())),
             (130, 200, 100, Ok(())),
-            (131, 200, 100, Err(Reason::NotYetValid)),
+            (131, 200, 100, Err(WindowRejection::NotYetValid)),
             (u64::MAX, u64::MAX, u64::MAX - 1, Ok(())),
         ] {
             assert_eq!(
@@ -476,7 +489,7 @@ mod tests {
                     valid_from,
                     expires_at
                 }
-                .admits(now),
+                .check(now),
                 expected
             );
         }
@@ -637,14 +650,14 @@ mod tests {
                 Err(Reason::Audience)
             );
         }
-        case.verifier.0.remembered.run_pending_tasks();
-        assert_eq!(case.verifier.0.remembered.entry_count(), 0);
-        for index in 0..=MAX_REMEMBERED {
+        case.verifier.0.cache.run_pending_tasks();
+        assert_eq!(case.verifier.0.cache.entry_count(), 0);
+        for index in 0..=MAX_CACHED_TOKENS {
             let token = case.signed(|_, claims| claims["jti"] = index.into());
             assert!(case.verifier.verify_at(token.as_bytes(), NOW).is_ok());
         }
-        case.verifier.0.remembered.run_pending_tasks();
-        assert!(case.verifier.0.remembered.entry_count() <= MAX_REMEMBERED);
+        case.verifier.0.cache.run_pending_tasks();
+        assert!(case.verifier.0.cache.entry_count() <= MAX_CACHED_TOKENS);
     }
 
     #[test]
@@ -888,7 +901,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let token = metrics::with_local_recorder(&recorder, || {
             let case = Case::new();
-            let now = unix_now().unwrap();
+            let now = unix_seconds().unwrap();
             let token = case.signed(|_, claims| {
                 claims["iat"] = now.into();
                 claims["exp"] = (now + 60).into();

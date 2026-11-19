@@ -1,13 +1,13 @@
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
-use infra_outbound_http::{BuildError, Client, ExchangeError, Limits, prepare_tls};
+use infra_outbound_http::{BuildError, Client, ExchangeError, prepare_tls};
 use operation_context::OperationContext;
 use serde::Deserialize;
 use url::Url;
 
 use crate::{
     DiscoveryTransportError, KeycloakError, Options, Registration, TransportBuildFailure,
-    options::{admit_options, assertion_issuer, strict_provider_url, token_endpoint},
+    options::{Scheme, admit_options, assertion_issuer, strict_provider_url, token_endpoint},
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
 
@@ -19,54 +19,61 @@ struct Metadata {
 
 impl Registration {
     pub async fn prepare_keycloak(options: Options) -> Result<Self, KeycloakError> {
-        Self::prepare_keycloak_with(options, "https", Client::try_new).await
+        Self::prepare_keycloak_with(options, Scheme::Https).await
     }
 
     #[cfg(test)]
     pub(crate) async fn prepare_keycloak_for_test_http(
         options: Options,
     ) -> Result<Self, KeycloakError> {
-        Self::prepare_keycloak_with(options, "http", Client::try_new_for_test_http).await
+        Self::prepare_keycloak_with(options, Scheme::Http).await
     }
 
     async fn prepare_keycloak_with(
         options: Options,
-        scheme: &str,
-        client: fn(&Url, Limits) -> Result<Client, BuildError>,
+        scheme: Scheme,
     ) -> Result<Self, KeycloakError> {
         let admitted = admit_options(options, scheme, scheme)?;
         verify_metadata(
             &admitted.options.assertion_audience,
             &admitted.issuer,
             &admitted.endpoint,
-            client,
+            scheme,
         )
         .await?;
         let token_http =
-            client(&admitted.endpoint, TOKEN_LIMITS).map_err(TransportBuildFailure::token_url)?;
+            build_client(scheme, &admitted.endpoint).map_err(TransportBuildFailure::token_url)?;
         Self::build(admitted, token_http).map_err(KeycloakError::from)
     }
 }
 
 pub async fn verify_keycloak_metadata(issuer: &str, token_url: &str) -> Result<(), KeycloakError> {
-    let issuer_url = assertion_issuer(issuer, "https")?;
-    let endpoint = token_endpoint(token_url, "https", &issuer_url)?;
-    verify_metadata(issuer, &issuer_url, &endpoint, Client::try_new).await
+    let issuer_url = assertion_issuer(issuer, Scheme::Https)?;
+    let endpoint = token_endpoint(token_url, Scheme::Https, &issuer_url)?;
+    verify_metadata(issuer, &issuer_url, &endpoint, Scheme::Https).await
+}
+
+fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
+    match scheme {
+        Scheme::Https => Client::try_new(url, TOKEN_LIMITS),
+        #[cfg(any(test, feature = "test-support"))]
+        Scheme::Http => Client::try_new_for_test_http(url, TOKEN_LIMITS),
+    }
 }
 
 async fn verify_metadata(
     issuer: &str,
     issuer_url: &Url,
     endpoint: &Url,
-    client: fn(&Url, Limits) -> Result<Client, BuildError>,
+    scheme: Scheme,
 ) -> Result<(), KeycloakError> {
-    if issuer_url.scheme() == "https" {
+    if scheme == Scheme::Https {
         prepare_tls()
             .await
             .map_err(TransportBuildFailure::assertion_audience)?;
     }
     let discovery_http =
-        client(issuer_url, TOKEN_LIMITS).map_err(TransportBuildFailure::assertion_audience)?;
+        build_client(scheme, issuer_url).map_err(TransportBuildFailure::assertion_audience)?;
     let metadata = fetch_metadata(issuer_url, &discovery_http).await?;
     if metadata.issuer != issuer {
         return Err(KeycloakError::Discovery(

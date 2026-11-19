@@ -87,18 +87,18 @@ impl TokenEndpoint {
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
         let check = || context.check().map_err(AcquisitionError::from);
-        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
+        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant_label| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
-            record_acquisition(grant, error.label());
+            record_acquisition(grant_label, error.label());
         });
         let result = match check() {
             Ok(()) => self.request_token(grant, started, context).await,
             Err(error) => Err(error),
         };
         let result = check().and(result);
-        let grant = std::mem::DropGuard::dismiss(metric);
+        let grant_label = std::mem::DropGuard::dismiss(metric);
         record_acquisition(
-            grant,
+            grant_label,
             result
                 .as_ref()
                 .err()

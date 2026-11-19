@@ -21,7 +21,7 @@ pub struct TrustRegistry {
 
 pub(crate) struct TrustedKey {
     pub(crate) kid: KeyId,
-    pub(crate) key: ParsedPublicKey,
+    pub(crate) public_key: ParsedPublicKey,
     thumbprint: String,
 }
 
@@ -85,14 +85,17 @@ impl TrustRegistry {
                 TrustError::document("the trust registry is not one JSON object of JWK Sets")
             }
         })?;
-        let entries = entries
-            .0
-            .map_err(|repeated| match ServiceName::parse(&repeated) {
-                Ok(caller) => {
-                    TrustError::new(Place::Caller(caller), "is repeated in the trust registry")
-                }
-                Err(_) => TrustError::document("the trust registry repeats a caller"),
-            })?;
+        let entries = match entries {
+            Entries::Unique(entries) => entries,
+            Entries::RepeatedCaller(repeated) => {
+                return Err(match ServiceName::parse(&repeated) {
+                    Ok(caller) => {
+                        TrustError::new(Place::Caller(caller), "is repeated in the trust registry")
+                    }
+                    Err(_) => TrustError::document("the trust registry repeats a caller"),
+                });
+            }
+        };
         if entries.is_empty() {
             return Err(TrustError::document("the trust registry names no caller"));
         }
@@ -164,9 +167,10 @@ impl fmt::Debug for TrustRegistry {
     }
 }
 
-struct Entries(
-    Result<IndexMap<String, DuplicateCheckedJson, foldhash::quality::RandomState>, String>,
-);
+enum Entries {
+    Unique(IndexMap<String, DuplicateCheckedJson, foldhash::quality::RandomState>),
+    RepeatedCaller(String),
+}
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -177,19 +181,23 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries = IndexMap::default();
-                let mut repeated = None;
+                let mut state = Entries::Unique(IndexMap::default());
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
-                    match entries.entry(name) {
-                        Entry::Vacant(entry) => {
-                            entry.insert(value);
-                        }
-                        Entry::Occupied(entry) => {
-                            repeated.get_or_insert_with(|| entry.key().clone());
-                        }
+                    let repeated = match &mut state {
+                        Entries::Unique(entries) => match entries.entry(name) {
+                            Entry::Vacant(entry) => {
+                                entry.insert(value);
+                                None
+                            }
+                            Entry::Occupied(entry) => Some(entry.key().clone()),
+                        },
+                        Entries::RepeatedCaller(_) => None,
+                    };
+                    if let Some(repeated) = repeated {
+                        state = Entries::RepeatedCaller(repeated);
                     }
                 }
-                Ok(Entries(repeated.map_or(Ok(entries), Err)))
+                Ok(state)
             }
         }
         deserializer.deserialize_map(Visitor)
@@ -245,10 +253,10 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                 let mut unique_members = Some(serde_json::Map::new());
                 while let Some((name, child)) = map.next_entry()? {
                     match (&mut unique_members, child) {
-                        (Some(members), DuplicateCheckedJson::Value(value))
-                            if !members.contains_key(&name) =>
-                        {
-                            members.insert(name, value);
+                        (Some(members), DuplicateCheckedJson::Value(value)) => {
+                            if members.insert(name, value).is_some() {
+                                unique_members = None;
+                            }
                         }
                         _ => unique_members = None,
                     }
@@ -340,14 +348,14 @@ fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
         return Err("has malformed coordinates");
     };
     let point = shared_rules::rfc7518::p256_point(&x, &y).ok_or("has malformed coordinates")?;
-    let key = ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point)
+    let public_key = ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point)
         .map_err(|_| "is not a point on P-256")?;
     let thumbprint = jwk
         .thumbprint(ThumbprintHash::SHA256)
         .map_err(|_| "cannot compute the public key thumbprint")?;
     Ok(TrustedKey {
         kid,
-        key,
+        public_key,
         thumbprint,
     })
 }

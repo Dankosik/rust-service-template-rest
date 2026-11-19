@@ -113,16 +113,41 @@ fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError
         })
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Scheme {
+    Https,
+    #[cfg(any(test, feature = "test-support"))]
+    Http,
+}
+
+impl Scheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Http => "http",
+        }
+    }
+
+    const fn token_url_mismatch_reason(self) -> &'static str {
+        match self {
+            Self::Https => "must use HTTPS",
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Http => "must use loopback HTTP",
+        }
+    }
+}
+
 pub(crate) fn strict_provider_url(raw: &str) -> Option<Url> {
     if uri::has_whitespace_or_control(raw) || uri::authority_has_userinfo(raw) {
         return None;
     }
-    let invalid_syntax = Cell::new(false);
+    let syntax_valid = Cell::new(true);
     let url = Url::options()
-        .syntax_violation_callback(Some(&|_| invalid_syntax.set(true)))
+        .syntax_violation_callback(Some(&|_| syntax_valid.set(false)))
         .parse(raw)
         .ok()?;
-    (!invalid_syntax.get()
+    (syntax_valid.get()
         && url.host().is_some()
         && url.username().is_empty()
         && url.password().is_none()
@@ -132,8 +157,8 @@ pub(crate) fn strict_provider_url(raw: &str) -> Option<Url> {
 
 pub(crate) fn admit_options(
     options: Options,
-    endpoint_scheme: &str,
-    issuer_scheme: &str,
+    endpoint_scheme: Scheme,
+    issuer_scheme: Scheme,
 ) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
@@ -156,9 +181,9 @@ pub(crate) fn admit_options(
     })
 }
 
-pub(crate) fn assertion_issuer(raw: &str, scheme: &str) -> Result<Url, ConfigurationError> {
+pub(crate) fn assertion_issuer(raw: &str, scheme: Scheme) -> Result<Url, ConfigurationError> {
     strict_provider_url(raw)
-        .filter(|issuer| issuer.scheme() == scheme && issuer.query().is_none())
+        .filter(|issuer| issuer.scheme() == scheme.as_str() && issuer.query().is_none())
         .ok_or(ConfigurationError {
             key: "assertion_audience",
             reason: "must be an HTTPS issuer URL without userinfo, a query, or a fragment",
@@ -167,7 +192,7 @@ pub(crate) fn assertion_issuer(raw: &str, scheme: &str) -> Result<Url, Configura
 
 pub(crate) fn token_endpoint(
     raw: &str,
-    scheme: &str,
+    scheme: Scheme,
     issuer: &Url,
 ) -> Result<Url, ConfigurationError> {
     let error = |key, reason| Err(ConfigurationError { key, reason });
@@ -177,15 +202,8 @@ pub(crate) fn token_endpoint(
     let Ok(endpoint) = Url::parse(raw) else {
         return error("token_url", "must be a valid HTTPS URL");
     };
-    if endpoint.scheme() != scheme {
-        return error(
-            "token_url",
-            if scheme == "https" {
-                "must use HTTPS"
-            } else {
-                "must use loopback HTTP"
-            },
-        );
+    if endpoint.scheme() != scheme.as_str() {
+        return error("token_url", scheme.token_url_mismatch_reason());
     }
     if endpoint.host_str().is_none() {
         return error("token_url", "must have a host");

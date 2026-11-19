@@ -26,25 +26,21 @@ impl Token {
         requested_at: Instant,
         expires_in: Option<u64>,
     ) -> Result<Self, AcquisitionError> {
-        let value = zeroize::Zeroizing::new(format!("Bearer {access_token}"));
         if !shared_rules::rfc6750::is_b64token(access_token.as_bytes()) {
             return Err(AcquisitionError::InvalidResponse);
         }
+        let value = zeroize::Zeroizing::new(format!("Bearer {access_token}"));
         let mut header =
             HeaderValue::from_str(value.as_str()).map_err(|_| AcquisitionError::InvalidResponse)?;
         header.set_sensitive(true);
-        let expires_at = match expires_in {
-            None => None,
-            Some(lifetime) => {
-                let expiry = requested_at
+        let expires_at = expires_in
+            .map(|lifetime| {
+                requested_at
                     .checked_add(Duration::from_secs(lifetime))
-                    .ok_or(AcquisitionError::InvalidResponse)?;
-                if Instant::now() >= expiry {
-                    return Err(AcquisitionError::InvalidResponse);
-                }
-                Some(expiry)
-            }
-        };
+                    .filter(|&expiry| Instant::now() < expiry)
+                    .ok_or(AcquisitionError::InvalidResponse)
+            })
+            .transpose()?;
         Ok(Self {
             header,
             requested_at,
