@@ -9,6 +9,14 @@ useDefault = true
 description = "Cargo build output is not source; `gitleaks dir` ignores .gitignore and would otherwise read hundreds of megabytes of it"
 paths = ['''^target/''']
 
+[[allowlists]]
+description = "Verified SHA-256 of the benchmark caller source in the outbound call build and run receipts"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^specs/outbound-call-perf/evidence/summaries/([^/]+/run|builds(-prewarm)?/[^/]+/build)\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"caller/credentials\.rs": "(2d08245eccf7b3590904f5707740a957c295371fa21e313c90a5b74c7c777a21|46b8cc0a1b287df5ee94d38fdb7319b850a71a1c03540028f4622b0f63c249a8)",?\s*$''']
+
 # template:begin messaging:gitleaks-messaging-fixtures
 # Public async-nats 0.50.0 fixtures, verified against archive SHA256:
 # d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f
