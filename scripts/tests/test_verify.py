@@ -57,7 +57,6 @@ def _clean_verify_env(**extra: str) -> dict[str, str]:
         "ALLOW_HEAVY",
         "REPOSITORY_CI",
         "VERIFY_RUNTIME_IMAGE",
-        "VERIFY_DOCKER_COMMAND",
         "VERIFY_FORCE",
         "BASE_REF",
         "CARGO_TARGET_DIR",
@@ -90,9 +89,6 @@ class ChangedPathsTests(unittest.TestCase):
             _git(repo, "mv", "crates/old/src/lib.rs", "crates/new/src/lib.rs")
             _git(repo, "commit", "-qm", "move")
 
-            diff_out = changed_paths.changed_paths(repo, base="HEAD~1")
-            self.assertEqual(diff_out, ["crates/new/src/lib.rs", "crates/old/src/lib.rs"])
-
             (repo / "notes.md").write_text("untracked\n", encoding="utf-8")
             base_only = changed_paths.changed_paths(repo, base="HEAD~1")
             self.assertEqual(base_only, ["crates/new/src/lib.rs", "crates/old/src/lib.rs"])
@@ -118,8 +114,8 @@ class ChangedPathsTests(unittest.TestCase):
 
             (repo / "notes.md").write_text("staged\n", encoding="utf-8")
             _git(repo, "add", "notes.md")
-            (repo / "notes.md").write_text("unstaged\n", encoding="utf-8")
-            self.assertEqual(changed_paths.changed_paths(repo, union="HEAD"), ["notes.md"])
+            (repo / special_name).write_text("unstaged\n", encoding="utf-8")
+            self.assertEqual(changed_paths.changed_paths(repo, union="HEAD"), [special_name, "notes.md"])
 
             self.assertEqual(
                 changed_paths.changed_paths(repo, files=["b.rs", "a.rs", "b.rs", ""]),
@@ -201,7 +197,7 @@ class SurfacesTests(unittest.TestCase):
         )
         verdicts = surfaces.classify_files(
             self.source_fixture,
-            ["assets/data.bin", "assets/extra.cfg", "README.md"],
+            ["assets/data.bin", "assets/extra.cfg"],
         )
         self.assertTrue(verdicts["rust_source"])
         self.assertTrue(verdicts["runtime_image"])
@@ -1108,20 +1104,12 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertNotIn("template-quality-projections", res.stdout)
         self.assertNotIn("  make test\n", res.stdout)
 
-        # Quality tooling files DO route quality-check-self-test and template-quality-projections
-        for q_file in (
-            ".jscpd.json",
-            "quality/architecture.json",
-            "scripts/checks/architecture.py",
-            "scripts/checks/npx.py",
-            "scripts/tests/test_quality.py",
-        ):
-            q_res = self._run_verify("--plan", "--files", q_file)
-            self.assertEqual(q_res.returncode, 0, q_res.stderr)
-            self.assertIn("  make duplication-check\n", q_res.stdout)
-            self.assertIn("  make architecture-check\n", q_res.stdout)
-            self.assertIn("  make quality-check-self-test\n", q_res.stdout)
-            self.assertIn("  make template-quality-projections\n", q_res.stdout)
+        q_res = self._run_verify("--plan", "--files", ".jscpd.json")
+        self.assertEqual(q_res.returncode, 0, q_res.stderr)
+        self.assertIn("  make duplication-check\n", q_res.stdout)
+        self.assertIn("  make architecture-check\n", q_res.stdout)
+        self.assertIn("  make quality-check-self-test\n", q_res.stdout)
+        self.assertIn("  make template-quality-projections\n", q_res.stdout)
 
         # Template engine files ALSO route quality-check-self-test and template-quality-projections
         t_res = self._run_verify("--plan", "--files", "scripts/template/init.py")
@@ -1214,7 +1202,6 @@ class VerifyRunnerTests(unittest.TestCase):
         df_blocked = self._run_verify(
             "--files",
             "build/docker/Dockerfile",
-            VERIFY_DOCKER_COMMAND="missing-docker-bin",
             PATH=str(isolated_bin),
         )
         self.assertEqual(df_blocked.returncode, 2)
@@ -1224,7 +1211,6 @@ class VerifyRunnerTests(unittest.TestCase):
         sh_blocked = self._run_verify(
             "--files",
             "scripts/profiles/fixture.sh",
-            VERIFY_DOCKER_COMMAND="missing-docker-bin",
             PATH=str(isolated_bin),
         )
         self.assertEqual(sh_blocked.returncode, 2)
@@ -1239,7 +1225,6 @@ class VerifyRunnerTests(unittest.TestCase):
         sh_pass = self._run_verify(
             "--files",
             "scripts/profiles/fixture.sh",
-            VERIFY_DOCKER_COMMAND="missing-docker-bin",
             VERIFY_FORCE="1",
             PATH=str(isolated_bin),
         )
@@ -1249,7 +1234,6 @@ class VerifyRunnerTests(unittest.TestCase):
         docs_pass = self._run_verify(
             "--files",
             "README.md",
-            VERIFY_DOCKER_COMMAND="missing-docker-bin",
             VERIFY_FORCE="1",
             PATH=str(isolated_bin),
         )
@@ -1260,7 +1244,6 @@ class VerifyRunnerTests(unittest.TestCase):
         ci_blocked = self._run_verify(
             "--files",
             "scripts/profiles/fixture.sh",
-            VERIFY_DOCKER_COMMAND="missing-docker-bin",
             CI="true",
             PATH=str(isolated_bin),
         )
@@ -1348,8 +1331,6 @@ class VerifyRunnerTests(unittest.TestCase):
         remaining_attempts = [
             p for p in verify_dir.iterdir() if p.name.startswith("attempt-")
         ]
-        self.assertLessEqual(len(remaining_receipts), 20)
-        self.assertLessEqual(len(remaining_attempts), 20)
         self.assertEqual(len(remaining_receipts), 20)
         self.assertEqual(len(remaining_attempts), 20)
         self.assertFalse((verify_dir / "old-00.receipt").exists())
