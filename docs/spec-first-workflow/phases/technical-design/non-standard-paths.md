@@ -21,8 +21,9 @@ Design](../technical-design.md) from step 1.
   ownership, or cleanup still carries real open forks).
 - **Skipped Definition (fixed external contract):** when [Phase
   Selection](../../../spec-first-workflow.md#phase-selection) skipped Definition
-  because a fixed external contract left zero behavioral forks, use `intent.md`
-  and that cited contract as the obligation baseline.
+  because a fixed external contract left zero behavioral forks, verify
+  `intent.md` is `status: ready` and use `intent.md` and that cited contract as
+  the obligation baseline.
 
 ## No-Open-Decisions Exit
 
@@ -53,7 +54,8 @@ non-trivial `rollout.md` apply:
 
 ## Blocked Exit
 
-Use on non-`ready` `spec.md` (outside a skipped-Definition contract), missing
+Use on non-`ready` `intent.md` (`reopen_owner: Intake`) or non-`ready`
+`spec.md` (outside a skipped-Definition contract), missing
 or contradictory product behavior, tripped `spec.md` `Reopen if`, falsified
 baseline/requirement, missing external authority, or a surviving user-owned
 trade-off. Collect all independent blockers in one pass—formatting `B<n>` per

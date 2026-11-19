@@ -29,6 +29,7 @@ fixtures, proving layers, and test commands to Implementation.
 
      | Input | Exact fields | Target home |
      | --- | --- | --- |
+     | `intent.md` | `I<n>` (`Binding` / `Rejected`), `Hard constraints & Must not`, `Scope & non-goals`, `Priority / tie-breakers` | Preserved across slice boundaries, `Global constraints`, and `Completion` (reopen upstream on conflict) |
      | `spec.md` (or external contract) | `R<n>`, `G<n>`, limits | Owning task `Sources` + `Outcome`/`Observable claim` (or `Completion`) |
      | `spec.md` | `Downstream handoff` (`Planning`), `Durable contract update` | Fold `Durable contract update` into landing slice `Boundary -> In scope`; route `Downstream handoff` (`Planning`) to `Boundary -> In scope`, `Global constraints`, or slicing shape |
      | `design/design.md` (or Technical Design's reviewed no-open-decisions result) | `D<n>`, `S<n>`, `forced owners`, `Verified anchors`, `Pinned shared identifiers`, `Shared mutated surfaces`, `Superseded paths and generated contracts`, `Durable doc updates`, `Planning hooks` | Task `Sources`, `Mutable owners`, `Boundary -> In scope`, `Exclusive locks`, `Global constraints`, or slicing shape |

@@ -67,9 +67,10 @@ Library Selection](../../backend-library-selection.md).
 mechanism, or architecture/compile violation, skip Phase C deep attacks on
 malformed sections while still reporting upstream gaps found in the same pass.*
 
-2. **Obligation trace, spec fidelity & scope.** Verify `spec.md` is `status:
-   ready` (or a valid skipped-Definition fixed external contract), then
-   independently map `intent.md` (`I<n>`) + `spec.md` (all `R<n>`, `Open to
+2. **Obligation trace, spec fidelity & scope.** Verify `intent.md` (when
+   present) and `spec.md` (or a valid skipped-Definition fixed external
+   contract) are `status: ready`, then independently map `intent.md` (`I<n>`
+   including `Binding` strength) + `spec.md` (all `R<n>`, `Open to
    Technical Design:`, `G<n>`, `Terminology`, `Non-goals`,
    `Assumptions/Reopen if`, `Downstream handoff`, `Durable contract update`,
    `Carried concerns`) + `api/` `->` decision/mechanism `->` owner `->`
@@ -133,10 +134,10 @@ malformed sections while still reporting upstream gaps found in the same pass.*
 
 ## No-Open-Decisions Result
 
-Always 1 fresh `reviewer-agent`. Verify preconditions (`spec.md` is `status:
-ready` or a valid skipped-Definition fixed external contract with zero
-behavioral forks, zero tripped `spec.md` `Reopen if`, and no non-trivial
-`rollout.md` required). Inspect primary code, `quality/architecture.json`, and
+Always 1 fresh `reviewer-agent`. Verify preconditions (`intent.md` when present
+and `spec.md` are `status: ready`, or a valid skipped-Definition fixed external
+contract with `intent.md` at `status: ready` and zero behavioral forks, zero
+tripped `spec.md` `Reopen if`, and no non-trivial `rollout.md` required). Inspect primary code, `quality/architecture.json`, and
 non-obvious `Cargo.lock` sources for every obligation (`R<n>`, `Open to
 Technical Design:`, `G<n>`, `Technical Design` `Downstream handoff`, `Durable
 contract update`, `Carried concerns`). Try to construct **one realistic

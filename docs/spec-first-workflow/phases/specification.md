@@ -78,11 +78,11 @@ systems) can rely on.
      Freshness](research-branches.md#conflict-or-freshness)), and carry bounded
      unknowns and `valid as of` refresh triggers into `Reopen if`.
    - Settle every `intent.md` item (settled interview decisions `I<n>` including
-     their `Rejected` exclusions and `Why` rationale, hard constraints and
-     `Must not` prohibitions, `Suggested mechanisms` translated to observable
-     invariants unless mandated, `Priority / tie-breakers`, delegated limits,
-     assumptions `A<n>`, `Terminology`, and `Open questions`) and surfaced fork
-     in order:
+     their `Binding` strength, `Rejected` exclusions, and `Why` rationale,
+     `Concrete scenarios`, hard constraints and `Must not` prohibitions,
+     `Suggested mechanisms` translated to observable invariants unless
+     mandated, `Priority / tie-breakers`, delegated limits, assumptions `A<n>`,
+     `Terminology`, and `Open questions`) and surfaced fork in order:
 
      | Source | Action |
      | --- | --- |
@@ -106,10 +106,11 @@ systems) can rely on.
 4. **Run Author Pre-Flight (static, on-disk `draft` only).** Repair gaps in
    place:
    - **Intent & research trace:** every `intent.md` settled decision (`I<n>`
-     without reviving any `Rejected` option), hard constraint, `Must not`
-     prohibition, assumption (`A<n>`), delegated limit, `Success signal`,
-     `Open question`, and live `research/*.md` unknown/refresh trigger maps to
-     a `spec.md` anchor.
+     respecting `Binding: hard | default` and without reviving any `Rejected`
+     option), `Concrete scenarios`, hard constraint, `Must not` prohibition,
+     assumption (`A<n>`), delegated limit, `Success signal`, `Open question`,
+     and live `research/*.md` unknown/refresh trigger maps to a `spec.md`
+     anchor.
    - **Adversarial dry-run:** act as a literal, hostile implementer on the 1–2
      hardest multi-rule/unhappy paths and check every table cell is total—try to
      break `intent.md`'s `Success signal` (**malicious compliance**) or produce

@@ -74,7 +74,9 @@ permitted continuation). Apply [Context And Lifetime](../agent-harness.md#contex
 and [Nested Execution](../agent-harness.md#nested-execution): retain returned
 session IDs before waiting (missing identity is a carrier failure) and omit
 `task_id` on new lanes and initial reviews. Spawned children lack `question`;
-the Orchestrator primary may use `question` for user-owned decisions.
+the Orchestrator primary prefers plain-text rounds under
+[Grilling](../spec-first-workflow/shared/grilling.md) and uses `question` only
+when it preserves full trade-off context and free-form qualification.
 
 At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
 [Implementation Review](../spec-first-workflow/phases/implementation-review.md).

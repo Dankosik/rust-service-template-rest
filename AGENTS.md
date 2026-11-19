@@ -125,17 +125,23 @@ evidence changes phase, risk, ownership, proof, or harness control.
 
 Execute directly without workflow artifacts or a ledger, finish under
 [Validation budget](#validation-budget), and report outcome, executed checks,
-and material limitations. Keep active ledger tasks under their ledger owner, and
-escalate to [Workflow Router](docs/spec-first-workflow.md) when scope outgrows
-Direct Work (beyond an unavailable optional environment alone).
+and material limitations. If even a small request leaves user-owned decisions
+ambiguous, close them first via short
+[Grilling](docs/spec-first-workflow/shared/grilling.md) (escalating to
+[Workflow Router](docs/spec-first-workflow.md) if scope outgrows Direct Work)
+rather than assuming product behavior. Keep active ledger tasks under their
+ledger owner, and escalate to [Workflow Router](docs/spec-first-workflow.md)
+when scope outgrows Direct Work (beyond an unavailable optional environment
+alone).
 
 Before finishing Direct Work, load
 [Review](docs/spec-first-workflow/shared/review.md#trigger) when either gate
 fires:
 
 - **Full review:** requested; touches authorization, money, data integrity,
-  concurrency, or hard-to-reverse migration; or a material correctness question
-  remains uncertain.
+  concurrency, or hard-to-reverse migration; alters non-trivial production
+  behavior without a pre-existing independent test or contract oracle; or a
+  material correctness question remains uncertain.
 - **Structure review:** adds a crate, dependency/feature, trait/layer, custom
   general mechanism, config key, or fallback/shim/parallel path.
 

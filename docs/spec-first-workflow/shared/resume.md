@@ -21,7 +21,8 @@ completed phases.
    otherwise resume Planning, its review, or its
    [handoff](transition.md#implementation-handoff). During implementation or
    validation read the index and current ready-frontier packets. Before a
-   ledger exists, read `workflow-plan.md` when present.
+   ledger exists, read `workflow-plan.md` and `specs/<task>/intent.md` (including
+   any `status: draft` `Remaining frontier`) when present.
 3. Read only the decision, design, research, or rollout inputs needed by the
    next action.
 4. Resolve conflict by reopening the narrowest authoritative owner; never merge

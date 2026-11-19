@@ -150,7 +150,7 @@ $(TOOLS_ROOT)/%:
 .PHONY: deny unused-deps dependency-drift native-transport typos secret-scan secret-scan-history \
 	actionlint zizmor shellcheck python-lint docs-check architecture-check monitoring-rules \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
-	agent-harness-sync check-instructions ledger-check
+	agent-harness-sync check-instructions intent-check ledger-check
 
 deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Check advisories, licenses, bans, and sources (deny.toml)
 	$(CARGO_DENY) --locked check
@@ -240,6 +240,10 @@ agent-harness-sync: ## Materialize selected agent harness files from .agents/
 
 check-instructions: ## Validate .agents/skills, roles, and materialized harness files
 	python3 scripts/harness-sync.py --check --repo . $(if $(wildcard template/init.py),,--require-materialized)
+
+intent-check: ## Verify specs/<TASK>/intent.md invariants (TASK=<slug|path>)
+	@test -n "$(TASK)" || { echo "intent-check requires TASK=<slug> or TASK=<path>" >&2; exit 2; }
+	python3 scripts/check-intent.py "$(if $(wildcard $(TASK)/intent.md),$(TASK),$(if $(wildcard specs/$(TASK)/intent.md),specs/$(TASK),$(if $(and $(wildcard $(TASK)),$(filter %.md,$(TASK))),$(TASK),specs/$(TASK))))"
 
 ledger-check: ## Verify specs/<TASK>/tasks.md invariants and print execution waves (TASK=<slug|path>)
 	@test -n "$(TASK)" || { echo "ledger-check requires TASK=<slug> or TASK=<path>" >&2; exit 2; }
