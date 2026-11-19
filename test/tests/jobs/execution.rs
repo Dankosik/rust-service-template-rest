@@ -1725,7 +1725,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
     .await;
     proxy.arm(
         Fault::ForwardThenDrop,
-        Boundary::Autocommit("SET state = 'completed'"),
+        Boundary::OutsideTransaction("SET state = 'completed'"),
     );
     gate.complete.notify_one();
 
@@ -1817,7 +1817,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
 
     proxy.arm(
         Fault::ForwardThenDrop,
-        Boundary::Autocommit("SET state = 'completed'"),
+        Boundary::OutsideTransaction("SET state = 'completed'"),
     );
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;

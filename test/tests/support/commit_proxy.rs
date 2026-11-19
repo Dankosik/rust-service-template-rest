@@ -32,6 +32,7 @@ pub(crate) enum Fault {
 pub(crate) enum Boundary {
     Commit(Option<&'static str>),
     Autocommit(&'static str),
+    OutsideTransaction(&'static str),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -475,11 +476,15 @@ impl Frontend {
             Boundary::Commit(statement) => (statement, commit),
             Boundary::Autocommit(statement) => (
                 Some(statement),
+                matches!(message.first(), Some(b'Q' | b'S')),
+            ),
+            Boundary::OutsideTransaction(statement) => (
+                Some(statement),
                 !in_transaction && matches!(message.first(), Some(b'Q' | b'S')),
             ),
         };
         if let (Some(statement), Some(sql)) = (statement, sql)
-            && !(matches!(boundary, Boundary::Autocommit(_)) && in_transaction)
+            && !(matches!(boundary, Boundary::OutsideTransaction(_)) && in_transaction)
         {
             self.matched |= std::str::from_utf8(sql).is_ok_and(|sql| sql.contains(statement));
         }
