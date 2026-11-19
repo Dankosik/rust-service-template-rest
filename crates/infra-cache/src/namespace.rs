@@ -140,16 +140,11 @@ impl CacheNamespace {
             parent,
             Operation::Get,
             |connection| {
-                let mut pipeline = redis::Pipeline::with_capacity(READ_TRANSACTION_COMMANDS);
-                pipeline
-                    .atomic()
-                    .cmd("EXISTS")
-                    .arg(&key)
-                    .cmd("GETRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(max_value_bytes);
-                query_read(pipeline, connection, max_value_bytes)
+                query_read(
+                    key.read_transaction(max_value_bytes),
+                    connection,
+                    max_value_bytes,
+                )
             },
             |value| match value {
                 Some(bytes) if bytes.len() > max_value_bytes => Err(ErrorType::ValueTooLarge),
@@ -328,6 +323,21 @@ struct NamespacedKey<'a> {
 impl NamespacedKey<'_> {
     fn len(&self) -> usize {
         self.namespace.as_str().len() + 1 + self.key.len()
+    }
+
+    fn read_transaction(self, max_value_bytes: usize) -> redis::Pipeline {
+        let key_len = self.len();
+        let mut buffer = std::fmt::NumBuffer::new();
+        let range_end = max_value_bytes.format_into(&mut buffer);
+        let mut exists = redis::Cmd::with_capacity(2, "EXISTS".len() + key_len);
+        exists.arg("EXISTS").arg(&self);
+        let mut range =
+            redis::Cmd::with_capacity(4, "GETRANGE".len() + key_len + 1 + range_end.len());
+        range.arg("GETRANGE").arg(self).arg("0").arg(range_end);
+
+        let mut pipeline = redis::Pipeline::with_capacity(READ_TRANSACTION_COMMANDS);
+        pipeline.atomic().add_command(exists).add_command(range);
+        pipeline
     }
 
     fn set_command(self, value: &[u8], ttl_ms: u64) -> redis::Cmd {
