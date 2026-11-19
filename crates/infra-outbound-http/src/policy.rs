@@ -50,11 +50,12 @@ impl Origin {
     pub(crate) fn admits(&self, uri: &Uri) -> bool {
         uri.scheme() == Some(&self.scheme)
             && uri.authority().is_some_and(|authority| {
-                authority.host().eq_ignore_ascii_case(&self.host)
+                let host = authority.host();
+                host.eq_ignore_ascii_case(&self.host)
                     && shared_rules::uri::http_origin_port(
                         self.scheme.as_str(),
                         authority.as_str(),
-                        authority.host(),
+                        host,
                     ) == Some(self.port)
             })
     }
@@ -103,8 +104,10 @@ fn frame_body(request: &mut Request<Bytes>) {
     );
     let headers = request.headers_mut();
     headers.remove(header::TRANSFER_ENCODING);
-    if length > 0 || expects_content {
+    if length > 0 {
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    } else if expects_content {
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
     } else {
         headers.remove(header::CONTENT_LENGTH);
     }

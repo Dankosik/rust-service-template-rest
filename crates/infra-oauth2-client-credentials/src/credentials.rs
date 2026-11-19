@@ -317,20 +317,28 @@ impl TokenSource<OnBehalfOf> {
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_active(deadline)?;
-        let mut registration_closed = self.registration().closed.clone();
-        let acquisition = async {
-            match self {
-                Self::Service(service) => service.service_token(deadline).await,
-                Self::Exchange(exchange, OnBehalfOf(subject)) => {
-                    exchange.exchange(subject, deadline).await
+        let acquired = if let Self::Service(service) = self
+            && tokio::task::coop::has_budget_remaining()
+            && service.check_active(deadline).is_ok()
+            && let Some(token) = service.reuse_service_token_and_schedule_refresh(Instant::now())
+        {
+            Ok(token)
+        } else {
+            let mut registration_closed = self.registration().closed.clone();
+            let acquisition = async {
+                match self {
+                    Self::Service(service) => service.service_token(deadline).await,
+                    Self::Exchange(exchange, OnBehalfOf(subject)) => {
+                        exchange.exchange(subject, deadline).await
+                    }
                 }
+            };
+            tokio::select! {
+                biased;
+                stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
+                _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
+                result = acquisition => result,
             }
-        };
-        let acquired = tokio::select! {
-            biased;
-            stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
-            _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
-            result = acquisition => result,
         };
         self.check_active(deadline)?;
         let acquired = acquired?;
@@ -367,7 +375,7 @@ impl ServiceTokens {
         let inner = &self.0.inner;
         let _fetch_guard = tokio::time::timeout_at(deadline.cutoff, inner.fetch_lock.lock())
             .await
-            .map_err(|_| deadline.expiry_error)?;
+            .map_err(|_| deadline.expiry_error())?;
         self.check_active(deadline)?;
         let now = Instant::now();
         if let Some(token) = self.reuse_service_token_and_schedule_refresh(now) {
@@ -556,8 +564,14 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
-    expiry_error: AcquisitionError,
+    source: CutoffSource,
     context: &'a RequestContext,
+}
+
+#[derive(Clone, Copy)]
+enum CutoffSource {
+    Request,
+    Synthetic,
 }
 
 impl AcquisitionDeadline<'_> {
@@ -566,27 +580,29 @@ impl AcquisitionDeadline<'_> {
         self.context.child_until(ceiling)
     }
 
-    fn expired_error(self) -> Option<AcquisitionError> {
-        (Instant::now() >= self.cutoff).then_some(self.expiry_error)
+    fn expiry_error(self) -> AcquisitionError {
+        match self.source {
+            CutoffSource::Request => AcquisitionError::Timeout,
+            CutoffSource::Synthetic => AcquisitionError::Unavailable,
+        }
     }
 
     fn stopped_error(self) -> Option<AcquisitionError> {
-        self.expired_error()
-            .or_else(|| self.context.stopped().map(AcquisitionError::from))
+        if matches!(self.source, CutoffSource::Synthetic) && Instant::now() >= self.cutoff {
+            return Some(self.expiry_error());
+        }
+        self.context.stopped().map(AcquisitionError::from)
     }
 }
 
 pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadline<'_> {
-    let (cutoff, expiry_error) = match context.deadline().and_then(Deadline::instant) {
-        Some(cutoff) => (cutoff, AcquisitionError::Timeout),
-        None => (
-            Instant::now() + FETCH_TIMEOUT,
-            AcquisitionError::Unavailable,
-        ),
+    let (cutoff, source) = match context.deadline().and_then(Deadline::instant) {
+        Some(cutoff) => (cutoff, CutoffSource::Request),
+        None => (Instant::now() + FETCH_TIMEOUT, CutoffSource::Synthetic),
     };
     AcquisitionDeadline {
         cutoff,
-        expiry_error,
+        source,
         context,
     }
 }

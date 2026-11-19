@@ -1,0 +1,60 @@
+cargo build --workspace --locked
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+   --> vendor/sqlx-core/src/pool/inner.rs:229:14
+    |
+229 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |size| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+229 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |size| {
+229 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |size| {
+    |
+
+warning: `sqlx-core` (lib) generated 1 warning (run `cargo fix --lib -p sqlx-core` to apply 1 suggestion)
+warning: `sqlx-core` (lib) generated 1 warning (1 duplicate)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> vendor/aws-smithy-http-client/src/client/pool/establish.rs:232:10
+    |
+232 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    |          ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+232 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+232 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> vendor/aws-smithy-http-client/src/client/pool/stats.rs:292:10
+    |
+292 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    |          ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+292 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+292 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> vendor/aws-smithy-http-client/src/client/pool/stats.rs:300:10
+    |
+300 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    |          ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+300 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+300 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    |
+
+warning: `aws-smithy-http-client` (lib) generated 3 warnings (run `cargo fix --lib -p aws-smithy-http-client` to apply 3 suggestions)
+   Compiling service-config v0.1.0 (/Users/daniil/Projects/Opensource/rust-outbound-call-perf/crates/config)
+   Compiling migrate v0.1.0 (/Users/daniil/Projects/Opensource/rust-outbound-call-perf/crates/migrate)
+   Compiling service v0.1.0 (/Users/daniil/Projects/Opensource/rust-outbound-call-perf/crates/service)
+   Compiling jobs-worker v0.1.0 (/Users/daniil/Projects/Opensource/rust-outbound-call-perf/crates/jobs-worker)
+   Compiling integration-tests v0.1.0 (/Users/daniil/Projects/Opensource/rust-outbound-call-perf/test)
+    Finished `dev` profile [unoptimized] target(s) in 45.98s

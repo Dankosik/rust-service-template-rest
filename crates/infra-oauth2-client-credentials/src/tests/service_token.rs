@@ -1,6 +1,8 @@
 use super::*;
 use std::assert_matches;
 
+use crate::credentials::TokenSource;
+
 #[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;
@@ -74,6 +76,33 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
         authorizations,
         ["Bearer first", "Bearer first", "Bearer second"]
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_reusable_service_token_yields_when_the_task_budget_is_exhausted() {
+    let fixture = Fixture::new().await;
+    let tokens = fixture.service_tokens(&[]);
+    let client = tokens.http(fixture.resource_client()).unwrap();
+    fixture.send(&client).await.unwrap();
+
+    let task = tokio::spawn(async move {
+        let context = token_context();
+        let source = TokenSource::Service(tokens);
+        let mut acquisition = Box::pin(source.acquire_for_request(acquisition_deadline(&context)));
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        poll_pending(acquisition.as_mut()).await;
+        acquisition.await.unwrap()
+    });
+    let token = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(token.header, "Bearer fixture-token");
+    assert_eq!(fixture.token_request_count(), 1);
     fixture.finish().await;
 }
 

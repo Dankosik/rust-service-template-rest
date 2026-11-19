@@ -280,9 +280,10 @@ pub(crate) fn attach_client_response(
             status_hook_code: Some(code),
         },
     );
-    response
-        .map(|body| ClientResponseBody::start(body, observation, custody, initial, missing_status))
-        .map(tonic::body::Body::new)
+    response.map(|body| {
+        ClientResponseBody::start(body, observation, custody, initial, missing_status)
+            .map_or_else(tonic::body::Body::empty, tonic::body::Body::new)
+    })
 }
 
 impl<B> ClientResponseBody<B>
@@ -295,7 +296,7 @@ where
         custody: ClientCustody,
         initial: Option<ClientOutcome>,
         missing_status: ClientOutcome,
-    ) -> Self {
+    ) -> Option<Self> {
         let ended = body.is_end_stream();
         let watch_stop = custody.watch_stop;
         let mut phase = StreamPhase::Open(ActiveStream {
@@ -321,7 +322,8 @@ where
         }
         let watched = match &phase {
             StreamPhase::Open(active) if watch_stop => Some(active.lifetime.clone()),
-            StreamPhase::Open(_) | StreamPhase::Trailers(_) | StreamPhase::Done => None,
+            StreamPhase::Open(_) | StreamPhase::Trailers(_) => None,
+            StreamPhase::Done => return None,
         };
         let mut response_body = Self {
             state: Arc::new(Mutex::new(phase)),
@@ -332,7 +334,7 @@ where
         if let Some(lifetime) = watched {
             response_body.spawn_watcher(lifetime);
         }
-        response_body
+        Some(response_body)
     }
 
     fn spawn_watcher(&mut self, lifetime: OperationContext) {
@@ -659,7 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unbounded_opening_only_response_does_not_spawn_watcher() {
+    async fn response_start_watches_open_streams_and_releases_terminal_custody() {
         let open_without_watch = ClientResponseBody::start(
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
@@ -671,7 +673,8 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         assert!(open_without_watch.watcher.is_none());
 
         let open_with_watch = ClientResponseBody::start(
@@ -685,22 +688,39 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         assert!(open_with_watch.watcher.is_some());
 
-        let already_initial = ClientResponseBody::start(
-            PendingFrames::stalled(),
+        let source = PendingFrames::stalled();
+        let dropped = Arc::clone(&source.dropped);
+        let upload = PendingFrames::stalled();
+        let upload_dropped = Arc::clone(&upload.dropped);
+        let (_outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload));
+        let cancellation = CancellationToken::new();
+        let (report, mut wire_code) = tokio::sync::oneshot::channel();
+        let response = attach_client_response(
+            http::Response::builder()
+                .header(tonic::Status::GRPC_STATUS, "14")
+                .body(tonic::body::Body::new(source))
+                .unwrap(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
                 lifetime: OperationContext::unbounded(),
                 watch_stop: true,
-                guards: test_guards(None),
-                on_status: None,
+                guards: ClientGuards {
+                    upload_guard,
+                    cancel_on_drop: cancellation.clone().drop_guard(),
+                },
+                on_status: Some(Box::new(move |code| report.send(code).unwrap())),
             },
-            Some(ClientOutcome::local(tonic::Code::Ok)),
-            ClientOutcome::local(tonic::Code::Unknown),
         );
-        assert!(already_initial.watcher.is_none());
+        assert_eq!(wire_code.try_recv().unwrap(), tonic::Code::Unavailable);
+        assert!(cancellation.is_cancelled());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(upload_dropped.load(Ordering::SeqCst));
+        assert!(response.body().is_end_stream());
+        assert_eq!(response.body().size_hint().exact(), Some(0));
     }
 
     #[tokio::test]
@@ -724,7 +744,8 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         let watcher = body.watcher.take().unwrap();
         parent.cancel();
         tokio::time::timeout(TEST_BUDGET, watcher)
@@ -773,7 +794,8 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         let done = body.watcher_done.take().unwrap();
         drop(body);
 
@@ -820,7 +842,8 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         let watcher = body.watcher.take().unwrap();
         tokio::time::advance(TEST_BUDGET).await;
         tokio::time::timeout(TEST_BUDGET, watcher)
@@ -885,7 +908,8 @@ mod tests {
             },
             None,
             ClientOutcome::local(tonic::Code::Unknown),
-        );
+        )
+        .unwrap();
         let watcher_done = body.watcher_done.take().unwrap();
         let mut cx = Context::from_waker(Waker::noop());
         let caught =

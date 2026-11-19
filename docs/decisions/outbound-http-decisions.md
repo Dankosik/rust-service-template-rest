@@ -20,6 +20,13 @@ selection](../backend-library-selection.md#rejected-candidates).
 | `Content-Length` buffer presizing or automatic `url.full` / trace-header injection | Untrusted `Content-Length` reserves memory before bytes arrive; webhook URLs can carry provider secrets in paths or queries. | Never for untrusted response headers; opt in to trace propagation per trusted peer. |
 | Default 90 s pooled idle timeout | Common provider front ends close idle keep-alive sockets at 60 s (AWS ALB) or 75 s (nginx), causing reuse races on half-closed connections. | Provider topology guarantees longer idle keep-alive windows. |
 
+A buffered response owns storage sized for the bytes it received. Retaining a
+single Hyper frame can keep its entire receive allocation live. In three
+matched large-response retention trials, this increased peak live heap in
+every pair (outbound call comparison, evidence commit `546723f`). Reopen if
+the transport can provide a backing-size bound and the benefit repeats under
+the caller's response lifetimes.
+
 <!-- template:begin webhooks:docs-outbound-http-webhook-delivery -->
 ## Outbound webhook delivery
 

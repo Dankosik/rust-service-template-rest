@@ -1,0 +1,16 @@
+{
+  "observed_paired_deltas": {},
+  "pairs": [
+    {
+      "cells": {
+        "base": "001-service-before-64-base/cell.json"
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "service-before-64"
+    }
+  ]
+}

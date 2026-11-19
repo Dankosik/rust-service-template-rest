@@ -1,0 +1,14 @@
+{
+  "analysis": "heaptrack_print --file PROFILE --merge-backtraces=0 --print-allocators=0 --print-temporary=0 --peak-limit=20 --print-massif MASSIF --massif-threshold=0.1",
+  "behavior": "Omit Ubuntu 1.5.0 unsupported -q and route profiler banners to stderr. Both profiling artifacts use the same launcher and unchanged allocation profiler.",
+  "failure_archives": [
+    "raw/first-frame-heap.tar.gz",
+    "raw/first-frame-heap-short.tar.gz"
+  ],
+  "guest_image": "Ubuntu 24.04 x64",
+  "guest_launcher_sha256": "12e8aa4e36963d24190ecdc2eea2a38df6b77c2260f0aa5e67a3d4eebafada13",
+  "launcher": "heaptrack-ubuntu-1.5-compat.py",
+  "launcher_sha256": "12e8aa4e36963d24190ecdc2eea2a38df6b77c2260f0aa5e67a3d4eebafada13",
+  "tool": "/usr/bin/heaptrack",
+  "version": "1.5.0"
+}

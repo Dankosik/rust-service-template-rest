@@ -83,20 +83,20 @@ impl Outcome {
     }
 }
 
-pub(crate) struct Attempt {
+pub(crate) struct Attempt<'a> {
     started: Instant,
     method: &'static str,
     template: Option<&'static str>,
-    server: Server,
+    server: &'a Server,
     status: Option<StatusCode>,
     span: Span,
 }
 
-impl Attempt {
-    pub(crate) fn start<'a>(
+impl<'a> Attempt<'a> {
+    pub(crate) fn start(
         method: &Method,
         template: Option<UrlTemplate>,
-        server: &Server,
+        server: &'a Server,
         context: &'a RequestContext,
     ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
@@ -119,7 +119,7 @@ impl Attempt {
                 started: Instant::now(),
                 method,
                 template,
-                server: server.clone(),
+                server,
                 status: None,
                 span,
             },

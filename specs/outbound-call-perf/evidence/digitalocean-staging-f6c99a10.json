@@ -1,0 +1,8 @@
+{
+  "baseline": "d101ce385552e29267d6e8ed42f50163582a30ad",
+  "candidate": "8e2317e82bde1f967539070f75f4efe90fda2dc6",
+  "overlay": "f6c99a10faf0134c18b642e5c9be2c6d8cde12a6",
+  "overlay_archive_sha256": "4014b4897e1a91c9ee555a336727d909deec3dd287206358598ca05c03d18cbf",
+  "source_archive_sha256": "300d1b62cfd7f0e33888e04ec5791a5428859b8babc111338aec8061cbae608c",
+  "staged_at": "2026-11-19T16:29:45.141949+00:00"
+}
