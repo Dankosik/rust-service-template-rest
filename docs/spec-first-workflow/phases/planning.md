@@ -10,10 +10,10 @@ cases, fixtures, proving layers, and exact test commands to Implementation.
 1. **Reconcile accepted inputs and delta.** Read all accepted artifacts in
    `specs/<task>/` (`intent.md`, `spec.md`, `design/`, `rollout.md`,
    `research/*.md`, and `workflow-plan.md` when present), or Technical Design's
-   reviewed no-open-decisions evidence. Map every `R<n>`, `G<n>`, limit,
-   exception, rollout gate, `Carried concerns` item, and required durable
-   decision-doc update to a task delta, primary evidence proving it is already
-   met, or an authorized scope exit.
+   reviewed no-open-decisions evidence. Map every `R<n>`, `G<n>`, `Planning`
+   `Downstream handoff`, limit, exception, rollout gate, `Carried concerns`
+   item, and required durable contract or decision-doc update to a task delta,
+   primary evidence proving it is already met, or an authorized scope exit.
    - Missing or conflicting upstream decision: stop and return [Transition
      Result V1](../shared/transition.md#transition-result-v1) (`status:
      blocked`, `reopen_owner` naming the smallest upstream owner).
@@ -61,9 +61,10 @@ cases, fixtures, proving layers, and exact test commands to Implementation.
      shared seam or high-risk slice earlier) rather than mirroring `spec.md`
      headings. Keep the cut with fewer tasks, less lock serialization, and
      earlier risk retirement.
-   - *Complete this step only when:* every obligation, `G<n>`, carried concern,
-     and durable doc update maps to a task; every task's `Provides` feeds a
-     downstream task or `Completion` (**deletion test**); every task meets a
+   - *Complete this step only when:* every obligation, `G<n>`, `Downstream
+     handoff`, carried concern, and durable contract or decision-doc update
+     maps to a task; every task's `Provides` feeds a downstream task or
+     `Completion` (**deletion test**); every task meets a
      valid shape and split/merge bound with zero false parallelism; every
      blast-radius companion sits inside its unit or behind a valid compiling
      dependency; and the DAG is acyclic with all code reaching `Implemented`

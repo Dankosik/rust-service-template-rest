@@ -70,7 +70,9 @@ Evaluate these triggers before loading a phase owner:
 
 Intake is required for new structured work unless a complete Intent already
 exists; Specification and Planning are required unless ready equivalent
-authority already supplies their output. Reopen Intake whenever requester
+authority already supplies their output (for Specification, a reviewed `spec.md`
+at `status: ready` or a fixed external contract with zero open behavioral
+forks—never `intent.md` alone). Reopen Intake whenever requester
 meaning is missing or changed. Load only the triggered owner, recording
 `skipped` solely when a durable [Transition
 result](spec-first-workflow/shared/transition.md) requires that disposition.

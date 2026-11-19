@@ -16,7 +16,7 @@ Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit whe
 
 | Obligation | Decision / Mechanism | Semantic owner | Proving surface |
 | --- | --- | --- | --- |
-| `spec.md#r1-...` / `G1` / carried concern | `D1` — <mechanism> or `forced:` <existing owner> | `<crate>::<module>` | <public seam, schema/probe, or durable effect; note required external input> |
+| `spec.md#r1-...` / `G1` / handoff / carried concern | `D1` — <mechanism> or `forced:` <existing owner> | `<crate>::<module>` | <public seam, schema/probe, or durable effect; note required external input> |
 
 ## Key decisions
 
@@ -29,7 +29,7 @@ Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit whe
 - **Strongest rejected alternative:** <steelman simplest/strongest substitute> — rejected because <exact obligation, invariant, or bound it breaks>
 - **Accepted cost:** <concrete trade-off accepted>
 - **Reopen if:** <objective condition or owner reversing the choice>
-- **Durable record:** <`docs/decisions/...`, `docs/backend-library-selection.md`, or `docs/repo-architecture.md` update in Implementation, or `none`>
+- **Durable record:** <`docs/decisions/...`, `docs/backend-library-selection.md`, `docs/repo-architecture.md`, or `docs/production-contract.md` update in Implementation, or `none`>
 
 ## System flows, invariants, and failure semantics
 
@@ -84,9 +84,9 @@ Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit whe
 - **Steelman `D<n>` & traceability:** add `D<n>` only for genuine open choices
   (forced paths stay in `Obligation trace`); each `Strongest rejected
   alternative` must be a serious simplest/strongest substitute, never a
-  strawman. Every `R<n>`, `G<n>`, and `spec.md` `Carried concerns` item appears
-  in `Obligation trace`; Planning packets cite `design/design.md#d1-...`
-  directly.
+  strawman. Every `R<n>`, `G<n>`, `Technical Design` `Downstream handoff`,
+  `Durable contract update`, and `spec.md` `Carried concerns` item appears in
+  `Obligation trace`; Planning packets cite `design/design.md#d1-...` directly.
 - **Seams & sketches, not implementation:** inline a compact Rust signature +
   3–8 line caller usage sketch, SQL constraint, state table, or exact
   wire/signing vector (with one deterministic non-secret vector for
@@ -94,7 +94,9 @@ Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit whe
   Keep function bodies, private file layout, task slicing, and test
   cases/fixtures/proving layers/commands out of `design.md` ([Evidence
   Contract](../shared/evidence-contract.md#design-proof)).
-- **Durable record gate:** mark a durable update to `docs/decisions/`,
+- **Durable record gate:** preserve every `Durable contract update` from
+  `spec.md` (`docs/repo-architecture.md#domain-vocabulary` or
+  `docs/production-contract.md`), and mark a durable update to `docs/decisions/`,
   [Backend Library Selection](../../backend-library-selection.md), or
   [Repository Architecture](../../repo-architecture.md) only when all three
   hold—(1) hard to reverse, (2) surprising without context, and (3) a real

@@ -41,7 +41,8 @@ sections while still reporting upstream gaps found in the same pass.*
 
 1. **Obligation trace, spec fidelity & scope.** Starting independently from
    `spec.md` (`R<n>`, `G<n>`, `Terminology`, `Non-goals`, `Decisions,
-   assumptions, and reopen triggers`, `Carried concerns`) and canonical
+   assumptions, and reopen triggers`—including `Technical Design` `Downstream
+   handoff` and `Durable contract update`—and `Carried concerns`) and canonical
    contracts, reconstruct `obligation -> mechanism/decision -> semantic owner
    -> contract/truth -> proving surface`. `FAIL` on any unsupported obligation,
    tripped `spec.md` `Reopen if` trigger, contradicted/altered `spec.md`
@@ -133,8 +134,9 @@ sections while still reporting upstream gaps found in the same pass.*
     `Intake`, or external authority).
 - **No-open-decisions result:**
   - `PASS`: primary-source evidence recorded in `evidence_boundary` proves
-    every `R<n>`, `G<n>`, and `spec.md` `Carried concerns` item is mechanically
-    forced without architectural ambiguity.
+    every `R<n>`, `G<n>`, `Technical Design` `Downstream handoff`, and
+    `spec.md` `Carried concerns` item is mechanically forced without
+    architectural ambiguity.
   - `CONCERNS`: every choice is mechanically forced, with only a bounded later
     proof or risk obligation (such as a genuinely uncached `Cargo.lock` source
     check or an unresolved downstream proof concern carried from `spec.md`);

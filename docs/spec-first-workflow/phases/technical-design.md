@@ -33,7 +33,8 @@ change without affecting callers, contracts, schemas, bounds, or signals.
    read-heavy multi-crate or `Cargo.lock` lookups to `evidence-agent` under
    [Read-Only Delegation](../shared/read-only-delegation.md), verifying
    decision-critical facts directly.
-   - Route each open `R<n>`, `G<n>`, and carried concern to its branch(es):
+   - Route each open `R<n>`, `G<n>`, `Technical Design` `Downstream handoff`,
+     `Durable contract update`, and carried concern to its branch(es):
      - runtime crossings, data/schema, truth, trust, failure/concurrency,
        budgets, signals, or rollout -> [System
        Design](technical-design/system-design.md);
@@ -60,10 +61,12 @@ change without affecting callers, contracts, schemas, bounds, or signals.
        `reopen_owner: Specification` or `Intake`—never ask the user to choose
        an internal mechanism).
      - *Mechanically forced (zero open choices):* current code,
-       `quality/architecture.json`, and `spec.md` leave zero architectural
-       ambiguity. Skip drafting `design.md` and submit the source-verified
-       forced-owner evidence directly to step 5.
-   - *Complete step 1 only when* every `R<n>`, `G<n>`, carried concern, and
+       `quality/architecture.json`, and `spec.md` (including any `Technical
+       Design` `Downstream handoff`) leave zero architectural ambiguity. Skip
+       drafting `design.md` and submit the source-verified forced-owner
+       evidence directly to step 5.
+   - *Complete step 1 only when* every `R<n>`, `G<n>`, `Technical Design`
+     `Downstream handoff`, `Durable contract update`, carried concern, and
      `spec.md` assumption/non-goal is reconciled against primary code and
      `Cargo.lock` sources, every open choice maps to a branch, and zero
      decision-changing evidence gaps remain.
@@ -108,7 +111,8 @@ change without affecting callers, contracts, schemas, bounds, or signals.
 
 4. **Run the Checkable Pre-Review Audit (static).** Attack only what is written
    on disk (never unwritten chat context) and close every gap in place:
-   - **Trace & identifier parity:** every `R<n>`, `G<n>`, and `spec.md` carried
+   - **Trace & identifier parity:** every `R<n>`, `G<n>`, `Technical Design`
+     `Downstream handoff`, `Durable contract update`, and `spec.md` carried
      concern sits in `Obligation trace` with owner and proving surface; zero
      `Non-goals` leaked in; every shared identifier across units is pinned.
    - **Deletion & steelman check:** every added structure, dependency, queue,
