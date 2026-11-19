@@ -12,7 +12,7 @@ use super::{
     AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MembershipGauge, MetricMembership,
     deadline_reached_or_cleanup_ended, execute_before_deadline, within,
 };
-use crate::engine::{Operation, Shared, observe_failure};
+use crate::engine::{Operation, WorkerGroup, observe_failure};
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
@@ -177,28 +177,28 @@ pub(crate) fn complete_query(
 }
 
 pub(super) async fn complete_batched(
-    shared: &Shared,
+    group: &WorkerGroup,
     fence: ClaimFence,
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
-    let group = shared.completions.group(supervisor_deadline);
+    let completion_group = group.completions.group(supervisor_deadline);
     let (_registration, mut reply_rx) =
-        group.register(fence, slots, &shared.completions.memberships);
-    let writer = match group.writer_or_reply(&mut reply_rx).await {
+        completion_group.register(fence, slots, &group.completions.memberships);
+    let writer = match completion_group.writer_or_reply(&mut reply_rx).await {
         WriteTurn::Write(writer) => writer,
         WriteTurn::Reply(reply) => return reply,
     };
-    let batch = CompletionBatch::new(std::mem::take(&mut *group.queued.lock()));
-    write_batch(shared, batch, supervisor_deadline).await;
+    let batch = CompletionBatch::new(std::mem::take(&mut *completion_group.queued.lock()));
+    write_batch(group, batch, supervisor_deadline).await;
     drop(writer);
     reply_rx.await.unwrap_or(Err(Unacknowledged))
 }
 
-async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Instant) {
+async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: Instant) {
     batch.prune(|entry| entry.reply_tx.is_closed());
     if batch.queued.is_empty()
-        || deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline)
+        || deadline_reached_or_cleanup_ended(&group.lifecycle.cleanup, deadline)
     {
         return;
     }
@@ -213,9 +213,9 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
             })
             .collect();
         within(
-            &shared.lifecycle.cleanup,
+            &group.lifecycle.cleanup,
             deadline,
-            execute_before_deadline(shared, "complete jobs batch", deadline, async |connection| {
+            execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
                 observed(
                     "complete jobs",
                     sqlx::query_scalar!(
@@ -244,7 +244,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
             batch.finish(results);
         }
         Some(Err(error)) => {
-            observe_failure(shared, Operation::Record, &error);
+            observe_failure(group, Operation::Record, &error);
             drop(error);
             let results = std::iter::repeat_n(Err(Unacknowledged), batch.queued.len());
             batch.finish(results);

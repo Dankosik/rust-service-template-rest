@@ -6,9 +6,9 @@ use metrics::{Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
-use crate::ServerEndpoint;
 use crate::error::{CommandError, CommandFailure, ErrorType};
 use crate::namespace::Operation;
+use crate::{Namespace, ServerEndpoint};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
@@ -31,13 +31,17 @@ pub(super) enum LocalSizeRefusal {
 }
 
 impl LocalSizeRefusal {
-    pub(super) fn record(self, namespace: &'static str) {
+    pub(super) fn record(self, namespace: Namespace) {
         let reason = match self {
             Self::Key => "key_too_large",
             Self::Value => "value_too_large",
         };
-        metrics::counter!(LOCAL_SIZE_REFUSALS_METRIC, "cache" => namespace, "reason" => reason)
-            .increment(1);
+        metrics::counter!(
+            LOCAL_SIZE_REFUSALS_METRIC,
+            "cache" => namespace.as_str(),
+            "reason" => reason
+        )
+        .increment(1);
     }
 }
 
@@ -78,18 +82,28 @@ impl Outcome {
     }
 }
 
-#[derive(Default, derive_more::Debug)]
-#[debug("NamespaceHistograms {{ .. }}")]
-pub(crate) struct NamespaceHistograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);
+#[derive(derive_more::Debug)]
+#[debug("NamespaceHistograms({:?}, ..)", self.namespace)]
+pub(crate) struct NamespaceHistograms {
+    namespace: Namespace,
+    entries: EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>,
+}
 
 impl NamespaceHistograms {
-    fn histogram(
-        &self,
-        namespace: &'static str,
-        operation: Operation,
-        outcome: Outcome,
-    ) -> &Histogram {
-        self.0[operation][outcome].get_or_init(|| {
+    pub(crate) fn new(namespace: Namespace) -> Self {
+        Self {
+            namespace,
+            entries: EnumMap::default(),
+        }
+    }
+
+    pub(crate) const fn namespace(&self) -> Namespace {
+        self.namespace
+    }
+
+    fn histogram(&self, operation: Operation, outcome: Outcome) -> &Histogram {
+        self.entries[operation][outcome].get_or_init(|| {
+            let namespace = self.namespace.as_str();
             if let Some(error_label) = outcome.error_label() {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
@@ -112,7 +126,6 @@ impl NamespaceHistograms {
 
 pub(crate) struct OperationGuard<'a> {
     started: Instant,
-    namespace: &'static str,
     histograms: &'a NamespaceHistograms,
     operation: Operation,
     span: Span,
@@ -121,7 +134,6 @@ pub(crate) struct OperationGuard<'a> {
 
 impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
-        namespace: &'static str,
         histograms: &'a NamespaceHistograms,
         operation: Operation,
         server: &ServerEndpoint,
@@ -134,7 +146,7 @@ impl<'a> OperationGuard<'a> {
             db.namespace = %server.database_index,
             db.operation.name = operation.redis_name(),
             db.operation.batch.size = operation.redis_batch_size(),
-            cache.name = namespace,
+            cache.name = histograms.namespace().as_str(),
             server.address = server.host.as_str(),
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
@@ -145,7 +157,6 @@ impl<'a> OperationGuard<'a> {
         );
         Self {
             started: Instant::now(),
-            namespace,
             histograms,
             operation,
             span,
@@ -188,7 +199,7 @@ impl<'a> OperationGuard<'a> {
         self.finish(Outcome::Failed(error_type));
         self.span.in_scope(|| {
             tracing::debug!(
-                cache.name = self.namespace,
+                cache.name = self.histograms.namespace().as_str(),
                 cache.operation = operation_label(self.operation),
                 cache.error.reason = reason,
                 error.type = label,
@@ -201,7 +212,7 @@ impl<'a> OperationGuard<'a> {
         self.finalized = true;
         self.span.record("cache.outcome", outcome.label());
         self.histograms
-            .histogram(self.namespace, self.operation, outcome)
+            .histogram(self.operation, outcome)
             .record(self.started.elapsed());
     }
 }

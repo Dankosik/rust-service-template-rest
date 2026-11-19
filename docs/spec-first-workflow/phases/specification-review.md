@@ -13,7 +13,9 @@ affects the outcome.
   constraints, yet a clause excludes it without an authorized reason.
 
 When a scenario exposes a mismatch, give its starting state, trigger, and
-observable result.
+observable result. Name the specific promise and its source. Show how the
+result breaks that promise or how the disputed clause excludes a result the
+accepted contract permits.
 
 ## Lenses
 

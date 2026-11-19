@@ -9,7 +9,7 @@ use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider, SharedH
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::ConfigError;
-use crate::provider::{Admitted, Target};
+use crate::provider::{ResolvedProvider, Target};
 
 #[derive(derive_more::Debug)]
 pub enum CredentialSource {
@@ -24,7 +24,7 @@ pub enum CredentialSource {
 impl CredentialSource {
     pub(crate) fn credentials_provider(
         &self,
-        admitted: &Admitted,
+        provider: &ResolvedProvider,
         http_client: &SharedHttpClient,
     ) -> Result<SharedCredentialsProvider, ConfigError> {
         match self {
@@ -47,11 +47,11 @@ impl CredentialSource {
                 )))
             }
             Self::WorkloadIdentity => {
-                if !matches!(admitted.target, Target::AmazonS3 { .. }) {
+                if !matches!(provider.target, Target::AmazonS3 { .. }) {
                     return Err(ConfigError::Credentials);
                 }
                 Ok(SharedCredentialsProvider::new(workload_identity(
-                    &admitted.region,
+                    &provider.region,
                     http_client.clone(),
                 )?))
             }

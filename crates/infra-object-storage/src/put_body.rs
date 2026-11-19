@@ -129,13 +129,49 @@ impl From<Vec<u8>> for PutBody {
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
+pub(crate) enum ByteProgress {
+    Reading(NonZeroU64),
+    AwaitingEof(Option<Bytes>),
+}
+
+impl ByteProgress {
+    pub(crate) fn new(len: u64) -> Self {
+        NonZeroU64::new(len).map_or(Self::AwaitingEof(None), Self::Reading)
+    }
+
+    pub(crate) fn remaining(&self) -> u64 {
+        match self {
+            Self::Reading(remaining) => remaining.get(),
+            Self::AwaitingEof(held) => held.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        }
+    }
+
+    pub(crate) fn accept(&mut self, chunk: Bytes) -> Result<Option<Bytes>, Bytes> {
+        let Self::Reading(remaining) = self else {
+            return Err(chunk);
+        };
+        let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
+            return Err(chunk);
+        };
+        if let Some(remaining) = NonZeroU64::new(next) {
+            *self = Self::Reading(remaining);
+            Ok(Some(chunk))
+        } else {
+            *self = Self::AwaitingEof(Some(chunk));
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<Option<Bytes>, ()> {
+        match self {
+            Self::AwaitingEof(held) => Ok(held.take()),
+            Self::Reading(_) => Err(()),
+        }
+    }
+}
+
 enum ExactLengthPhase {
-    Reading {
-        remaining: NonZeroU64,
-    },
-    AwaitingEnd {
-        held: Option<Bytes>,
-    },
+    Streaming(ByteProgress),
     Draining {
         held: Option<Bytes>,
         trailers: Option<Frame<Bytes>>,
@@ -161,29 +197,26 @@ impl ExactLengthPhase {
     }
 
     fn on_data(&mut self, data: Bytes) -> PhaseStep {
-        let len = data.len() as u64;
-        if len == 0 {
+        if data.is_empty() {
             return PhaseStep::Continue;
         }
-        let Self::Reading { remaining } = self else {
+        let Self::Streaming(progress) = self else {
             return PhaseStep::Mismatch;
         };
-        let Some(next) = remaining.get().checked_sub(len) else {
-            return PhaseStep::Mismatch;
-        };
-        if let Some(remaining) = NonZeroU64::new(next) {
-            *self = Self::Reading { remaining };
-            return PhaseStep::Yield(Ok(Frame::data(data)));
+        match progress.accept(data) {
+            Ok(Some(data)) => PhaseStep::Yield(Ok(Frame::data(data))),
+            Ok(None) => PhaseStep::Continue,
+            Err(_rejected) => PhaseStep::Mismatch,
         }
-        *self = Self::AwaitingEnd { held: Some(data) };
-        PhaseStep::Continue
     }
 
     fn finish_data(&mut self, trailers: Option<Frame<Bytes>>) -> PhaseStep {
-        let Self::AwaitingEnd { held } = self else {
+        let Self::Streaming(progress) = self else {
             return PhaseStep::Mismatch;
         };
-        let held = held.take();
+        let Ok(held) = progress.finish() else {
+            return PhaseStep::Mismatch;
+        };
         *self = Self::Draining { held, trailers };
         PhaseStep::Continue
     }
@@ -202,10 +235,7 @@ impl ExactLength {
         E: Into<BoxError> + 'static,
     {
         let mismatch = Arc::new(AtomicBool::new(false));
-        let phase = NonZeroU64::new(len)
-            .map_or(ExactLengthPhase::AwaitingEnd { held: None }, |remaining| {
-                ExactLengthPhase::Reading { remaining }
-            });
+        let phase = ExactLengthPhase::Streaming(ByteProgress::new(len));
         let body = Self {
             inner: SyncWrapper::new(UnsyncBoxBody::new(body.map_err(Into::into))),
             phase,
@@ -266,8 +296,8 @@ impl Body for ExactLength {
 
     fn size_hint(&self) -> SizeHint {
         let exact = match &self.phase {
-            ExactLengthPhase::Reading { remaining } => remaining.get(),
-            ExactLengthPhase::AwaitingEnd { held } | ExactLengthPhase::Draining { held, .. } => {
+            ExactLengthPhase::Streaming(progress) => progress.remaining(),
+            ExactLengthPhase::Draining { held, .. } => {
                 held.as_ref().map_or(0, |data| data.len() as u64)
             }
         };

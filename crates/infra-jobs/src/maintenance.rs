@@ -10,7 +10,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{
-    Operation, OperationError, Shared, backstop, observe_failure, observe_recovery,
+    Operation, OperationError, WorkerGroup, backstop, observe_failure, observe_recovery,
 };
 
 // template:begin outbox:jobs-maintenance-outbox-module
@@ -29,11 +29,11 @@ const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
+pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
     let mut pass = CleanupPass::start(Cleanup::Jobs);
     let mut removed = 0u64;
     loop {
-        let batch = Box::pin(delete_batch(shared))
+        let batch = Box::pin(delete_batch(primary_group))
             .await
             .inspect_err(|_| pass.failed())?;
         pass.committed(batch);
@@ -45,14 +45,14 @@ pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationErro
     }
 }
 
-pub(crate) async fn run_retention(shared: &Shared, cancel: CancellationToken) {
+pub(crate) async fn run_retention(primary_group: &WorkerGroup, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
         let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
         loop {
             schedule.next().await;
-            match remove_expired(shared).await {
-                Ok(_) => observe_recovery(shared, Operation::Retention),
-                Err(error) => observe_failure(shared, Operation::Retention, &error),
+            match remove_expired(primary_group).await {
+                Ok(_) => observe_recovery(primary_group, Operation::Retention),
+                Err(error) => observe_failure(primary_group, Operation::Retention, &error),
             }
         }
     }))
@@ -60,16 +60,16 @@ pub(crate) async fn run_retention(shared: &Shared, cancel: CancellationToken) {
 }
 
 async fn in_maintenance_tx<T, F>(
-    shared: &Shared,
+    primary_group: &WorkerGroup,
     timeout: Duration,
     work: F,
 ) -> Result<T, OperationError>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, OperationError>,
 {
-    let _turn = shared.statement_turn.lock().await;
+    let _turn = primary_group.statement_turn.lock().await;
     backstop(async {
-        in_tx(&shared.pool, async |tx| {
+        in_tx(&primary_group.pool, async |tx| {
             set_statement_timeout(tx, timeout).await?;
             work(tx).await
         })
@@ -78,8 +78,8 @@ where
     .await
 }
 
-async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
-    in_maintenance_tx(shared, RETENTION_STATEMENT_TIMEOUT, async |tx| {
+async fn delete_batch(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
+    in_maintenance_tx(primary_group, RETENTION_STATEMENT_TIMEOUT, async |tx| {
         let delete = sqlx::query!(
             "DELETE FROM background_jobs \
              WHERE id = ANY (ARRAY( \
@@ -99,7 +99,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
 }
 
 pub(crate) async fn run_sampling(
-    shared: &Shared,
+    primary_group: &WorkerGroup,
     kinds: &[&'static str],
     cancel: CancellationToken,
 ) {
@@ -116,36 +116,36 @@ pub(crate) async fn run_sampling(
     });
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
-            run_kind_sampling(shared, kinds),
-            run_population_sampling(shared),
+            run_kind_sampling(primary_group, kinds),
+            run_population_sampling(primary_group),
         );
     }))
     .await;
 }
 
-async fn run_kind_sampling(shared: &Shared, kinds: &[&str]) -> ! {
+async fn run_kind_sampling(primary_group: &WorkerGroup, kinds: &[&str]) -> ! {
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
         // template:begin outbox:jobs-maintenance-outbox-sampler
         if outbox::is_registered(kinds) {
-            outbox::sample(shared).await;
+            outbox::sample(primary_group).await;
         }
         // template:end outbox:jobs-maintenance-outbox-sampler
-        match sample_once(shared, kinds).await {
+        match sample_once(primary_group, kinds).await {
             Ok(sample) => {
                 publish_sample(&sample);
-                observe_recovery(shared, Operation::Sample);
+                observe_recovery(primary_group, Operation::Sample);
             }
             Err(error) => {
-                observe_failure(shared, Operation::Sample, &error);
+                observe_failure(primary_group, Operation::Sample, &error);
             }
         }
     }
 }
 
-async fn run_population_sampling(shared: &Shared) -> ! {
+async fn run_population_sampling(primary_group: &WorkerGroup) -> ! {
     let mut observers = [Population::ExpiredCompleted, Population::Failed].map(|population| {
         (
             population,
@@ -154,7 +154,9 @@ async fn run_population_sampling(shared: &Shared) -> ! {
     });
     loop {
         for (population, observer) in &mut observers {
-            observer.sample(read_population(shared, *population)).await;
+            observer
+                .sample(read_population(primary_group, *population))
+                .await;
         }
         tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
     }
@@ -176,13 +178,13 @@ impl Population {
 }
 
 async fn read_population(
-    shared: &Shared,
+    primary_group: &WorkerGroup,
     population: Population,
 ) -> Result<PopulationSample, MaintenanceFailure> {
-    let _turn = tokio::time::timeout(POPULATION_TURN_WAIT, shared.statement_turn.lock())
+    let _turn = tokio::time::timeout(POPULATION_TURN_WAIT, primary_group.statement_turn.lock())
         .await
         .map_err(|_| MaintenanceFailure::Permit)?;
-    in_observation_tx(&shared.pool, async |tx| {
+    in_observation_tx(&primary_group.pool, async |tx| {
         Ok(match population {
             Population::Failed => observed(
                 "observe failed jobs population",
@@ -253,8 +255,11 @@ fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
-async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, OperationError> {
-    in_maintenance_tx(shared, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
+async fn sample_once(
+    primary_group: &WorkerGroup,
+    kinds: &[&str],
+) -> Result<Sample, OperationError> {
+    in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
         let rows = observed(
             "sample jobs",
             sqlx::query_as!(

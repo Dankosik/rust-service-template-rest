@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZeroU32;
@@ -19,7 +18,7 @@ use service_config::{JobsOperatorLoadError, LoadOptions, OperatorPostgresConfig}
 use crate::report_failure;
 
 use crate::cli::{OperatorCommand, RecoveryArgs};
-use crate::shutdown::{DEPENDENCY_CLOSE, RUNTIME_SHUTDOWN_TIMEOUT};
+use crate::shutdown::{DEPENDENCY_CLOSE_BUDGET, RUNTIME_SHUTDOWN_TIMEOUT};
 use crate::signals::Signals;
 
 pub(crate) enum Request {
@@ -450,7 +449,7 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
     };
     let result = verify_and_execute(&pool, &mut signals, request).await;
     let cleanup_incomplete =
-        infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != CloseOutcome::Complete;
+        infra_postgres::close(&pool, DEPENDENCY_CLOSE_BUDGET).await != CloseOutcome::Complete;
     Report {
         result,
         cleanup_incomplete,
@@ -474,14 +473,15 @@ async fn verify_and_execute(
         .await
         .map_err(|cause| request.failed_before_start(cause))?
         .map_err(|error| request.refused(Cause::SessionAdmission, startup_detail(error)))?;
-    let invoked = Cell::new(false);
-    let operation = async {
-        invoked.set(true);
+    let mut invoked = false;
+    let outcome = bounded(signals, jobs::OPERATION_TIMEOUT, async {
+        invoked = true;
         request.execute(pool).await
-    };
-    match bounded(signals, jobs::OPERATION_TIMEOUT, operation).await {
+    })
+    .await;
+    match outcome {
         Ok(result) => result.map_err(|error| request.database_error(&error)),
-        Err(cause) if invoked.get() => Err(request.failed_after_start(cause)),
+        Err(cause) if invoked => Err(request.failed_after_start(cause)),
         Err(cause) => Err(request.failed_before_start(cause)),
     }
 }

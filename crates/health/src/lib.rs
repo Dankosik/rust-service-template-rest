@@ -175,54 +175,54 @@ impl State {
             Self::NotEvaluated => None,
             Self::Evaluated(check) => Some(&*check),
         };
-        let was_ready = previous.is_some_and(|check| check.is_ready_at(now, stale_after));
-        let (verdict, event) = match observed {
-            Ok(()) => (
+        let stale_age = previous.and_then(|check| stale_age(check.checked_at, now, stale_after));
+        let is_fresh = stale_age.is_none();
+        let (verdict, event) = match (observed, previous.map(|check| &check.verdict)) {
+            (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => (
                 Verdict::Ready {
                     consecutive_failures: 0,
                 },
-                if was_ready {
-                    RefreshEvent::Unchanged
-                } else {
-                    RefreshEvent::Recovered
-                },
+                RefreshEvent::Unchanged,
             ),
-            Err(reason) => match previous.map(|check| &check.verdict) {
+            (Ok(()), _) => (
+                Verdict::Ready {
+                    consecutive_failures: 0,
+                },
+                RefreshEvent::Recovered,
+            ),
+            (
+                Err(reason),
                 Some(Verdict::Ready {
                     consecutive_failures,
-                }) => {
-                    let consecutive_failures = consecutive_failures.saturating_add(1);
-                    if was_ready && consecutive_failures < failure_threshold.get() {
-                        (
-                            Verdict::Ready {
-                                consecutive_failures,
-                            },
-                            RefreshEvent::AbsorbedFailure {
-                                reason,
-                                consecutive_failures,
-                            },
-                        )
-                    } else {
-                        (
-                            Verdict::NotReady(reason.clone()),
-                            RefreshEvent::Lost(reason),
-                        )
-                    }
+                }),
+            ) => {
+                let consecutive_failures = consecutive_failures.saturating_add(1);
+                if is_fresh && consecutive_failures < failure_threshold.get() {
+                    (
+                        Verdict::Ready {
+                            consecutive_failures,
+                        },
+                        RefreshEvent::AbsorbedFailure {
+                            reason,
+                            consecutive_failures,
+                        },
+                    )
+                } else {
+                    (
+                        Verdict::NotReady(reason.clone()),
+                        RefreshEvent::Lost(reason),
+                    )
                 }
-                Some(Verdict::NotReady(_)) | None => {
-                    (Verdict::NotReady(reason), RefreshEvent::Unchanged)
-                }
-            },
-        };
-        let log = RefreshLog {
-            stale_age: previous.and_then(|check| stale_age(check.checked_at, now, stale_after)),
-            event,
+            }
+            (Err(reason), Some(Verdict::NotReady(_)) | None) => {
+                (Verdict::NotReady(reason), RefreshEvent::Unchanged)
+            }
         };
         *self = Self::Evaluated(Check {
             checked_at: now,
             verdict,
         });
-        Some(log)
+        Some(RefreshLog { stale_age, event })
     }
 
     fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
@@ -242,7 +242,7 @@ impl State {
     }
 
     fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
-        self.fresh_check(now, stale_after)?.verdict.as_result()
+        self.fresh_check(now, stale_after)?.verdict.to_result()
     }
 }
 
@@ -257,7 +257,7 @@ impl Verdict {
         matches!(self, Self::Ready { .. })
     }
 
-    fn as_result(&self) -> Result<(), NotReady> {
+    fn to_result(&self) -> Result<(), NotReady> {
         match self {
             Self::Ready { .. } => Ok(()),
             Self::NotReady(failure) => Err(NotReady::from(failure.clone())),
@@ -269,12 +269,6 @@ impl Verdict {
 struct Check {
     checked_at: Instant,
     verdict: Verdict,
-}
-
-impl Check {
-    fn is_ready_at(&self, now: Instant, stale_after: Duration) -> bool {
-        self.verdict.is_ready() && check_freshness(self.checked_at, now, stale_after).is_ok()
-    }
 }
 
 fn stale_at(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
@@ -527,8 +521,10 @@ impl Readiness {
             .probes
             .iter()
             .map(|probe| check_probe(probe.as_ref(), deadline, budget));
-        let outcomes = join_all(checks).await;
-        let observed = outcomes.into_iter().collect();
+        let observed = join_all(checks)
+            .await
+            .into_iter()
+            .collect::<Result<(), _>>();
         metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         observed
     }
@@ -542,8 +538,8 @@ async fn check_probe(
     let probe_name = probe.name();
     let result = tokio::time::timeout_at(deadline, probe.check()).await;
     let outcome = match result {
-        Ok(outcome) if Instant::now() <= deadline => {
-            outcome.map_err(|error| ProbeFailure::Failed {
+        Ok(probe_result) if Instant::now() <= deadline => {
+            probe_result.map_err(|error| ProbeFailure::Failed {
                 probe: probe_name,
                 error,
             })
@@ -590,7 +586,7 @@ impl ReadinessReader {
 
     pub async fn wait_until_ready_is_not(&mut self, seen: bool) -> Option<bool> {
         loop {
-            let stale_at = {
+            let stale_deadline = {
                 let state = self.rx.borrow_and_update();
                 let ready_check = state.ready_check(Instant::now(), self.stale_after);
                 let ready = ready_check.is_some();
@@ -602,14 +598,15 @@ impl ReadinessReader {
                 }
                 ready_check.and_then(|check| stale_at(check.checked_at, self.stale_after))
             };
-            let changed = self.rx.changed();
-            match stale_at {
-                Some(stale_at) => {
-                    if let Ok(changed) = tokio::time::timeout_at(stale_at, changed).await {
-                        changed.ok()?;
+            match stale_deadline {
+                Some(deadline) => {
+                    if let Ok(recv_result) =
+                        tokio::time::timeout_at(deadline, self.rx.changed()).await
+                    {
+                        recv_result.ok()?;
                     }
                 }
-                None => changed.await.ok()?,
+                None => self.rx.changed().await.ok()?,
             }
         }
     }

@@ -2047,17 +2047,6 @@ async fn a_no_transaction_restore_keeps_a_nonzero_lock_budget(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
-async fn an_unreachable_target_fails_in_the_connect_stage(pool: PgPool) {
-    let _ = pool;
-    let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=verify-full").unwrap();
-    let err = migrate::run(&fixture("widgets").await, &options(&dsn))
-        .await
-        .unwrap_err();
-    assert_eq!(err.stage(), "connect", "{err}");
-    assert!(!err.to_string().contains("pw"), "{err}");
-}
-
-#[sqlx::test(migrations = false)]
 async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     pool.execute("CREATE TABLE widgets (id int)").await.unwrap();

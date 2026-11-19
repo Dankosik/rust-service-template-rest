@@ -14,7 +14,7 @@ use operation_context::{OperationContext, Stopped};
 use secrecy::SecretString;
 
 use crate::error::{Failure, LocalFailure};
-use crate::provider::{UploadChecksum, admit};
+use crate::provider::{UploadChecksum, resolve};
 use crate::{
     ConfigError, ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey,
     ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
@@ -840,10 +840,10 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
         endpoint: stub.endpoint.clone(),
         region: String::new(),
     });
-    let admitted = admit(&options.provider, &options.bucket).unwrap();
+    let resolved = resolve(&options.provider, &options.bucket).unwrap();
     let storage = ObjectStorage::build(
         options,
-        admitted,
+        resolved,
         crate::https_client(),
         aws_sdk_s3::config::SharedCredentialsProvider::new(NoIdentity),
     );
@@ -1566,7 +1566,7 @@ fn tls_snapshot_storage(
         region: String::new(),
     });
     options.operation_timeout = Duration::from_millis(250);
-    let admitted = admit(&options.provider, &options.bucket).unwrap();
+    let resolved = resolve(&options.provider, &options.bucket).unwrap();
     let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
         .with_trust_store(
             aws_smithy_http_client::tls::TrustStore::empty()
@@ -1582,9 +1582,9 @@ fn tls_snapshot_storage(
         .build_with_resolver(FixtureResolver(address.ip()));
     let credentials = options
         .credentials
-        .credentials_provider(&admitted, &client)
+        .credentials_provider(&resolved, &client)
         .unwrap();
-    ObjectStorage::build(options, admitted, client, credentials)
+    ObjectStorage::build(options, resolved, client, credentials)
 }
 
 #[tokio::test]

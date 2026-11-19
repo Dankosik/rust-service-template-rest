@@ -14,7 +14,7 @@ const MAX_BATCH_BYTES: usize = 64 * 1024;
 const BATCH_WINDOW: Duration = Duration::from_millis(2);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(1);
-const DRAINING: u32 = 1 << 31;
+const DRAINING_BIT: u32 = 1 << 31;
 const DROPPED_METRIC: &str = "telemetry_log_records_dropped_total";
 const SINK_ERRORS_METRIC: &str = "telemetry_log_sink_errors_total";
 static TOTALS: Counters = Counters::new();
@@ -98,7 +98,7 @@ bitflags::bitflags! {
     }
 }
 
-const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING == 0);
+const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING_BIT == 0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
@@ -137,21 +137,21 @@ impl Counters {
 
 #[derive(Debug)]
 struct Shared {
-    open: RwLock<Option<crossbeam_channel::Sender<()>>>,
-    drain: AtomicU32,
+    shutdown_gate: RwLock<Option<crossbeam_channel::Sender<()>>>,
+    drain_state: AtomicU32,
     counters: Counters,
 }
 
 impl Shared {
     fn close(&self) {
-        let _ = self.open.write().take();
+        let _ = self.shutdown_gate.write().take();
     }
 
     fn latch_drain_failure(&self, reason: LoggerShutdownReasons) {
         let _ = self
-            .drain
+            .drain_state
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
-                (state & DRAINING != 0).then_some(state | reason.bits())
+                (state & DRAINING_BIT != 0).then_some(state | reason.bits())
             });
     }
 
@@ -162,7 +162,7 @@ impl Shared {
             SinkOperation::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
             SinkOperation::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
             SinkOperation::Worker => {
-                self.drain
+                self.drain_state
                     .fetch_or(LoggerShutdownReasons::WORKER.bits(), Ordering::Relaxed);
             }
         }
@@ -178,10 +178,10 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
-        let open = self.shared.open.read();
-        match open.is_some().then(|| self.sender.try_send(record)) {
+        let gate = self.shared.shutdown_gate.read();
+        match gate.is_some().then(|| self.sender.try_send(record)) {
             Some(Ok(())) => {
-                drop(open);
+                drop(gate);
                 if self.sender.len() >= DEEP_QUEUE_RECORDS {
                     self.worker_thread.unpark();
                 }
@@ -207,13 +207,15 @@ impl Output {
 #[must_use = "retain the logger guard and explicitly shut it down before process exit"]
 pub struct LoggerGuard {
     shared: Arc<Shared>,
-    completion: crossbeam_channel::Receiver<()>,
+    completion_rx: crossbeam_channel::Receiver<()>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl LoggerGuard {
     pub fn begin_shutdown(&self) {
-        self.shared.drain.fetch_or(DRAINING, Ordering::Relaxed);
+        self.shared
+            .drain_state
+            .fetch_or(DRAINING_BIT, Ordering::Relaxed);
     }
 
     #[must_use]
@@ -229,8 +231,9 @@ impl LoggerGuard {
         if Instant::now() >= deadline {
             reasons |= LoggerShutdownReasons::DEADLINE;
         }
-        reasons |=
-            LoggerShutdownReasons::from_bits_truncate(self.shared.drain.load(Ordering::Relaxed));
+        reasons |= LoggerShutdownReasons::from_bits_truncate(
+            self.shared.drain_state.load(Ordering::Relaxed),
+        );
         let snapshot = self.snapshot();
         if reasons.is_empty() {
             LoggerShutdown::Completed(snapshot)
@@ -244,18 +247,17 @@ impl LoggerGuard {
         if remaining.is_zero() {
             return LoggerShutdownReasons::DEADLINE;
         }
-        let reasons = match self.completion.recv_timeout(remaining) {
+        let reasons = match self.completion_rx.recv_timeout(remaining) {
             Ok(()) => LoggerShutdownReasons::empty(),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 return LoggerShutdownReasons::DEADLINE;
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => LoggerShutdownReasons::WORKER,
         };
-        while self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
+        let Some(worker) = self.worker.take() else {
+            return reasons;
+        };
+        while !worker.is_finished() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return reasons | LoggerShutdownReasons::DEADLINE;
@@ -266,9 +268,7 @@ impl LoggerGuard {
             )]
             thread::sleep(remaining.min(JOIN_POLL));
         }
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
+        if worker.join().is_err() {
             self.shared.record_sink_error(SinkOperation::Worker);
             return reasons | LoggerShutdownReasons::WORKER;
         }
@@ -286,12 +286,12 @@ impl Drop for LoggerGuard {
 pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output, LoggerGuard)> {
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(0);
     let shared = Arc::new(Shared {
-        open: RwLock::new(Some(shutdown_tx)),
-        drain: AtomicU32::new(0),
+        shutdown_gate: RwLock::new(Some(shutdown_tx)),
+        drain_state: AtomicU32::new(0),
         counters: Counters::new(),
     });
-    let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
-    let (complete, completion) = crossbeam_channel::bounded(1);
+    let (records_tx, records_rx) = crossbeam_channel::bounded(QUEUE_RECORDS);
+    let (completion_tx, completion_rx) = crossbeam_channel::bounded(1);
     let worker_shared = Arc::clone(&shared);
     let worker = thread::Builder::new()
         .name("telemetry-writer".into())
@@ -299,23 +299,23 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
             WRITER_CONTEXT.set(true);
             let shared: &Shared = &worker_shared;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                write_records(writer, records, &shutdown_rx, shared);
+                write_records(writer, records_rx, &shutdown_rx, shared);
             }));
             if result.is_err() {
                 worker_shared.record_sink_error(SinkOperation::Worker);
             }
             drop(result);
-            let _ = complete.try_send(());
+            let _ = completion_tx.try_send(());
         })?;
     Ok((
         Output {
-            sender,
+            sender: records_tx,
             shared: Arc::clone(&shared),
             worker_thread: worker.thread().clone(),
         },
         LoggerGuard {
             shared,
-            completion,
+            completion_rx,
             worker: Some(worker),
         },
     ))
@@ -1001,8 +1001,8 @@ mod tests {
         let output = Output {
             sender,
             shared: Arc::new(Shared {
-                open: RwLock::new(Some(open)),
-                drain: AtomicU32::new(0),
+                shutdown_gate: RwLock::new(Some(open)),
+                drain_state: AtomicU32::new(0),
                 counters: Counters::new(),
             }),
             worker_thread: waiter.thread().clone(),
@@ -1056,8 +1056,8 @@ mod tests {
         ];
         for (after_torn_line, steps, expected) in cases {
             let shared = Shared {
-                open: RwLock::new(None),
-                drain: AtomicU32::new(0),
+                shutdown_gate: RwLock::new(None),
+                drain_state: AtomicU32::new(0),
                 counters: Counters::new(),
             };
             let mut sink = ScriptedSink {

@@ -6,18 +6,18 @@ use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 use super::BootstrapError;
 
 #[derive(Debug)]
-pub(super) struct MountedStore {
+pub(super) struct PreparedStore {
     pub(super) store: Store,
     operations: std::num::NonZeroUsize,
     retention: std::time::Duration,
 }
 
 pub(super) fn prepare(
-    mounted: usize,
+    operation_count: usize,
     config: &Config,
     postgres_pool: Option<&PgPool>,
-) -> Result<Option<MountedStore>, BootstrapError> {
-    let Some(operations) = std::num::NonZeroUsize::new(mounted) else {
+) -> Result<Option<PreparedStore>, BootstrapError> {
+    let Some(operations) = std::num::NonZeroUsize::new(operation_count) else {
         return Ok(None);
     };
     let retention = config
@@ -27,14 +27,14 @@ pub(super) fn prepare(
     let store = Store::new(pool.clone(), retention).map_err(|error| {
         ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
     })?;
-    Ok(Some(MountedStore {
+    Ok(Some(PreparedStore {
         store,
         operations,
         retention,
     }))
 }
 
-impl MountedStore {
+impl PreparedStore {
     pub(super) async fn activate(self, background: &mut Background) -> Result<(), BootstrapError> {
         self.store.check_startup().await?;
         background.spawn_with_token("idempotency_cleanup", |stop| self.store.run_cleanup(stop));
