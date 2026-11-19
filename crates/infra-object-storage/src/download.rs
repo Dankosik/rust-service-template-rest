@@ -1,4 +1,3 @@
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -13,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::call::{CallContext, CallStop};
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
+use crate::put_body::ByteProgress;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
 #[derive(derive_more::Debug)]
@@ -33,29 +33,13 @@ enum State {
     Failed(ObjectStorageError),
 }
 
-enum BodyProgress {
-    Reading(NonZeroU64),
-    AwaitingEof(Option<Bytes>),
-}
-
 struct Resources {
     waker: Option<Waker>,
     context: CallContext,
     body: ByteStream,
-    progress: BodyProgress,
+    progress: ByteProgress,
     guard: OperationGuard,
     _permit: OwnedSemaphorePermit,
-}
-
-impl Resources {
-    fn unread_bytes(&self) -> u64 {
-        match &self.progress {
-            BodyProgress::Reading(remaining) => remaining.get(),
-            BodyProgress::AwaitingEof(final_chunk) => {
-                final_chunk.as_ref().map_or(0, |chunk| chunk.len() as u64)
-            }
-        }
-    }
 }
 
 enum Outcome {
@@ -101,7 +85,7 @@ impl Resources {
         if let Some(stopped) = self.context.stopped() {
             return Err(Failure::stopped(stopped));
         }
-        let Ok(unread) = usize::try_from(self.unread_bytes()) else {
+        let Ok(unread) = usize::try_from(self.progress.remaining()) else {
             return Err(LocalFailure::TooLarge.into());
         };
         if unread > limit.min(isize::MAX as usize) {
@@ -121,22 +105,22 @@ impl State {
         outcome: Outcome,
         discarded: Option<Result<Bytes, ByteStreamError>>,
     ) -> Option<Completion> {
-        if !matches!(self, State::Open(_)) {
-            return None;
-        }
         let terminal = match &outcome {
             Outcome::Success => State::Succeeded,
             Outcome::Failure(failure) => State::Failed(failure.error),
             Outcome::Cancelled => State::Failed(ObjectStorageError::Unavailable),
         };
-        let State::Open(resources) = std::mem::replace(self, terminal) else {
-            return None;
-        };
-        Some(Completion {
-            resources,
-            outcome,
-            discarded,
-        })
+        match std::mem::replace(self, terminal) {
+            State::Open(resources) => Some(Completion {
+                resources,
+                outcome,
+                discarded,
+            }),
+            other => {
+                *self = other;
+                None
+            }
+        }
     }
 
     fn fail_poll(
@@ -152,7 +136,7 @@ impl State {
 
     fn unread_bytes(&self) -> Option<u64> {
         match self {
-            State::Open(resources) => Some(resources.unread_bytes()),
+            State::Open(resources) => Some(resources.progress.remaining()),
             State::Succeeded => Some(0),
             State::Failed(_) => None,
         }
@@ -205,35 +189,20 @@ impl State {
             Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => {
                 (Poll::Ready(Ok(ReadStep::Empty(chunk))), None)
             }
-            Poll::Ready(Some(Ok(chunk))) => {
-                let BodyProgress::Reading(remaining) = &resources.progress else {
-                    return self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk)));
-                };
-                let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
-                    return self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk)));
-                };
-                if let Some(remaining) = NonZeroU64::new(next) {
-                    resources.progress = BodyProgress::Reading(remaining);
-                    (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
-                } else {
-                    resources.progress = BodyProgress::AwaitingEof(Some(chunk));
-                    (Poll::Ready(Ok(ReadStep::Buffered)), None)
-                }
-            }
+            Poll::Ready(Some(Ok(chunk))) => match resources.progress.accept(chunk) {
+                Ok(Some(chunk)) => (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None),
+                Ok(None) => (Poll::Ready(Ok(ReadStep::Buffered)), None),
+                Err(chunk) => self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk))),
+            },
             Poll::Ready(Some(Err(error))) => {
                 self.fail_poll(error::from_download_body(&error), Some(Err(error)))
             }
-            Poll::Ready(None) => match &mut resources.progress {
-                BodyProgress::AwaitingEof(final_chunk) => {
-                    let chunk = final_chunk.take();
-                    (
-                        Poll::Ready(Ok(ReadStep::Chunk(chunk))),
-                        self.close(Outcome::Success, None),
-                    )
-                }
-                BodyProgress::Reading(_) => {
-                    self.fail_poll(LocalFailure::ContentLength.into(), None)
-                }
+            Poll::Ready(None) => match resources.progress.finish() {
+                Ok(chunk) => (
+                    Poll::Ready(Ok(ReadStep::Chunk(chunk))),
+                    self.close(Outcome::Success, None),
+                ),
+                Err(()) => self.fail_poll(LocalFailure::ContentLength.into(), None),
             },
         }
     }
@@ -273,13 +242,11 @@ impl Download {
         permit: OwnedSemaphorePermit,
         context: CallContext,
     ) -> Self {
-        let progress = NonZeroU64::new(metadata.size)
-            .map_or(BodyProgress::AwaitingEof(None), BodyProgress::Reading);
         let shared = Arc::new(Mutex::new(State::Open(Resources {
             waker: None,
             context: context.clone(),
             body,
-            progress,
+            progress: ByteProgress::new(metadata.size),
             guard,
             _permit: permit,
         })));

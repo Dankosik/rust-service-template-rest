@@ -361,12 +361,12 @@ impl Link {
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,
     {
-        let context = parent.child(self.command_timeout);
-        check_not_stopped(&context, parent)?;
+        let budget = CommandBudget::new(parent, self.command_timeout);
+        budget.check_not_stopped()?;
         let _slot = self.claim_slot()?;
-        let (generation, reservation) = self.reserve_generation(&context, parent).await?;
+        let (generation, reservation) = self.reserve_generation(&budget).await?;
         let query = build_query(generation.connection.clone());
-        check_before_dispatch(&generation, &context, parent)?;
+        budget.check_before_dispatch(&generation)?;
         let mut exchange = Exchange::new(
             &generation,
             reservation,
@@ -376,49 +376,44 @@ impl Link {
         let reply = tokio::select! {
             biased;
             reply = &mut exchange => reply,
-            _ = context.wait_stopped() => {
-                return Err(CommandError::OutcomeUnknown(classify_stop(parent)));
+            () = budget.wait_stopped() => {
+                return Err(CommandError::OutcomeUnknown(budget.classify_stop()));
             }
             () = generation.retired.cancelled() => {
                 return Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io)));
             }
         };
         let value = reply.map_err(|error| {
-            CommandError::from_reply(
-                &error,
-                operation,
-                context.stopped().map(|_| classify_stop(parent)),
-            )
+            CommandError::from_reply(&error, operation, budget.stopped_failure())
         })?;
         if matches!(operation, Operation::Get) {
-            check_not_stopped(&context, parent)?;
+            budget.check_not_stopped()?;
         }
         Ok(value)
     }
 
     async fn reserve_generation(
         &self,
-        context: &OperationContext,
-        parent: &OperationContext,
+        budget: &CommandBudget<'_>,
     ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), CommandError> {
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
-            _ = context.wait_stopped() => {
-                return Err(CommandError::NotApplied(classify_stop(parent)));
+            () = budget.wait_stopped() => {
+                return Err(CommandError::NotApplied(budget.classify_stop()));
             }
         };
-        check_not_stopped(context, parent)?;
+        budget.check_not_stopped()?;
         let generation = generation?;
         let reservation = tokio::select! {
             biased;
             result = generation.reserve() => result?,
-            _ = context.wait_stopped() => {
-                return Err(CommandError::NotApplied(classify_stop(parent)));
+            () = budget.wait_stopped() => {
+                return Err(CommandError::NotApplied(budget.classify_stop()));
             }
             () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
-        check_before_dispatch(&generation, context, parent)?;
+        budget.check_before_dispatch(&generation)?;
         Ok((generation, reservation))
     }
 
@@ -434,32 +429,47 @@ impl Link {
     }
 }
 
-fn classify_stop(parent: &OperationContext) -> CommandFailure {
-    parent.stopped().map_or(
-        CommandFailure::Failed(ErrorType::Timeout),
-        CommandFailure::Stopped,
-    )
+struct CommandBudget<'a> {
+    context: OperationContext,
+    parent: &'a OperationContext,
 }
 
-fn check_not_stopped(
-    context: &OperationContext,
-    parent: &OperationContext,
-) -> Result<(), CommandError> {
-    context
-        .check()
-        .map_err(|_| CommandError::NotApplied(classify_stop(parent)))
-}
-
-fn check_before_dispatch(
-    generation: &Generation,
-    context: &OperationContext,
-    parent: &OperationContext,
-) -> Result<(), CommandError> {
-    check_not_stopped(context, parent)?;
-    if generation.retired.is_cancelled() {
-        return Err(ErrorType::Io.into());
+impl<'a> CommandBudget<'a> {
+    fn new(parent: &'a OperationContext, command_timeout: Duration) -> Self {
+        Self {
+            context: parent.child(command_timeout),
+            parent,
+        }
     }
-    Ok(())
+
+    fn classify_stop(&self) -> CommandFailure {
+        self.parent.stopped().map_or(
+            CommandFailure::Failed(ErrorType::Timeout),
+            CommandFailure::Stopped,
+        )
+    }
+
+    fn stopped_failure(&self) -> Option<CommandFailure> {
+        self.context.stopped().map(|_| self.classify_stop())
+    }
+
+    fn check_not_stopped(&self) -> Result<(), CommandError> {
+        self.context
+            .check()
+            .map_err(|_| CommandError::NotApplied(self.classify_stop()))
+    }
+
+    fn check_before_dispatch(&self, generation: &Generation) -> Result<(), CommandError> {
+        self.check_not_stopped()?;
+        if generation.retired.is_cancelled() {
+            return Err(ErrorType::Io.into());
+        }
+        Ok(())
+    }
+
+    async fn wait_stopped(&self) {
+        let _ = self.context.wait_stopped().await;
+    }
 }
 
 impl Drop for Link {

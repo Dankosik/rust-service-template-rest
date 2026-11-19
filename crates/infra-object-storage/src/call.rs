@@ -68,12 +68,7 @@ pub(crate) async fn within_mutation<T>(
     context: &CallContext,
     future: impl std::future::Future<Output = T>,
 ) -> Result<(T, Option<CallStop>), Interrupted> {
-    let mut future = std::pin::pin!(future);
-    within(context, async {
-        let reply = future.as_mut().await;
-        (reply, context.stopped())
-    })
-    .await
+    within(context, async { (future.await, context.stopped()) }).await
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +85,7 @@ pub(crate) enum CallStop {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallContext {
+    deadline: Deadline,
     context: OperationContext,
     uses_parent_deadline: bool,
 }
@@ -102,13 +98,14 @@ impl CallContext {
             _ => (Deadline::new(now, timeout), false),
         };
         Self {
+            deadline,
             context: OperationContext::new(Some(deadline), parent.cancellation().child_token()),
             uses_parent_deadline,
         }
     }
 
-    pub(crate) fn remaining(&self) -> Option<Duration> {
-        self.context.remaining()
+    pub(crate) fn remaining(&self) -> Duration {
+        self.deadline.remaining()
     }
 
     pub(crate) fn stopped(&self) -> Option<CallStop> {

@@ -67,13 +67,13 @@ pub(crate) enum Target {
 }
 
 #[derive(Debug)]
-pub(crate) struct Admitted {
+pub(crate) struct ResolvedProvider {
     pub(crate) target: Target,
     pub(crate) region: String,
     pub(crate) checksum: UploadChecksum,
 }
 
-impl Admitted {
+impl ResolvedProvider {
     fn at_endpoint(
         url: String,
         region: String,
@@ -88,7 +88,7 @@ impl Admitted {
     }
 }
 
-pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, ConfigError> {
+pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvider, ConfigError> {
     if !valid_bucket(bucket) {
         return Err(ConfigError::Bucket);
     }
@@ -105,7 +105,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             {
                 return Err(ConfigError::ExpectedBucketOwner);
             }
-            Ok(Admitted {
+            Ok(ResolvedProvider {
                 target: Target::AmazonS3 {
                     expected_bucket_owner: expected_bucket_owner.clone(),
                 },
@@ -118,7 +118,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
-            Ok(Admitted::at_endpoint(
+            Ok(ResolvedProvider::at_endpoint(
                 origin_without_path(&origin),
                 "auto".to_owned(),
                 false,
@@ -130,7 +130,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             if origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
-            Ok(Admitted::at_endpoint(
+            Ok(ResolvedProvider::at_endpoint(
                 origin_without_path(&origin),
                 signing_region(region, Some("auto"))?,
                 false,
@@ -141,13 +141,13 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             endpoint,
             region,
             path_style,
-        } => Ok(Admitted::at_endpoint(
+        } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?),
             signing_region(region, Some("us-east-1"))?,
             *path_style,
             UploadChecksum::Never,
         )),
-        Provider::Local { endpoint, region } => Ok(Admitted::at_endpoint(
+        Provider::Local { endpoint, region } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?),
             signing_region(region, Some("us-east-1"))?,
             true,
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn amazon_requires_a_region_and_an_owner() {
-        let admitted = admit(
+        let admitted = resolve(
             &Provider::AmazonS3 {
                 region: "eu-central-1".to_owned(),
                 expected_bucket_owner: "123456789012".to_owned(),
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(admitted.checksum, UploadChecksum::Always);
 
         for region in ["us-gov-west-1", "cn-north-1", "eusc-de-east-1"] {
-            let admitted = admit(
+            let admitted = resolve(
                 &Provider::AmazonS3 {
                     region: region.to_owned(),
                     expected_bucket_owner: "123456789012".to_owned(),
@@ -266,7 +266,7 @@ mod tests {
             assert_eq!(admitted.unwrap().region, region);
         }
         for region in ["", "EU-central-1", "eu central 1", "eu-central-1/"] {
-            let refused = admit(
+            let refused = resolve(
                 &Provider::AmazonS3 {
                     region: region.to_owned(),
                     expected_bucket_owner: "123456789012".to_owned(),
@@ -276,7 +276,7 @@ mod tests {
             assert_eq!(refused.unwrap_err(), ConfigError::Region, "{region:?}");
         }
         for owner in ["", "12345678901", "1234567890123", "12345678901a"] {
-            let refused = admit(
+            let refused = resolve(
                 &Provider::AmazonS3 {
                     region: "us-east-1".to_owned(),
                     expected_bucket_owner: owner.to_owned(),
@@ -298,7 +298,7 @@ mod tests {
             "https://0123456789abcdef0123456789abcdef.eu.r2.cloudflarestorage.com/",
             "https://0123456789abcdef0123456789abcdef.fedramp.r2.cloudflarestorage.com",
         ] {
-            let admitted = admit(
+            let admitted = resolve(
                 &Provider::CloudflareR2 {
                     endpoint: endpoint.to_owned(),
                 },
@@ -325,7 +325,7 @@ mod tests {
             "https://0123456789abcdef0123456789abcdef.r2.cloud\tflarestorage.com",
             "",
         ] {
-            let refused = admit(
+            let refused = resolve(
                 &Provider::CloudflareR2 {
                     endpoint: endpoint.to_owned(),
                 },
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn railway_takes_its_bucket_endpoint_and_defaults_the_region() {
-        let admitted = admit(
+        let admitted = resolve(
             &Provider::Railway {
                 endpoint: "https://t3.storageapi.dev".to_owned(),
                 region: String::new(),
@@ -359,7 +359,7 @@ mod tests {
             "https://t3.storageapi.dev/x",
             "t3.storageapi.dev",
         ] {
-            let refused = admit(
+            let refused = resolve(
                 &Provider::Railway {
                     endpoint: endpoint.to_owned(),
                     region: "auto".to_owned(),
@@ -368,7 +368,7 @@ mod tests {
             );
             assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
         }
-        let refused = admit(
+        let refused = resolve(
             &Provider::Railway {
                 endpoint: "https://t3.storageapi.dev".to_owned(),
                 region: "AMS 1".to_owned(),
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn local_allows_plaintext_and_path_style() {
-        let admitted = admit(
+        let admitted = resolve(
             &Provider::Local {
                 endpoint: "http://127.0.0.1:7070".to_owned(),
                 region: String::new(),
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn a_generic_provider_takes_an_https_origin_and_the_common_subset() {
-        let admitted = admit(
+        let admitted = resolve(
             &Provider::S3Compatible {
                 endpoint: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
                 region: "eu-central-003".to_owned(),
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(admitted.region, "eu-central-003");
         assert_eq!(admitted.checksum, UploadChecksum::Never);
 
-        let admitted = admit(
+        let admitted = resolve(
             &Provider::S3Compatible {
                 endpoint: "https://ceph.internal.example:8443".to_owned(),
                 region: String::new(),
@@ -443,7 +443,7 @@ mod tests {
             "https://user@ceph.internal.example",
             "",
         ] {
-            let refused = admit(
+            let refused = resolve(
                 &Provider::S3Compatible {
                     endpoint: endpoint.to_owned(),
                     region: String::new(),
@@ -467,7 +467,7 @@ mod tests {
             "document-processing-results",
             &"a".repeat(63),
         ] {
-            admit(&provider, bucket).unwrap_or_else(|_| panic!("{bucket:?}"));
+            resolve(&provider, bucket).unwrap_or_else(|_| panic!("{bucket:?}"));
         }
         for bucket in [
             "ab",
@@ -478,7 +478,7 @@ mod tests {
             "trailing-",
         ] {
             assert_eq!(
-                admit(&provider, bucket).unwrap_err(),
+                resolve(&provider, bucket).unwrap_err(),
                 ConfigError::Bucket,
                 "{bucket:?}"
             );

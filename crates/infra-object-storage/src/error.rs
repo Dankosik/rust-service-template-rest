@@ -104,7 +104,7 @@ pub(crate) struct Failure<E = ObjectStorageError> {
 }
 
 impl<E> Failure<E> {
-    const fn with_label(error: E, error_type: &'static str) -> Self {
+    const fn with_error_type(error: E, error_type: &'static str) -> Self {
         Self {
             error,
             error_type: CompactString::const_new(error_type),
@@ -147,7 +147,7 @@ impl Failure<MutationError> {
     pub(crate) const BUSY: Self = Self::not_applied(MutationFailure::Busy, "busy");
 
     const fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
-        Self::with_label(MutationError::NotApplied(reason), error_type)
+        Self::with_error_type(MutationError::NotApplied(reason), error_type)
     }
 
     pub(crate) fn mutation_stopped(
@@ -192,7 +192,7 @@ pub(crate) enum LocalFailure {
 impl From<LocalFailure> for Failure {
     fn from(cause: LocalFailure) -> Self {
         use ObjectStorageError as E;
-        let (error, label) = match cause {
+        let (error, error_type) = match cause {
             LocalFailure::Busy => (E::Busy, "busy"),
             LocalFailure::TooLarge => (E::TooLarge, "too_large"),
             LocalFailure::DownloadAllocation => (E::Unavailable, "download_allocation"),
@@ -204,7 +204,7 @@ impl From<LocalFailure> for Failure {
             LocalFailure::PresignExpiry => (E::Rejected, "expires_in"),
             LocalFailure::PresignedHeaders => (E::Rejected, "presigned_headers"),
         };
-        Self::with_label(error, label)
+        Self::with_error_type(error, error_type)
     }
 }
 
@@ -216,11 +216,11 @@ pub(crate) enum UploadFailure {
 
 impl From<UploadFailure> for Failure<MutationError> {
     fn from(cause: UploadFailure) -> Self {
-        let label = match cause {
+        let error_type = match cause {
             UploadFailure::Body => "body",
             UploadFailure::Length => "body_length",
         };
-        Self::not_applied(MutationFailure::Rejected, label)
+        Self::not_applied(MutationFailure::Rejected, error_type)
     }
 }
 
@@ -317,21 +317,21 @@ where
             };
             (FailureKind::Status { status, code }, error_type)
         }
-        SdkError::DispatchFailure(_)
+        SdkError::TimeoutError(_) => (FailureKind::Timeout, CompactString::const_new("timeout")),
+        SdkError::DispatchFailure(failure) => {
             if error_chain::contains::<aws_credential_types::provider::error::CredentialsError>(
                 error,
-            ) =>
-        {
-            (
-                FailureKind::NoCredentials,
-                CompactString::const_new("credentials"),
-            )
+            ) {
+                (
+                    FailureKind::NoCredentials,
+                    CompactString::const_new("credentials"),
+                )
+            } else if failure.is_timeout() {
+                (FailureKind::Timeout, CompactString::const_new("timeout"))
+            } else {
+                (FailureKind::Lost, CompactString::const_new("dispatch"))
+            }
         }
-        SdkError::TimeoutError(_) => (FailureKind::Timeout, CompactString::const_new("timeout")),
-        SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Timeout, CompactString::const_new("timeout"))
-        }
-        SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
         _ => (FailureKind::Lost, CompactString::const_new("response")),
     }
 }

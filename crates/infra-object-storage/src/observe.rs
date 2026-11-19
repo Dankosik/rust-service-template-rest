@@ -235,7 +235,12 @@ impl OperationGuard {
                 Outcome::NotFound | Outcome::AlreadyExists | Outcome::TooLarge | Outcome::Busy => {
                     emit_failure!(tracing::Level::DEBUG);
                 }
-                _ => emit_failure!(tracing::Level::WARN),
+                Outcome::Unavailable
+                | Outcome::Rejected
+                | Outcome::Unknown
+                | Outcome::Integrity
+                | Outcome::Ok
+                | Outcome::Cancelled => emit_failure!(tracing::Level::WARN),
             }
         });
     }
