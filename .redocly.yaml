@@ -1,4 +1,4 @@
-# Redocly CLI ruleset for api/openapi/service.yaml (`make openapi-lint`).
+# Redocly CLI ruleset for api/openapi/service.yaml (`just openapi-lint`).
 # The document is generated from the Rust contract; these rules catch what
 # the generator does not guarantee: dangling references, duplicate or unsafe
 # operationIds, examples that contradict their schema, undefined path

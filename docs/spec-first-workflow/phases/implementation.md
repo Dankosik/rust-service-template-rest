@@ -24,7 +24,7 @@ the starting integration HEAD as Base. Keep the writable ledger in the integrati
 is untracked in the source checkout, bring its current contents into this
 worktree before updating it. Keep it out of candidate commits and provide
 its actual location to isolated Leads. Verify
-the plan, packets, upstream readiness and frontier with `make ledger-check TASK=<task>`.
+the plan, packets, upstream readiness and frontier by inspecting `tasks.md` and its packets directly.
 Resolve a missing control or invalid input under [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery).
 
 Use local commits unless the user forbids them. In that case apply
@@ -104,7 +104,7 @@ writable scope. Apply the adapter's capability escalation for a missed invariant
 
 Record the terminal receipt. On `Accepted`, mark the ledger done and apply
 [Cleanup](../shared/cleanup.md). If cleanup changes tracked documentation,
-run `make docs-check` and `make typos` and commit the scoped change in commit
+run `just docs-check` and `just typos` and commit the scoped change in commit
 mode. Report impact, material limitations, pending external checks and
 follow-ups. On terminal `Blocked`, preserve useful work and record
 `status: blocked` and `Blocked stop:` with the exact missing input or

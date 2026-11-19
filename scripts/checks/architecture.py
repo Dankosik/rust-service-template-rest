@@ -6,26 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from scripts import lib
+
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]')
-
-
-def load_metadata(root: Path) -> dict[str, Any]:
-    result = subprocess.run(
-        ["cargo", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise ValueError(f"cargo metadata failed: {result.stderr.strip()}")
-    return json.loads(result.stdout)
 
 
 def check_path_attributes(manifests: Sequence[str], root: Path) -> list[str]:
@@ -102,7 +90,7 @@ def check(metadata: Mapping[str, Any], policy: Mapping[str, Any], root: Path) ->
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--repo", type=Path, default=lib.ROOT)
     parser.add_argument("--policy", type=Path, default=None)
     args = parser.parse_args(argv)
     root = args.repo.resolve()
@@ -111,8 +99,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy_path = root / policy_path
     try:
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
-        issues = check(load_metadata(root), policy, root)
-    except (OSError, ValueError, KeyError) as error:
+        issues = check(lib.cargo_metadata(root, no_deps=True, offline=True), policy, root)
+    except (OSError, ValueError, KeyError, lib.ScriptError) as error:
         print(f"architecture-check: {error}", file=sys.stderr)
         return 1
     if issues:

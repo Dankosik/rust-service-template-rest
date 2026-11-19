@@ -1,0 +1,16 @@
+[
+  {
+    "subject": "events.rust",
+    "headers": {
+      "Created-At": "2026-09-26T12:34:56.123456789Z",
+      "Event-Schema": "v1",
+      "Event-Type": "example.created",
+      "Message-Id": "rust-go-compat-1",
+      "Nats-Msg-Id": "rust-go-compat-1"
+    },
+    "body_base64": "eyJhbW91bnQiOjEuMCwiZXNjYXBlZCI6IlxcdTAwNDEiLCJpdGVtcyI6W3RydWUsZmFsc2VdfQ==",
+    "stream": "RUST_EXPORTS",
+    "stream_sequence": 1,
+    "stored_at": "2026-09-26T12:37:00.000000003Z"
+  }
+]

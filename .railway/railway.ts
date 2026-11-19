@@ -21,7 +21,7 @@ export default defineRailway((ctx) => {
       dockerfilePath: "build/docker/Dockerfile",
       watchPatterns: [
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        "LICENSE", "deny.toml", "tools/versions.env",
+        "LICENSE", "deny.toml",
         "crates/**", "migrations/**", ".sqlx/**", "vendor/**",
         "test/Cargo.toml", "test/src/**", "test/tests/**", "test/fixtures/**",
         "env/config/**", "build/docker/**", ".dockerignore",

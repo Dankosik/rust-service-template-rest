@@ -275,7 +275,7 @@ rcgen = { version = "0.14.10", default-features = false }
 tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures
 
-# `make lint` promotes warnings to errors; levels here default to `warn` so
+# `just lint` promotes warnings to errors; levels here default to `warn` so
 # local builds stay usable while a fix is in progress, except unconditional
 # defects (`non_kebab_case_bins`, `non_kebab_case_packages`,
 # `redundant_homepage`, `non_ascii_idents`, `unsafe_code`,

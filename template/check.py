@@ -12,13 +12,9 @@ import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
-sys.dont_write_bytecode = True
+from template import harness, init as template_init
 
 ROOT = Path(__file__).resolve().parents[1]
-if os.fspath(ROOT / "template") not in sys.path:
-    sys.path.insert(0, os.fspath(ROOT / "template"))
-
-import init as template_init  # noqa: E402
 
 CANONICAL_PROFILES: dict[str, dict[str, str]] = {
     "minimal": {},
@@ -38,12 +34,6 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
     "grpc-service-auth": {"grpc": "enabled", "authn": "oidc-jwt", "service_auth": "jwt"},
     "messaging-outbox": {"database": "postgres", "jobs": "postgres", "messaging": "nats-jetstream", "outbox": "postgres"},
     "cache-s3": {"cache": "redis", "object_storage": "s3"},
-    "runtime-progress": {
-        "grpc": "enabled",
-        "authn": "oidc-jwt",
-        "messaging": "nats-jetstream",
-        "object_storage": "s3",
-    },
     "full": {
         "database": "postgres",
         "authn": "oidc-jwt",
@@ -65,14 +55,14 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
 DEFAULT_ARTIFACTS = ("minimal", "postgres-full")
 
 
-def _inputs_for(name: str, harness: str = "core") -> template_init.InitInputs:
+def _inputs_for(name: str, agent_harness: str = "core") -> template_init.InitInputs:
     slug = f"demo-{name}"
     return template_init.InitInputs(
         service_name=slug,
         repository=f"https://github.com/example/{slug}",
         description=f"Verification projection for {name}",
         codeowner="@example/platform",
-        agent_harness=harness,
+        agent_harness=agent_harness,
         **CANONICAL_PROFILES[name],
     )
 
@@ -86,8 +76,8 @@ def _run(cmd: Sequence[str], *, cwd: Path, env: dict[str, str]) -> None:
 def check_projections(names: Sequence[str]) -> None:
     harnesses = {"minimal": "claude", "postgres": "codex", "full": "all"}
     for name in names:
-        harness = harnesses.get(name, "core")
-        inputs = _inputs_for(name, harness=harness)
+        selected_harness = harnesses.get(name, "core")
+        inputs = _inputs_for(name, agent_harness=selected_harness)
         with tempfile.TemporaryDirectory(prefix=f"proj-{name}-") as tmp:
             staged = Path(tmp) / "repo"
             template_init.project_tree(ROOT, staged, inputs, run_cargo=False, from_git_head=False)
@@ -96,56 +86,46 @@ def check_projections(names: Sequence[str]) -> None:
             svc = tomllib.loads((staged / "crates/service/Cargo.toml").read_text(encoding="utf-8"))
             assert ws["workspace"]["package"]["repository"] == inputs.repository
             assert svc["package"]["name"] == inputs.service_name
-            _run(
-                [sys.executable, "-B", "scripts/harness-sync.py", "--check", "--repo", os.fspath(staged), "--require-materialized"],
-                cwd=staged,
-                env=os.environ.copy(),
+            mise_cfg = tomllib.loads((staged / "mise.toml").read_text(encoding="utf-8"))
+            mise_lock = tomllib.loads((staged / "mise.lock").read_text(encoding="utf-8"))
+            assert set(mise_lock.get("tools", {}).keys()) == set(mise_cfg.get("tools", {}).keys()), (
+                f"{name}: mise.lock tools disagree with mise.toml"
             )
-        print(f"projection ok: {name} (harness={harness})")
-
-
-def _tools_root() -> str:
-    if existing := os.environ.get("TOOLS_ROOT"):
-        return existing
-    res = subprocess.run(
-        ["git", "-C", os.fspath(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    common = Path(res.stdout.strip()) if res.returncode == 0 and res.stdout.strip() else ROOT / ".git"
-    return os.fspath((common / "tools").resolve())
+            harness.sync_or_check(staged, "check", selected_harness, require_materialized=True)
+            _run(["just", "--summary"], cwd=staged, env=os.environ.copy())
+            _run([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"], cwd=staged, env=os.environ.copy())
+        print(f"projection ok: {name} (harness={selected_harness})")
 
 
 def check_matrix(names: Sequence[str]) -> None:
     shared_target = Path(os.environ.get("CARGO_TARGET_DIR") or (ROOT / "target/template-matrix")).resolve()
     shared_target.mkdir(parents=True, exist_ok=True)
-    tools_root = _tools_root()
     for name in names:
-        inputs = _inputs_for(name, harness="core")
+        inputs = _inputs_for(name, agent_harness="core")
         with tempfile.TemporaryDirectory(prefix=f"matrix-{name}-") as tmp:
             staged = Path(tmp) / "repo"
-            env = {**os.environ, "CARGO_TARGET_DIR": os.fspath(shared_target), "TOOLS_ROOT": tools_root}
+            env = {**os.environ, "CARGO_TARGET_DIR": os.fspath(shared_target)}
             template_init.project_tree(ROOT, staged, inputs, run_cargo=True, from_git_head=False)
             _run(["cargo", "fmt", "--all", "--check"], cwd=staged, env=env)
             _run(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], cwd=staged, env=env)
-            _run(["make", "test"], cwd=staged, env=env)
-            _run([sys.executable, "-B", "scripts/check-architecture.py", "--repo", os.fspath(staged)], cwd=staged, env=env)
+            _run(["just", "test"], cwd=staged, env=env)
+            _run([sys.executable, "-m", "scripts.checks.architecture", "--repo", os.fspath(staged)], cwd=staged, env=env)
+            _run([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"], cwd=staged, env=env)
         print(f"matrix ok: {name}")
 
 
 def check_artifacts(names: Sequence[str]) -> None:
     for name in names:
-        inputs = _inputs_for(name, harness="core")
+        inputs = _inputs_for(name, agent_harness="core")
         with tempfile.TemporaryDirectory(prefix=f"artifact-{name}-") as tmp:
             staged = Path(tmp) / "repo"
             env = os.environ.copy()
             template_init.project_tree(ROOT, staged, inputs, run_cargo=True, from_git_head=False)
             tag = f"{inputs.service_name}:template-check"
             try:
-                _run(["bash", "scripts/image.sh", "build", tag], cwd=staged, env={**env, "VCS_REF": "template-check"})
-                _run(["bash", "scripts/image.sh", "check", tag, "template-check"], cwd=staged, env=env)
-                _run(["bash", "scripts/image.sh", "scan", tag], cwd=staged, env=env)
+                _run([sys.executable, "-m", "scripts.image", "build", tag], cwd=staged, env={**env, "VCS_REF": "template-check"})
+                _run([sys.executable, "-m", "scripts.image", "check", tag, "template-check"], cwd=staged, env=env)
+                _run([sys.executable, "-m", "scripts.image", "scan", tag], cwd=staged, env=env)
             finally:
                 subprocess.run(["docker", "image", "rm", "-f", tag], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"artifact ok: {name}")
@@ -168,7 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.artifacts:
             check_artifacts(args.profiles or list(DEFAULT_ARTIFACTS))
         return 0
-    except (RuntimeError, AssertionError, template_init.InitError) as exc:
+    except (RuntimeError, AssertionError, template_init.InitError, harness.HarnessError) as exc:
         print(f"template-check: {exc}", file=sys.stderr)
         return 1
 

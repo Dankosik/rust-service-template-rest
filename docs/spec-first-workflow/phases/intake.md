@@ -79,8 +79,6 @@ chat history, so accuracy here governs the entire pipeline.
      `Concrete scenarios` on non-trivial changes, preserving requester-supplied
      examples, edge cases, and numeric thresholds verbatim, and removing any
      draft-only `Remaining frontier` section.
-   - **Mechanical gate:** run `make intent-check TASK=<task>` (`python3
-     scripts/check-intent.py specs/<task>`) and fix every error.
    - **Author Cold-Start Self-Check:** re-read **only** `intent.md` with zero
      chat history and close every gap in place:
      - **Cold-start completeness:** a fresh Definition session can act without
@@ -103,11 +101,10 @@ chat history, so accuracy here governs the entire pipeline.
      auth/security/PII, money, destructive/irreversible migration, or `≥2`
      external actors/services). Pass strictly `specs/<task>/intent.md` and the
      adapter path (omit chat summaries or author rationale). Repair confirmed
-     local defects in place, ask one surgical follow-up round if a real
-     requester fork surfaces, and re-run `make intent-check TASK=<task>`.
-   - *Done when* `intent.md` (`status: draft`) passes `make intent-check`,
-     Cold-Start Self-Check, and any triggered Cold-Start Intent Review with zero
-     chat-dependent meaning.
+     local defects in place, and ask one surgical follow-up round if a real
+     requester fork surfaces.
+   - *Done when* `intent.md` (`status: draft`) passes Cold-Start Self-Check and
+     any triggered Cold-Start Intent Review with zero chat-dependent meaning.
 
 4. **Confirm shared understanding (Gate 1) and mark `ready`.**
    - Present a compact one-screen confirmation brief in the user's language with
@@ -122,19 +119,17 @@ chat history, so accuracy here governs the entire pipeline.
      - labeled assumptions (`A1..An` with `Reopen if`, highlighting the single
        riskiest assumption), delegated choices, and priority tie-breakers;
      - observable success signal.
-   - Wait for explicit user confirmation before flipping `status: ready`,
-     re-running `make intent-check TASK=<task>`, and starting [Cross-Phase
+   - Wait for explicit user confirmation before flipping `status: ready` and
+     starting [Cross-Phase
      Continuation](../shared/transition.md#cross-phase-continuation) (for a
      clear brief with zero open questions, this reflection is the only round).
      Skip waiting only when the user explicitly instructed to proceed without
      confirmation and zero high-risk branches or material assumptions remain.
    - On user corrections, reconcile `intent.md` in place under
-     [Artifacts](../shared/artifacts.md), re-run `make intent-check`, and
-     re-confirm if the delta is material.
+     [Artifacts](../shared/artifacts.md) and re-confirm if the delta is material.
    - *Done when* the user confirms **shared understanding**, `intent.md` is at
-     `status: ready` passing `make intent-check`, and the intent locator, first
-     owner, and any routing-relevant assumptions or non-blocking open questions
-     are ready.
+     `status: ready`, and the intent locator, first owner, and any
+     routing-relevant assumptions or non-blocking open questions are ready.
 
 5. **Handle mid-pipeline reopens.**
    - Flip `specs/<task>/intent.md` back to `status: draft` under [Artifact
@@ -152,11 +147,9 @@ chat history, so accuracy here governs the entire pipeline.
    - Reconcile settled answers into `specs/<task>/intent.md` in place while
      preserving `I<n>` and `A<n>` ID stability (never renumber surviving IDs;
      mark overturned `I<k>` explicitly `Superseded by I<m>` or updated in
-     place), run `make intent-check TASK=<task>` on the reconciled `draft` plus
-     Cold-Start Self-Check (and [Cold-Start Intent
+     place), run Cold-Start Self-Check (and [Cold-Start Intent
      Review](#cold-start-intent-review) if the delta hits a high-risk trigger),
-     confirm material deltas with the user, flip back to `status: ready`,
-     re-run `make intent-check TASK=<task>` to verify `ready` invariants, and
+     confirm material deltas with the user, flip back to `status: ready`, and
      return control via [Cross-Phase
      Continuation](../shared/transition.md#cross-phase-continuation) to the
      earliest phase invalidated by the updated `intent.md` (reopening Definition

@@ -2,7 +2,7 @@
 
 This file owns the shape of repository skills under
 `.agents/skills/<name>/`. Read it before adding or editing a skill.
-`make check-instructions` enforces the mechanical part. Two classes share the
+`just check-instructions` enforces the mechanical part. Two classes share the
 directory:
 
 - **Decision skills** (`rust-*`, `merge-conflict-resolution`) follow the
@@ -23,8 +23,8 @@ reference at the paragraph whose unresolved question selects it; do not load
 the whole reference set by default. Keep general manuals, scripts, and assets
 outside decision skills. Cursor, Codex, Grok,
 OpenCode, and Antigravity read `.agents/skills` directly; `.claude/skills` and
-`.qwen/skills` are generated symlink views (`make agent-harness-sync`, checked
-by `make check-instructions`).
+`.qwen/skills` are generated symlink views (`just agent-harness-sync`, checked
+by `just check-instructions`).
 
 ## Frontmatter
 
@@ -151,7 +151,7 @@ code whose ongoing correctness depends on that owner.
 
 ## Change And Proof
 
-A skill edit is an instruction change: `make check-instructions` proves shape, and
+A skill edit is an instruction change: `just check-instructions` proves shape, and
 a read-through of skills that share a trigger proves they still discriminate.
 Structural validity does not establish better model behaviour; see
 [Prompt Maintenance](prompt-maintenance.md#change-and-proof) for behavioral

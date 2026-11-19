@@ -19,11 +19,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Load tool manifest
-      shell: bash
-      run: |
-        set -euo pipefail
-        grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+    - name: Set up pinned tools (mise)
+      uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
+      with:
+        version: "2026.11.10"
+        install_args: just cosign
+        cache: false
 
     - name: Prepare image metadata
       id: meta
@@ -43,11 +44,6 @@ runs:
         GHCR_TOKEN: ${{ inputs.github_token }}
         GHCR_USER: ${{ github.actor }}
       run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
-
-    - name: Install cosign
-      uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-      with:
-        cosign-release: v${{ env.COSIGN_VERSION }}
 
     - name: Set up Buildx
       id: buildx
@@ -75,7 +71,7 @@ runs:
         metadata_dir=$(mktemp -d "${RUNNER_TEMP}/runtime-export.XXXXXXXX")
         trap 'rm -rf -- "${metadata_dir}"' EXIT
         export RUNTIME_IMAGE_METADATA_FILE="${metadata_dir}/metadata.json"
-        make image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
+        just image-build "${PRIMARY_IMAGE}"
         python3 .github/actions/publish-image/publish.py identify
 
     - name: Smoke-test runtime image
@@ -83,21 +79,21 @@ runs:
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      run: make image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
+      run: just image-check "${IMAGE_ID}" "${CANDIDATE_SHA}"
 
     - name: Scan image with Trivy
       shell: bash
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make image-scan CONTAINER_IMAGE="${IMAGE_ID}"
+      run: just image-scan "${IMAGE_ID}"
 
     - name: Generate SBOM (CycloneDX)
       shell: bash
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make image-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT=sbom.cdx.json
+      run: just image-sbom "${IMAGE_ID}" sbom.cdx.json
 
     - name: Push candidate and confirm registry identity
       id: digest

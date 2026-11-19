@@ -9,7 +9,6 @@
 !Cargo.lock
 !LICENSE
 !deny.toml
-!tools/versions.env
 !build/docker/rust-notices.py
 !build/docker/rust-notices.toml
 !vendor/

@@ -54,8 +54,8 @@ Give each instruction one disposition before editing it.
 | Conditional method | Put behind its observable trigger. |
 | Structure or process justified only by hypothetical future reuse | Remove; retain only when a current accepted constraint and owner require it. |
 | Behavior guaranteed by a tool, schema, sandbox, or generator | Remove from prose or emit once only where the guarantee is absent. |
-| Mechanical prohibition checkable by a lint, architecture rule, or structural script | Graduate into `Cargo.toml`, `clippy.toml`, `quality/architecture.json`, or `scripts/harness-sync.py` and remove the prose ban. |
-| Fact apparent from canonical code, contract, test, or file layout | Remove; cache an environment lookup in prose (such as a `Makefile` command table) only when re-deriving it costs more than its lines. |
+| Mechanical prohibition checkable by a lint, architecture rule, or structural script | Graduate into `Cargo.toml`, `clippy.toml`, `quality/architecture.json`, or `template/harness.py` and remove the prose ban. |
+| Fact apparent from canonical code, contract, test, or file layout | Remove; cache an environment lookup in prose (such as a `justfile` command table) only when re-deriving it costs more than its lines. |
 | Restatement of another owner | Replace with a trigger and link. |
 | Example that defines required behavior | Replace with a schema or fixture when possible; otherwise retain it with its contract. |
 | Example of only the ordinary path | Remove unless it makes a non-obvious engineering choice visible; retain its selecting condition and the condition that changes the choice under [Skill Authoring](skill-authoring.md#decision-examples). |

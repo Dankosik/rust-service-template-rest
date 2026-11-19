@@ -1,7 +1,7 @@
 # template:begin postgres:compose-postgres-header
-# The same file serves `make test-integration-db` and the image rehearsal,
-# which set POSTGRES_PORT=0 for an ephemeral host port and read it back.
-# `make test-integration-db` also starts `pgbouncer` in front of it.
+# The same file serves `just test-integration-db` and the image rehearsal,
+# which set POSTGRES_PORT=127.0.0.1:0 for an ephemeral loopback port and read it back.
+# `just test-integration-db` also starts `pgbouncer` in front of it.
 # template:end postgres:compose-postgres-header
 services:
   # template:begin postgres:compose-postgres-service
@@ -67,7 +67,7 @@ services:
       retries: 20
   # template:end cache:compose-valkey-service
   # template:begin object-storage:compose-versitygw-service
-  # S3 emulator for `make test-integration-object-storage` and a local run:
+  # S3 emulator for `just test-integration-object-storage` and a local run:
   #   docker compose -f env/docker-compose.yml up -d --wait versitygw
   # The posix backend keeps objects and their metadata (extended attributes)
   # under /data, an anonymous volume that `down -v` removes. A directory there
@@ -92,3 +92,14 @@ services:
       timeout: 3s
       retries: 20
   # template:end object-storage:compose-versitygw-service
+  # template:begin outbound-auth:compose-keycloak-service
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
+    profiles: ["oauth"]
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "${KEYCLOAK_PORT:-127.0.0.1:8080}:8080"
+  # template:end outbound-auth:compose-keycloak-service

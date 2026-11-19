@@ -56,7 +56,7 @@ updates:
           - "*"
 
   # FROM digests in the Dockerfile. A rust:<version> bump must land with the
-  # same version in rust-toolchain.toml; `make dockerfile-check` refuses drift.
+  # same version in rust-toolchain.toml; `just dockerfile-check` refuses drift.
   - package-ecosystem: "docker"
     directory: "/build/docker"
     schedule:

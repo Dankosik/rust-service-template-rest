@@ -1,5 +1,5 @@
 # Baseline for running the service on a developer machine:
-#   make run   (= cargo run -p service -- --config env/config/local.toml)
+#   just run   (= cargo run -p service -- --config env/config/local.toml)
 #
 # Non-secret defaults only. Secret keys may appear here only as empty
 # placeholders; a non-empty value fails startup. Set secrets through
@@ -49,9 +49,9 @@ mode = "none"
 
 # template:begin postgres:local-config
 [postgres]
-# The profile is inert until enabled. With `make compose-up`:
+# The profile is inert until enabled. With `just compose-up`:
 #   APP__POSTGRES__ENABLED=true \
-#   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
+#   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' just run
 enabled = false
 dsn = ""
 max_connections = 4
@@ -66,13 +66,13 @@ session_budgets = "startup"
 # template:begin http-idempotency:local-config-http-idempotency
 # The pack is inert until an idempotent operation is served, and retention
 # has no usable default: set it once the pack is active, for example:
-#   APP__HTTP_IDEMPOTENCY__RETENTION=24h make run
+#   APP__HTTP_IDEMPOTENCY__RETENTION=24h just run
 # [http_idempotency]
 # retention = "24h"
 # template:end http-idempotency:local-config-http-idempotency
 
 # template:begin jobs:local-config-jobs
-# The jobs worker reads this section; a worker beside `make run` needs its own APP__HTTP__ADDR and APP__OBSERVABILITY__METRICS__ADDR.
+# The jobs worker reads this section; a worker beside `just run` needs its own APP__HTTP__ADDR and APP__OBSERVABILITY__METRICS__ADDR.
 # [jobs]
 # max_workers = 1
 # template:end jobs:local-config-jobs
@@ -111,7 +111,7 @@ session_budgets = "startup"
 # Object storage is inert until a provider is selected. The secret is
 # environment-only. With the emulator, which creates `template-bucket`:
 #   docker compose -f env/docker-compose.yml up -d --wait versitygw
-#   APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret make run
+#   APP__OBJECT_STORAGE__SECRET_ACCESS_KEY=template-secret just run
 # [object_storage]
 # provider = "local"
 # endpoint = "http://127.0.0.1:7070"

@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -169,11 +170,11 @@ def check_compatibility(before_doc: dict, after_doc: dict) -> list[str]:
     return errors
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base", type=Path)
     parser.add_argument("candidate", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         errors = check_compatibility(
             json.loads(args.base.read_text(encoding="utf-8")),

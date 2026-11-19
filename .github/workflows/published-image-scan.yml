@@ -25,4 +25,4 @@ jobs:
       - name: Reassess published image digests
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/actions/publish-image/rescan.sh
+        run: python3 .github/actions/publish-image/rescan.py

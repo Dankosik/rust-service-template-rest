@@ -58,7 +58,7 @@ Reopen if:
   - *Observable:* `POST /webhooks` with a tampered signature returns `401
     invalid_signature` and writes zero inbox rows (fails on base commit);
     paired `G1` valid-signature acceptance holds.
-  - *Wrong layer:* `test_invalid_signature` passes, `make test` succeeds, or
+  - *Wrong layer:* `test_invalid_signature` passes, `just test` succeeds, or
     paraphrasing `Outcome` without a public-seam falsifier.
 - **`Depends on` & `Provides` (producer isolation):** put stops before later
   `[acceptance]` or `[effect:<action>]` gates in `Boundary -> Out of scope`
@@ -84,7 +84,7 @@ Reopen if:
   writes collide on (concrete file or directory path, never globs or prose)
   across four categories (or `none`):
   1. *Manifests & policy:* `Cargo.toml`, `Cargo.lock`,
-     `quality/architecture.json`, `template/profiles.json`, `Makefile`.
+     `quality/architecture.json`, `template/profiles.json`, `justfile`, `mise.toml`.
   2. *Ordered or generated surfaces:* `migrations/`, `.sqlx/`,
      `api/openapi/service.yaml`, `api/proto/`.
   3. *Shared wiring & module registries:* parent crate `lib.rs`/`mod.rs` when

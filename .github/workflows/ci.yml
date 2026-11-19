@@ -61,16 +61,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just gitleaks
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Secret scan
         env:
           BASE_SHA: ${{ needs.changes.outputs.base_sha }}
         run: |
           set -euo pipefail
           if [[ -z "${BASE_SHA}" ]]; then
-            make secret-scan-history
+            just secret-scan-history
           else
-            make secret-scan BASE_REF="${BASE_SHA}"
+            just secret-scan "${BASE_SHA}"
           fi
 
   repo-lint:
@@ -82,24 +86,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
-      - name: Install pinned Cargo linters
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
-          tool: typos@${{ env.TYPOS_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+          version: "2026.11.10"
+          install_args: just typos zizmor actionlint shellcheck ruff lychee promtool
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Repository linters
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          make typos
-          make actionlint
-          make zizmor
-          make shellcheck
-          make python-lint
-          make docs-check
-          make check-instructions
-          make monitoring-rules
+          just typos
+          just actionlint
+          just zizmor
+          just shellcheck
+          just python-lint
+          just docs-check
+          just monitoring-rules
+          just scripts-test
+          # template:begin source-template:ci-check-instructions
+          just check-instructions
+          # template:end source-template:ci-check-instructions
       - name: Set up Buildx
         id: buildx
         if: needs.changes.outputs.docker == 'true'
@@ -114,7 +121,7 @@ jobs:
         if: needs.changes.outputs.docker == 'true'
         env:
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
-        run: make dockerfile-check
+        run: just dockerfile-check
 
   rust:
     needs: changes
@@ -136,30 +143,33 @@ jobs:
           shared-key: rust-quality
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
-      - run: cargo fetch --locked
-      - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
-          tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          version: "2026.11.10"
+          install_args: just cargo-nextest github:Boshen/cargo-shear github:oasdiff/oasdiff npm:@redocly/cli
+          cache_key_prefix: mise-rust
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache_save_post: true
+      - run: cargo fetch --locked
       - name: Format, lint, build, test, and architecture
         run: |
           set -euo pipefail
-          make fmt-check
-          make lint
-          make build
-          make test
-          make unused-deps
-          make architecture-check
+          just fmt-check
+          just lint
+          just build
+          just test
+          just unused-deps
+          just architecture-check
+          just vendor-drift
       - name: Profiling and vendored transport regressions
         if: needs.changes.outputs.deps == 'true' || needs.changes.outputs.post_merge == 'true'
         run: |
           set -euo pipefail
-          make profiling-check
-          make native-transport
+          just profiling-check
+          just native-transport
       - name: OpenAPI contract
         if: needs.changes.outputs.openapi == 'true'
-        run: make openapi-check
+        run: just openapi-check
       - name: OpenAPI breaking compatibility
         if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
         env:
@@ -167,19 +177,21 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          make openapi-breaking-since BASE_REF="${BASE_SHA}"
+          just openapi-breaking-since "${BASE_SHA}"
       # template:begin postgres:ci-migrations-step
       - name: SQL migrations
         if: needs.changes.outputs.migrations == 'true'
         env:
           BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          MISE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mise install --locked github:sbdchd/squawk
           if [[ -n "${BASE_SHA}" ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            make migration-check BASE_REF="${BASE_SHA}"
+            just migration-check "${BASE_SHA}"
           else
-            make migration-check BASE_REF=HEAD
+            just migration-check HEAD
           fi
       # template:end postgres:ci-migrations-step
 
@@ -192,7 +204,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Dependency review
         if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -200,17 +211,18 @@ jobs:
           fail-on-severity: high
           comment-summary-in-pr: never
       - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
-          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+          version: "2026.11.10"
+          install_args: just cargo-deny
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Dependency policy and vendored drift
         run: |
           set -euo pipefail
-          make deny
-          make dependency-drift
+          just deny
+          just vendor-drift --online
           if [[ -f tools/grpc-codegen/Cargo.toml ]]; then
-            make grpc-generator-deny
+            just grpc-generator-deny
           fi
 
   # template:begin grpc:ci-grpc-job
@@ -225,6 +237,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just buf
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check protobuf schemas and generated Rust
         env:
           BASE_SHA: ${{ needs.changes.outputs.base_sha }}
@@ -233,9 +250,9 @@ jobs:
           set -euo pipefail
           if [[ -n "${BASE_SHA}" ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            GRPC_BASE_REF="${BASE_SHA}" make grpc-check
+            just grpc-check "${BASE_SHA}"
           else
-            GRPC_BASE_REF=HEAD make grpc-check
+            just grpc-check HEAD
           fi
   # template:end grpc:ci-grpc-job
 
@@ -256,44 +273,31 @@ jobs:
           key: integration
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
-      - name: Restore sqlx-cli
-        if: hashFiles('crates/infra-postgres/Cargo.toml') != ''
-        id: sqlx-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
-          path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
-          key: sqlx-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.SQLX_CLI_VERSION }}
+          version: "2026.11.10"
+          install_args: just
+          cache_key_prefix: mise-int
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache_save_post: true
       - name: PostgreSQL integration and SQLx check
         if: hashFiles('crates/infra-postgres/Cargo.toml') != ''
+        env:
+          MISE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          REQUIRE_DOCKER=1 make test-integration-db
-          make sqlx-check
-      - name: Save sqlx-cli
-        if: hashFiles('crates/infra-postgres/Cargo.toml') != '' && steps.sqlx-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
-          key: ${{ steps.sqlx-cache.outputs.cache-primary-key }}
+          REQUIRE_DOCKER=1 just test-integration-db
+          mise install --locked cargo:sqlx-cli
+          just sqlx-check
       - name: Cache integration
         if: hashFiles('crates/infra-cache/Cargo.toml') != ''
-        run: REQUIRE_DOCKER=1 make test-integration-cache
+        run: REQUIRE_DOCKER=1 just test-integration-cache
       - name: Object storage integration
         if: hashFiles('crates/infra-object-storage/Cargo.toml') != ''
-        run: REQUIRE_DOCKER=1 make test-integration-object-storage
+        run: REQUIRE_DOCKER=1 just test-integration-object-storage
       - name: JetStream integration
         if: hashFiles('crates/infra-messaging/Cargo.toml') != ''
-        run: REQUIRE_DOCKER=1 make test-integration-messaging
-      - name: Set up Go for wire compatibility
-        if: hashFiles('crates/infra-messaging/Cargo.toml') != ''
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-      - name: Go wire compatibility
-        if: hashFiles('crates/infra-messaging/Cargo.toml') != ''
-        run: make messaging-go-compat
+        run: REQUIRE_DOCKER=1 just test-integration-messaging
   # template:end integration:ci-integration-job
 
   # template:begin outbound-auth:ci-oauth-job
@@ -308,8 +312,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Keycloak OAuth integration
-        run: REQUIRE_DOCKER=1 make test-integration-oauth
+        run: REQUIRE_DOCKER=1 just test-integration-oauth
   # template:end outbound-auth:ci-oauth-job
 
   image:
@@ -321,7 +330,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -338,17 +351,17 @@ jobs:
           MIGRATIONS_CHANGED: ${{ needs.changes.outputs.migrations }}
         run: |
           set -euo pipefail
-          make image-build RUNTIME_IMAGE="service:ci"
+          just image-build "service:ci"
           image_id=$(docker image inspect --format '{{.Id}}' service:ci)
           if [[ "${MIGRATIONS_CHANGED}" == true && -d crates/migrate ]]; then
-            make migration-validate RUNTIME_IMAGE="${image_id}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+            just migration-validate "${image_id}" "${VCS_REF}"
           else
-            make image-check RUNTIME_IMAGE="${image_id}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+            just image-check "${image_id}" "${VCS_REF}"
           fi
-          make image-scan CONTAINER_IMAGE="${image_id}"
-          make image-sbom CONTAINER_IMAGE="${image_id}" SBOM_OUTPUT="${RUNNER_TEMP}/source.cdx.json"
+          just image-scan "${image_id}"
+          just image-sbom "${image_id}" "${RUNNER_TEMP}/source.cdx.json"
 
-  # template:begin runtime-progress:ci-runtime-progress-job
+  # template:begin source-template:ci-runtime-progress-job
   runtime-progress:
     needs: changes
     if: needs.changes.outputs.runtime_progress == 'true' && needs.changes.outputs.post_merge == 'true'
@@ -367,7 +380,11 @@ jobs:
           cache-bin: "false"
           shared-key: runtime-progress
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -379,7 +396,7 @@ jobs:
       - name: CPU-quota progress proof
         env:
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
-        run: make runtime-progress-proof
+        run: just runtime-progress-proof
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -388,7 +405,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
-  # template:end runtime-progress:ci-runtime-progress-job
+  # template:end source-template:ci-runtime-progress-job
 
   # template:begin source-template:ci-template-job
   template:
@@ -401,19 +418,20 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Projection and script unit checks
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just
+          cache_key_prefix: mise-tpl
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache_save_post: true
+      - name: Projection and unit checks
         run: |
           set -euo pipefail
-          make template-check
-          make template-test
-      - if: needs.changes.outputs.post_merge == 'true'
-        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
+          just template-check
+          just template-test
       - if: needs.changes.outputs.post_merge == 'true'
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - if: needs.changes.outputs.post_merge == 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: nextest@${{ env.CARGO_NEXTEST_VERSION }}
       - if: needs.changes.outputs.post_merge == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
@@ -424,10 +442,12 @@ jobs:
         if: needs.changes.outputs.post_merge == 'true'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          MISE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mise install --locked cargo-nextest
           cargo fetch --locked
-          make template-matrix
+          just template-matrix
   # template:end source-template:ci-template-job
 
   required:
@@ -448,9 +468,9 @@ jobs:
       - oauth-integration
       # template:end outbound-auth:ci-required-oauth
       - image
-      # template:begin runtime-progress:ci-required-runtime-progress
+      # template:begin source-template:ci-required-runtime-progress
       - runtime-progress
-      # template:end runtime-progress:ci-required-runtime-progress
+      # template:end source-template:ci-required-runtime-progress
       # template:begin source-template:ci-required-template
       - template
       # template:end source-template:ci-required-template

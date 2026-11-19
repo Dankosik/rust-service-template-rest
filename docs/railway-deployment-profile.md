@@ -96,7 +96,7 @@ Choose one delivery path per derived service and keep its provenance distinct:
 
 ## The build
 
-Builds hold no credentials (`make dockerfile-check` refuses secret-named `ARG` /
+Builds hold no credentials (`just dockerfile-check` refuses secret-named `ARG` /
 `ENV` declarations; vendor private crates via `vendor-private/` as described in
 [Build Speed](build-speed.md#deployment-builds)). `ARG IMAGE_TESTS` defaults to
 `none` when CI runs tests; CI-less repositories (`REPOSITORY_CI = none`) must
@@ -118,7 +118,7 @@ Keep `deploy.drainingSeconds` in `.railway/railway.ts` (and container/orchestrat
 stop grace elsewhere) at least 5 s above `http.grace_period` validated by
 `crates/service/src/bootstrap`: a teardown that spends its whole budget exits at
 the end of the grace period, and an equal platform limit can `SIGKILL` it first,
-replacing exit code `3` with `137`. Rerun `make image-build && make image-check`
+replacing exit code `3` with `137`. Rerun `just image-build && just image-check`
 when lifecycle budgets move.
 
 ## Operator-owned configuration

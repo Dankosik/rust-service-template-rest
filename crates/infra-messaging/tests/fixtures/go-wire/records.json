@@ -1,0 +1,204 @@
+{
+  "version": 1,
+  "provenance": {
+    "repository": "https://github.com/Dankosik/go-service-template-rest",
+    "revision": "a50f43cf869b86accb3fdba24d758cc2d15a02df",
+    "files": {
+      "internal/domainevent/event.go": "add1371aa3ef73b26a9f1eb08d9b992f48969d4a8f6dbd256d81d6d1a058e556",
+      "internal/infra/natsjs/message_deadletter.go": "4063580a0322974331c13f3de19e3296b0c40d1785cbbf98d695dc74ef5b953c",
+      "internal/infra/natsjs/message_wire.go": "c98d7c1db43f515e072e91416cf1baa6d0da5c898337d62be9fef3173ed9fe88"
+    }
+  },
+  "cases": [
+    {
+      "name": "fractional_raw_bytes",
+      "event": {
+        "subject": "events.created",
+        "message_id": "message-fraction",
+        "publication_id": "publication-fraction",
+        "event_type": "example.created",
+        "schema": "v1",
+        "created_at": "2026-09-26T12:34:56.123456789Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 123456789,
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0="
+      },
+      "encoded": {
+        "subject": "events.created",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56.123456789Z",
+          "Event-Schema": "v1",
+          "Event-Type": "example.created",
+          "Message-Id": "message-fraction",
+          "Nats-Msg-Id": "publication-fraction"
+        },
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0=",
+        "stream": "",
+        "stream_sequence": 0,
+        "stored_at": ""
+      },
+      "inbound": {
+        "subject": "events.created",
+        "headers": {
+          "Created-At": "2026-09-26T18:04:56.123456789+05:30",
+          "Event-Schema": "v1",
+          "Event-Type": "example.created",
+          "Message-Id": "message-fraction",
+          "Nats-Msg-Id": "publication-fraction"
+        },
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0=",
+        "stream": "EVENTS",
+        "stream_sequence": 17,
+        "stored_at": "2026-09-26T12:35:00.000000001Z"
+      },
+      "decoded": {
+        "subject": "events.created",
+        "message_id": "message-fraction",
+        "publication_id": "publication-fraction",
+        "event_type": "example.created",
+        "schema": "v1",
+        "created_at": "2026-09-26T12:34:56.123456789Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 123456789,
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0="
+      },
+      "reencoded": {
+        "subject": "events.created",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56.123456789Z",
+          "Event-Schema": "v1",
+          "Event-Type": "example.created",
+          "Message-Id": "message-fraction",
+          "Nats-Msg-Id": "publication-fraction"
+        },
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0=",
+        "stream": "",
+        "stream_sequence": 0,
+        "stored_at": ""
+      },
+      "reencoded_go_decodes": true,
+      "dlq": {
+        "subject": "",
+        "headers": {
+          "Created-At": "2026-09-26T18:04:56.123456789+05:30",
+          "Dead-Letter-Reason": "exhausted",
+          "Event-Schema": "v1",
+          "Event-Type": "example.created",
+          "Message-Id": "message-fraction",
+          "Nats-Msg-Id": "dlq-1f8f3a88222163a09b9c06da53fdb10d54be8cace014e3fc8903521dca78427e",
+          "Original-Subject": "events.created"
+        },
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0=",
+        "stream": "EVENTS_DLQ",
+        "stream_sequence": 29,
+        "stored_at": "2026-09-26T12:36:00.000000002Z"
+      },
+      "restored": {
+        "subject": "events.created",
+        "message_id": "message-fraction",
+        "publication_id": "redrive-dae25f4a82ed95fc3223b3457b872efa3fe23a4acf5b853e4bf5fd154005d172",
+        "event_type": "example.created",
+        "schema": "v1",
+        "created_at": "2026-09-26T12:34:56.123456789Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 123456789,
+        "body_base64": "eyJhbW91bnQiOjEuMDAsImVzY2FwZWQiOiJcXHUwMDQxIiwiaXRlbXMiOlt0cnVlLGZhbHNlXX0="
+      }
+    },
+    {
+      "name": "identity_schema_boundary",
+      "event": {
+        "subject": "events.boundary",
+        "message_id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "publication_id": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+        "event_type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "schema": "v65535",
+        "created_at": "2026-09-26T12:34:56Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 0,
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ=="
+      },
+      "encoded": {
+        "subject": "events.boundary",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56Z",
+          "Event-Schema": "v65535",
+          "Event-Type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "Message-Id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "Nats-Msg-Id": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ==",
+        "stream": "",
+        "stream_sequence": 0,
+        "stored_at": ""
+      },
+      "inbound": {
+        "subject": "events.boundary",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56.5+00:00",
+          "Event-Schema": "v65535",
+          "Event-Type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "Message-Id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "Nats-Msg-Id": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ==",
+        "stream": "EVENTS",
+        "stream_sequence": 17,
+        "stored_at": "2026-09-26T12:35:00.000000001Z"
+      },
+      "decoded": {
+        "subject": "events.boundary",
+        "message_id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "publication_id": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+        "event_type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "schema": "v65535",
+        "created_at": "2026-09-26T12:34:56.5Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 500000000,
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ=="
+      },
+      "reencoded": {
+        "subject": "events.boundary",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56.5Z",
+          "Event-Schema": "v65535",
+          "Event-Type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "Message-Id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "Nats-Msg-Id": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ==",
+        "stream": "",
+        "stream_sequence": 0,
+        "stored_at": ""
+      },
+      "reencoded_go_decodes": true,
+      "dlq": {
+        "subject": "",
+        "headers": {
+          "Created-At": "2026-09-26T12:34:56.5+00:00",
+          "Dead-Letter-Reason": "exhausted",
+          "Event-Schema": "v65535",
+          "Event-Type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "Message-Id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "Nats-Msg-Id": "dlq-92ca2f246b8d0d0f206f9525e1028fe115c3e70f5fff80f4525ad9f9bec84713",
+          "Original-Subject": "events.boundary"
+        },
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ==",
+        "stream": "EVENTS_DLQ",
+        "stream_sequence": 29,
+        "stored_at": "2026-09-26T12:36:00.000000002Z"
+      },
+      "restored": {
+        "subject": "events.boundary",
+        "message_id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "publication_id": "redrive-168d0889aa579681fbb10a061f235f9a0ddee2e65adc896cb5d52a041076db9c",
+        "event_type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "schema": "v65535",
+        "created_at": "2026-09-26T12:34:56.5Z",
+        "unix_seconds": 1790426096,
+        "nanosecond": 500000000,
+        "body_base64": "eyJyYXciOiAic3BhY2luZyBpcyBwcmVzZXJ2ZWQifQ=="
+      }
+    }
+  ]
+}

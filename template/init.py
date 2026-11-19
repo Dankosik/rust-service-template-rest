@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""One-shot service initializer: sets identity, prunes unselected profiles, removes template/."""
+"""One-shot service initializer: sets identity, prunes unselected profiles, materializes harness, removes template/."""
 
 from __future__ import annotations
 
 import argparse
 import html
-import importlib.util
 import json
 import os
 import re
@@ -15,13 +14,13 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-sys.dont_write_bytecode = True
+from template import harness
 
 CHOICES: dict[str, tuple[str, ...]] = {
     "database": ("none", "postgres"),
@@ -38,7 +37,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "cache": ("none", "redis"),
     "object_storage": ("none", "s3"),
     "service_auth": ("none", "jwt"),
-    "agent_harness": ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "antigravity", "all"),
+    "agent_harness": harness.HARNESS_CHOICES,
 }
 
 _SERVICE_NAME_RE = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,63}$")
@@ -94,7 +93,33 @@ class InitInputs:
     agent_harness: str = "all"
 
 
-def validate_inputs(inputs: InitInputs) -> InitInputs:
+def load_profiles(root: Path) -> dict[str, Any]:
+    return json.loads((root / "template/profiles.json").read_text(encoding="utf-8"))
+
+
+def eval_condition(expr: Any, inputs: InitInputs) -> bool:
+    if isinstance(expr, bool):
+        return expr
+    if not isinstance(expr, Mapping):
+        raise InitError(f"invalid condition expression: {expr!r}")
+    if "all" in expr:
+        return all(eval_condition(sub, inputs) for sub in expr["all"])
+    if "any" in expr:
+        return any(eval_condition(sub, inputs) for sub in expr["any"])
+    for key, expected in expr.items():
+        actual = getattr(inputs, key)
+        if isinstance(expected, list):
+            if actual not in expected:
+                return False
+        elif isinstance(expected, str) and expected.startswith("!"):
+            if actual == expected[1:]:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def validate_inputs(inputs: InitInputs, profiles_doc: Mapping[str, Any] | None = None) -> InitInputs:
     if not _SERVICE_NAME_RE.fullmatch(inputs.service_name) or inputs.service_name.replace("-", "_") in _RESERVED_CRATE_NAMES:
         raise InitError(f"invalid SERVICE_NAME: {inputs.service_name!r}")
     parsed = urlsplit(inputs.repository)
@@ -110,118 +135,22 @@ def validate_inputs(inputs: InitInputs) -> InitInputs:
         if getattr(inputs, name) not in allowed:
             raise InitError(f"{name.upper()} must be one of {', '.join(allowed)}")
 
-    if inputs.outbound_auth == "oauth2-client-credentials":
-        inputs = replace(inputs, outbound_http="bounded")
-    if inputs.http_idempotency == "postgres":
-        if inputs.database != "postgres":
-            raise InitError("HTTP_IDEMPOTENCY=postgres requires DATABASE=postgres")
-        if inputs.authn == "none":
-            raise InitError("HTTP_IDEMPOTENCY=postgres requires AUTHN=oidc-jwt or oidc-introspection")
-    if inputs.jobs == "postgres" and inputs.database != "postgres":
-        raise InitError("JOBS=postgres requires DATABASE=postgres")
-    if inputs.outbox == "postgres" and (inputs.database != "postgres" or inputs.jobs != "postgres" or inputs.messaging != "nats-jetstream"):
-        raise InitError("OUTBOX=postgres requires DATABASE=postgres, JOBS=postgres, and MESSAGING=nats-jetstream")
-    if inputs.webhooks == "durable" and (inputs.database != "postgres" or inputs.jobs != "postgres" or inputs.outbound_http != "bounded"):
-        raise InitError("WEBHOOKS=durable requires DATABASE=postgres, JOBS=postgres, and OUTBOUND_HTTP=bounded")
-    if inputs.inbound_webhooks == "standard-webhooks" and (inputs.database != "postgres" or inputs.jobs != "postgres"):
-        raise InitError("INBOUND_WEBHOOKS=standard-webhooks requires DATABASE=postgres and JOBS=postgres")
-    if inputs.service_auth == "jwt" and inputs.grpc != "enabled":
-        raise InitError("SERVICE_AUTH=jwt requires GRPC=enabled")
+    doc = profiles_doc if profiles_doc is not None else load_profiles(Path(__file__).resolve().parents[1])
+    for rule in doc.get("auto_enable", ()):
+        if eval_condition(rule["when"], inputs):
+            inputs = replace(inputs, **rule["set"])
+    for rule in doc.get("requires", ()):
+        if eval_condition(rule["when"], inputs) and not eval_condition(rule["require"], inputs):
+            raise InitError(rule["message"])
     return inputs
 
 
-def selected_marker_profiles(inputs: InitInputs) -> set[str]:
-    selected: set[str] = set()
-    if inputs.database == "postgres":
-        selected.update(("postgres", "service-secrets"))
-    if inputs.authn != "none":
-        selected.update(("authn", inputs.authn))
-    if inputs.outbound_http == "bounded":
-        selected.update(("outbound-http", "request-budget"))
-    if inputs.outbound_auth == "oauth2-client-credentials":
-        selected.add("outbound-auth")
-    if inputs.grpc == "enabled":
-        selected.add("grpc")
-        if inputs.authn != "none":
-            selected.add("grpc-authn")
-        if inputs.database == "postgres" and inputs.authn in {"none", "oidc-introspection"}:
-            selected.add("postgres-grpc-consumers")
-        if inputs.database == "postgres" and inputs.authn == "oidc-introspection":
-            selected.add("postgres-grpc-auth")
-        if inputs.authn == "oidc-jwt":
-            selected.add("grpc-jwt")
-        if inputs.outbound_auth == "oauth2-client-credentials":
-            selected.add("outbound-auth-grpc")
-    if inputs.grpc == "enabled" and inputs.authn == "oidc-jwt" and inputs.messaging == "nats-jetstream" and inputs.object_storage == "s3":
-        selected.add("runtime-progress")
-    if inputs.messaging == "nats-jetstream":
-        selected.update(("messaging", "config-url"))
-    if inputs.service_auth == "jwt":
-        selected.add("service-auth")
-    if inputs.service_auth == "jwt" or inputs.outbound_auth == "oauth2-client-credentials":
-        selected.add("service-test-tls")
-    if inputs.authn == "oidc-jwt" or inputs.outbound_auth == "oauth2-client-credentials" or inputs.service_auth == "jwt":
-        selected.add("jsonwebtoken")
-    if any((inputs.authn != "none", inputs.outbound_http == "bounded", inputs.grpc == "enabled", inputs.cache == "redis", inputs.database == "postgres", inputs.object_storage == "s3")):
-        selected.add("tls-fixtures")
-    if inputs.http_idempotency == "postgres":
-        selected.update(("http-idempotency", "request-budget", "test-metrics"))
-        if inputs.authn == "oidc-introspection":
-            selected.add("http-idempotency-mounted")
-    if inputs.authn == "oidc-introspection" and (inputs.http_idempotency == "postgres" or (inputs.database == "postgres" and inputs.grpc == "enabled")):
-        selected.add("test-introspection-fixtures")
-    if inputs.jobs == "postgres":
-        selected.update(("jobs", "test-metrics"))
-        if inputs.http_idempotency == "postgres":
-            selected.add("jobs-http-idempotency")
-    if inputs.outbox == "postgres":
-        selected.update(("outbox", "test-digest"))
-        if inputs.jobs == "postgres" and inputs.webhooks == "durable":
-            selected.add("jobs-reference")
-    if inputs.jobs == "postgres" or inputs.messaging == "nats-jetstream":
-        selected.add("worker")
-    if inputs.cache == "redis":
-        selected.add("cache")
-    if inputs.object_storage == "s3":
-        selected.add("object-storage")
-    if any((inputs.grpc == "enabled", inputs.cache == "redis", inputs.outbound_http == "bounded", inputs.object_storage == "s3")):
-        selected.add("rustls")
-    if any((inputs.database == "postgres", inputs.messaging == "nats-jetstream", inputs.cache == "redis", inputs.object_storage == "s3")):
-        selected.add("integration")
-    if any((inputs.database == "postgres", inputs.messaging == "nats-jetstream", inputs.cache == "redis", inputs.object_storage == "s3", inputs.outbound_auth == "oauth2-client-credentials")):
-        selected.add("container-integration")
-    if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
-        selected.add("webhooks-common")
-    if inputs.webhooks == "durable":
-        selected.add("webhooks")
-    if inputs.inbound_webhooks == "standard-webhooks":
-        selected.update(("inbound-webhooks", "request-budget"))
-    if selected & {"postgres", "cache", "grpc-jwt"}:
-        selected.add("service-test-tempfile")
-    return selected
-
-
-def _load_harness_module(repo: Path) -> Any:
-    script = repo / "scripts/harness-sync.py"
-    spec = importlib.util.spec_from_file_location("_template_harness_sync", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_profiles(root: Path) -> dict[str, Any]:
-    return json.loads((root / "template/profiles.json").read_text(encoding="utf-8"))
-
-
-def _profile_removals(raw: dict[str, Any]) -> dict[str, list[str]]:
-    removals: dict[str, list[str]] = {}
-    for key, val in raw.items():
-        if key in {"schema_version", "source_only", "identity"}:
-            continue
-        removals[key] = list(val.get("remove_when_none", val.get("remove_when_unselected", [])))
-    return removals
+def selected_marker_profiles(inputs: InitInputs, profiles_doc: Mapping[str, Any]) -> set[str]:
+    return {
+        name
+        for name, spec in profiles_doc["profiles"].items()
+        if eval_condition(spec["when"], inputs)
+    }
 
 
 def _apply_markers(root: Path, valid_profiles: set[str], selected: set[str]) -> None:
@@ -375,6 +304,27 @@ def _prune_workspace_dependencies(root: Path) -> None:
     cargo_path.write_text("".join(kept_lines), encoding="utf-8")
 
 
+def _prune_mise_lock(staged: Path) -> None:
+    mise_toml = staged / "mise.toml"
+    mise_lock = staged / "mise.lock"
+    if not mise_toml.is_file() or not mise_lock.is_file():
+        return
+    retained_tools = set(tomllib.loads(mise_toml.read_text(encoding="utf-8")).get("tools", {}).keys())
+    text = mise_lock.read_text(encoding="utf-8")
+    parts = re.split(r"(?m)^(?=\[\[tools\.)", text)
+    kept = [parts[0]]
+    for block in parts[1:]:
+        header = block.splitlines()[0]
+        match = re.fullmatch(r'\[\[tools\.(?:"([^"]+)"|([^\]]+))\]\]', header)
+        if not match:
+            kept.append(block)
+            continue
+        tool_key = match.group(1) or match.group(2)
+        if tool_key in retained_tools:
+            kept.append(block)
+    mise_lock.write_text("".join(kept).rstrip() + "\n", encoding="utf-8")
+
+
 def _prune_cargo_lock_and_generate(staged: Path, inputs: InitInputs) -> None:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -415,7 +365,8 @@ def project_tree(
     run_cargo: bool = True,
     from_git_head: bool = True,
 ) -> None:
-    inputs = validate_inputs(inputs)
+    profiles_doc = load_profiles(source_root)
+    inputs = validate_inputs(inputs, profiles_doc)
     if from_git_head:
         staged.mkdir(parents=True, exist_ok=True)
         archive = subprocess.run(
@@ -443,20 +394,18 @@ def project_tree(
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    profiles_raw = _load_profiles(staged)
-    removals = _profile_removals(profiles_raw)
-    selected = selected_marker_profiles(inputs)
+    selected = selected_marker_profiles(inputs, profiles_doc)
+    profiles = profiles_doc["profiles"]
 
-    _apply_markers(staged, set(removals), selected)
-    _apply_identity(staged, profiles_raw["identity"], inputs)
+    _apply_markers(staged, set(profiles), selected)
+    _apply_identity(staged, profiles_doc["identity"], inputs)
 
-    to_remove = list(profiles_raw["source_only"])
-    for profile, paths in removals.items():
-        if profile not in selected:
-            to_remove.extend(paths)
+    to_remove = list(profiles_doc["source_only"])
+    for name, spec in profiles.items():
+        if name not in selected:
+            to_remove.extend(spec.get("remove_when_unselected", ()))
     _remove_paths(staged, to_remove)
 
-    harness = _load_harness_module(staged)
     selected_adapters = set(harness.selected_adapters(inputs.agent_harness))
     for name, pack in harness.ADAPTERS.items():
         if name not in selected_adapters:
@@ -468,17 +417,13 @@ def project_tree(
                     shutil.rmtree(target)
     _prune_empty_dirs(staged / ".agents/adapters")
 
-    res = subprocess.run(
-        [sys.executable, "-B", "scripts/harness-sync.py", "--apply", "--repo", os.fspath(staged), "--harness", inputs.agent_harness],
-        cwd=staged,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if res.returncode != 0:
-        raise InitError(f"harness sync failed: {res.stderr.strip()}")
+    try:
+        harness.sync_or_check(staged, "apply", inputs.agent_harness)
+    except harness.HarnessError as exc:
+        raise InitError(f"harness sync failed: {exc}")
 
     _prune_workspace_dependencies(staged)
+    _prune_mise_lock(staged)
     if run_cargo:
         _prune_cargo_lock_and_generate(staged, inputs)
 
@@ -524,6 +469,33 @@ def _sync_staged_to_repo(staged: Path, repo: Path) -> None:
             parent.rmdir()
             parent = parent.parent
 
+    # Source checkouts materialize gitignored harness files (e.g. via `just agent-harness-sync`).
+    # Remove any materialized harness entry not present in the staged projection so unselected
+    # adapters do not leak as untracked files once source-template .gitignore rules are stripped.
+    for pack in harness.ADAPTERS.values():
+        for raw_rel in (*pack.generated, *pack.settings):
+            rel = raw_rel.rstrip("/")
+            target = repo / rel
+            if not (target.exists() or target.is_symlink()):
+                continue
+            if target.is_symlink() or target.is_file():
+                if rel not in staged_rel:
+                    target.unlink()
+            elif target.is_dir():
+                for child in sorted(target.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                    child_rel = child.relative_to(repo).as_posix()
+                    if child.is_symlink() or child.is_file():
+                        if child_rel not in staged_rel:
+                            child.unlink()
+                    elif child.is_dir() and not any(child.iterdir()):
+                        child.rmdir()
+                if target.is_dir() and not any(target.iterdir()):
+                    target.rmdir()
+            parent = target.parent
+            while parent != repo and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+
 
 def _read_arg(args: argparse.Namespace, name: str, default: str | None) -> str:
     cli_val = getattr(args, name)
@@ -549,10 +521,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        defaults = {f.name: (None if f.default is MISSING else f.default) for f in fields(InitInputs)}
-        inputs = validate_inputs(
-            InitInputs(**{f.name: _read_arg(args, f.name, defaults[f.name]) for f in fields(InitInputs)})
-        )
         repo = Path(
             subprocess.run(
                 ["git", "-C", os.fspath(args.repo), "rev-parse", "--show-toplevel"],
@@ -561,6 +529,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 check=True,
             ).stdout.strip()
         ).resolve()
+        defaults = {f.name: (None if f.default is MISSING else f.default) for f in fields(InitInputs)}
+        inputs = validate_inputs(
+            InitInputs(**{f.name: _read_arg(args, f.name, defaults[f.name]) for f in fields(InitInputs)}),
+            load_profiles(repo),
+        )
         status = subprocess.run(
             ["git", "-C", os.fspath(repo), "status", "--porcelain=v1", "--untracked-files=no"],
             capture_output=True,

@@ -3,7 +3,7 @@
 This is the architecture front door for the service identified by
 `crates/service/Cargo.toml`. It records only invariants that `Cargo.toml`,
 [`quality/architecture.json`](../quality/architecture.json), and Rust types
-cannot state by themselves; read code, committed schemas, tests, and `make help`
+cannot state by themselves; read code, committed schemas, tests, and `just`
 for concrete modules, types, and commands.
 
 ## Global Invariants
@@ -34,7 +34,7 @@ for concrete modules, types, and commands.
    crate with the `test` role in `quality/architecture.json`. It depends on no
    workspace crate, appears only in dev-dependencies, and leaves with the
    template profile of its last consumer. A helper that needs one crate's types
-   stays behind that crate's `test-support` feature. `make architecture-check`
+   stays behind that crate's `test-support` feature. `just architecture-check`
    rejects a `#[path]` that reaches outside its own package.
 5. Trust, ingress/egress, dependency criticality, failure mapping (`crates/service-failure`),
    readiness (`crates/health`), and staged shutdown budgets (`crates/service/src/bootstrap`)

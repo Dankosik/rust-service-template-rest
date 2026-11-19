@@ -1,4 +1,4 @@
-# Bug-finding Python lint for repository scripts; `make python-lint`.
+# Bug-finding Python lint for repository scripts; `just python-lint`.
 line-length = 120
 extend-exclude = ["vendor"]
 

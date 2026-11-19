@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify changed paths into ~12 CI surface groups (replaces 35-surface classifier)."""
+"""Classify changed paths into CI surface groups."""
 
 from __future__ import annotations
 
@@ -15,57 +15,62 @@ SURFACES: dict[str, tuple[str, ...]] = {
     "rust": (
         "crates/**", "test/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
         "rustfmt.toml", "clippy.toml", "vendor/**", ".cargo/**", ".config/nextest.toml",
-        ".sqlx/**", "env/config/**", "Makefile",
+        ".sqlx/**", "env/config/**", "quality/architecture.json",
+        "scripts/checks/architecture.py", "scripts/checks/vendor.py", "scripts/lib.py",
+        "justfile", "mise.toml", "mise.lock", ".mise/**",
     ),
     "deps": (
         "Cargo.toml", "Cargo.lock", "deny.toml", "rust-toolchain.toml", "vendor/**",
-        "tools/grpc-codegen/**", "tools/versions.env", "scripts/check-dependency-drift.py",
+        "tools/grpc-codegen/**", "mise.toml", "mise.lock",
+        "scripts/checks/vendor.py", "scripts/lib.py",
     ),
     "openapi": (
         "api/openapi/**", "crates/service/**", "crates/infra-http/**", "crates/service-failure/**",
-        ".redocly.yaml", "scripts/check-openapi-idempotency.py", "Makefile",
+        ".redocly.yaml", "scripts/checks/openapi_idempotency.py", "justfile", "mise.toml", "mise.lock", ".mise/**",
     ),
     "grpc": (
         "api/proto/**", "buf.yaml", "crates/grpc-contracts/**", "tools/grpc-codegen/**",
-        "scripts/grpc.sh", "Makefile",
+        "scripts/grpc.py", "scripts/lib.py", "justfile", "mise.toml", "mise.lock",
     ),
     "migrations": (
-        "migrations/**", "crates/migrate/**", "scripts/migration-check.py",
-        "scripts/migration-validate.sh", "test/fixtures/migrations/**", "Makefile",
+        "migrations/**", "crates/migrate/**", "scripts/checks/migrations.py",
+        "scripts/image.py", "scripts/lib.py", "test/fixtures/migrations/**",
+        "justfile", "mise.toml", "mise.lock",
     ),
     "integration": (
         "crates/infra-postgres/**", "crates/infra-jobs/**", "crates/infra-idempotency-store/**",
         "crates/infra-webhooks/**", "crates/infra-messaging/**", "crates/infra-cache/**",
         "crates/infra-object-storage/**", "crates/service/**", "crates/config/**",
         "migrations/**", ".sqlx/**", "test/**", "env/**", "Cargo.toml", "Cargo.lock",
-        "rust-toolchain.toml", "vendor/**", "scripts/integration.sh", "scripts/sqlx-prepare.sh",
-        "scripts/messaging-go-compat.sh", "Makefile",
+        "rust-toolchain.toml", "vendor/**", "scripts/integration.py", "scripts/lib.py",
+        "justfile", "mise.toml", "mise.lock",
     ),
     "oauth": (
         "crates/infra-oauth2-client-credentials/**", "crates/infra-outbound-http/**",
         "crates/config/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        "tools/versions.env", "scripts/integration.sh", "Makefile",
+        "env/docker-compose.yml", "scripts/integration.py", "scripts/lib.py",
+        "justfile", "mise.toml", "mise.lock",
     ),
     "docker": (
         "build/docker/**", ".dockerignore", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        "tools/versions.env", "LICENSE", "deny.toml", "scripts/image.sh", "migrations/**",
-        ".github/actions/publish-image/**", "Makefile",
+        "mise.toml", "mise.lock", "LICENSE", "deny.toml", "scripts/image.py", "scripts/lib.py",
+        "migrations/**", ".github/actions/publish-image/**", "justfile",
     ),
     "runtime_progress": (
         "crates/service/examples/runtime_progress.rs", "crates/service/tests/runtime_progress.rs",
-        "build/docker/runtime-progress.Dockerfile", "scripts/runtime-progress.sh",
+        "build/docker/runtime-progress.Dockerfile", "template/runtime_progress.py",
         "crates/service/**", "crates/infra-http-transport/**", "crates/infra-grpc/**",
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
     ),
     "repo_lint": (
         "*.md", "docs/**", ".agents/**", ".github/**", "scripts/**", "template/**",
-        "env/monitoring/**", "quality/architecture.json", "tools/versions.env",
-        ".typos.toml", "ruff.toml", "Makefile", "crates/**", "Cargo.toml",
+        "env/monitoring/**", "quality/architecture.json", "mise.toml", "mise.lock", ".mise/**",
+        ".typos.toml", "ruff.toml", "justfile", "crates/**", "Cargo.toml",
         ".config/wt.toml", ".worktreeinclude",
     ),
     "template": (
-        "template/**", "Makefile", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-        "tools/versions.env", "build/docker/**", ".github/**", "scripts/**", "crates/**",
+        "template/**", "justfile", "mise.toml", "mise.lock", ".mise/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "build/docker/**", ".github/**", "scripts/**", "crates/**",
         "test/**", "env/**", ".railway/**", "README.md", "AGENTS.md", ".agents/**",
         ".config/wt.toml", ".worktreeinclude", "docs/worktrees.md",
     ),
@@ -88,8 +93,11 @@ def _applicable(repo: Path) -> dict[str, bool]:
     has_postgres = (repo / "crates/infra-postgres").is_dir()
     has_grpc = (repo / "crates/grpc-contracts").is_dir()
     has_oauth = (repo / "crates/infra-oauth2-client-credentials").is_dir()
-    has_rt = (repo / "scripts/runtime-progress.sh").is_file()
-    has_int = (repo / "env/docker-compose.yml").is_file()
+    has_rt = (repo / "template/runtime_progress.py").is_file()
+    has_int = any(
+        (repo / crate).is_dir()
+        for crate in ("crates/infra-postgres", "crates/infra-cache", "crates/infra-object-storage", "crates/infra-messaging")
+    )
     has_tpl = (repo / "template/init.py").is_file()
     return {
         "rust": True,

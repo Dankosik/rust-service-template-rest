@@ -26,6 +26,8 @@ use time::macros::utc_datetime;
 const FIXTURE_PATH_ENV: &str = "GO_WIRE_FIXTURES";
 const EXPORT_PATH_ENV: &str = "GO_WIRE_RUST_EXPORT";
 const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
+const COMMITTED_GO_WIRE_FIXTURES: &[u8] = include_bytes!("fixtures/go-wire/records.json");
+const COMMITTED_RUST_WIRE_EXPORT: &[u8] = include_bytes!("fixtures/go-wire/rust-export.json");
 
 #[derive(Debug, Deserialize)]
 struct FixtureSet {
@@ -70,7 +72,7 @@ impl EventRecord {
 }
 
 #[serde_as]
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
 struct WireRecord {
     subject: String,
     headers: BTreeMap<String, String>,
@@ -95,13 +97,40 @@ impl EventPayload for BridgePayload {
 }
 
 #[test]
-#[ignore = "CI generates GO_WIRE_FIXTURES with the pinned actual Go package"]
+fn rust_matches_committed_go_wire_fixtures() {
+    let fixtures: FixtureSet = serde_json::from_slice(COMMITTED_GO_WIRE_FIXTURES)
+        .expect("committed Go fixture has the bridge record schema");
+    verify_fixture_set(&fixtures);
+    let expected_rust_export: Vec<WireRecord> = serde_json::from_slice(COMMITTED_RUST_WIRE_EXPORT)
+        .expect("committed Go-verified Rust export has the wire record schema");
+    assert_eq!(
+        rust_production_records(),
+        expected_rust_export,
+        "Rust production wire export drifted from Go-verified golden fixture; run `just messaging-go-compat --update`"
+    );
+}
+
+#[test]
+#[ignore = "refresh/verify live export against Go via `just messaging-go-compat`"]
 #[expect(
     clippy::disallowed_methods,
     reason = "wire fixture owns finite output-file exchange with its Go consumer"
 )]
 fn rust_production_wire_exports_for_go() {
     let fixtures = fixtures();
+    verify_fixture_set(&fixtures);
+
+    let records = rust_production_records();
+    let export_path = env::var(EXPORT_PATH_ENV)
+        .expect("messaging-go-compat must provide GO_WIRE_RUST_EXPORT for actual Go decode");
+    fs::write(
+        export_path,
+        serde_json::to_vec_pretty(&records).expect("Rust records serialize"),
+    )
+    .expect("Rust production records write");
+}
+
+fn verify_fixture_set(fixtures: &FixtureSet) {
     assert_eq!(fixtures.version, 1, "unsupported Go-wire fixture version");
     for name in ["fractional_raw_bytes", "identity_schema_boundary"] {
         assert!(
@@ -113,16 +142,7 @@ fn rust_production_wire_exports_for_go() {
     for fixture in &fixtures.cases {
         verify_go_record_in_rust(fixture);
     }
-    verify_production_limits(&fixtures);
-
-    let records = rust_production_records();
-    let export_path = env::var(EXPORT_PATH_ENV)
-        .expect("CI must provide GO_WIRE_RUST_EXPORT for actual Go decode");
-    fs::write(
-        export_path,
-        serde_json::to_vec_pretty(&records).expect("Rust records serialize"),
-    )
-    .expect("Rust production records write");
+    verify_production_limits(fixtures);
 }
 
 #[expect(

@@ -6,7 +6,7 @@
 #
 # - The builder tag is the toolchain authority for the image; .dockerignore
 #   keeps rust-toolchain.toml out of the context so rustup does not download
-#   components in every stage. `make dockerfile-check` asserts the tag equals the
+#   components in every stage. `just dockerfile-check` asserts the tag equals the
 #   channel in rust-toolchain.toml.
 # - Builder and runtime share one Debian release (trixie / debian13): a
 #   trixie-built glibc binary does not start on an older cc-debian image.
@@ -20,8 +20,8 @@
 #   OS packages alone cannot satisfy it. Source revision and vendor custody
 #   records identify local patches beyond auditable names and versions.
 # - Every ARG has a default because Railway passes only the service variables
-#   an ARG names; `make dockerfile-check` asserts the tool defaults equal
-#   tools/versions.env. Railway sets RAILWAY_GIT_COMMIT_SHA, which wins over
+#   an ARG names; this Dockerfile is the single owner of build-stage static
+#   archive pins. Railway sets RAILWAY_GIT_COMMIT_SHA, which wins over
 #   VCS_REF. No ARG carries a credential: BuildKit prints a referenced ARG in
 #   the build log, and Railway's builds have no secret mounts.
 # - CARGO_INCREMENTAL=0, fixed /src, stripping and SOURCE_DATE_EPOCH bounded
@@ -44,9 +44,9 @@ WORKDIR /src
 # gcc only. curl and xz fetch and unpack the build tools below.
 RUN apt-get update && apt-get install -y --no-install-recommends make curl xz-utils \
  && rm -rf /var/lib/apt/lists/*
-# The upstream static release binaries, checked against the digests in
-# tools/versions.env: compiling both tools took 67 s of a 728 s cold build,
-# and CI image builds start without a layer cache.
+# The upstream static release binaries, checked against their release digests:
+# compiling both tools took 67 s of a 728 s cold build, and CI image builds
+# start without a layer cache.
 ARG CARGO_CHEF_VERSION=0.1.78
 ARG CARGO_CHEF_X86_64_SHA256=aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d
 ARG CARGO_CHEF_AARCH64_SHA256=cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d
@@ -75,9 +75,10 @@ RUN set -eu; \
 FROM chef AS rust-notices-tool
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/*
-COPY tools/versions.env /tmp/versions.env
+ARG CARGO_ABOUT_VERSION=0.9.3
+ARG CARGO_ABOUT_X86_64_SHA256=3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
+ARG CARGO_ABOUT_AARCH64_SHA256=eb4d9ff6ebd2518152a8308729431a04b3836e71d2bd5ead7aea69f91a71162e
 RUN set -eu; \
-    . /tmp/versions.env; \
     arch=$(uname -m); \
     case "${arch}" in \
       x86_64) checksum=${CARGO_ABOUT_X86_64_SHA256} ;; \
@@ -222,7 +223,7 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 # Empty: the dependency alone makes the selected unit-test gate part of the build.
 COPY --from=unit-tests / /
-# The version is the Cargo package version; scripts/image.sh
+# The version is the Cargo package version; scripts/image.py
 # passes it from the workspace manifest.
 ARG APP_VERSION=unknown
 ARG VCS_REF=unknown

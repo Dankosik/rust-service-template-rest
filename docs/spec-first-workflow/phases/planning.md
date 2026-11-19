@@ -62,8 +62,8 @@ or architecture decisions to their upstream owner.
    Clear any resolved blocked stop, remove superseded orphan packets and
    discard runtime fields on a fresh draft with no integrated work.
 
-5. **Check the candidate.** Run `make ledger-check TASK=<task>` and repair
-   mechanical errors. Audit each producer using only its packet and sources
+5. **Check the candidate.** Inspect `tasks.md` and every packet for schema,
+   DAG, and lock invariants, and repair mechanical errors. Audit each producer using only its packet and sources
    against every contract its dependents assume. Check pairs with no coding
    path between them for undeclared owner, lock and exhaustive-type collisions.
    Locate the baseline witness for each local outcome, assembled claim and
@@ -81,7 +81,7 @@ or architecture decisions to their upstream owner.
 
 7. **Hand off.** Once all assigned axes clear, record bounded concerns in their
    Step 1 homes. Mark the ledger ready and retire pre-ledger coordination under
-   [Artifacts](../shared/artifacts.md) before rerunning `make ledger-check TASK=<task>`.
+   [Artifacts](../shared/artifacts.md) before re-verifying `tasks.md` and its packets.
    Return the ready ledger in [Transition Result V1](../shared/transition.md#transition-result-v1)
    with Implementation as next owner. Include checked execution waves, lock
    serializations, carried concerns and active reopen risks in movement evidence.

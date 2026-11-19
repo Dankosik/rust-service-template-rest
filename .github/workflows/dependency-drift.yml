@@ -1,10 +1,9 @@
 name: dependency-drift
 
-# Weekly drift that no Dependabot ecosystem covers: the vendored [patch] forks
-# behind their upstream releases and the tools/versions.env pins. The report
-# (scripts/check-dependency-drift.py --upstream) replaces the body of the one open
-# `dependency-drift` issue, and the issue closes when the report is clean.
-# docs/ci-cd-production-ready.md#vendored-forks describes the update.
+# Weekly drift that Dependabot does not cover: vendored [patch.crates-io] forks,
+# `mise.toml` tool/env pins, and Dockerfile static-archive ARG pins. The report
+# (`python3 -m scripts.checks.vendor drift --upstream`) updates the single open
+# `dependency-drift` issue and closes it when clean.
 
 on:
   schedule:
@@ -32,11 +31,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Report drift
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
+        with:
+          version: "2026.11.10"
+          install: false
+          cache: false
+      - name: Report vendored fork and tool pin drift
+        env:
+          MISE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           status=0
-          report=$(python3 scripts/check-dependency-drift.py --upstream) || status=$?
+          report=$(python3 -m scripts.checks.vendor drift --upstream) || status=$?
           if ((status > 1)) || [[ -z ${report} ]]; then
             printf 'dependency-drift: weekly poll did not produce a complete report (status %s)\n' "${status}" >&2
             exit 2
