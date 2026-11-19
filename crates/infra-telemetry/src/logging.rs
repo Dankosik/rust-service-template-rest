@@ -13,6 +13,7 @@ use tracing::{Event, Level, Metadata, Subscriber, span};
 use tracing_log::{AsLog as _, NormalizeEvent as _};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +53,7 @@ pub enum LoggingError {
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
-    let (targets, filter) = directive_filters(options.level)?;
+    let filter = directive_filter(options.level)?;
     if tracing::dispatcher::has_been_set()
         && tracing::dispatcher::get_default(|current| !current.is::<NoSubscriber>())
     {
@@ -71,7 +72,6 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());
     let subscriber = registry
-        .with(targets)
         .with(filter)
         // template:begin object-storage:telemetry-sdk-log-cap-apply
         .with(sdk_log_cap(options.level))
@@ -113,20 +113,84 @@ pub(crate) fn publish_observations() {
     sdk_diagnostics::publish();
 }
 
-type DirectiveFilters = (
-    Option<WithInfoSpans<Targets>>,
-    Option<WithInfoSpans<EnvFilter>>,
-);
-
-fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> {
-    let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
-    Ok(match static_targets(directive) {
-        Some(targets) => (Some(WithInfoSpans(targets)), None),
-        None => (None, Some(WithInfoSpans(filter))),
-    })
+enum DirectiveFilter {
+    Targets(Targets),
+    Env(EnvFilter),
 }
 
-struct WithInfoSpans<F>(F);
+impl<S> Layer<S> for DirectiveFilter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
+            Self::Env(filter) => filter.register_callsite(metadata),
+        }
+    }
+
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
+            Self::Env(filter) => filter.enabled(metadata, ctx),
+        }
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::event_enabled(targets, event, ctx),
+            Self::Env(filter) => filter.event_enabled(event, ctx),
+        }
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        match self {
+            Self::Targets(targets) => {
+                <Targets as Layer<S>>::on_new_span(targets, attrs, id, ctx);
+            }
+            Self::Env(filter) => filter.on_new_span(attrs, id, ctx),
+        }
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::on_record(targets, id, values, ctx),
+            Self::Env(filter) => filter.on_record(id, values, ctx),
+        }
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::on_enter(targets, id, ctx),
+            Self::Env(filter) => filter.on_enter(id, ctx),
+        }
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::on_exit(targets, id, ctx),
+            Self::Env(filter) => filter.on_exit(id, ctx),
+        }
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::on_close(targets, id, ctx),
+            Self::Env(filter) => filter.on_close(id, ctx),
+        }
+    }
+}
+
+fn directive_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
+    let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
+    let inner = match static_targets(directive) {
+        Some(targets) => DirectiveFilter::Targets(targets),
+        None => DirectiveFilter::Env(filter),
+    };
+    Ok(AdmissionFilter(inner))
+}
+
+struct AdmissionFilter(DirectiveFilter);
 
 fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && *metadata.level() <= Level::INFO
@@ -155,7 +219,10 @@ fn admission(metadata: &Metadata<'_>) -> Admission {
     }
 }
 
-impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
+impl<S> Layer<S> for AdmissionFilter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         let interest = self.0.register_callsite(metadata);
         match admission(metadata) {

@@ -481,6 +481,7 @@ impl FormatLayer {
         }
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn format_record<S>(
         &self,
         event: &Event<'_>,
@@ -491,30 +492,14 @@ impl FormatLayer {
     {
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
         let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
-        self.write_record(event, ctx, &mut scratch, &mut line)?;
-        Ok(line.buf.into_boxed_slice())
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn write_record<S>(
-        &self,
-        event: &Event<'_>,
-        ctx: &Context<'_, S>,
-        scratch: &mut Scratch,
-        line: &mut Bytes,
-    ) -> Result<(), DropReason>
-    where
-        S: Subscriber + for<'a> LookupSpan<'a>,
-    {
         let normalized = event.normalized_metadata();
-        let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
+        let (metadata, source) = match &normalized {
+            Some(metadata) => (metadata, Source::BridgedEvent),
+            None => (event.metadata(), Source::Event),
+        };
         event.record(&mut Capture {
-            scratch,
-            source: if normalized.is_some() {
-                Source::BridgedEvent
-            } else {
-                Source::Event
-            },
+            scratch: &mut scratch,
+            source,
         });
         let event_fields = scratch.fields.len();
         let span = ctx.event_span(event);
@@ -533,18 +518,18 @@ impl FormatLayer {
                 }
             }
         }
-        write_record_header(line, metadata, self.format);
+        write_record_header(&mut line, metadata, self.format);
         if let Some(span) = &span {
-            self.write_trace_context_fields(&span.id(), line);
+            self.write_trace_context_fields(&span.id(), &mut line);
         }
         if line.failed {
             return Err(DropReason::Oversize);
         }
-        scratch.write_body(line, event_fields, self.format);
+        scratch.write_body(&mut line, event_fields, self.format);
         if line.failed {
             Err(DropReason::Oversize)
         } else {
-            Ok(())
+            Ok(line.buf.into_boxed_slice())
         }
     }
 

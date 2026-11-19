@@ -137,14 +137,14 @@ impl Counters {
 
 #[derive(Debug)]
 struct Shared {
-    closed: RwLock<Option<crossbeam_channel::Sender<()>>>,
+    open: RwLock<Option<crossbeam_channel::Sender<()>>>,
     drain: AtomicU32,
     counters: Counters,
 }
 
 impl Shared {
     fn close(&self) {
-        let _ = self.closed.write().take();
+        let _ = self.open.write().take();
     }
 
     fn latch_drain_failure(&self, reason: LoggerShutdownReasons) {
@@ -178,7 +178,7 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
-        let open = self.shared.closed.read();
+        let open = self.shared.open.read();
         match open.is_some().then(|| self.sender.try_send(record)) {
             Some(Ok(())) => {
                 drop(open);
@@ -244,16 +244,13 @@ impl LoggerGuard {
         if remaining.is_zero() {
             return LoggerShutdownReasons::DEADLINE;
         }
-        let mut reasons = LoggerShutdownReasons::empty();
-        match self.completion.recv_timeout(remaining) {
-            Ok(()) => {}
+        let reasons = match self.completion.recv_timeout(remaining) {
+            Ok(()) => LoggerShutdownReasons::empty(),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 return LoggerShutdownReasons::DEADLINE;
             }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                reasons = LoggerShutdownReasons::WORKER;
-            }
-        }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => LoggerShutdownReasons::WORKER,
+        };
         while self
             .worker
             .as_ref()
@@ -273,7 +270,7 @@ impl LoggerGuard {
             && worker.join().is_err()
         {
             self.shared.record_sink_error(SinkOperation::Worker);
-            reasons |= LoggerShutdownReasons::WORKER;
+            return reasons | LoggerShutdownReasons::WORKER;
         }
         reasons
     }
@@ -289,7 +286,7 @@ impl Drop for LoggerGuard {
 pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output, LoggerGuard)> {
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(0);
     let shared = Arc::new(Shared {
-        closed: RwLock::new(Some(shutdown_tx)),
+        open: RwLock::new(Some(shutdown_tx)),
         drain: AtomicU32::new(0),
         counters: Counters::new(),
     });
@@ -324,6 +321,45 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
     ))
 }
 
+enum NextRecord {
+    Record(Record),
+    Flush,
+    Closed,
+}
+
+fn wait_for_record(
+    records: &crossbeam_channel::Receiver<Record>,
+    shutdown: &crossbeam_channel::Receiver<()>,
+    flush_after: Option<Duration>,
+) -> NextRecord {
+    if let Ok(record) = records.try_recv() {
+        return NextRecord::Record(record);
+    }
+    let drain_after_shutdown = || {
+        records
+            .try_recv()
+            .map_or(NextRecord::Closed, NextRecord::Record)
+    };
+    if let Some(timeout) = flush_after {
+        crossbeam_channel::select_biased! {
+            recv(records) -> received => received.map_or(NextRecord::Closed, NextRecord::Record),
+            recv(shutdown) -> _ => drain_after_shutdown(),
+            default(timeout) => NextRecord::Flush,
+        }
+    } else {
+        crossbeam_channel::select_biased! {
+            recv(records) -> received => received.map_or(NextRecord::Closed, NextRecord::Record),
+            recv(shutdown) -> _ => drain_after_shutdown(),
+        }
+    }
+}
+
+fn flush_sink(writer: &mut impl Write, shared: &Shared) {
+    if writer.flush().is_err() {
+        shared.record_sink_error(SinkOperation::Flush);
+    }
+}
+
 fn write_records<W: Write>(
     mut writer: W,
     records: crossbeam_channel::Receiver<Record>,
@@ -338,36 +374,15 @@ fn write_records<W: Write>(
         let carried_over = carried.is_some();
         let first = if let Some(record) = carried.take() {
             record
-        } else if let Ok(record) = records.try_recv() {
-            record
-        } else if dirty {
-            crossbeam_channel::select_biased! {
-                recv(records) -> received => match received {
-                    Ok(record) => record,
-                    Err(_) => break,
-                },
-                recv(shutdown) -> _ => match records.try_recv() {
-                    Ok(record) => record,
-                    Err(_) => break,
-                },
-                default(FLUSH_INTERVAL) => {
-                    if writer.flush().is_err() {
-                        shared.record_sink_error(SinkOperation::Flush);
-                    }
+        } else {
+            match wait_for_record(&records, shutdown, dirty.then_some(FLUSH_INTERVAL)) {
+                NextRecord::Record(record) => record,
+                NextRecord::Flush => {
+                    flush_sink(&mut writer, shared);
                     dirty = false;
                     continue;
                 }
-            }
-        } else {
-            crossbeam_channel::select_biased! {
-                recv(records) -> received => match received {
-                    Ok(record) => record,
-                    Err(_) => break,
-                },
-                recv(shutdown) -> _ => match records.try_recv() {
-                    Ok(record) => record,
-                    Err(_) => break,
-                },
+                NextRecord::Closed => break,
             }
         };
         if !carried_over && last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
@@ -386,9 +401,7 @@ fn write_records<W: Write>(
         last_write = Some(Instant::now());
         dirty = true;
     }
-    if writer.flush().is_err() {
-        shared.record_sink_error(SinkOperation::Flush);
-    }
+    flush_sink(&mut writer, shared);
     drop(records);
 }
 
@@ -987,7 +1000,7 @@ mod tests {
         let output = Output {
             sender,
             shared: Arc::new(Shared {
-                closed: RwLock::new(Some(open)),
+                open: RwLock::new(Some(open)),
                 drain: AtomicU32::new(0),
                 counters: Counters::new(),
             }),
@@ -1042,7 +1055,7 @@ mod tests {
         ];
         for (after_torn_line, steps, expected) in cases {
             let shared = Shared {
-                closed: RwLock::new(None),
+                open: RwLock::new(None),
                 drain: AtomicU32::new(0),
                 counters: Counters::new(),
             };
