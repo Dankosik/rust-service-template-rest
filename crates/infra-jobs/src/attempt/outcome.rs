@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
@@ -18,18 +20,18 @@ const RETRY_JITTER_SPAN_DIVISOR: i64 = 5;
 pub(super) enum Transition {
     Complete(Completion),
     Retry {
-        summary: String,
+        summary: Cow<'static, str>,
         base_micros: i64,
         floor_micros: i64,
         cause: RetryCause,
     },
     Fail {
         reason: FailureReason,
-        summary: String,
+        summary: Cow<'static, str>,
     },
     Snooze {
         delay_micros: i64,
-        summary: String,
+        summary: Cow<'static, str>,
     },
     Release,
 }
@@ -103,7 +105,7 @@ pub(super) enum Written {
 }
 
 impl Written {
-    const fn from_rows(rows: u64) -> Self {
+    pub(super) const fn from_rows(rows: u64) -> Self {
         if rows == 1 {
             Self::Applied
         } else {
@@ -274,8 +276,8 @@ pub(super) fn map_outcome(
     let number = attempt.number;
     let exhausted = number >= policy.max_attempts;
     let retry_budget_spent = exhausted && !is_outbox;
-    let retry_or_exhaust = |spent: bool, text: &str, cause, floor_micros| {
-        let summary = sanitize_summary(text);
+    let retry_or_exhaust = |spent: bool, summary, cause, floor_micros| {
+        let summary = sanitize_summary(summary);
         if spent {
             return Transition::Fail {
                 reason: FailureReason::Exhausted,
@@ -292,41 +294,47 @@ pub(super) fn map_outcome(
     match outcome {
         HandlerOutcome::Success(completion) => Transition::Complete(completion),
         HandlerOutcome::Cancelled => Transition::Release,
-        HandlerOutcome::Error(error) => match error.disposition {
+        HandlerOutcome::Error(JobError {
+            disposition,
+            summary,
+        }) => match disposition {
             Disposition::Snooze { delay_micros } => Transition::Snooze {
                 delay_micros,
-                summary: sanitize_summary(&error.summary),
+                summary: sanitize_summary(summary),
             },
             Disposition::Permanent => Transition::Fail {
                 reason: FailureReason::Permanent,
-                summary: sanitize_summary(&error.summary),
+                summary: sanitize_summary(summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
                 retry_budget_spent,
-                &error.summary,
+                summary,
                 RetryCause::Failure,
                 floor_micros,
             ),
             Disposition::Retry => {
-                retry_or_exhaust(retry_budget_spent, &error.summary, RetryCause::Failure, 0)
+                retry_or_exhaust(retry_budget_spent, summary, RetryCause::Failure, 0)
             }
         },
-        HandlerOutcome::Panic => {
-            retry_or_exhaust(exhausted, "handler panicked", RetryCause::Failure, 0)
-        }
+        HandlerOutcome::Panic => retry_or_exhaust(
+            exhausted,
+            Cow::Borrowed("handler panicked"),
+            RetryCause::Failure,
+            0,
+        ),
         HandlerOutcome::PayloadDecode(error) => retry_or_exhaust(
             exhausted,
-            &payload_summary(attempt.kind, &error),
+            Cow::Owned(payload_summary(attempt.kind, &error)),
             RetryCause::Failure,
             0,
         ),
         HandlerOutcome::Timeout => retry_or_exhaust(
             retry_budget_spent,
-            &format!(
+            Cow::Owned(format!(
                 "attempt timed out after {}",
                 jiff::fmt::friendly::SpanPrinter::new()
                     .unsigned_duration_to_string(&policy.timeout)
-            ),
+            )),
             RetryCause::Timeout,
             0,
         ),
@@ -364,7 +372,10 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
-fn sanitize_summary(text: &str) -> String {
+fn sanitize_summary(text: Cow<'static, str>) -> Cow<'static, str> {
+    if text.len() <= MAX_ERROR_SUMMARY_BYTES && !text.chars().any(char::is_control) {
+        return text;
+    }
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
         let ch = if ch.is_control() { ' ' } else { ch };
@@ -373,7 +384,7 @@ fn sanitize_summary(text: &str) -> String {
         }
         sanitized.push(ch);
     }
-    sanitized
+    Cow::Owned(sanitized)
 }
 #[cfg(test)]
 mod tests {
@@ -398,7 +409,8 @@ mod tests {
         let error = sqlx::Error::Protocol("private driver detail".to_owned());
         std::assert_matches!(
             outcome(HandlerOutcome::Error(error.into()), 1),
-            Transition::Retry { ref summary, .. } if summary == "postgres protocol"
+            Transition::Retry { summary: Cow::Owned(ref summary), .. }
+                if summary == "postgres protocol"
         );
     }
 
@@ -412,7 +424,7 @@ mod tests {
             outcome(HandlerOutcome::Error(JobError::retryable("fail")), 25),
             Transition::Fail {
                 reason: FailureReason::Exhausted,
-                ..
+                summary: Cow::Borrowed("fail"),
             }
         );
         std::assert_matches!(
@@ -426,7 +438,7 @@ mod tests {
                 base_micros,
                 cause: RetryCause::Failure,
                 floor_micros: 2_000_001,
-                ..
+                summary: Cow::Borrowed("at least"),
             } if base_micros == 1_000_000
         );
         std::assert_matches!(
@@ -458,7 +470,10 @@ mod tests {
                 HandlerOutcome::Error(JobError::unavailable("pool timed out")),
                 25,
             ),
-            Transition::Snooze { delay_micros: 10_000_000, ref summary } if summary == "pool timed out"
+            Transition::Snooze {
+                delay_micros: 10_000_000,
+                summary: Cow::Borrowed("pool timed out"),
+            }
         );
         std::assert_matches!(
             outcome(HandlerOutcome::Panic, 1),
@@ -479,7 +494,7 @@ mod tests {
             outcome(HandlerOutcome::Error(JobError::permanent("stop")), 1),
             Transition::Fail {
                 reason: FailureReason::Permanent,
-                ..
+                summary: Cow::Borrowed("stop"),
             }
         );
     }
@@ -532,7 +547,7 @@ mod tests {
     #[test]
     fn the_write_view_carries_each_statement_binding() {
         let retry = Transition::Retry {
-            summary: "retry me".to_owned(),
+            summary: Cow::Borrowed("retry me"),
             base_micros: 81_000_000,
             floor_micros: 2_000_000,
             cause: RetryCause::Failure,
@@ -547,7 +562,7 @@ mod tests {
         );
         let snooze = Transition::Snooze {
             delay_micros: 7,
-            summary: String::new(),
+            summary: Cow::Borrowed(""),
         };
         std::assert_matches!(
             write_of(&snooze),
@@ -555,7 +570,7 @@ mod tests {
         );
         let fail = Transition::Fail {
             reason: FailureReason::Exhausted,
-            summary: "done".to_owned(),
+            summary: Cow::Borrowed("done"),
         };
         std::assert_matches!(
             write_of(&fail),
@@ -584,20 +599,26 @@ mod tests {
 
     #[test]
     fn summaries_sanitize_controls_and_preserve_utf8_without_payload_disclosure() {
-        assert_eq!(sanitize_summary("a\nb\0c"), "a b c");
-        assert_eq!(sanitize_summary(""), "");
-        assert_eq!(sanitize_summary(&"x".repeat(1024)), "x".repeat(1024));
-        assert_eq!(sanitize_summary(&"x".repeat(65_536)), "x".repeat(1024));
+        assert_eq!(sanitize_summary(Cow::Borrowed("a\nb\0c")), "a b c");
+        assert_eq!(sanitize_summary(Cow::Borrowed("")), "");
         assert_eq!(
-            sanitize_summary(&("\u{0085}".repeat(1023) + "é")),
+            sanitize_summary(Cow::Owned("x".repeat(1024))),
+            "x".repeat(1024)
+        );
+        assert_eq!(
+            sanitize_summary(Cow::Owned("x".repeat(65_536))),
+            "x".repeat(1024)
+        );
+        assert_eq!(
+            sanitize_summary(Cow::Owned("\u{0085}".repeat(1023) + "é")),
             " ".repeat(1023)
         );
         assert_eq!(
-            sanitize_summary(&("é".repeat(512) + "tail")),
+            sanitize_summary(Cow::Owned("é".repeat(512) + "tail")),
             "é".repeat(512)
         );
         assert_eq!(
-            sanitize_summary(&("a".repeat(1023) + "é")),
+            sanitize_summary(Cow::Owned("a".repeat(1023) + "é")),
             "a".repeat(1023)
         );
         let error = serde_json::from_str::<u32>("\"secret\"").unwrap_err();

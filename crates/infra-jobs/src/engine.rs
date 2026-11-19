@@ -32,8 +32,21 @@ pub struct Engine {
 pub struct Started {
     lifecycle: Arc<AttemptLifecycle>,
     _background: tokio_util::sync::DropGuard,
-    stop: CancellationToken,
+    signals: Arc<EngineSignals>,
+}
+
+pub(crate) struct EngineSignals {
+    pub(crate) stop: CancellationToken,
     failure: CancellationToken,
+}
+
+impl EngineSignals {
+    fn new(stop: CancellationToken) -> Self {
+        Self {
+            stop,
+            failure: CancellationToken::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,8 +174,7 @@ impl Engine {
         );
         let engine = Arc::new(self);
         let background = cancel.child_token();
-        let stop = background.child_token();
-        let failure = CancellationToken::new();
+        let signals = Arc::new(EngineSignals::new(background.child_token()));
         let lifecycle = Arc::clone(&engine.primary_group.lifecycle);
         lifecycle.drain.start_claim_loops(groups);
         for group in engine.groups() {
@@ -172,8 +184,8 @@ impl Engine {
                 Run::Claim {
                     _exit: DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain)),
                 },
-                stop.clone(),
-                failure.clone(),
+                signals.stop.clone(),
+                Arc::clone(&signals),
             );
         }
         let listener = infra_postgres::notifications_enabled(&engine.primary_group.pool)
@@ -187,14 +199,13 @@ impl Engine {
                 Arc::clone(&engine.primary_group),
                 run,
                 background.clone(),
-                failure.clone(),
+                Arc::clone(&signals),
             );
         }
         Started {
             lifecycle,
             _background: background.drop_guard(),
-            stop,
-            failure,
+            signals,
         }
     }
 }
@@ -219,7 +230,7 @@ impl fmt::Debug for Engine {
 
 impl Started {
     pub fn stop_claiming(&self) {
-        self.stop.cancel();
+        self.signals.stop.cancel();
     }
 
     #[must_use]
@@ -256,7 +267,7 @@ impl Started {
     }
 
     pub async fn failed(&self) {
-        self.failure.cancelled().await;
+        self.signals.failure.cancelled().await;
     }
 }
 
@@ -292,13 +303,13 @@ fn spawn_guarded(
     group: Arc<WorkerGroup>,
     run: Run,
     token: CancellationToken,
-    failure: CancellationToken,
+    signals: Arc<EngineSignals>,
 ) {
-    let guard = task_guard(run.label(), token.clone(), failure.clone());
+    let guard = task_guard(run.label(), token.clone(), signals.failure.clone());
     tracker.spawn(async move {
         let _guard = guard;
         match run {
-            _claim @ Run::Claim { .. } => claim::run_claim_loop(group, token, failure).await,
+            _claim @ Run::Claim { .. } => claim::run_claim_loop(group, signals).await,
             Run::Retention => maintenance::run_retention(&group, token).await,
             Run::Listener(engine) => listener::run_listener(&group, &engine, token).await,
             Run::Sampling(kinds) => maintenance::run_sampling(&group, &kinds, token).await,
@@ -381,8 +392,7 @@ impl Drop for DrainParticipant {
 }
 
 pub(crate) struct SupervisorGuard {
-    stop: CancellationToken,
-    failure: CancellationToken,
+    signals: Arc<EngineSignals>,
     job_id: crate::kind::JobId,
     kind: &'static str,
     retired: bool,
@@ -392,15 +402,13 @@ pub(crate) struct SupervisorGuard {
 impl SupervisorGuard {
     pub(crate) fn new(
         drain: Arc<AttemptDrain>,
-        stop: CancellationToken,
-        failure: CancellationToken,
+        signals: Arc<EngineSignals>,
         job_id: crate::kind::JobId,
         kind: &'static str,
     ) -> Self {
         drain.admit();
         Self {
-            stop,
-            failure,
+            signals,
             job_id,
             kind,
             retired: false,
@@ -423,8 +431,8 @@ impl Drop for SupervisorGuard {
                 panicked = std::thread::panicking(),
                 "jobs_engine_task_stopped"
             );
-            self.failure.cancel();
-            self.stop.cancel();
+            self.signals.failure.cancel();
+            self.signals.stop.cancel();
         }
     }
 }
@@ -621,7 +629,12 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
 }
 
 pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
-    if group.failing[operation].swap(false, Ordering::SeqCst) {
+    let failing = &group.failing[operation];
+    if failing.load(Ordering::SeqCst)
+        && failing
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }
@@ -702,8 +715,7 @@ mod tests {
             let job_id = crate::JobId(uuid::Uuid::nil());
             let guard = SupervisorGuard::new(
                 Arc::clone(&shared.lifecycle.drain),
-                CancellationToken::new(),
-                CancellationToken::new(),
+                Arc::new(EngineSignals::new(CancellationToken::new())),
                 job_id,
                 "ordinary",
             );
@@ -777,13 +789,11 @@ mod tests {
             let started = Started {
                 lifecycle: Arc::clone(&engine.primary_group.lifecycle),
                 _background: CancellationToken::new().drop_guard(),
-                stop: CancellationToken::new(),
-                failure: CancellationToken::new(),
+                signals: Arc::new(EngineSignals::new(CancellationToken::new())),
             };
             let mut supervisor = SupervisorGuard::new(
                 Arc::clone(&started.lifecycle.drain),
-                started.stop.clone(),
-                started.failure.clone(),
+                Arc::clone(&started.signals),
                 crate::JobId(uuid::Uuid::nil()),
                 "ordinary",
             );
@@ -925,8 +935,8 @@ mod tests {
         let tracker = TaskTracker::new();
         let registered = engine.primary_group.registry.get("ordinary").unwrap();
         for case in ["unpolled", "abort", "expired"] {
-            let stop = CancellationToken::new();
-            let failure = CancellationToken::new();
+            let signals = Arc::new(EngineSignals::new(CancellationToken::new()));
+            let drain = &engine.primary_group.lifecycle.drain;
             let future = crate::attempt::supervise(
                 Arc::clone(&engine.primary_group),
                 crate::claim::Claimed {
@@ -957,13 +967,13 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
-                    Arc::clone(&engine.primary_group.lifecycle.drain),
-                    stop.clone(),
-                    failure.clone(),
+                    Arc::clone(drain),
+                    Arc::clone(&signals),
                     crate::JobId(uuid::Uuid::nil()),
                     "ordinary",
                 ),
             );
+            assert_eq!(drain.in_flight(), 1, "{case}");
             assert_eq!(gauges.get("jobs_owned_attempts", None), 1.0, "{case}");
             if case == "unpolled" {
                 drop(future);
@@ -983,8 +993,9 @@ mod tests {
                         .unwrap();
                 }
             }
-            assert_eq!(failure.is_cancelled(), case != "expired", "{case}");
-            assert_eq!(stop.is_cancelled(), case != "expired", "{case}");
+            assert_eq!(signals.failure.is_cancelled(), case != "expired", "{case}");
+            assert_eq!(signals.stop.is_cancelled(), case != "expired", "{case}");
+            assert_eq!(drain.in_flight(), 0, "{case}");
             assert_eq!(engine.primary_group.slots.available_permits(), 1, "{case}");
             assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
         }
@@ -1007,12 +1018,10 @@ mod tests {
 
     #[test]
     fn supervisor_panic_after_retirement_still_stops_its_start() {
-        let stop = CancellationToken::new();
-        let failure = CancellationToken::new();
+        let signals = Arc::new(EngineSignals::new(CancellationToken::new()));
         let guard = SupervisorGuard::new(
             Arc::default(),
-            stop.clone(),
-            failure.clone(),
+            Arc::clone(&signals),
             crate::JobId(uuid::Uuid::nil()),
             "ordinary",
         );
@@ -1022,8 +1031,8 @@ mod tests {
             panic!("retirement defect");
         }));
         assert!(result.is_err());
-        assert!(stop.is_cancelled());
-        assert!(failure.is_cancelled());
+        assert!(signals.stop.is_cancelled());
+        assert!(signals.failure.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]

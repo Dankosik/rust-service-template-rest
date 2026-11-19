@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::mem::DropGuard;
 use std::sync::{Arc, Weak};
 
+use futures_util::{TryFutureExt as _, future::Either};
 use infra_postgres::observed;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -13,6 +15,8 @@ use super::{
     deadline_reached_or_cleanup_ended, execute_before_deadline, within,
 };
 use crate::engine::{Operation, WorkerGroup, observe_failure};
+
+const INLINE_BATCH_CAPACITY: usize = 16;
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
@@ -81,9 +85,12 @@ impl CompletionGroup {
         fence: ClaimFence,
         slots: &Arc<AttemptSlots>,
         memberships: &MembershipGauge,
-    ) -> (impl Drop + use<'a>, oneshot::Receiver<CompletionReply>) {
+    ) -> (
+        DropGuard<ClaimFence, impl FnOnce(ClaimFence) + use<'a>>,
+        oneshot::Receiver<CompletionReply>,
+    ) {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let registration = std::mem::DropGuard::new(fence, |fence| {
+        let registration = DropGuard::new(fence, |fence| {
             let retired = {
                 let mut queued = self.queued.lock();
                 queued
@@ -183,13 +190,17 @@ pub(super) async fn complete_batched(
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
     let completion_group = group.completions.group(supervisor_deadline);
-    let (_registration, mut reply_rx) =
+    let (registration, mut reply_rx) =
         completion_group.register(fence, slots, &group.completions.memberships);
     let writer = match completion_group.writer_or_reply(&mut reply_rx).await {
         WriteTurn::Write(writer) => writer,
-        WriteTurn::Reply(reply) => return reply,
+        WriteTurn::Reply(reply) => {
+            DropGuard::dismiss(registration);
+            return reply;
+        }
     };
     let batch = CompletionBatch::new(std::mem::take(&mut *completion_group.queued.lock()));
+    DropGuard::dismiss(registration);
     write_batch(group, batch, supervisor_deadline).await;
     drop(writer);
     reply_rx.await.unwrap_or(Err(Unacknowledged))
@@ -202,22 +213,53 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
     {
         return;
     }
-    let result = {
-        type BatchColumn<T> = SmallVec<[T; 16]>;
-        let (ids, generations, tokens): (BatchColumn<_>, BatchColumn<_>, BatchColumn<_>) = batch
-            .queued
-            .iter()
-            .map(|queued| {
-                let fence = queued.fence;
-                (fence.job_id.0, fence.generation, fence.token)
-            })
-            .collect();
-        within(
-            &group.lifecycle.cleanup,
-            deadline,
-            execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
-                observed!(
-                    "complete jobs",
+    let columns;
+    let query = match batch.queued.as_slice() {
+        [entry] => CompletionQuery::Single(entry.fence),
+        entries => {
+            type BatchColumn<T> = SmallVec<[T; INLINE_BATCH_CAPACITY]>;
+            columns = entries
+                .iter()
+                .map(|entry| {
+                    let fence = entry.fence;
+                    (fence.job_id.0, fence.generation, fence.token)
+                })
+                .collect::<(BatchColumn<_>, BatchColumn<_>, BatchColumn<_>)>();
+            let (ids, generations, tokens) = &columns;
+            CompletionQuery::Multiple {
+                ids,
+                generations,
+                tokens,
+            }
+        }
+    };
+    let result = within(
+        &group.lifecycle.cleanup,
+        deadline,
+        execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
+            let statement = match query {
+                CompletionQuery::Single(ClaimFence {
+                    job_id,
+                    generation,
+                    token,
+                }) => Either::Left(
+                    sqlx::query!(
+                        "UPDATE background_jobs AS job \
+                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                         WHERE job.id = $1 AND job.claim_generation = $2 AND job.claim_token = $3 \
+                           AND job.claim_expires_at IS NOT NULL",
+                        job_id.0,
+                        generation,
+                        token,
+                    )
+                    .execute(&mut *connection)
+                    .map_ok(CompletionWrite::Single),
+                ),
+                CompletionQuery::Multiple {
+                    ids,
+                    generations,
+                    tokens,
+                } => Either::Right(
                     sqlx::query_scalar!(
                         "UPDATE background_jobs AS job \
                          SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
@@ -225,23 +267,25 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
                          WHERE job.id = done.id AND job.claim_generation = done.generation AND job.claim_token = done.token \
                            AND job.claim_expires_at IS NOT NULL \
                          RETURNING done.position AS \"position!\"",
-                        &ids[..],
-                        &generations[..],
-                        &tokens[..],
+                        ids,
+                        generations,
+                        tokens,
                     )
-                    .fetch_all(&mut *connection),
-                )
-                .await
-            }),
-        )
-        .await
-    };
+                    .fetch_all(&mut *connection)
+                    .map_ok(CompletionWrite::Multiple),
+                ),
+            };
+            observed!("complete jobs", statement).await
+        }),
+    )
+    .await;
     match result {
-        Some(Ok(positions)) => {
-            let results = written_by_position(&positions, batch.queued.len())
-                .into_iter()
-                .map(Ok);
-            batch.finish(results);
+        Some(Ok(CompletionWrite::Single(result))) => {
+            batch.finish([Ok(Written::from_rows(result.rows_affected()))]);
+        }
+        Some(Ok(CompletionWrite::Multiple(positions))) => {
+            let written = written_by_position(&positions, batch.queued.len());
+            batch.finish(written.into_iter().map(Ok));
         }
         Some(Err(error)) => {
             observe_failure(group, Operation::Record, &error);
@@ -253,8 +297,25 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
     }
 }
 
-fn written_by_position(positions: &[i64], len: usize) -> Vec<Written> {
-    let mut written = vec![Written::Unchanged; len];
+enum CompletionQuery<'a> {
+    Single(ClaimFence),
+    Multiple {
+        ids: &'a [uuid::Uuid],
+        generations: &'a [i64],
+        tokens: &'a [uuid::Uuid],
+    },
+}
+
+enum CompletionWrite {
+    Single(sqlx::postgres::PgQueryResult),
+    Multiple(Vec<i64>),
+}
+
+fn written_by_position(
+    positions: &[i64],
+    len: usize,
+) -> SmallVec<[Written; INLINE_BATCH_CAPACITY]> {
+    let mut written = SmallVec::<[_; INLINE_BATCH_CAPACITY]>::from_elem(Written::Unchanged, len);
     for &position in positions {
         if let Some(entry) = usize::try_from(position - 1)
             .ok()

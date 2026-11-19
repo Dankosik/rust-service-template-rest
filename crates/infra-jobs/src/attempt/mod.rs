@@ -553,7 +553,7 @@ async fn drive(
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
 ) -> Option<HandlerOutcome> {
-    let _cancel_on_drop = cancel.clone().drop_guard();
+    let _cancel_on_drop = cancel.drop_guard_ref();
     let mut handler = std::mem::DropGuard::new(future, |future| {
         if let Err(payload) =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))

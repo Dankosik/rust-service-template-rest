@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO background_jobs (id, kind, payload_text, unique_key, not_before, trace_context, trace_state) VALUES ($6, $1, $7, $2::text COLLATE \"C\", statement_timestamp() + ($3::bigint * interval '1 microsecond'), $4, $5) ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d75fac79f30f7a2560b756e225cf351014151a461668f722fa1faf7a15dd8acf"
+}
