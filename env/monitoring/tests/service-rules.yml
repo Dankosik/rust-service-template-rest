@@ -215,6 +215,63 @@ tests:
           - labels: 'ALERTS{alertname="RuntimeSchedulerSampleStale",alertstate="firing",job="service",instance="lag",severity="ticket"}'
             value: 1
 
+  - name: "One pre-export span drop opens a bounded ticket even before the first scrape"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'service_startup_trace_exporter_active{job="service",instance="a"}'
+        values: "1x15"
+      - series: 'process_start_time_seconds{job="service",instance="a"}'
+        values: "0x15"
+      - series: 'telemetry_sdk_diagnostics_total{job="service",instance="a",event="queue_dropping_started"}'
+        values: "0x5 1x9"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="restarted"}'
+        values: "1x15"
+      - series: 'process_start_time_seconds{job="service",instance="restarted"}'
+        values: "0x7 480x7"
+      - series: 'telemetry_sdk_diagnostics_total{job="service",instance="restarted",event="queue_dropping_started"}'
+        values: "0x5 1x1 0x7"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="early"}'
+        values: "_ 1x14"
+      - series: 'process_start_time_seconds{job="service",instance="early"}'
+        values: "_ 0x14"
+      - series: 'telemetry_sdk_diagnostics_total{job="service",instance="early",event="queue_dropping_started"}'
+        values: "_ 1x14"
+      - series: 'service_startup_trace_exporter_active{job="service",instance="off"}'
+        values: "0x15"
+      - series: 'telemetry_sdk_diagnostics_total{job="service",instance="off",event="queue_dropping_started"}'
+        values: "0x5 1x9"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 0m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TelemetrySpanQueueOverflow",alertstate="firing",job="service",instance="early",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 6m
+        exp_samples:
+          - &service_span_queue_ticket
+            labels: 'ALERTS{alertname="TelemetrySpanQueueOverflow",alertstate="firing",job="service",instance="a",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TelemetrySpanQueueOverflow",alertstate="firing",job="service",instance="restarted",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 8m
+        exp_samples:
+          - *service_span_queue_ticket
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing",alertname=~"TelemetrySpanQueueOverflow|TelemetryRecordsLost"}'
+        eval_time: 15m
+        exp_samples: []
+
   - name: "A job with no reachable target pages; the lost replica becomes a ticket"
     interval: 1m
     input_series:

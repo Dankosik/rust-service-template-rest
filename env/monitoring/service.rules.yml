@@ -298,6 +298,19 @@ groups:
           summary: Application logs or trace exports are persistently failing
           description: '{{ $labels.instance }} of {{ $labels.job }} has reported telemetry loss or invalid collector responses for ten minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#telemetryrecordslost
+      - alert: TelemetrySpanQueueOverflow
+        expr: |
+          max by(job,instance) (telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="queue_dropping_started"}) > 0
+          and on(job,instance) (service_startup_trace_exporter_active{job=~"service|jobs-worker"} == 1)
+          and on(job,instance) (
+            increase(telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="queue_dropping_started"}[5m]) > 0
+            or on(job,instance) (time() - process_start_time_seconds{job=~"service|jobs-worker"} < 300)
+          )
+        labels: {severity: ticket}
+        annotations:
+          summary: The trace batch queue dropped at least one span before export
+          description: '{{ $labels.instance }} of {{ $labels.job }} reported a local trace batch queue overflow.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#telemetryspanqueueoverflow
       - alert: RuntimeThreadsElevated
         expr: |
           process_threads{job=~"service|jobs-worker"}

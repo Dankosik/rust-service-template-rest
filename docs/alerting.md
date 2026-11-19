@@ -318,8 +318,23 @@ backpressure or restore the log sink. For tracing, inspect
 trust and capacity. The SDK result counts all spans in a batch by the final
 call result. The receiver separately reports explicit rejections through
 `telemetry_sdk_reported_rejected_spans_total`. Verify recovery at the
-destination with a sampled trace. After a queue-overflow diagnostic, the SDK
-may publish the exact dropped-span count only during shutdown.
+destination with a sampled trace.
+
+### TelemetrySpanQueueOverflow
+
+The SDK dropped at least one span before it could reach the exporter because
+the local batch queue was full. The SDK emits `queue_dropping_started` once per
+batch processor, on the first drop, and may report the total drop count during
+shutdown. With an active exporter, any increase in the diagnostic counter
+over five minutes opens the ticket. A positive counter observed during the
+first five minutes after process start also qualifies, covering drops before
+the first scrape. The ticket clears when the observation window closes or
+Prometheus sees a healthy replacement's zero counter.
+
+Ticket expiry marks the end of the notification window. Further drops in the
+same batch processor produce no new onset signal. Check the affected
+instance's trace load and the collector's latency and capacity. Verify
+current trace delivery at the destination with a sampled trace.
 
 ### RuntimeThreadsElevated
 
