@@ -137,7 +137,7 @@ hyper-util = { version = "=0.1.21", default-features = false }
 http-body = { version = "1.1.0", default-features = false }
 http-body-util = { version = "0.1.5", default-features = false }
 http = { version = "1.5.0", default-features = false }
-mime = { version = "0.3.17", default-features = false }
+mediatype = { version = "0.23.0", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
 tikv-jemallocator = { version = "0.7.0", default-features = false }
 rlimit = { version = "0.11.0", default-features = false }
@@ -207,6 +207,11 @@ async-trait = { version = "0.1.92", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
 derive-where = { version = "1.7.0", default-features = false }
+educe = { version = "0.7.6", default-features = false }
+delegate = { version = "0.13.5", default-features = false }
+const_format = { version = "0.2.37", default-features = false }
+fastrand = { version = "2.5.0", default-features = false }
+pin-project-lite = { version = "0.2.17", default-features = false }
 enum-map = { version = "3.1.0", default-features = false }
 const-hex = { version = "1.19.3", default-features = false }
 async-stream = { version = "0.3.6", default-features = false }
@@ -250,7 +255,6 @@ wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
 # template:begin outbound-http:workspace-outbound-http-transport
 hyper-rustls = { version = "0.27.9", default-features = false }
-once_cell = { version = "1.21.4", default-features = false }
 # template:end outbound-http:workspace-outbound-http-transport
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }

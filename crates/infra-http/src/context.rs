@@ -1,6 +1,6 @@
-use std::mem::DropGuard;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes, to_bytes};
@@ -108,31 +108,64 @@ pub(crate) async fn collect_body(
 }
 // template:end http-idempotency:http-idempotency-collect-body
 
-async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
-    let Some((tracking, deadline)) = context.and_then(|context| {
-        context
-            .tracking
-            .as_deref()
-            .zip(context.operation.deadline())
-    }) else {
-        return read.await;
-    };
-    let mut read = std::pin::pin!(read);
-    let mut pending = None;
-    std::future::poll_fn(|cx| {
-        let polled = read.as_mut().poll(cx);
-        if polled.is_pending() && pending.is_none() && !deadline.expired() {
-            tracking.pending.fetch_add(1, Ordering::Relaxed);
-            pending = Some(DropGuard::new(tracking, move |tracking| {
-                if deadline.expired() {
-                    tracking.pending_at_deadline.store(true, Ordering::Relaxed);
-                }
-                tracking.pending.fetch_sub(1, Ordering::Release);
-            }));
+pub(crate) struct BodyReadTracker {
+    target: Option<(Arc<RequestTracking>, Deadline)>,
+    pending: Option<PendingRead>,
+}
+
+struct PendingRead {
+    tracking: Arc<RequestTracking>,
+    deadline: Deadline,
+}
+
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        if self.deadline.expired() {
+            self.tracking
+                .pending_at_deadline
+                .store(true, Ordering::Relaxed);
+        }
+        self.tracking.pending.fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl BodyReadTracker {
+    pub(crate) fn new(context: Option<&RequestContext>) -> Self {
+        let target =
+            context.and_then(|context| context.tracking.clone().zip(context.operation.deadline()));
+        Self {
+            target,
+            pending: None,
+        }
+    }
+
+    pub(crate) fn poll_with<T>(&mut self, poll: impl FnOnce() -> Poll<T>) -> Poll<T> {
+        let polled = poll();
+        if polled.is_pending() {
+            if self.pending.is_none()
+                && let Some((tracking, deadline)) = &self.target
+                && !deadline.expired()
+            {
+                tracking.pending.fetch_add(1, Ordering::Relaxed);
+                self.pending = Some(PendingRead {
+                    tracking: Arc::clone(tracking),
+                    deadline: *deadline,
+                });
+            }
+        } else {
+            self.pending = None;
         }
         polled
-    })
-    .await
+    }
+}
+
+async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
+    let mut tracker = BodyReadTracker::new(context);
+    if tracker.target.is_none() {
+        return read.await;
+    }
+    let mut read = std::pin::pin!(read);
+    std::future::poll_fn(|cx| tracker.poll_with(|| read.as_mut().poll(cx))).await
 }
 
 #[derive(Clone, Debug)]

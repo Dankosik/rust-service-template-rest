@@ -975,7 +975,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         () = resource.started() => {}
         result = &mut delayed => panic!("delayed call finished before the gate: {result:?}"),
     }
-    *credentials.lock_cached() = crate::credentials::Cached::default();
+    credentials.clear_cached();
     tokens.token_json(
         StatusCode::OK,
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
@@ -1270,7 +1270,7 @@ async fn resource_opening_ceiling_starts_before_credentials_without_caller_metad
             result = &mut call => panic!("token must be gated: {result:?}"),
         }
         super::advance(Duration::from_secs(2)).await;
-        let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
+        let result = poll_fn(|cx| Poll::Ready(Pin::new(&mut call).poll(cx))).await;
         assert_matches!(result, Poll::Ready(Err(ref error))
             if error.code() == Code::DeadlineExceeded, "{result:?}");
         drop(call);

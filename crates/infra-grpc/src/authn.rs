@@ -44,38 +44,28 @@ impl VerifiedPrincipal {
         extensions.get::<Self>()
     }
 
-    pub fn claims<'a, T: Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError> {
-        self.0.claims()
-    }
+    delegate::delegate! {
+        to self.0 {
+            pub fn claims<'a, T: Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError>;
 
-    #[must_use]
-    pub fn actor(&self) -> Option<&Actor> {
-        self.0.actor()
-    }
+            #[must_use]
+            pub fn actor(&self) -> Option<&Actor>;
 
-    #[must_use]
-    pub const fn expires_at(&self) -> u64 {
-        self.0.expires_at()
-    }
+            #[must_use]
+            pub const fn expires_at(&self) -> u64;
 
-    #[must_use]
-    pub fn scopes(&self) -> &[String] {
-        self.0.scopes()
-    }
+            #[must_use]
+            pub fn scopes(&self) -> &[String];
 
-    #[must_use]
-    pub fn client_id(&self) -> Option<&str> {
-        self.0.client_id()
-    }
+            #[must_use]
+            pub fn client_id(&self) -> Option<&str>;
 
-    #[must_use]
-    pub fn subject(&self) -> Option<&str> {
-        self.0.subject()
-    }
+            #[must_use]
+            pub fn subject(&self) -> Option<&str>;
 
-    #[must_use]
-    pub fn issuer(&self) -> &str {
-        self.0.issuer()
+            #[must_use]
+            pub fn issuer(&self) -> &str;
+        }
     }
 }
 

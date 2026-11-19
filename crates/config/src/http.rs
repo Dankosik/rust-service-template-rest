@@ -12,17 +12,15 @@ use crate::listener_limits::{
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(transparent)]
 pub(crate) struct ReadinessPropagationDelay(
-    #[serde(deserialize_with = "crate::de::duration")] Duration,
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(15)))]
+    Duration,
 );
-
-impl Default for ReadinessPropagationDelay {
-    fn default() -> Self {
-        Self(Duration::from_secs(15))
-    }
-}
 
 pub(crate) type HttpInput = HttpFields<ReadinessPropagationDelay>;
 
@@ -42,20 +40,25 @@ impl ShutdownTail {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default(bound(Propagation: Default)))]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct HttpFields<Propagation> {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
     /// all-interfaces (`0.0.0.0`). Hostnames are refused.
-    #[serde(deserialize_with = "crate::de::listen_addr")]
+    #[serde_as(as = "crate::de::ListenAddr")]
+    #[educe(Default(expression = SocketAddr::from(([0, 0, 0, 0], 8080))))]
     addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL.
     /// `drain_timeout` plus the process's [`ShutdownTail`] must fit inside it.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(45)))]
     grace_period: Duration,
     /// Bound for the HTTP drain. In the service this includes
     /// `readiness_propagation_delay`. The worker budgets its drain separately.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(25)))]
     drain_timeout: Duration,
     /// Time the service keeps serving after readiness flips off so a load
     /// balancer observes `/health/ready` failing before the listener stops
@@ -66,65 +69,51 @@ pub(crate) struct HttpFields<Propagation> {
     /// timeout to avoid 502s when it reuses a connection the listener closed.
     /// The default clears the common 60s timeout. Google Cloud load balancers
     /// hold backend connections for 600s.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(75)))]
     header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
     /// reads. Features that stream responses own the lifetime of their bodies
     /// and any resources held after the response head.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
     /// Read-buffer ceiling for one request head. Overflow answers with a
     /// Hyper 431 before the router.
+    #[educe(Default(expression = ByteSize::kib(16)))]
     max_header_bytes: ByteSize,
     /// A declared request body length above this ceiling answers 413.
     /// Streaming bodies are checked as handlers or extractors read them.
+    #[educe(Default(expression = ByteSize::mib(1)))]
     max_body_bytes: ByteSize,
     /// Requests in handlers at once, each counted until its response head.
     /// Requests above the limit wait up to `admission_wait` before receiving
     /// 503. `http_server_active_requests` includes waiting requests.
     /// Zero disables the limit.
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "crate::de::StrictCount")]
+    #[educe(Default(expression = DEFAULT_MAX_IN_FLIGHT))]
     max_in_flight: u32,
     /// Longest wait for a handler slot. It consumes part of the request budget
     /// and cannot outlast `request_timeout`. Zero sheds at once.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
+    #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound.
     /// A connection carries one request at a time, so `max_in_flight` takes
     /// effect only below this cap.
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "crate::de::StrictCount")]
+    #[educe(Default(expression = DEFAULT_MAX_CONNECTIONS))]
     max_connections: u32,
     /// Age after which a connection is told to finish and close, so its client
     /// reconnects and is balanced again. Each connection's age is spread by
     /// up to 10% either way. Zero leaves connection age unbounded.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "crate::de::StrictDuration")]
     max_connection_age: Duration,
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "crate::de::StrictBool")]
     access_log_health_probes: bool,
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "crate::de::StrictBool")]
     trust_trace_context: bool,
-}
-
-impl<Propagation: Default> Default for HttpFields<Propagation> {
-    fn default() -> Self {
-        Self {
-            addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
-            grace_period: Duration::from_secs(45),
-            drain_timeout: Duration::from_secs(25),
-            readiness_propagation_delay: Propagation::default(),
-            header_read_timeout: Duration::from_secs(75),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            max_header_bytes: ByteSize::kib(16),
-            max_body_bytes: ByteSize::mib(1),
-            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
-            admission_wait: DEFAULT_ADMISSION_WAIT,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
-            max_connection_age: Duration::ZERO,
-            access_log_health_probes: false,
-            trust_trace_context: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

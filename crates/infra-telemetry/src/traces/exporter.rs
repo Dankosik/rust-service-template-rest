@@ -14,6 +14,8 @@ use opentelemetry_otlp::{
     WithHttpConfig,
 };
 use secrecy::ExposeSecret;
+use shared_rules::uri::{authority_has_userinfo, has_whitespace_or_control};
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{EndpointSource, TracingError, TracingOptions};
 
@@ -246,9 +248,10 @@ fn collector_url(setting: &Setting<'_>) -> Result<reqwest::Url, TracingError> {
     if !matches!(uri.scheme_str(), Some("http" | "https"))
         || uri
             .authority()
-            .is_none_or(|authority| authority.host().is_empty() || authority.as_str().contains('@'))
+            .is_none_or(|authority| authority.host().is_empty())
+        || authority_has_userinfo(raw)
         || raw.contains(['?', '#', '\\'])
-        || raw.chars().any(|c| c.is_whitespace() || c.is_control())
+        || has_whitespace_or_control(raw)
     {
         return Err(invalid());
     }
@@ -282,7 +285,7 @@ impl TrustFile {
         clippy::disallowed_types,
         reason = "the blocking exporter preparation task owns TLS file reads"
     )]
-    fn read(&self) -> Result<Vec<u8>, TracingError> {
+    fn read(&self) -> Result<Zeroizing<Vec<u8>>, TracingError> {
         let name = self.variable;
         let read_error = |error: io::Error| TracingError::TrustRead {
             name,
@@ -297,10 +300,16 @@ impl TrustFile {
             options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
         }
         let file = options.open(&self.path).map_err(read_error)?;
-        if !file.metadata().map_err(read_error)?.is_file() {
+        let metadata = file.metadata().map_err(read_error)?;
+        if !metadata.is_file() {
             return Err(TracingError::TrustFileType { name });
         }
-        let mut pem = Vec::new();
+        let max_bytes = usize::try_from(TRUST_FILE_MAX_BYTES).unwrap_or(usize::MAX);
+        let capacity = usize::try_from(metadata.len())
+            .unwrap_or(max_bytes)
+            .min(max_bytes)
+            .saturating_add(1);
+        let mut pem = Zeroizing::new(Vec::with_capacity(capacity));
         file.take(TRUST_FILE_MAX_BYTES + 1)
             .read_to_end(&mut pem)
             .map_err(read_error)?;
@@ -361,11 +370,18 @@ impl CollectorTrust {
     fn load_client_identity(&self) -> Result<Option<reqwest::Identity>, TracingError> {
         match (&self.client_certificate, &self.client_key) {
             (Some(certificate), Some(key)) => {
-                let mut pem = key.read()?;
-                if certificate.path.as_os_str() != key.path.as_os_str() {
-                    pem.push(b'\n');
-                    pem.extend(certificate.read()?);
-                }
+                let key_pem = key.read()?;
+                let pem = if certificate.path.as_os_str() == key.path.as_os_str() {
+                    key_pem
+                } else {
+                    let cert_pem = certificate.read()?;
+                    let mut combined =
+                        Zeroizing::new(Vec::with_capacity(key_pem.len() + 1 + cert_pem.len()));
+                    combined.extend_from_slice(&key_pem);
+                    combined.push(b'\n');
+                    combined.extend_from_slice(&cert_pem);
+                    combined
+                };
                 reqwest::Identity::from_pem(&pem)
                     .map(Some)
                     .map_err(|_| TracingError::IdentityPem)
@@ -479,7 +495,7 @@ fn parse_headers(setting: &Setting<'_>) -> Result<HashMap<String, String>, Traci
         if name == axum::http::header::HOST
             || HeaderValue::from_str(value).is_err()
             || decoded_otlp_header_value(value)
-                .is_some_and(|decoded| HeaderValue::try_from(decoded).is_err())
+                .is_some_and(|decoded| HeaderValue::from_str(&decoded).is_err())
         {
             return Err(invalid);
         }
@@ -495,16 +511,23 @@ fn parse_headers(setting: &Setting<'_>) -> Result<HashMap<String, String>, Traci
     Ok(headers)
 }
 
-fn decoded_otlp_header_value(value: &str) -> Option<String> {
+fn decoded_otlp_header_value(value: &str) -> Option<Zeroizing<String>> {
     let (prefix, escapes) = value.split_once('%')?;
-    let mut decoded = Vec::with_capacity(value.len());
+    let mut decoded = Zeroizing::new(Vec::with_capacity(value.len()));
     decoded.extend_from_slice(prefix.as_bytes());
     for part in escapes.split('%') {
         let (digits, literal) = part.split_at_checked(2)?;
         decoded.push(u8::from_str_radix(digits, 16).ok()?);
         decoded.extend_from_slice(literal.as_bytes());
     }
-    String::from_utf8(decoded).ok()
+    let raw = std::mem::take(&mut *decoded);
+    match String::from_utf8(raw) {
+        Ok(text) => Some(Zeroizing::new(text)),
+        Err(error) => {
+            error.into_bytes().zeroize();
+            None
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
+use arrayvec::ArrayVec;
 use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
+use compact_str::CompactString;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -42,7 +44,7 @@ pub(crate) mod header_name {
 #[derive(Clone, Debug)]
 pub struct InboundEnvelope {
     pub(crate) message_id: String,
-    pub(crate) event_type: String,
+    pub(crate) event_type: CompactString,
     pub(crate) schema_version: u16,
     pub(crate) occurred_at: OffsetDateTime,
     pub(crate) payload: Bytes,
@@ -84,7 +86,7 @@ pub fn decode_envelope(
     let envelope = decode_envelope_ref(subject, headers, &payload)?;
     Ok(InboundEnvelope {
         message_id: envelope.message_id.to_owned(),
-        event_type: envelope.event_type.to_owned(),
+        event_type: CompactString::new(envelope.event_type),
         schema_version: envelope.schema_version,
         occurred_at: envelope.occurred_at,
         payload,
@@ -300,28 +302,22 @@ pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeE
     (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES).ok_or(EnvelopeError::HeadersTooLarge)
 }
 
-const RFC3339_UTC_MAX_BYTES: usize = 30;
-
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {
-    let mut buffer = [0; RFC3339_UTC_MAX_BYTES];
-    let bytes = format_timestamp_bytes(value, &mut buffer)?;
-    str::from_utf8(bytes)
+    let bytes = format_timestamp_bytes(value)?;
+    str::from_utf8(&bytes)
         .map(str::to_owned)
         .map_err(|_| EnvelopeError::CreatedAtOutOfRange)
 }
 
-fn format_timestamp_bytes(
+pub(crate) fn format_timestamp_bytes(
     value: OffsetDateTime,
-    buffer: &mut [u8; RFC3339_UTC_MAX_BYTES],
-) -> Result<&[u8], EnvelopeError> {
-    let utc = value
+) -> Result<ArrayVec<u8, 40>, EnvelopeError> {
+    let mut buf = ArrayVec::new();
+    value
         .checked_to_offset(UtcOffset::UTC)
+        .and_then(|value| value.format_into(&mut buf, &Rfc3339).ok())
         .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
-    let mut remaining = buffer.as_mut_slice();
-    utc.format_into(&mut remaining, &Rfc3339)
-        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)?;
-    let written = RFC3339_UTC_MAX_BYTES - remaining.len();
-    Ok(&buffer[..written])
+    Ok(buf)
 }
 
 pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), EnvelopeError> {

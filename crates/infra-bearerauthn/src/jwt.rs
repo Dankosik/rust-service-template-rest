@@ -1,4 +1,6 @@
 use std::{
+    borrow::Borrow,
+    hash::{Hash, Hasher},
     sync::Arc,
     time::{Duration, Instant as MonotonicInstant},
 };
@@ -8,11 +10,15 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
 use moka::{Expiry, sync::Cache};
 use shared_rules::rfc7515;
+use smallvec::SmallVec;
+use zeroize::Zeroizing;
 
 use crate::{
     JwtAlgorithm, PresentedToken, Principal, VerificationError, VerificationReason,
     claims::{ClaimPolicy, VerifiedClaims, validate_jwt_claims},
-    jwks::{KeySet, MAX_SIGNATURE_BYTES, SignatureInput, SignatureVerificationError},
+    jwks::{
+        AllowedAlgorithms, KeySet, MAX_SIGNATURE_BYTES, SignatureInput, SignatureVerificationError,
+    },
     refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh},
 };
 
@@ -97,12 +103,12 @@ mod fixtures {
             reason = "fixture setup must fail if its fixed issuer or audience is invalid"
         )]
         pub fn verifier(&self) -> Verifier {
-            let claims = ClaimPolicy::try_new(ISSUER.to_owned(), vec![AUDIENCE.to_owned()])
+            let claims = ClaimPolicy::try_new(ISSUER, vec![AUDIENCE.to_owned()])
                 .expect("valid fixture claim policy");
             Verifier::jwt(JwtVerifier::new(
                 claims,
                 TokenProfile::ResourceServer,
-                ALGORITHMS.to_vec(),
+                crate::jwks::allowed_algorithms(&ALGORITHMS),
                 KeyStore::new(Arc::clone(&self.keys)),
                 std::time::Duration::from_hours(1),
             ))
@@ -121,6 +127,21 @@ pub enum TokenProfile {
     Rfc9068,
 }
 
+#[derive(Eq, PartialEq)]
+struct TokenKey(Zeroizing<Box<[u8]>>);
+
+impl Borrow<[u8]> for TokenKey {
+    fn borrow(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl Hash for TokenKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_ref().hash(state);
+    }
+}
+
 #[derive(Clone)]
 struct CachedVerification {
     verified: VerifiedClaims,
@@ -130,10 +151,10 @@ struct CachedVerification {
 
 struct CachedVerificationExpiry;
 
-impl Expiry<Box<[u8]>, CachedVerification> for CachedVerificationExpiry {
+impl Expiry<TokenKey, CachedVerification> for CachedVerificationExpiry {
     fn expire_after_create(
         &self,
-        _token: &Box<[u8]>,
+        _token: &TokenKey,
         cached: &CachedVerification,
         created_at: MonotonicInstant,
     ) -> Option<Duration> {
@@ -151,17 +172,17 @@ struct AdmittedHeader {
 pub(crate) struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
-    algorithms: Vec<JwtAlgorithm>,
+    algorithms: AllowedAlgorithms,
     key_store: Arc<KeyStore>,
     jwks_max_age: Duration,
-    cache: Cache<Box<[u8]>, CachedVerification, foldhash::quality::RandomState>,
+    cache: Cache<TokenKey, CachedVerification, foldhash::quality::RandomState>,
 }
 
 impl JwtVerifier {
     fn new(
         claim_policy: ClaimPolicy,
         token_profile: TokenProfile,
-        algorithms: Vec<JwtAlgorithm>,
+        algorithms: AllowedAlgorithms,
         key_store: Arc<KeyStore>,
         jwks_max_age: Duration,
     ) -> Self {
@@ -208,7 +229,8 @@ impl JwtVerifier {
         let keys = Guard::into_inner(keys);
         let cached = self.verify_uncached(token, &unix_now, keys).await?;
         let principal = cached.verified.principal.clone();
-        self.cache.insert(bytes.into(), cached);
+        self.cache
+            .insert(TokenKey(Zeroizing::new(Box::from(bytes))), cached);
         Ok(principal)
     }
 
@@ -276,14 +298,18 @@ impl JwtVerifier {
 
     fn admit_header(&self, header: &[u8]) -> Result<AdmittedHeader, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
-        let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
-        let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
+        let mut decoded =
+            SmallVec::<[u8; 256]>::from_elem(0_u8, base64::decoded_len_estimate(header.len()));
+        let length = URL_SAFE_NO_PAD
+            .decode_slice(header, &mut decoded)
+            .map_err(|_| malformed())?;
+        let header: Header = serde_json::from_slice(&decoded[..length]).map_err(|_| malformed())?;
         // RFC 7515 §4.1.11
         if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
             return Err(malformed());
         }
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
-            .filter(|algorithm| self.algorithms.contains(algorithm))
+            .filter(|&algorithm| self.algorithms[algorithm])
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
         let typ = header.typ.as_deref();
         let admitted_type = match self.token_profile {
@@ -365,12 +391,11 @@ mod tests {
 
     fn verifier(keys: Arc<KeySet>, algorithms: &[JwtAlgorithm]) -> JwtVerifier {
         let claim_policy =
-            ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
-                .unwrap();
+            ClaimPolicy::try_new("https://issuer.example", vec!["api".to_owned()]).unwrap();
         JwtVerifier::new(
             claim_policy,
             TokenProfile::ResourceServer,
-            algorithms.to_vec(),
+            crate::jwks::allowed_algorithms(algorithms),
             KeyStore::new(keys),
             Duration::from_hours(1),
         )
@@ -1947,7 +1972,7 @@ mod tests {
             let insertion_delay = Duration::from_millis(250);
             let ttl = moka::Expiry::expire_after_create(
                 &super::CachedVerificationExpiry,
-                &token.into_bytes().into_boxed_slice(),
+                &super::TokenKey(zeroize::Zeroizing::new(Box::from(token.as_bytes()))),
                 &cached,
                 cached.expires_at.checked_sub(expected_held).unwrap() + insertion_delay,
             );

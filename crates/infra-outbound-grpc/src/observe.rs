@@ -1,3 +1,4 @@
+use std::mem::DropGuard;
 use std::sync::{Arc, LazyLock, Once, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -47,12 +48,29 @@ impl Destination {
     }
 }
 
-pub(crate) struct Call {
+struct CallInner {
     metrics: Arc<MethodMetrics>,
     span: tracing::Span,
     started: Instant,
-    finished: bool,
 }
+
+impl CallInner {
+    fn record(&self, code: tonic::Code) {
+        let span_code = status_code_names(code as usize).span;
+        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
+        if otel_http::grpc::status_is_error(code as u16, false) {
+            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
+            self.span.set_status(SpanStatus::error(""));
+        }
+        self.metrics.record_handled(code, self.started.elapsed());
+    }
+
+    fn cancel(self) {
+        self.record(tonic::Code::Cancelled);
+    }
+}
+
+pub(crate) struct Call(DropGuard<CallInner, fn(CallInner)>);
 
 impl Call {
     pub(crate) fn start<B>(
@@ -64,44 +82,27 @@ impl Call {
         let metrics = series.resolve(request);
         let span = make_client_span(request, &metrics, destination);
         metrics.started.increment(1);
-        Self {
-            metrics,
-            span,
-            started,
-            finished: false,
-        }
+        Self(DropGuard::new(
+            CallInner {
+                metrics,
+                span,
+                started,
+            },
+            CallInner::cancel,
+        ))
     }
 
     pub(crate) fn span(&self) -> &tracing::Span {
-        &self.span
+        &self.0.span
     }
 
-    pub(crate) fn finish(mut self, code: tonic::Code) {
-        self.record(code);
-        self.finished = true;
+    pub(crate) fn finish(self, code: tonic::Code) {
+        DropGuard::dismiss(self.0).record(code);
     }
 
     pub(crate) fn refuse(self, status: tonic::Status) -> tonic::Status {
         self.finish(status.code());
         status
-    }
-
-    fn record(&self, code: tonic::Code) {
-        let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
-        if otel_http::grpc::status_is_error(code as u16, false) {
-            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
-            self.span.set_status(SpanStatus::error(""));
-        }
-        self.metrics.record_handled(code, self.started.elapsed());
-    }
-}
-
-impl Drop for Call {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.record(tonic::Code::Cancelled);
-        }
     }
 }
 

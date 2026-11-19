@@ -1,9 +1,11 @@
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
+use arc_swap::ArcSwap;
 use axum::extract::{FromRef, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use infra_http::extract::Path;
@@ -182,7 +184,7 @@ where
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn receive(
-    Path(endpoint_id): Path<String>,
+    Path(endpoint_id): Path<CompactString>,
     State(state): State<WebhookState>,
     request: Request,
 ) -> Response {
@@ -290,8 +292,9 @@ impl OutcomeSlot {
 struct EndpointMetrics {
     endpoint: SharedString,
     outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
-    protocol_rejections: [OnceLock<Counter>; ProtocolError::ALL.len()],
-    custom_rejections: Mutex<HashMap<&'static str, Counter>>,
+    protocol_rejections: EnumMap<ProtocolError, OnceLock<Counter>>,
+    custom_rejections: ArcSwap<HashMap<&'static str, Counter>>,
+    custom_rejections_lock: Mutex<()>,
 }
 
 impl EndpointMetrics {
@@ -299,8 +302,9 @@ impl EndpointMetrics {
         Self {
             endpoint,
             outcomes: EnumMap::default(),
-            protocol_rejections: [const { OnceLock::new() }; ProtocolError::ALL.len()],
-            custom_rejections: Mutex::new(HashMap::default()),
+            protocol_rejections: EnumMap::default(),
+            custom_rejections: ArcSwap::default(),
+            custom_rejections_lock: Mutex::new(()),
         }
     }
 
@@ -318,16 +322,16 @@ impl EndpointMetrics {
     }
 
     fn record_protocol_rejection(&self, error: ProtocolError) {
-        self.protocol_rejections[error.index()]
+        self.protocol_rejections[error]
             .get_or_init(|| self.rejection_counter(error.reason()))
             .increment(1);
     }
 
     fn record_rejection(&self, reason: &'static str) {
-        if let Some(error) = ProtocolError::ALL
+        if let Some((error, _)) = self
+            .protocol_rejections
             .iter()
-            .copied()
-            .find(|error| error.reason() == reason)
+            .find(|(error, _)| error.reason() == reason)
         {
             self.record_protocol_rejection(error);
             return;
@@ -340,12 +344,29 @@ impl EndpointMetrics {
             self.record(slot);
             return;
         }
-        let counter = self
-            .custom_rejections
-            .lock()
-            .entry(reason)
-            .or_insert_with(|| self.rejection_counter(reason))
-            .clone();
+        self.record_custom_rejection(reason);
+    }
+
+    fn record_custom_rejection(&self, reason: &'static str) {
+        let snapshot = self.custom_rejections.load();
+        if let Some(counter) = snapshot.get(reason) {
+            counter.increment(1);
+            return;
+        }
+        drop(snapshot);
+        let guard = self.custom_rejections_lock.lock();
+        let current = self.custom_rejections.load();
+        if let Some(counter) = current.get(reason) {
+            let counter = counter.clone();
+            drop(guard);
+            counter.increment(1);
+            return;
+        }
+        let counter = self.rejection_counter(reason);
+        let mut next = (**current).clone();
+        next.insert(reason, counter.clone());
+        self.custom_rejections.store(Arc::new(next));
+        drop(guard);
         counter.increment(1);
     }
 
@@ -423,6 +444,7 @@ mod tests {
             cloned_partner.metrics.record(OutcomeSlot::Accepted);
             partner.metrics.record_rejection("invalid_signature");
             partner.metrics.record_rejection("invalid_token");
+            partner.metrics.record_rejection("invalid_token");
             let _ = state.state.reject_unknown_endpoint();
             let _ = cloned.state.reject_unknown_endpoint();
         });
@@ -463,7 +485,7 @@ mod tests {
                         Label::new("outcome", "rejected"),
                         Label::new("reason", "invalid_token"),
                     ],
-                    1,
+                    2,
                 ),
                 (vec![Label::new("outcome", "unknown_endpoint")], 2),
             ]

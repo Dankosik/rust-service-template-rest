@@ -1,19 +1,37 @@
-use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
 use secrecy::SecretString;
-use serde::Deserialize;
 use serde::de::{IntoDeserializer as _, Unexpected};
+use serde::{Deserialize, Deserializer};
+use serde_with::DeserializeAs;
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct StrictString(#[serde(deserialize_with = "string")] pub(crate) String);
+pub(crate) struct StrictString;
 
-pub(crate) fn string<'de, D>(deserializer: D) -> Result<String, D::Error>
+impl<'de> DeserializeAs<'de, String> for StrictString {
+    fn deserialize_as<D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string(deserializer)
+    }
+}
+
+impl<'de> DeserializeAs<'de, PathBuf> for StrictString {
+    fn deserialize_as<D>(deserializer: D) -> Result<PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string(deserializer).map(PathBuf::from)
+    }
+}
+
+fn string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     struct StringVisitor;
 
@@ -42,95 +60,67 @@ where
     deserializer.deserialize_any(StringVisitor)
 }
 
-pub(crate) fn optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<StrictString>::deserialize(deserializer)?.map(|value| value.0))
-}
+pub(crate) struct StrictBool;
 
-pub(crate) fn boolean<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    const EXPECTED: &str = "a boolean";
-    serde_untagged::UntaggedEnumVisitor::new()
-        .expecting(EXPECTED)
-        .bool(Ok)
-        .string(|text| {
-            text.trim()
-                .parse()
-                .map_err(|_| serde::de::Error::invalid_value(Unexpected::Str(text), &EXPECTED))
-        })
-        .deserialize(deserializer)
-}
-
-#[allow(dead_code, reason = "only optional profiles use optional booleans")]
-pub(crate) fn optional_boolean<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(transparent)]
-    struct StrictBool(#[serde(deserialize_with = "boolean")] bool);
-
-    Ok(Option::<StrictBool>::deserialize(deserializer)?.map(|value| value.0))
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct StrictEnum<T>(pub(crate) T);
-
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for StrictEnum<T> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl<'de> DeserializeAs<'de, bool> for StrictBool {
+    fn deserialize_as<D>(deserializer: D) -> Result<bool, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
-        string_enum(deserializer).map(Self)
+        const EXPECTED: &str = "a boolean";
+        serde_untagged::UntaggedEnumVisitor::new()
+            .expecting(EXPECTED)
+            .bool(Ok)
+            .string(|text| {
+                text.trim()
+                    .parse()
+                    .map_err(|_| serde::de::Error::invalid_value(Unexpected::Str(text), &EXPECTED))
+            })
+            .deserialize(deserializer)
     }
 }
 
-pub(crate) fn string_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+#[derive(Debug, Default)]
+pub(crate) struct StrictEnum<T = ()>(pub(crate) T);
+
+impl<'de, T> Deserialize<'de> for StrictEnum<T>
 where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
+    T: Deserialize<'de>,
 {
-    let raw = string(deserializer)?;
-    T::deserialize(raw.as_str().into_deserializer())
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        StrictEnum::<()>::deserialize_as(deserializer).map(Self)
+    }
 }
 
-#[allow(dead_code, reason = "only optional profiles use optional enums")]
-pub(crate) fn optional_string_enum<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+impl<'de, T> DeserializeAs<'de, T> for StrictEnum
 where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
+    T: Deserialize<'de>,
 {
-    Ok(Option::<StrictEnum<T>>::deserialize(deserializer)?.map(|value| value.0))
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = string(deserializer)?;
+        T::deserialize(raw.as_str().into_deserializer())
+    }
 }
 
 #[allow(
     dead_code,
     reason = "only optional webhook profiles require non-optional secrets"
 )]
-pub(crate) fn secret<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    string(deserializer).map(SecretString::from)
-}
+pub(crate) struct StrictSecret;
 
-#[allow(dead_code, reason = "only inbound webhooks decode a secret map")]
-pub(crate) fn secret_map<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, SecretString>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(transparent)]
-    struct StrictSecret(#[serde(deserialize_with = "secret")] SecretString);
-
-    let raw = BTreeMap::<String, StrictSecret>::deserialize(deserializer)?;
-    Ok(raw.into_iter().map(|(key, value)| (key, value.0)).collect())
+impl<'de> DeserializeAs<'de, SecretString> for StrictSecret {
+    fn deserialize_as<D>(deserializer: D) -> Result<SecretString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string(deserializer).map(SecretString::from)
+    }
 }
 
 #[derive(Deserialize)]
@@ -156,89 +146,86 @@ fn invalid_count<E: serde::de::Error>() -> E {
     )
 }
 
-pub(crate) fn unsigned_count<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + FromStr,
-{
-    Scalar::deserialize(deserializer)
-        .map_err(|_| invalid_count::<D::Error>())?
-        .into_count()
-}
+pub(crate) struct StrictCount;
 
-pub(crate) fn optional_unsigned_count<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+impl<'de, T> DeserializeAs<'de, T> for StrictCount
 where
-    D: serde::Deserializer<'de>,
     T: Deserialize<'de> + FromStr,
 {
-    Option::<Scalar<T>>::deserialize(deserializer)
-        .map_err(|_| invalid_count::<D::Error>())?
-        .map(Scalar::into_count)
-        .transpose()
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Scalar::deserialize(deserializer)
+            .map_err(|_| invalid_count::<D::Error>())?
+            .into_count()
+    }
 }
 
 fn invalid_ratio<E: serde::de::Error>() -> E {
     E::invalid_value(Unexpected::Other("a malformed number"), &"a number")
 }
 
-pub(crate) fn ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match Scalar::<f64>::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
-        Scalar::Typed(value) => Ok(value),
-        Scalar::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
+pub(crate) struct StrictRatio;
+
+impl<'de> DeserializeAs<'de, f64> for StrictRatio {
+    fn deserialize_as<D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Scalar::<f64>::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
+            Scalar::Typed(value) => Ok(value),
+            Scalar::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
+        }
     }
 }
 
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
-pub(crate) fn blank_as_none_with<'de, D, T>(
-    deserializer: D,
-    parse: impl FnOnce(&str) -> Result<T, D::Error>,
-) -> Result<Option<T>, D::Error>
+pub(crate) struct BlankAsNone<T = StrictString>(PhantomData<fn() -> T>);
+
+impl<'de, V, T> DeserializeAs<'de, Option<V>> for BlankAsNone<T>
 where
-    D: serde::Deserializer<'de>,
+    T: DeserializeAs<'de, V>,
 {
-    optional_string(deserializer)?
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(parse)
-        .transpose()
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<V>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(raw): Option<String> = Option::<StrictString>::deserialize_as(deserializer)?
+        else {
+            return Ok(None);
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        T::deserialize_as(trimmed.into_deserializer()).map(Some)
+    }
 }
 
-pub(crate) fn blank_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: From<String>,
-{
-    blank_as_none_with(deserializer, |trimmed| Ok(T::from(trimmed.to_owned())))
+pub(crate) struct BlankSecretAsNone;
+
+impl<'de> DeserializeAs<'de, Option<SecretString>> for BlankSecretAsNone {
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw: Option<String> = Option::<StrictString>::deserialize_as(deserializer)?;
+        Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| SecretString::from(value))))
+    }
 }
 
-pub(crate) fn blank_secret_as_none<'de, D>(
-    deserializer: D,
-) -> Result<Option<SecretString>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = optional_string(deserializer)?;
-    Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| SecretString::from(value))))
-}
+pub(crate) struct ListenAddr;
 
-pub(crate) fn listen_addr<'de, D>(deserializer: D) -> Result<SocketAddr, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = string(deserializer)?;
-    parse_listen_addr(&raw)
-}
-
-pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<SocketAddr>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    blank_as_none_with(deserializer, parse_listen_addr)
+impl<'de> DeserializeAs<'de, SocketAddr> for ListenAddr {
+    fn deserialize_as<D>(deserializer: D) -> Result<SocketAddr, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = string(deserializer)?;
+        parse_listen_addr(&raw)
+    }
 }
 
 fn parse_listen_addr<E: serde::de::Error>(value: &str) -> Result<SocketAddr, E> {
@@ -250,24 +237,15 @@ fn parse_listen_addr<E: serde::de::Error>(value: &str) -> Result<SocketAddr, E> 
     .map_err(|_| E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR_FORM))
 }
 
-pub(crate) fn duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    decoded_duration(&string(deserializer)?, "a duration")
-}
+pub(crate) struct StrictDuration;
 
-#[allow(
-    dead_code,
-    reason = "removing both OIDC profiles leaves no optional duration fields"
-)]
-pub(crate) fn optional_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    optional_string(deserializer)?
-        .map(|text| decoded_duration(&text, "a duration"))
-        .transpose()
+impl<'de> DeserializeAs<'de, Duration> for StrictDuration {
+    fn deserialize_as<D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        decoded_duration(&string(deserializer)?, "a duration")
+    }
 }
 
 pub(crate) fn decoded_duration<E: serde::de::Error>(
@@ -291,6 +269,8 @@ pub(crate) fn display_duration(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[rstest::rstest]
@@ -307,9 +287,10 @@ mod tests {
 
     #[test]
     fn socket_addr_rejects_hostnames() {
+        #[serde_with::serde_as]
         #[derive(Debug, Deserialize)]
         struct Probe {
-            #[serde(deserialize_with = "listen_addr")]
+            #[serde_as(as = "ListenAddr")]
             #[expect(dead_code, reason = "the probe only checks that deserialization fails")]
             addr: SocketAddr,
         }
@@ -329,17 +310,23 @@ mod tests {
             Beta,
         }
 
+        #[serde_with::serde_as]
         #[derive(Debug, Deserialize)]
         struct Probe {
-            #[serde(default, deserialize_with = "blank_as_none")]
+            #[serde(default)]
+            #[serde_as(as = "BlankAsNone")]
             path: Option<String>,
-            #[serde(default, deserialize_with = "optional_boolean")]
+            #[serde(default)]
+            #[serde_as(as = "Option<StrictBool>")]
             flag: Option<bool>,
-            #[serde(default, deserialize_with = "optional_string_enum")]
+            #[serde(default)]
+            #[serde_as(as = "Option<StrictEnum>")]
             kind: Option<Kind>,
-            #[serde(default, deserialize_with = "optional_duration")]
+            #[serde(default)]
+            #[serde_as(as = "Option<StrictDuration>")]
             ttl: Option<Duration>,
-            #[serde(default, deserialize_with = "secret_map")]
+            #[serde(default)]
+            #[serde_as(as = "BTreeMap<_, StrictSecret>")]
             secrets: BTreeMap<String, SecretString>,
         }
 

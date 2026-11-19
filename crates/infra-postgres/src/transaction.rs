@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt as _, TryFutureExt as _, TryStreamExt as _};
+use smallvec::SmallVec;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
     PgArguments, PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
@@ -48,7 +49,7 @@ pub struct Tx<'c, Mode = ()> {
     conn: &'c mut PgConnection,
     proven_alive: bool,
     mode: Mode,
-    notifications: Vec<Notification>,
+    notifications: SmallVec<[Notification; 1]>,
     command_savepoint_notification_count: Option<usize>,
 }
 
@@ -305,7 +306,7 @@ impl<M: TxMode> Tx<'_, M> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct NotificationKey {
     channel: &'static str,
     payload: &'static str,
@@ -320,11 +321,11 @@ struct Notification {
 impl Notification {
     fn record_if_due(
         &self,
-        last_sent: &mut BTreeMap<NotificationKey, Instant>,
+        last_sent: &mut foldhash::HashMap<NotificationKey, Instant>,
         now: Instant,
     ) -> bool {
         match last_sent.entry(self.key) {
-            std::collections::btree_map::Entry::Occupied(entry)
+            std::collections::hash_map::Entry::Occupied(entry)
                 if now.saturating_duration_since(*entry.get()) < self.min_interval =>
             {
                 false
@@ -341,11 +342,11 @@ fn dispatch_notifications(
     pool: &PgPool,
     notifications_enabled: bool,
     mut guard: DiscardOnDrop,
-    mut notifications: Vec<Notification>,
+    mut notifications: SmallVec<[Notification; 1]>,
 ) {
     const SEND_BUDGET: Duration = Duration::from_millis(100);
-    static LAST_SENT: parking_lot::Mutex<BTreeMap<NotificationKey, Instant>> =
-        parking_lot::Mutex::new(BTreeMap::new());
+    static LAST_SENT: LazyLock<parking_lot::Mutex<foldhash::HashMap<NotificationKey, Instant>>> =
+        LazyLock::new(|| parking_lot::Mutex::new(foldhash::HashMap::default()));
 
     if notifications.is_empty() || !notifications_enabled {
         return;
@@ -633,7 +634,8 @@ where
     E: From<TxError>,
 {
     let span = observe::transaction_span(pool);
-    let mut observation = TransactionObservation::start(span.clone());
+    let mut observation =
+        TransactionObservation::start(span.clone(), crate::pool::pool_metrics(pool));
     async {
         let acquired = Box::pin(acquire_for_transaction(pool, acquire_deadline)).await;
         observation.record_connection_wait();
@@ -657,7 +659,7 @@ where
             conn: &mut tx,
             proven_alive: true,
             mode,
-            notifications: Vec::new(),
+            notifications: SmallVec::new(),
             command_savepoint_notification_count: None,
         };
         let result = f(&mut handle).await;
@@ -711,7 +713,7 @@ mod tests {
     fn notification_cooldowns_are_independent_per_channel_and_payload() {
         let now = tokio::time::Instant::now();
         let interval = Duration::from_millis(25);
-        let mut last_sent = BTreeMap::new();
+        let mut last_sent = foldhash::HashMap::default();
         let first = Notification {
             key: NotificationKey {
                 channel: "jobs",

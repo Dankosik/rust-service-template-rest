@@ -86,21 +86,13 @@ impl WorkerInput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, derive_more::Deref)]
 pub struct WorkerConfig(WorkerSections);
 
 impl WorkerConfig {
     #[must_use]
     pub fn finite_listener_connection_caps(&self) -> u64 {
         crate::finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
-    }
-}
-
-impl std::ops::Deref for WorkerConfig {
-    type Target = WorkerSections;
-
-    fn deref(&self) -> &WorkerSections {
-        &self.0
     }
 }
 

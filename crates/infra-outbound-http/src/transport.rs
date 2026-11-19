@@ -1,14 +1,16 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::client::legacy::connect::HttpConnector;
-use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 
 use crate::{BuildError, Limits, policy::Origin};
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
-static TLS_CONFIG: OnceCell<rustls::ClientConfig> = OnceCell::new();
+static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
+static TLS_CONFIG_INIT: Mutex<()> = Mutex::new(());
 
 pub(crate) type Transport = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<HttpConnector<Resolver>>,
@@ -36,11 +38,17 @@ pub async fn prepare_tls() -> Result<(), BuildError> {
 }
 
 pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
-    TLS_CONFIG.get_or_try_init(|| {
-        platform_tls_config().map_err(|source| BuildError::Tls {
-            source: Box::new(source),
-        })
-    })
+    if let Some(config) = TLS_CONFIG.get() {
+        return Ok(config);
+    }
+    let _guard = TLS_CONFIG_INIT.lock();
+    if let Some(config) = TLS_CONFIG.get() {
+        return Ok(config);
+    }
+    let config = platform_tls_config().map_err(|source| BuildError::Tls {
+        source: Box::new(source),
+    })?;
+    Ok(TLS_CONFIG.get_or_init(|| config))
 }
 
 fn platform_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {

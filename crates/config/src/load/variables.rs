@@ -3,19 +3,17 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroizing;
+
 use super::{ENV_PREFIX, ENV_SEPARATOR, Error};
 
 const SECRET_FILE_BYTES: u64 = 1024 * 1024;
 const SECRETS_SNAPSHOT_ATTEMPTS: usize = 3;
-
-fn variable_prefix() -> String {
-    format!("{ENV_PREFIX}{ENV_SEPARATOR}")
-}
+const VARIABLE_PREFIX: &str = const_format::formatcp!("{ENV_PREFIX}{ENV_SEPARATOR}");
 
 pub(crate) fn variable_name(key: &str) -> String {
     format!(
-        "{}{}",
-        variable_prefix(),
+        "{VARIABLE_PREFIX}{}",
         key.to_ascii_uppercase().replace('.', ENV_SEPARATOR)
     )
 }
@@ -61,7 +59,7 @@ impl VariableSource {
 pub(super) struct Variable {
     pub(super) original_name: String,
     pub(super) key: String,
-    pub(super) value: String,
+    pub(super) value: Zeroizing<String>,
     pub(super) source: VariableSource,
 }
 
@@ -71,7 +69,7 @@ fn insert_variable(
     variables: &mut Variables,
     name: &str,
     suffix: &str,
-    value: String,
+    value: Zeroizing<String>,
     source: VariableSource,
 ) -> Result<(), Error> {
     let name_key = name.to_ascii_lowercase();
@@ -116,11 +114,10 @@ pub(super) fn collect_variables(
 fn read_environment(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Variables, Error> {
-    let prefix = variable_prefix();
     let mut variables = Variables::new();
     for (key, value) in environment {
         let name = key.to_string_lossy();
-        let Some(suffix) = name.strip_prefix(&prefix) else {
+        let Some(suffix) = name.strip_prefix(VARIABLE_PREFIX) else {
             continue;
         };
         if !is_variable_suffix(suffix) {
@@ -137,7 +134,7 @@ fn read_environment(
             &mut variables,
             &name,
             suffix,
-            value,
+            Zeroizing::new(value),
             VariableSource::Environment,
         )?;
     }
@@ -240,13 +237,12 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
         path: reported_dir.to_owned(),
         error,
     };
-    let prefix = variable_prefix();
     let mut variables = Variables::new();
     for entry in fs::read_dir(scan_dir).map_err(unreadable)? {
         let entry = entry.map_err(unreadable)?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        let Some(suffix) = name.strip_prefix(&prefix) else {
+        let Some(suffix) = name.strip_prefix(VARIABLE_PREFIX) else {
             continue;
         };
         let reported_path = reported_dir.join(&file_name);
@@ -275,7 +271,7 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
     clippy::disallowed_types,
     reason = "the bounded startup reader validates and reads the same open descriptor"
 )]
-fn read_secret_file(path: &Path) -> io::Result<String> {
+fn read_secret_file(path: &Path) -> io::Result<Zeroizing<String>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -285,26 +281,43 @@ fn read_secret_file(path: &Path) -> io::Result<String> {
         options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "expected a regular file",
         ));
     }
-    let text = io::read_to_string(file.take(SECRET_FILE_BYTES + 1))?;
-    if text.len() as u64 > SECRET_FILE_BYTES {
+    let capacity = usize::try_from(metadata.len().min(SECRET_FILE_BYTES))
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    file.take(SECRET_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > SECRET_FILE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the value exceeds the 1 MiB secret file limit",
         ));
     }
+    let mut text = match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(text) => Zeroizing::new(text),
+        Err(error) => {
+            drop(Zeroizing::new(error.into_bytes()));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secret file is not valid UTF-8",
+            ));
+        }
+    };
     if text.contains('\0') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "the value contains a NUL byte, which no variable can hold",
         ));
     }
-    Ok(shared_rules::secret_file::value(text))
+    Ok(Zeroizing::new(shared_rules::secret_file::value(
+        std::mem::take(&mut *text),
+    )))
 }
 
 #[cfg(all(test, unix))]
@@ -342,7 +355,7 @@ mod tests {
         }
 
         let snapshot = read_projected_secrets(dir.path(), selected).unwrap();
-        assert_eq!(snapshot["app__log__level"].value, "debug");
-        assert_eq!(snapshot["app__log__format"].value, "text");
+        assert_eq!(snapshot["app__log__level"].value.as_str(), "debug");
+        assert_eq!(snapshot["app__log__format"].value.as_str(), "text");
     }
 }

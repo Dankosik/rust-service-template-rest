@@ -26,6 +26,7 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_smithy_http_client::tls;
 use operation_context::OperationContext;
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use self::call::{CallContext, Interrupted, call_policy, within, within_mutation};
@@ -58,7 +59,12 @@ pub struct ObjectStorageOptions {
     pub operation_timeout: Duration,
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug(
+    "ObjectStorage {{ provider: {:?}, max_object_bytes: {}, .. }}",
+    inner.provider_name,
+    inner.max_object_bytes
+)]
 pub struct ObjectStorage {
     inner: Arc<Inner>,
 }
@@ -85,16 +91,6 @@ impl Inner {
         self.amazon_s3
             .as_ref()
             .map(|target| target.expected_bucket_owner.clone())
-    }
-}
-
-impl std::fmt::Debug for ObjectStorage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ObjectStorage")
-            .field("provider", &self.inner.provider_name)
-            .field("max_object_bytes", &self.inner.max_object_bytes)
-            .finish_non_exhaustive()
     }
 }
 
@@ -157,12 +153,12 @@ impl ObjectMetadata {
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("PresignedUrl([REDACTED])")]
-pub struct PresignedUrl(String);
+pub struct PresignedUrl(SecretString);
 
 impl PresignedUrl {
     #[must_use]
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.expose_secret()
     }
 }
 
@@ -445,7 +441,7 @@ impl ObjectStorage {
                 Err(guard.fail(LocalFailure::PresignedHeaders))
             }
             Ok(request) => {
-                let url = PresignedUrl(request.uri().to_owned());
+                let url = PresignedUrl(SecretString::from(request.uri()));
                 guard.succeed();
                 Ok(url)
             }

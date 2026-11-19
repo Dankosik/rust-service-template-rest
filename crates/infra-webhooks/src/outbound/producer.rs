@@ -1,6 +1,7 @@
 use std::{future::poll_fn, sync::Arc, task::Poll};
 
 use bytes::Bytes;
+use compact_str::CompactString;
 use foldhash::HashSet;
 use http::HeaderValue;
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
@@ -38,8 +39,8 @@ impl Producer {
             .await?;
         let delivery = Delivery {
             version: delivery_version(),
-            endpoint_id: endpoint_id.to_owned(),
-            content_type: content_type.to_owned(),
+            endpoint_id: CompactString::from(endpoint_id),
+            content_type: CompactString::from(content_type),
             body: Bytes::from(body),
         };
         match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default()).await? {
@@ -148,8 +149,8 @@ mod tests {
             for extra in [0, 1] {
                 let mut delivery = super::Delivery {
                     version: super::delivery_version(),
-                    endpoint_id: endpoint_id.to_owned(),
-                    content_type: format!("{}é\t\\\"", "x".repeat(4095)),
+                    endpoint_id: endpoint_id.into(),
+                    content_type: format!("{}é\t\\\"", "x".repeat(4095)).into(),
                     body: bytes::Bytes::from(vec![0xff; body_bytes]),
                 };
                 assert!(HeaderValue::from_str(&delivery.content_type).is_ok());

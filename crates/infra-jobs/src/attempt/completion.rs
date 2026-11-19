@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::mem::DropGuard;
 use std::sync::{Arc, Weak};
 
@@ -21,7 +20,7 @@ const INLINE_BATCH_CAPACITY: usize = 16;
 type CompletionReply = Result<Written, Unacknowledged>;
 
 pub(crate) struct Completions {
-    groups: Mutex<BTreeMap<Instant, Weak<CompletionGroup>>>,
+    groups: Mutex<foldhash::HashMap<Instant, Weak<CompletionGroup>>>,
     pub(crate) memberships: MembershipGauge,
 }
 
@@ -148,7 +147,7 @@ impl CompletionBatch {
         );
     }
 
-    fn retire(&mut self) -> Vec<oneshot::Sender<CompletionReply>> {
+    fn retire(&mut self) -> SmallVec<[oneshot::Sender<CompletionReply>; 16]> {
         std::mem::take(&mut self.queued)
             .into_iter()
             .map(QueuedCompletion::retire)
@@ -317,8 +316,9 @@ fn written_by_position(
 ) -> SmallVec<[Written; INLINE_BATCH_CAPACITY]> {
     let mut written = SmallVec::<[_; INLINE_BATCH_CAPACITY]>::from_elem(Written::Unchanged, len);
     for &position in positions {
-        if let Some(entry) = usize::try_from(position - 1)
-            .ok()
+        if let Some(entry) = position
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| written.get_mut(index))
         {
             *entry = Written::Applied;
@@ -523,5 +523,14 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn written_by_position_ignores_out_of_range_and_extreme_positions() {
+        let written = written_by_position(&[i64::MIN, -1, 0, 1, 3, 4, i64::MAX], 3);
+        assert_eq!(
+            written.as_slice(),
+            [Written::Applied, Written::Unchanged, Written::Applied]
+        );
     }
 }

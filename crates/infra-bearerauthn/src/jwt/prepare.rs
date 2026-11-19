@@ -10,7 +10,7 @@ use crate::{
     EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError, PreparationPhase,
     PreparationReason, ProviderFailure, Verifier,
     claims::ClaimPolicy,
-    jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure},
+    jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms},
     provider::{Document, ProviderClient},
     refresh::{KeyStore, run_refresh_worker},
 };
@@ -51,12 +51,13 @@ async fn prepare_with_provider(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
     );
+    let algorithms = allowed_algorithms(&options.algorithms);
     let claim_policy = if options.algorithms.is_empty()
         || options.jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE
     {
         Err(PreparationError::invalid_options())
     } else {
-        ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)
+        ClaimPolicy::try_new(options.issuer.as_str(), options.audiences)
     };
     let claim_policy =
         enforce_startup_deadline(startup_deadline, PreparationPhase::Options, claim_policy)?;
@@ -65,7 +66,7 @@ async fn prepare_with_provider(
         None => JwksSource::Discovery(options.issuer),
     };
     let key_set = source
-        .fetch(&provider, &options.algorithms, startup_deadline)
+        .fetch(&provider, algorithms, startup_deadline)
         .await
         .and_then(|keys| {
             if keys.is_empty() {
@@ -84,7 +85,7 @@ async fn prepare_with_provider(
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
         options.token_profile,
-        options.algorithms.clone(),
+        algorithms,
         key_store.clone(),
         options.jwks_max_age,
     ));
@@ -92,7 +93,7 @@ async fn prepare_with_provider(
         key_store,
         provider,
         source,
-        options.algorithms,
+        algorithms,
         cancel,
         options.jwks_max_age,
     ));

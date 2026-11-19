@@ -17,6 +17,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+foldhash = { workspace = true, features = ["std"] }
 infra-postgres = { workspace = true }
 infra-telemetry = { workspace = true }
 secrecy = { workspace = true }

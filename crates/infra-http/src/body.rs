@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 
-pub(crate) fn hold_guard_until_end<G: Send + Unpin + 'static>(body: Body, guard: G) -> Body {
+pub(crate) fn hold_guard_until_end<G: Send + 'static>(body: Body, guard: G) -> Body {
     on_body_end(body, None, move |_| drop(guard))
 }
 
@@ -17,7 +17,7 @@ pub(crate) enum BodyEnd {
 pub(crate) fn on_body_end(
     body: Body,
     remaining: Option<u64>,
-    finish: impl FnOnce(BodyEnd) + Send + Unpin + 'static,
+    finish: impl FnOnce(BodyEnd) + Send + 'static,
 ) -> Body {
     if let Some(end) = body_end(body.is_end_stream(), remaining) {
         finish(end);
@@ -38,13 +38,16 @@ fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
     }
 }
 
-struct GuardedBody<F> {
-    body: Body,
-    remaining: Option<u64>,
-    finish: Option<F>,
+pin_project_lite::pin_project! {
+    struct GuardedBody<F> {
+        #[pin]
+        body: Body,
+        remaining: Option<u64>,
+        finish: Option<F>,
+    }
 }
 
-impl<F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<F> {
+impl<F: FnOnce(BodyEnd)> HttpBody for GuardedBody<F> {
     type Data = Bytes;
     type Error = axum::Error;
 
@@ -52,11 +55,11 @@ impl<F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<F> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let this = self.get_mut();
-        let frame = Pin::new(&mut this.body).poll_frame(cx);
+        let mut this = self.project();
+        let frame = this.body.as_mut().poll_frame(cx);
         if let Poll::Ready(ref frame) = frame
             && this.finish.is_some()
-            && let Some(end) = this.end_after(frame.as_ref())
+            && let Some(end) = end_after(this.remaining, &this.body, frame.as_ref())
             && let Some(finish) = this.finish.take()
         {
             finish(end);
@@ -73,21 +76,23 @@ impl<F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<F> {
     }
 }
 
-impl<F> GuardedBody<F> {
-    fn end_after(&mut self, frame: Option<&Result<Frame<Bytes>, axum::Error>>) -> Option<BodyEnd> {
-        let end_stream = match frame {
-            None => true,
-            Some(Err(_)) => return Some(BodyEnd::Error),
-            Some(Ok(frame)) => {
-                if let (Some(remaining), Some(data)) = (&mut self.remaining, frame.data_ref()) {
-                    let Some(next) = remaining.checked_sub(data.len() as u64) else {
-                        return Some(BodyEnd::Error);
-                    };
-                    *remaining = next;
-                }
-                frame.is_trailers() || self.body.is_end_stream()
+fn end_after(
+    remaining: &mut Option<u64>,
+    body: &Body,
+    frame: Option<&Result<Frame<Bytes>, axum::Error>>,
+) -> Option<BodyEnd> {
+    let end_stream = match frame {
+        None => true,
+        Some(Err(_)) => return Some(BodyEnd::Error),
+        Some(Ok(frame)) => {
+            if let (Some(remaining), Some(data)) = (remaining.as_mut(), frame.data_ref()) {
+                let Some(next) = remaining.checked_sub(data.len() as u64) else {
+                    return Some(BodyEnd::Error);
+                };
+                *remaining = next;
             }
-        };
-        body_end(end_stream, self.remaining)
-    }
+            frame.is_trailers() || body.is_end_stream()
+        }
+    };
+    body_end(end_stream, *remaining)
 }

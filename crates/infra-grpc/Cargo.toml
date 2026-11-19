@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 async-stream = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
+enum-map = { workspace = true }
 foldhash = { workspace = true, features = ["std"] }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -26,6 +28,7 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 infra-http-transport = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
+delegate = { workspace = true }
 infra-bearerauthn = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 # template:end authn:grpc-bearer-dependency
@@ -37,7 +40,6 @@ opentelemetry = { workspace = true, features = ["trace"] }
 prost = { workspace = true, features = ["std"] }
 prost-reflect = { workspace = true }
 prost-types = { workspace = true, features = ["std"] }
-regex = { workspace = true, features = ["std"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }

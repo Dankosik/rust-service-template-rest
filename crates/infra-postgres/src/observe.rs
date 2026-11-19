@@ -1,5 +1,7 @@
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use enum_map::{Enum, EnumMap};
 use metrics::{SharedString, Unit};
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
@@ -274,7 +276,7 @@ fn record_statement_error(
 
 macro_rules! transaction_outcomes {
     ($($variant:ident => $label:literal),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
         pub(crate) enum TransactionOutcome { $($variant),* }
 
         impl TransactionOutcome {
@@ -317,6 +319,27 @@ impl TransactionOutcome {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct PoolMetrics {
+    connection_wait: OnceLock<metrics::Histogram>,
+    transaction_duration: EnumMap<TransactionOutcome, OnceLock<metrics::Histogram>>,
+}
+
+impl PoolMetrics {
+    fn connection_wait(&self) -> &metrics::Histogram {
+        self.connection_wait.get_or_init(|| {
+            metrics::histogram!(
+                CONNECTION_WAIT_METRIC,
+                "db.client.connection.pool.name" => "postgres"
+            )
+        })
+    }
+
+    fn transaction_duration(&self, outcome: TransactionOutcome) -> &metrics::Histogram {
+        self.transaction_duration[outcome].get_or_init(|| outcome.duration_histogram())
+    }
+}
+
 pub(crate) fn transaction_span(pool: &PgPool) -> Span {
     let target = pool.connect_options();
     tracing::info_span!(
@@ -335,6 +358,7 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
+    metrics: Option<Arc<PoolMetrics>>,
     phase: TransactionPhase,
 }
 
@@ -345,20 +369,25 @@ enum TransactionPhase {
 }
 
 impl TransactionObservation {
-    pub(crate) fn start(span: Span) -> Self {
+    pub(crate) fn start(span: Span, metrics: Option<Arc<PoolMetrics>>) -> Self {
         Self {
             started: Instant::now(),
             span,
+            metrics,
             phase: TransactionPhase::Running,
         }
     }
 
     pub(crate) fn record_connection_wait(&self) {
-        metrics::histogram!(
-            CONNECTION_WAIT_METRIC,
-            "db.client.connection.pool.name" => "postgres"
-        )
-        .record(self.started.elapsed());
+        let elapsed = self.started.elapsed();
+        match &self.metrics {
+            Some(metrics) => metrics.connection_wait().record(elapsed),
+            None => metrics::histogram!(
+                CONNECTION_WAIT_METRIC,
+                "db.client.connection.pool.name" => "postgres"
+            )
+            .record(elapsed),
+        }
     }
 
     pub(crate) fn begin_commit(&mut self) {
@@ -397,7 +426,11 @@ impl Drop for TransactionObservation {
         };
         self.span
             .record("postgres.transaction.outcome", outcome.label());
-        outcome.duration_histogram().record(self.started.elapsed());
+        let elapsed = self.started.elapsed();
+        match &self.metrics {
+            Some(metrics) => metrics.transaction_duration(outcome).record(elapsed),
+            None => outcome.duration_histogram().record(elapsed),
+        }
     }
 }
 

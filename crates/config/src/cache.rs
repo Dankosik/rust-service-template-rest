@@ -6,72 +6,65 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::local_development_only;
-use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::de::{BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{Rejected, Violations, duration_range, int_range, optional_pair};
 
-#[derive(Clone, Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Clone, Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct CacheInput {
     /// `redis://`, `rediss://`, `valkey://`, or `valkeys://`, password included
     /// unless `password_file` is set.
     /// Set `APP__CACHE__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
     /// password. The DSN then carries no password, and the running service
     /// follows the file. Missing, empty, or whitespace-only is unset (`None`),
     /// the default.
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
     /// PEM root CA path for a private certificate. Missing, empty, or
     /// whitespace-only is unset (`None`).
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     root_ca_path: Option<PathBuf>,
     /// PEM certificate chain this client presents to a server that requires
     /// one (mutual TLS). Set together with `client_key_path`. Missing, empty,
     /// or whitespace-only is unset (`None`).
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     client_cert_path: Option<PathBuf>,
     /// PEM private key of that certificate. The key is a path, so a file may
     /// set it; the key itself stays in the file it names.
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     client_key_path: Option<PathBuf>,
     /// Permit a plaintext DSN with `app.allow_insecure_development`.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     allow_plaintext: bool,
     /// Permit a DSN with no password with `app.allow_insecure_development`.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     allow_unauthenticated: bool,
     /// Bound for one cache command, including a reconnect wait.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(2)))]
     command_timeout: Duration,
     /// Maximum simultaneous application commands per cache client.
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default = 256)]
     max_concurrency: usize,
     /// Maximum wire key including namespace and separator.
+    #[educe(Default(expression = ByteSize::kib(1)))]
     max_key_bytes: ByteSize,
     /// Largest value the service will write or return from a lookup.
+    #[educe(Default(expression = ByteSize::kib(64)))]
     max_value_bytes: ByteSize,
-}
-
-impl Default for CacheInput {
-    fn default() -> Self {
-        Self {
-            dsn: None,
-            password_file: None,
-            root_ca_path: None,
-            client_cert_path: None,
-            client_key_path: None,
-            allow_plaintext: false,
-            allow_unauthenticated: false,
-            command_timeout: Duration::from_secs(2),
-            max_concurrency: 256,
-            max_key_bytes: ByteSize::kib(1),
-            max_value_bytes: ByteSize::kib(64),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

@@ -5,10 +5,12 @@ use std::{num::NonZeroU32, time::Duration};
 // template:begin oidc-introspection:authn-secrecy-import
 use secrecy::SecretString;
 // template:end oidc-introspection:authn-secrecy-import
+use itertools::Itertools as _;
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
+use serde_with::DeserializeAs;
 
-use crate::de::{StrictString, optional_string};
+use crate::de::{StrictEnum, StrictString};
 use crate::validate::{
     Rejected, ValidationError, Violations, missing, required, required_non_blank,
 };
@@ -29,16 +31,16 @@ impl Audiences {
     }
 
     fn from_values(values: impl IntoIterator<Item = String>) -> Result<Self, &'static str> {
-        let iter = values.into_iter();
-        let mut deduplicated = Vec::with_capacity(iter.size_hint().0);
-        for value in iter {
-            if value.trim().is_empty() {
-                return Err("values must be nonblank");
-            }
-            if !deduplicated.contains(&value) {
-                deduplicated.push(value);
-            }
-        }
+        let deduplicated: Vec<String> = values
+            .into_iter()
+            .map(|value| {
+                if value.trim().is_empty() {
+                    Err("values must be nonblank")
+                } else {
+                    Ok(value)
+                }
+            })
+            .process_results(|iter| iter.unique().collect())?;
         if deduplicated.is_empty() {
             return Err("must be a nonempty string or list of nonblank exact values");
         }
@@ -51,11 +53,12 @@ impl<'de> Deserialize<'de> for Audiences {
     where
         D: Deserializer<'de>,
     {
+        #[serde_with::serde_as]
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
-            One(StrictString),
-            Many(Vec<StrictString>),
+            One(#[serde_as(as = "StrictString")] String),
+            Many(#[serde_as(as = "Vec<StrictString>")] Vec<String>),
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {
@@ -65,8 +68,8 @@ impl<'de> Deserialize<'de> for Audiences {
             )
         })?;
         match input {
-            Input::One(value) => Self::from_values([value.0]),
-            Input::Many(values) => Self::from_values(values.into_iter().map(|value| value.0)),
+            Input::One(value) => Self::from_values([value]),
+            Input::Many(values) => Self::from_values(values),
         }
         .map_err(|_| {
             serde::de::Error::invalid_value(
@@ -85,24 +88,25 @@ impl TryFrom<Vec<String>> for Audiences {
     }
 }
 
-fn deserialize_audience_list<'de, D>(deserializer: D) -> Result<Option<Audiences>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let Some(raw) = optional_string(deserializer)? else {
-        return Ok(None);
-    };
-    let invalid = || {
-        serde::de::Error::invalid_value(
-            Unexpected::Other("a malformed audience list"),
-            &"a TOML array of nonblank strings",
-        )
-    };
-    let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
-    let items = Vec::<StrictString>::deserialize(value).map_err(|_| invalid())?;
-    Audiences::from_values(items.into_iter().map(|item| item.0))
-        .map(Some)
-        .map_err(|_| invalid())
+struct AudienceList;
+
+impl<'de> DeserializeAs<'de, Audiences> for AudienceList {
+    fn deserialize_as<D>(deserializer: D) -> Result<Audiences, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw: String = StrictString::deserialize_as(deserializer)?;
+        let invalid = || {
+            serde::de::Error::invalid_value(
+                Unexpected::Other("a malformed audience list"),
+                &"a TOML array of nonblank strings",
+            )
+        };
+        let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
+        let values: Vec<String> =
+            Vec::<StrictString>::deserialize_as(value).map_err(|_| invalid())?;
+        Audiences::from_values(values).map_err(|_| invalid())
+    }
 }
 
 // template:begin oidc-jwt:authn-token-profile
@@ -144,61 +148,70 @@ enum AuthnMode {
     // template:end oidc-introspection:authn-mode-introspection
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Clone, derive_more::Debug, Default, Deserialize)]
+#[debug("AuthnInput {{ .. }}")]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct AuthnInput {
-    #[serde(deserialize_with = "crate::de::string_enum")]
+    #[serde_as(as = "StrictEnum")]
     mode: AuthnMode,
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     issuer: Option<String>,
     audience: Option<Audiences>,
-    #[serde(default, deserialize_with = "deserialize_audience_list")]
+    #[serde(default)]
+    #[serde_as(as = "Option<AudienceList>")]
     audiences: Option<Audiences>,
     // template:begin oidc-jwt:authn-config-jwt-variant
     /// Required JWT access-token contract.
-    #[serde(default, deserialize_with = "crate::de::optional_string_enum")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictEnum>")]
     token_profile: Option<TokenProfile>,
     /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
     /// Missing uses `[RS256]`.
-    #[serde(default, deserialize_with = "deserialize_optional_algorithms")]
+    #[serde(default)]
+    #[serde_as(as = "Option<AlgorithmList>")]
     algorithms: Option<Vec<JwtAlgorithm>>,
     /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
     /// metadata.
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     jwks_uri: Option<String>,
     /// Maximum age since the verifier last acquired usable keys.
-    #[serde(default, deserialize_with = "crate::de::optional_duration")]
+    #[serde(default)]
+    #[serde_as(as = "Option<crate::de::StrictDuration>")]
     jwks_max_age: Option<std::time::Duration>,
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     introspection_endpoint: Option<String>,
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     introspection_client_id: Option<String>,
     /// Environment-only client secret. Missing or blank is rejected.
     /// Whitespace determines absence only; a present credential retains
     /// its exact bytes for the provider, including surrounding whitespace.
-    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "crate::de::BlankSecretAsNone")]
     introspection_client_secret: Option<SecretString>,
     /// Immediate provider-exchange capacity. Missing uses 32.
-    #[serde(default, deserialize_with = "crate::de::optional_unsigned_count")]
+    #[serde(default)]
+    #[serde_as(as = "Option<crate::de::StrictCount>")]
     provider_concurrency: Option<NonZeroU32>,
     /// Reuse verified positive results until their fixed expiry. Default off.
-    #[serde(default, deserialize_with = "crate::de::optional_boolean")]
+    #[serde(default)]
+    #[serde_as(as = "Option<crate::de::StrictBool>")]
     cache_enabled: Option<bool>,
     /// Maximum retained results, from 1 through 1024. Missing uses 256.
-    #[serde(default, deserialize_with = "crate::de::optional_unsigned_count")]
+    #[serde(default)]
+    #[serde_as(as = "Option<crate::de::StrictCount>")]
     cache_capacity: Option<usize>,
     /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
-    #[serde(default, deserialize_with = "crate::de::optional_duration")]
+    #[serde(default)]
+    #[serde_as(as = "Option<crate::de::StrictDuration>")]
     cache_ttl: Option<Duration>,
     // template:end oidc-introspection:authn-config-introspection-variant
-}
-
-impl std::fmt::Debug for AuthnInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AuthnInput { .. }")
-    }
 }
 
 #[derive(Clone, Default)]
@@ -259,46 +272,44 @@ fn default_algorithms() -> Vec<JwtAlgorithm> {
     vec![JwtAlgorithm::Rs256]
 }
 
-fn deserialize_optional_algorithms<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<JwtAlgorithm>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::de::IntoDeserializer as _;
+struct AlgorithmList;
 
-    const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
+impl<'de> DeserializeAs<'de, Vec<JwtAlgorithm>> for AlgorithmList {
+    fn deserialize_as<D>(deserializer: D) -> Result<Vec<JwtAlgorithm>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::IntoDeserializer as _;
 
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input {
-        List(Vec<crate::de::StrictEnum<JwtAlgorithm>>),
-        Text(StrictString),
-    }
+        const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
 
-    let Some(input) = Option::<Input>::deserialize(deserializer).map_err(|_| {
-        serde::de::Error::invalid_value(
-            Unexpected::Other("an unsupported algorithm list"),
-            &EXPECTED,
-        )
-    })?
-    else {
-        return Ok(None);
-    };
-    match input {
-        Input::List(values) => Ok(Some(values.into_iter().map(|item| item.0).collect())),
-        Input::Text(value) => value
-            .0
-            .split(',')
-            .map(|item| JwtAlgorithm::deserialize(item.trim().into_deserializer()))
-            .collect::<Result<Vec<_>, D::Error>>()
-            .map(Some)
-            .map_err(|_| {
-                serde::de::Error::invalid_value(
-                    Unexpected::Other("an unsupported JWT algorithm"),
-                    &EXPECTED,
-                )
-            }),
+        #[serde_with::serde_as]
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            List(#[serde_as(as = "Vec<StrictEnum>")] Vec<JwtAlgorithm>),
+            Text(#[serde_as(as = "StrictString")] String),
+        }
+
+        let input = Input::deserialize(deserializer).map_err(|_| {
+            serde::de::Error::invalid_value(
+                Unexpected::Other("an unsupported algorithm list"),
+                &EXPECTED,
+            )
+        })?;
+        match input {
+            Input::List(values) => Ok(values),
+            Input::Text(value) => value
+                .split(',')
+                .map(|item| JwtAlgorithm::deserialize(item.trim().into_deserializer()))
+                .collect::<Result<Vec<_>, D::Error>>()
+                .map_err(|_| {
+                    serde::de::Error::invalid_value(
+                        Unexpected::Other("an unsupported JWT algorithm"),
+                        &EXPECTED,
+                    )
+                }),
+        }
     }
 }
 // template:end oidc-jwt:authn-default-algorithms

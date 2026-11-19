@@ -2,8 +2,10 @@ use crate::{
     Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
     principal::{Identifiers, Identity},
 };
+use compact_str::CompactString;
 use serde::Deserialize;
-use std::{borrow::Cow, fmt, time::Duration};
+use smallvec::SmallVec;
+use std::{borrow::Cow, fmt, sync::Arc, time::Duration};
 // template:begin oidc-jwt:authn-claims-jwt-import
 use crate::TokenProfile;
 use serde_json::value::RawValue;
@@ -14,20 +16,23 @@ const LEEWAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct ClaimPolicy {
-    issuer: String,
+    issuer: Arc<str>,
     audiences: Vec<String>,
 }
 
 impl ClaimPolicy {
     pub(crate) fn try_new(
-        issuer: String,
+        issuer: &str,
         mut audiences: Vec<String>,
     ) -> Result<Self, PreparationError> {
         if audiences.is_empty() || audiences.iter().any(|audience| audience.trim().is_empty()) {
             return Err(PreparationError::invalid_options());
         }
         audiences.sort_unstable();
-        Ok(Self { issuer, audiences })
+        Ok(Self {
+            issuer: Arc::from(issuer),
+            audiences,
+        })
     }
 
     fn check_issuer_and_audience(
@@ -35,7 +40,7 @@ impl ClaimPolicy {
         issuer: &str,
         audience: &StringOrStrings<'_>,
     ) -> Result<(), VerificationError> {
-        if issuer != self.issuer {
+        if issuer != self.issuer.as_ref() {
             return Err(VerificationError::invalid(VerificationReason::Issuer));
         }
         if !self.accepts_audience(audience) {
@@ -62,14 +67,14 @@ impl ClaimPolicy {
 
 enum StringOrStrings<'a> {
     One(Cow<'a, str>),
-    Many(Vec<Cow<'a, str>>),
+    Many(SmallVec<[Cow<'a, str>; 4]>),
 }
 
 impl<'de: 'a, 'a> Deserialize<'de> for StringOrStrings<'a> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = StringOrStrings<'de>;
+        struct Visitor<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visitor<'a> {
+            type Value = StringOrStrings<'a>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a string or an array of strings")
             }
@@ -86,14 +91,14 @@ impl<'de: 'a, 'a> Deserialize<'de> for StringOrStrings<'a> {
                 self,
                 mut seq: A,
             ) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
+                let mut values = SmallVec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
                 while let Some(BorrowableString(value)) = seq.next_element()? {
                     values.push(value);
                 }
                 Ok(StringOrStrings::Many(values))
             }
         }
-        deserializer.deserialize_any(Visitor)
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
     }
 }
 
@@ -116,9 +121,9 @@ fn parse_actor(JsonObject(raw): JsonObject<RawAct<'_>>) -> Result<Actor, EmptyAc
         return Err(EmptyActorSubject);
     }
     Ok(Actor::new(
-        raw.sub.into_owned(),
+        CompactString::from(raw.sub),
         raw.client_id
-            .map(|BorrowableString(value)| value.into_owned()),
+            .map(|BorrowableString(value)| CompactString::from(value)),
     ))
 }
 
@@ -251,52 +256,54 @@ pub(crate) fn validate_jwt_claims(
     let invalid = VerificationError::invalid;
     let payload =
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
-        .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let scope = claims.scope.resolve(token_profile, claims.scp)?;
-    let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
-        (claims.iss, claims.aud, claims.exp)
-    else {
-        return Err(invalid(VerificationReason::MissingClaim));
-    };
-    let not_before = claims.nbf.map(|NumericDate(date)| date);
-    check_lifetime(expiry, not_before, now)?;
-    policy.check_issuer_and_audience(&issuer, &audience)?;
-    let identifiers = match token_profile {
-        // RFC 9068 §2.2
-        TokenProfile::Rfc9068 => {
-            let (Some(subject), Some(client_id), Some(_), Some(_)) = (
-                non_empty(claims.sub),
-                non_empty(claims.client_id),
-                claims.iat,
-                claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
-            ) else {
-                return Err(invalid(VerificationReason::MissingClaim));
-            };
-            Identifiers::Subject {
-                subject,
-                client_id: Some(client_id),
+    let (not_before, expiry, identifiers, scopes, actor) = {
+        let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
+            .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+        let scope = claims.scope.resolve(token_profile, claims.scp)?;
+        let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
+            (claims.iss, claims.aud, claims.exp)
+        else {
+            return Err(invalid(VerificationReason::MissingClaim));
+        };
+        let not_before = claims.nbf.map(|NumericDate(date)| date);
+        check_lifetime(expiry, not_before, now)?;
+        policy.check_issuer_and_audience(&issuer, &audience)?;
+        let identifiers = match token_profile {
+            // RFC 9068 §2.2
+            TokenProfile::Rfc9068 => {
+                let (Some(subject), Some(client_id), Some(_), Some(_)) = (
+                    non_empty(claims.sub),
+                    non_empty(claims.client_id),
+                    claims.iat,
+                    claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
+                ) else {
+                    return Err(invalid(VerificationReason::MissingClaim));
+                };
+                Identifiers::Subject {
+                    subject,
+                    client_id: Some(client_id),
+                }
             }
-        }
-        TokenProfile::ResourceServer => {
-            let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
-                .into_iter()
-                .find_map(non_empty);
-            Identifiers::from_claims(non_empty(claims.sub), client_id)?
-        }
+            TokenProfile::ResourceServer => {
+                let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
+                    .into_iter()
+                    .find_map(non_empty);
+                Identifiers::from_claims(non_empty(claims.sub), client_id)?
+            }
+        };
+        let scopes = Scopes::from_claim(scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
+        let actor = claims
+            .act
+            .map(parse_actor)
+            .transpose()
+            .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
+        (not_before, expiry, identifiers, scopes, actor)
     };
-    let scopes = Scopes::from_claim(scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
-    let actor = claims
-        .act
-        .map(parse_actor)
-        .transpose()
-        .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
-    let issuer = issuer.into_owned();
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
             Identity {
-                issuer,
+                issuer: Arc::clone(&policy.issuer),
                 identifiers,
                 scopes,
                 payload,
@@ -420,7 +427,7 @@ pub(crate) fn validate_introspection_claims(
         not_before,
         principal: Principal::new(
             Identity {
-                issuer: issuer.into_owned(),
+                issuer: Arc::clone(&policy.issuer),
                 identifiers,
                 scopes,
                 payload: payload.to_owned(),
@@ -455,8 +462,8 @@ fn satisfies_not_before(not_before: Option<Duration>, now: Duration) -> bool {
 
 impl Identifiers {
     fn from_claims(
-        subject: Option<String>,
-        client_id: Option<String>,
+        subject: Option<CompactString>,
+        client_id: Option<CompactString>,
     ) -> Result<Self, VerificationError> {
         match (subject, client_id) {
             (Some(subject), client_id) => Ok(Self::Subject { subject, client_id }),
@@ -466,9 +473,9 @@ impl Identifiers {
     }
 }
 
-fn non_empty(value: Option<BorrowableString<'_>>) -> Option<String> {
+fn non_empty(value: Option<BorrowableString<'_>>) -> Option<CompactString> {
     let BorrowableString(value) = value?;
-    (!value.is_empty()).then(|| value.into_owned())
+    (!value.is_empty()).then(|| CompactString::from(value))
 }
 
 pub(crate) struct Scopes(Vec<String>);
@@ -535,7 +542,7 @@ mod tests {
     // template:end oidc-introspection:authn-claims-introspection-test-import
 
     fn policy() -> ClaimPolicy {
-        ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()]).unwrap()
+        ClaimPolicy::try_new("https://issuer.example", vec!["api".to_owned()]).unwrap()
     }
 
     fn assert_actor_evidence(
@@ -713,7 +720,7 @@ mod tests {
     #[test]
     fn any_configured_audience_can_match_a_string_or_array() {
         let multiple_audiences = ClaimPolicy::try_new(
-            "https://issuer.example".to_owned(),
+            "https://issuer.example",
             Vec::from(["api", "accounts", "storefront", "billing"].map(str::to_owned)),
         )
         .unwrap();

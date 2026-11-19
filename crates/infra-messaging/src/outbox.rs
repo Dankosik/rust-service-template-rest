@@ -1,5 +1,7 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
+use arrayvec::ArrayString;
 use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
@@ -10,7 +12,7 @@ use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
-use uuid::{NonNilUuid, fmt::Simple};
+use uuid::NonNilUuid;
 
 use crate::error::{PublishError, PublishRejection};
 use crate::prepared::{
@@ -52,19 +54,20 @@ pub enum OutboxEnqueueError {
     Jobs(#[from] infra_jobs::EnqueueError),
 }
 
-#[derive(Debug)]
-#[derive_where::derive_where(Clone)]
+#[derive_where::derive_where(Clone, Debug)]
 pub struct OutboxRoute<T: EventPayload> {
     publication: PublicationRoute<T>,
-    publisher_id: NonNilUuid,
+    id_prefix: ArrayString<43>,
 }
 
 impl<T: EventPayload> PublicationRoute<T> {
     #[must_use]
     pub fn for_outbox(self, publisher_id: NonNilUuid) -> OutboxRoute<T> {
+        let mut id_prefix = ArrayString::new();
+        let _ = write!(&mut id_prefix, "outbox-v1-{}-", publisher_id.get().simple());
         OutboxRoute {
             publication: self,
-            publisher_id,
+            id_prefix,
         }
     }
 }
@@ -72,22 +75,10 @@ impl<T: EventPayload> PublicationRoute<T> {
 impl<T: EventPayload + Serialize> OutboxRoute<T> {
     pub fn prepare(&self, event: &Event<T>) -> Result<PreparedEvent, EnvelopeError> {
         self.publication.prepare_outbox(event, || {
-            let prefix = "outbox-v1-";
-            let digest: [u8; 32] = Sha256::digest(event.id.as_bytes()).into();
-            let mut hex = const_hex::Buffer::<32>::new();
-            let digest = hex.format(&digest);
-            let mut publisher = [0; Simple::LENGTH];
-            let publisher = self
-                .publisher_id
-                .get()
-                .simple()
-                .encode_lower(&mut publisher);
-            let mut id = String::with_capacity(prefix.len() + publisher.len() + 1 + digest.len());
-            id.push_str(prefix);
-            id.push_str(publisher);
-            id.push('-');
-            id.push_str(digest);
-            id
+            crate::wire::prefixed_digest_hex(
+                &self.id_prefix,
+                &Sha256::digest(event.id.as_bytes()).into(),
+            )
         })
     }
 }
@@ -616,5 +607,39 @@ mod tests {
         serde_json::to_vec(&candidate)
             .expect("primitive intent serializes")
             .len()
+    }
+
+    #[test]
+    fn outbox_route_clones_and_formats_debug_without_payload_debug_bound() {
+        #[derive(serde::Serialize)]
+        struct OpaquePayload;
+
+        impl domain_events::EventPayload for OpaquePayload {
+            const EVENT_TYPE: &'static str = "example.opaque";
+            const SCHEMA_VERSION: u16 = 1;
+        }
+
+        let publisher = uuid::NonNilUuid::new(uuid::Uuid::from_u128(1)).unwrap();
+        let mut registry = crate::Registry::default();
+        let publication = registry
+            .declare_publication(&crate::Route::<OpaquePayload>::new("events.opaque"), 128)
+            .unwrap();
+        let route = publication.for_outbox(publisher);
+        let cloned = route.clone();
+        let debug = format!("{route:?}");
+        assert_eq!(debug, format!("{cloned:?}"));
+        assert!(debug.contains("outbox-v1-00000000000000000000000000000001-"));
+        let event = domain_events::Event {
+            id: "event-1".to_owned(),
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
+            payload: OpaquePayload,
+        };
+        let prepared = cloned.prepare(&event).unwrap();
+        assert!(
+            prepared
+                .publication_id()
+                .starts_with("outbox-v1-00000000000000000000000000000001-")
+        );
+        assert_eq!(prepared.publication_id().len(), 43 + 64);
     }
 }

@@ -17,6 +17,8 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/sqlx"]
 [dependencies]
 arrayvec = { workspace = true }
 crossbeam-channel = { workspace = true, features = ["std"] }
+delegate = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
 parking_lot = { workspace = true }
@@ -42,6 +44,7 @@ reqwest = { workspace = true, features = ["blocking", "rustls"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tokio-util = { workspace = true }
@@ -51,6 +54,7 @@ tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
 uuid = { workspace = true, features = ["v4"] }
+zeroize = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["fs"] }

@@ -17,6 +17,10 @@ const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
 const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
+const MIN_ENCODED_KEY_BYTES: usize =
+    base64::encoded_len(MIN_KEY_BYTES, true).expect("minimum key fits");
+const MAX_ENCODED_KEY_BYTES: usize =
+    base64::encoded_len(MAX_KEY_BYTES, true).expect("maximum key fits");
 const TAG_BYTES: usize = 32;
 const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HMAC tag fits");
 
@@ -29,11 +33,17 @@ pub struct SigningKey(hmac::Key);
 impl SigningKey {
     pub fn from_encoded(encoded: &str) -> Result<Self, InvalidKey> {
         let encoded = encoded.trim_prefix("whsec_");
-        let decoded = zeroize::Zeroizing::new(STANDARD.decode(encoded).map_err(|_| InvalidKey)?);
-        if !(MIN_KEY_BYTES..=MAX_KEY_BYTES).contains(&decoded.len()) {
+        if !(MIN_ENCODED_KEY_BYTES..=MAX_ENCODED_KEY_BYTES).contains(&encoded.len()) {
             return Err(InvalidKey);
         }
-        Ok(Self(hmac::Key::new(hmac::HMAC_SHA256, &decoded)))
+        let mut decoded = zeroize::Zeroizing::new([0u8; MAX_KEY_BYTES + 2]);
+        let len = STANDARD
+            .decode_slice(encoded, &mut *decoded)
+            .map_err(|_| InvalidKey)?;
+        if !(MIN_KEY_BYTES..=MAX_KEY_BYTES).contains(&len) {
+            return Err(InvalidKey);
+        }
+        Ok(Self(hmac::Key::new(hmac::HMAC_SHA256, &decoded[..len])))
     }
 }
 
@@ -188,7 +198,7 @@ impl VerifiedMessage {
 #[error("webhook signing key is invalid")]
 pub struct InvalidKey;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum, thiserror::Error)]
 pub enum ProtocolError {
     #[error("webhook body exceeds the maximum size")]
     BodyTooLarge,
@@ -207,28 +217,6 @@ pub enum ProtocolError {
 }
 
 impl ProtocolError {
-    pub(crate) const ALL: [Self; 7] = [
-        Self::BodyTooLarge,
-        Self::MissingHeader,
-        Self::ConflictingHeader,
-        Self::InvalidMessageId,
-        Self::InvalidTimestamp,
-        Self::TimestampOutOfWindow,
-        Self::InvalidSignature,
-    ];
-
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::BodyTooLarge => 0,
-            Self::MissingHeader => 1,
-            Self::ConflictingHeader => 2,
-            Self::InvalidMessageId => 3,
-            Self::InvalidTimestamp => 4,
-            Self::TimestampOutOfWindow => 5,
-            Self::InvalidSignature => 6,
-        }
-    }
-
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
@@ -242,14 +230,6 @@ impl ProtocolError {
         }
     }
 }
-
-const _: () = {
-    let mut index = 0;
-    while index < ProtocolError::ALL.len() {
-        assert!(ProtocolError::ALL[index].index() == index);
-        index += 1;
-    }
-};
 
 pub(crate) fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
     (body.len() <= MAX_BODY_BYTES).ok_or(ProtocolError::BodyTooLarge)
@@ -361,14 +341,29 @@ mod tests {
 
     #[test]
     fn accepts_keys_from_24_through_64_bytes_and_rejects_the_adjacent_lengths() {
-        for (len, accepted) in [(23, false), (24, true), (64, true), (65, false)] {
+        for (len, accepted) in [
+            (22, false),
+            (23, false),
+            (24, true),
+            (64, true),
+            (65, false),
+            (66, false),
+            (67, false),
+        ] {
             let encoded = STANDARD.encode(vec![0x11; len]);
             assert_eq!(
                 SigningKey::from_encoded(&encoded).is_ok(),
                 accepted,
                 "{len} bytes"
             );
+            assert_eq!(
+                SigningKey::from_encoded(&format!("whsec_{encoded}")).is_ok(),
+                accepted,
+                "prefixed {len} bytes"
+            );
         }
+        assert!(SigningKey::from_encoded(&"!".repeat(32)).is_err());
+        assert!(SigningKey::from_encoded(&"A".repeat(33)).is_err());
     }
 
     #[test]

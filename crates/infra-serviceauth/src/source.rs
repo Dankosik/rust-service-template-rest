@@ -35,24 +35,18 @@ pub enum SigningError {
     Signing,
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("TokenSource({_0:?})")]
 pub struct TokenSource(Signing);
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 enum Signing {
+    #[debug("disabled")]
     Disabled,
+    #[debug("no signing key")]
     WithoutKey,
+    #[debug("[REDACTED]")]
     Key(Arc<Signer>),
-}
-
-impl fmt::Debug for TokenSource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match &self.0 {
-            Signing::Disabled => "TokenSource(disabled)",
-            Signing::WithoutKey => "TokenSource(no signing key)",
-            Signing::Key(_) => "TokenSource([REDACTED])",
-        })
-    }
 }
 
 impl TokenSource {
@@ -355,6 +349,16 @@ mod tests {
         );
         let catalog = source.receiver("catalog", origin()).unwrap();
         assert!(catalog.authorization().unwrap().is_some());
+        assert_eq!(
+            format!("{:?}", TokenSource::disabled()),
+            "TokenSource(disabled)"
+        );
+        assert_eq!(
+            format!("{:?}", TokenSource::without_key()),
+            "TokenSource(no signing key)"
+        );
+        assert_eq!(format!("{source:?}"), "TokenSource([REDACTED])");
+        assert_eq!(format!("{source:#?}"), "TokenSource([REDACTED])");
         for debug in [
             format!("{source:?}"),
             format!("{catalog:?}"),

@@ -164,7 +164,7 @@ impl IntrospectionVerifier {
         options: IntrospectionOptions,
         provider: ProviderClient,
     ) -> Result<Arc<Self>, PreparationError> {
-        let policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
+        let policy = ClaimPolicy::try_new(options.issuer.as_str(), options.audiences)?;
         if options.provider_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(PreparationError::invalid_options());
         }
@@ -1425,8 +1425,7 @@ mod tests {
     #[test]
     fn retention_ends_at_the_earlier_of_ttl_and_token_expiry() {
         let policy =
-            ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
-                .unwrap();
+            ClaimPolicy::try_new("https://issuer.example", vec!["api".to_owned()]).unwrap();
         let identity = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
             validate_introspection_claims(

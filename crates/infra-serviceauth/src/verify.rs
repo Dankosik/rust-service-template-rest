@@ -1,6 +1,7 @@
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     fmt,
+    hash::{Hash, Hasher},
     sync::{Arc, OnceLock},
 };
 
@@ -12,6 +13,8 @@ use shared_rules::{
     rfc6750::{self, NoBearer},
     rfc7515,
 };
+use smallvec::SmallVec;
+use zeroize::Zeroizing;
 
 use crate::{JwtType, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, TrustRegistry, unix_seconds};
 
@@ -113,6 +116,21 @@ impl Caller {
     }
 }
 
+#[derive(Eq, PartialEq)]
+struct TokenKey(Zeroizing<Box<[u8]>>);
+
+impl Borrow<[u8]> for TokenKey {
+    fn borrow(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl Hash for TokenKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_ref().hash(state);
+    }
+}
+
 #[derive(Clone)]
 pub struct Verifier(Arc<Inner>);
 
@@ -122,7 +140,7 @@ struct Inner {
     trust: TrustRegistry,
     verified: metrics::Counter,
     refused: EnumMap<Reason, OnceLock<metrics::Counter>>,
-    cache: Cache<Box<[u8]>, (Caller, Window), foldhash::quality::RandomState>,
+    cache: Cache<TokenKey, (Caller, Window), foldhash::quality::RandomState>,
 }
 
 impl fmt::Debug for Verifier {
@@ -197,7 +215,10 @@ impl Verifier {
             };
         }
         let (caller, window) = self.verify_uncached(token, now)?;
-        self.0.cache.insert(token.into(), (caller.clone(), window));
+        self.0.cache.insert(
+            TokenKey(Zeroizing::new(Box::from(token))),
+            (caller.clone(), window),
+        );
         Ok(caller)
     }
 
@@ -213,7 +234,7 @@ impl Verifier {
             payload,
             signature,
         } = rfc7515::compact(token).ok_or(Reason::Header)?;
-        let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
+        let header = decode_segment(header, Reason::Header)?;
         // RFC 7515 §5.2
         let header = std::str::from_utf8(&header).map_err(|_| Reason::Header)?;
         let header: TokenHeader<'_> = serde_json::from_str(header).map_err(|_| Reason::Header)?;
@@ -236,9 +257,7 @@ impl Verifier {
             .map(BorrowableString::as_str)
             .filter(|kid| !kid.is_empty())
             .ok_or(Reason::KeyId)?;
-        let payload = URL_SAFE_NO_PAD
-            .decode(payload)
-            .map_err(|_| Reason::Claims)?;
+        let payload = decode_segment(payload, Reason::Claims)?;
         let payload = std::str::from_utf8(&payload).map_err(|_| Reason::Claims)?;
         let claims: Claims<'_> = serde_json::from_str(payload).map_err(|_| Reason::Claims)?;
         let issuer = claims
@@ -276,6 +295,15 @@ impl Verifier {
 struct Window {
     valid_from: u64,
     expires_at: u64,
+}
+
+fn decode_segment(encoded: &[u8], reason: Reason) -> Result<SmallVec<[u8; 256]>, Reason> {
+    let mut decoded = SmallVec::from_elem(0_u8, base64::decoded_len_estimate(encoded.len()));
+    let length = URL_SAFE_NO_PAD
+        .decode_slice(encoded, &mut decoded)
+        .map_err(|_| reason)?;
+    decoded.truncate(length);
+    Ok(decoded)
 }
 
 fn verify_signature(

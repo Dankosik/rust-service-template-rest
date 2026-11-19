@@ -80,9 +80,10 @@ impl Producer {
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
         let subject = event.subject.as_str();
+        let span_name = compact_str::format_compact!("publish {subject}");
         let span = tracing::info_span!(
             "messaging_publish",
-            otel.name = format!("publish {subject}"),
+            otel.name = span_name.as_str(),
             otel.kind = "producer",
             messaging.system.name = "nats",
             messaging.operation.type = "send",

@@ -49,11 +49,18 @@ where
 }
 
 pub(crate) fn is_json_media_type(value: &str) -> bool {
-    value.eq_ignore_ascii_case("application/json")
-        || value.parse::<mime::Mime>().is_ok_and(|media_type| {
-            media_type.type_() == mime::APPLICATION
-                && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
-        })
+    if value.eq_ignore_ascii_case("application/json") {
+        return true;
+    }
+    mediatype::MediaType::parse(value).is_ok_and(|media_type| {
+        media_type.ty == mediatype::names::APPLICATION
+            && (media_type.subty == mediatype::names::JSON
+                || media_type.suffix == Some(mediatype::names::JSON))
+            && media_type
+                .params
+                .iter()
+                .all(|(_, param)| !param.as_str().is_empty())
+    })
 }
 
 #[expect(
@@ -812,6 +819,33 @@ mod tests {
                 .err()
                 .expect("the member does not fit");
             assert_eq!(body_pointer(error.path()).as_deref(), Some(pointer));
+        }
+    }
+
+    #[test]
+    fn json_media_type_accepts_rfc_9110_ows_and_structured_json_suffixes() {
+        for accepted in [
+            "application/json",
+            "application/json ; charset=utf-8",
+            "application/json;\tcharset=utf-8",
+            "application/json; charset=\"\"",
+            "application/vnd.orders+json; charset=utf-8",
+            "APPLICATION/JSON",
+        ] {
+            assert!(is_json_media_type(accepted), "{accepted:?}");
+        }
+        for rejected in [
+            "text/json",
+            "application/jsonx",
+            "",
+            "application/json; charset",
+            "application/json; charset=",
+            "application/json; charset=; foo=bar",
+            "application/json; charset= ; foo=bar",
+            "application/json; =utf-8",
+            "application/json; charset=\"unterminated",
+        ] {
+            assert!(!is_json_media_type(rejected), "{rejected:?}");
         }
     }
 }

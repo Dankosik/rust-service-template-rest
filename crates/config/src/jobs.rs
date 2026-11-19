@@ -46,22 +46,17 @@ impl JobsOperatorInput {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde_with::serde_as]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct JobsConfig {
     /// The most attempts one worker process runs at once
     /// (`APP__JOBS__MAX_WORKERS`), between 1 and 500.
     /// `postgres.max_connections` bounds it further per deployment.
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "crate::de::StrictCount")]
+    #[educe(Default(expression = NonZeroU32::MIN))]
     pub max_workers: NonZeroU32,
-}
-
-impl Default for JobsConfig {
-    fn default() -> Self {
-        Self {
-            max_workers: NonZeroU32::MIN,
-        }
-    }
 }
 
 impl JobsConfig {

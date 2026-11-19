@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,6 +9,7 @@ use std::{
 
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use enum_map::EnumMap;
 use jsonwebtoken::{
     Algorithm,
     jwk::{
@@ -26,12 +27,22 @@ use crate::{
     provider::{Document, ProviderClient},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, enum_map::Enum)]
 pub enum JwtAlgorithm {
     Rs256,
     Es256,
     Ps256,
     EdDsa,
+}
+
+pub(crate) type AllowedAlgorithms = EnumMap<JwtAlgorithm, bool>;
+
+pub(crate) fn allowed_algorithms(algorithms: &[JwtAlgorithm]) -> AllowedAlgorithms {
+    let mut allowed = AllowedAlgorithms::default();
+    for &algorithm in algorithms {
+        allowed[algorithm] = true;
+    }
+    allowed
 }
 
 const MIN_RSA_MODULUS_BITS: usize = 2048;
@@ -146,7 +157,7 @@ struct RawJwks {
     keys: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 enum KeyRejection {
     MalformedEntry,
     EncryptionOnly,
@@ -171,7 +182,7 @@ impl KeyRejection {
 
 struct ParsedKeySet {
     keys: Vec<JwtKey>,
-    rejected: BTreeMap<KeyRejection, u64>,
+    rejected: EnumMap<KeyRejection, u64>,
 }
 
 impl ParsedKeySet {
@@ -179,18 +190,18 @@ impl ParsedKeySet {
         self.keys.is_empty()
             && self
                 .rejected
-                .keys()
-                .any(|reason| *reason != KeyRejection::EncryptionOnly)
+                .iter()
+                .any(|(reason, &count)| count > 0 && reason != KeyRejection::EncryptionOnly)
     }
 }
 
 fn parse_jwks_entries(
     bytes: &[u8],
-    configured: &[JwtAlgorithm],
+    configured: AllowedAlgorithms,
 ) -> Result<ParsedKeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
-    let mut rejected = BTreeMap::<KeyRejection, u64>::new();
+    let mut rejected = EnumMap::<KeyRejection, u64>::default();
     let mut keys = Vec::new();
     for value in raw.keys {
         let key = Jwk::deserialize(&value)
@@ -204,26 +215,28 @@ fn parse_jwks_entries(
             });
         match key {
             Ok(key) => keys.push(key),
-            Err(reason) => *rejected.entry(reason).or_default() += 1,
+            Err(reason) => rejected[reason] += 1,
         }
     }
-    let mut rsa_algorithms = configured
-        .iter()
-        .copied()
-        .filter(|algorithm| algorithm.family() == KeyFamily::Rsa);
-    if let Some(first) = rsa_algorithms.next()
-        && rsa_algorithms.any(|other| other != first)
+    if configured
+        .into_iter()
+        .filter(|&(algorithm, enabled)| enabled && algorithm.family() == KeyFamily::Rsa)
+        .nth(1)
+        .is_some()
     {
         let conflicts = reject_conflicting_rsa_keys(&mut keys);
         if conflicts != 0 {
-            *rejected.entry(KeyRejection::AlgorithmBinding).or_default() += conflicts;
+            rejected[KeyRejection::AlgorithmBinding] += conflicts;
         }
     }
     Ok(ParsedKeySet { keys, rejected })
 }
 
 fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
-    for (&reason, &count) in &parsed.rejected {
+    for (reason, &count) in &parsed.rejected {
+        if count == 0 {
+            continue;
+        }
         tracing::debug!(
             reason = reason.label(),
             count,
@@ -251,7 +264,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
 
 #[cfg(any(test, feature = "test-support"))]
 fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
-    let parsed = parse_jwks_entries(bytes, configured)?;
+    let parsed = parse_jwks_entries(bytes, allowed_algorithms(configured))?;
     build_key_set(parsed, Instant::now())
 }
 
@@ -262,7 +275,10 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
         Conflicting,
     }
 
-    let mut bindings = HashMap::<Box<[u8]>, RsaBinding>::new();
+    let mut bindings =
+        HashMap::<Box<[u8]>, RsaBinding, foldhash::quality::RandomState>::with_hasher(
+            foldhash::quality::RandomState::default(),
+        );
     for key in keys
         .iter()
         .filter(|key| key.algorithm.family() == KeyFamily::Rsa)
@@ -285,7 +301,7 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
 fn admit_key(
     jwk: Jwk,
     raw_alg: Option<&str>,
-    configured: &[JwtAlgorithm],
+    configured: AllowedAlgorithms,
 ) -> Result<JwtKey, KeyRejection> {
     if is_encryption_only(&jwk, raw_alg) {
         return Err(KeyRejection::EncryptionOnly);
@@ -309,22 +325,19 @@ fn admit_key(
 fn bind_algorithm(
     explicit: Option<KeyAlgorithm>,
     family: KeyFamily,
-    configured: &[JwtAlgorithm],
+    configured: AllowedAlgorithms,
 ) -> Option<JwtAlgorithm> {
     if let Some(explicit) = explicit {
         Algorithm::try_from(explicit)
             .ok()
             .and_then(JwtAlgorithm::from_jsonwebtoken)
-            .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
+            .filter(|&algorithm| configured[algorithm] && algorithm.family() == family)
     } else {
-        let mut matching = configured
-            .iter()
-            .copied()
-            .filter(|algorithm| algorithm.family() == family);
+        let mut matching = configured.into_iter().filter_map(|(algorithm, enabled)| {
+            (enabled && algorithm.family() == family).then_some(algorithm)
+        });
         let algorithm = matching.next()?;
-        matching
-            .all(|other| other == algorithm)
-            .then_some(algorithm)
+        matching.next().is_none().then_some(algorithm)
     }
 }
 
@@ -518,7 +531,7 @@ impl JwksSource {
     pub(crate) async fn fetch(
         &self,
         provider: &ProviderClient,
-        algorithms: &[JwtAlgorithm],
+        algorithms: AllowedAlgorithms,
         deadline: Instant,
     ) -> Result<Arc<KeySet>, KeySetFailure> {
         let (uri, acquired_at) = match self {

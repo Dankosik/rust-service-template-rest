@@ -3,6 +3,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use arc_swap::ArcSwapOption;
 use infra_outbound_http::{Client, RequestContext};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
@@ -136,20 +137,21 @@ struct ServiceState {
     registration: Arc<RegistrationState>,
     target: ServiceTokenTarget,
     resource_origin: http::Uri,
+    active: ArcSwapOption<ServiceToken>,
     cached: Mutex<Cached>,
     fetch_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
-pub(crate) struct Cached {
-    pub(crate) service: Option<ServiceToken>,
+struct Cached {
+    service: Option<Arc<ServiceToken>>,
     failure: Option<CachedFailure>,
-    pub(crate) refresh_pending: bool,
+    refresh_pending: bool,
 }
 
-pub(crate) struct ServiceToken {
+struct ServiceToken {
     token: Arc<Token>,
-    pub(crate) refresh_after: Instant,
+    refresh_after: Instant,
 }
 
 impl Cached {
@@ -158,26 +160,6 @@ impl Cached {
             .as_ref()
             .filter(|failure| now < failure.until)
             .map(|failure| failure.error)
-    }
-
-    fn defer_refresh(&mut self, from: Instant) {
-        let next = from + refresh_retry();
-        if let Some(service) = self.service.as_mut() {
-            service.refresh_after = service.refresh_after.max(next);
-        }
-    }
-
-    fn store_service_token(&mut self, token: &Arc<Token>, now: Instant) -> bool {
-        self.failure = None;
-        let Some(reuse_until) = token.reusable_until(now) else {
-            return false;
-        };
-        let refresh_after = service_refresh_after(token.requested_at, reuse_until);
-        self.service = Some(ServiceToken {
-            token: token.clone(),
-            refresh_after,
-        });
-        true
     }
 }
 
@@ -230,6 +212,7 @@ impl Registration {
             registration: self.shared.clone(),
             target,
             resource_origin,
+            active: ArcSwapOption::empty(),
             cached: Mutex::default(),
             fetch_lock: tokio::sync::Mutex::new(()),
         });
@@ -410,12 +393,18 @@ impl ServiceTokens {
     }
 
     fn reuse_service_token_and_schedule_refresh(&self, now: Instant) -> Option<Arc<Token>> {
-        let mut cached = self.lock_cached();
+        if let Some(service) = self.0.inner.active.load().as_deref()
+            && service.token.is_reusable(now)
+            && now < service.refresh_after
+        {
+            return Some(Arc::clone(&service.token));
+        }
+        let mut cached = self.0.inner.lock_cached();
         let service = cached
             .service
             .as_ref()
             .filter(|service| service.token.is_reusable(now))?;
-        let token = service.token.clone();
+        let token = Arc::clone(&service.token);
         if now >= service.refresh_after {
             self.schedule_refresh_ahead(&mut cached, now, &token);
         }
@@ -426,19 +415,27 @@ impl ServiceTokens {
         if cached.refresh_pending || cached.cached_failure(now).is_some() {
             return;
         }
-        cached.defer_refresh(now);
+        self.0.inner.defer_refresh(cached, now);
         cached.refresh_pending = self
             .0
             .refresh_requests
             .try_send(RefreshRequest {
-                current: token.clone(),
+                current: Arc::clone(token),
                 deadline: now + FETCH_TIMEOUT,
             })
             .is_ok();
     }
 
-    pub(crate) fn lock_cached(&self) -> MutexGuard<'_, Cached> {
-        self.0.inner.lock_cached()
+    #[cfg(test)]
+    pub(crate) fn clear_cached(&self) {
+        let mut cached = self.0.inner.lock_cached();
+        *cached = Cached::default();
+        self.0.inner.active.store(None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_pending(&self) -> bool {
+        self.0.inner.lock_cached().refresh_pending
     }
 
     #[cfg(test)]
@@ -468,9 +465,41 @@ impl ServiceState {
 
     fn store_service_token(&self, token: Token) -> Arc<Token> {
         let token = Arc::new(token);
-        self.lock_cached()
-            .store_service_token(&token, Instant::now());
+        let mut cached = self.lock_cached();
+        self.store_service_token_locked(&mut cached, &token, Instant::now());
         token
+    }
+
+    fn store_service_token_locked(
+        &self,
+        cached: &mut Cached,
+        token: &Arc<Token>,
+        now: Instant,
+    ) -> bool {
+        cached.failure = None;
+        let Some(reuse_until) = token.reusable_until(now) else {
+            return false;
+        };
+        let refresh_after = service_refresh_after(token.requested_at, reuse_until);
+        let service = Arc::new(ServiceToken {
+            token: Arc::clone(token),
+            refresh_after,
+        });
+        cached.service = Some(Arc::clone(&service));
+        self.active.store(Some(service));
+        true
+    }
+
+    fn defer_refresh(&self, cached: &mut Cached, from: Instant) {
+        let next = from + refresh_retry();
+        if let Some(service) = cached.service.as_ref() {
+            let updated = Arc::new(ServiceToken {
+                token: Arc::clone(&service.token),
+                refresh_after: service.refresh_after.max(next),
+            });
+            cached.service = Some(Arc::clone(&updated));
+            self.active.store(Some(updated));
+        }
     }
 
     async fn refresh_ahead(&self, request: RefreshRequest) {
@@ -494,8 +523,8 @@ impl ServiceState {
             Ok(token) => {
                 let now = Instant::now();
                 let mut cached = self.lock_cached();
-                if !cached.store_service_token(&Arc::new(token), now) {
-                    cached.defer_refresh(now);
+                if !self.store_service_token_locked(&mut cached, &Arc::new(token), now) {
+                    self.defer_refresh(&mut cached, now);
                 }
             }
             Err(error) => {

@@ -75,8 +75,10 @@ async fn read(path: &Path) -> Result<Zeroizing<String>, DsnError> {
 }
 
 pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
-    let content = read_file(path).map_err(|error| DsnError::PasswordFile(error.kind()))?;
-    let password = Zeroizing::new(shared_rules::secret_file::value(content));
+    let mut content = read_file(path).map_err(|error| DsnError::PasswordFile(error.kind()))?;
+    let password = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
+        &mut *content,
+    )));
     if password.is_empty() {
         return Err(DsnError::PasswordFileEmpty);
     }
@@ -88,7 +90,7 @@ pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> 
     clippy::disallowed_types,
     reason = "the blocking reader validates and reads the same open descriptor"
 )]
-fn read_file(path: &Path) -> io::Result<String> {
+fn read_file(path: &Path) -> io::Result<Zeroizing<String>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -97,15 +99,25 @@ fn read_file(path: &Path) -> io::Result<String> {
         options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let mut content = io::read_to_string(file.take(MAX_PASSWORD_FILE_BYTES as u64 + 1))?;
-    if content.len() > MAX_PASSWORD_FILE_BYTES {
-        content.zeroize();
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(MAX_PASSWORD_FILE_BYTES)
+        .min(MAX_PASSWORD_FILE_BYTES)
+        .saturating_add(1);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    file.take(MAX_PASSWORD_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PASSWORD_FILE_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    Ok(content)
+    let raw = std::mem::take(&mut *bytes);
+    String::from_utf8(raw).map(Zeroizing::new).map_err(|error| {
+        error.into_bytes().zeroize();
+        io::ErrorKind::InvalidData.into()
+    })
 }
 
 #[cfg(test)]

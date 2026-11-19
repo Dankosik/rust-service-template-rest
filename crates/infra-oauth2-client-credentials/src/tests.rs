@@ -32,7 +32,7 @@ use url::Url;
 use crate::{
     AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokenTarget, ExchangeTokens,
     OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceTokenTarget, ServiceTokens,
-    credentials::{Cached, acquisition_deadline},
+    credentials::acquisition_deadline,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };

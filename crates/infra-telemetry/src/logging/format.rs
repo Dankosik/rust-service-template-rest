@@ -182,11 +182,23 @@ impl<const INLINE: usize> fmt::Write for Bytes<INLINE> {
     }
 }
 
+const _: () = assert!(MAX_RECORD_BYTES <= u16::MAX as usize);
+
 #[derive(Clone, Copy)]
 struct Entry {
     key: &'static str,
-    start: usize,
-    end: usize,
+    start: u16,
+    end: u16,
+}
+
+impl Entry {
+    fn range(self) -> std::ops::Range<usize> {
+        usize::from(self.start)..usize::from(self.end)
+    }
+}
+
+fn offset(index: usize) -> u16 {
+    u16::try_from(index).unwrap_or(u16::MAX)
 }
 
 struct Scratch {
@@ -207,8 +219,8 @@ impl Scratch {
     fn add_field(&mut self, key: &'static str, start: usize) {
         self.fields.push(Entry {
             key,
-            start,
-            end: self.values.len(),
+            start: offset(start),
+            end: offset(self.values.len()),
         });
     }
 
@@ -275,7 +287,7 @@ impl Scratch {
             return;
         }
         let start = self.values.len();
-        self.values.append(&values[field.start..field.end]);
+        self.values.append(&values[field.range()]);
         if self.values.failed {
             self.truncated = true;
             return;
@@ -316,17 +328,15 @@ impl Scratch {
             .then_some(field)
         });
         for field in unique.chain(unchanged) {
-            if cache.fields.is_full() {
+            if cache.fields.len() == MAX_SPAN_FIELDS {
                 return false;
             }
             let start = cache.values.len();
-            cache
-                .values
-                .append(&self.values.buf[field.start..field.end]);
+            cache.values.append(&self.values.buf[field.range()]);
             cache.fields.push(Entry {
                 key: field.key,
-                start,
-                end: cache.values.len(),
+                start: offset(start),
+                end: offset(cache.values.len()),
             });
         }
         !cache.values.failed
@@ -411,7 +421,7 @@ fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
 
 struct SpanFields {
     values: Bytes,
-    fields: ArrayVec<Entry, MAX_SPAN_FIELDS>,
+    fields: SmallVec<[Entry; 8]>,
     _slot: Permit,
 }
 
@@ -544,7 +554,7 @@ impl FormatLayer {
         if line.failed {
             Err(DropReason::Oversize)
         } else {
-            Ok(line.buf.into_boxed_slice())
+            Ok(line.buf.into_vec())
         }
     }
 
@@ -607,7 +617,7 @@ where
         scratch.push_json("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
         let mut cache = SpanFields {
             values: Bytes::new(MAX_SPAN_BYTES, scratch.values.len()),
-            fields: ArrayVec::new(),
+            fields: SmallVec::new(),
             _slot: slot,
         };
         if !scratch.compact_into(&mut cache, scratch.fields.len()) {
@@ -707,7 +717,7 @@ fn write_all_fields(
             continue;
         }
         let kept = line.len();
-        let value = &values[field.start..field.end];
+        let value = &values[field.range()];
         write_key(line, field.key, format);
         line.append(value);
         if line.failed {

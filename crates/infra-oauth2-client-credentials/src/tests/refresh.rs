@@ -434,7 +434,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         .await
         .unwrap();
     assert!(
-        service_tokens.lock_cached().refresh_pending,
+        service_tokens.refresh_pending(),
         "refresh request is queued"
     );
     let (shutdown, shutdown_requested) = oneshot::channel();

@@ -144,7 +144,7 @@ impl Engine {
         self.groups().flat_map(|group| group.registry.names())
     }
 
-    fn init_metrics(&self, kinds: &[&'static str]) {
+    fn init_metrics(&self, kinds: &[&'static str]) -> maintenance::SampleGauges {
         crate::attempt::describe_metrics();
         for group in self.groups() {
             group.owned_attempts.bind();
@@ -154,18 +154,19 @@ impl Engine {
             }
         }
         claim::describe_metrics();
-        maintenance::init_metrics(kinds);
+        let sample_gauges = maintenance::init_metrics(kinds);
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
             metrics::Unit::Count,
             "Failed worker database operations"
         );
+        sample_gauges
     }
 
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         let kinds: Vec<_> = self.kind_names().collect();
-        self.init_metrics(&kinds);
+        let gauges = self.init_metrics(&kinds);
         let groups = 1 + self.additional_groups.len();
         tracing::info!(
             worker.id = %self.primary_group.worker_id,
@@ -190,7 +191,7 @@ impl Engine {
         }
         let listener = infra_postgres::notifications_enabled(&engine.primary_group.pool)
             .then(|| Run::Listener(Arc::clone(&engine)));
-        let background_tasks = [Run::Retention, Run::Sampling(kinds)]
+        let background_tasks = [Run::Retention, Run::Sampling { kinds, gauges }]
             .into_iter()
             .chain(listener);
         for run in background_tasks {
@@ -281,10 +282,15 @@ impl fmt::Debug for Started {
 }
 
 enum Run {
-    Claim { _exit: DrainParticipant },
+    Claim {
+        _exit: DrainParticipant,
+    },
     Retention,
     Listener(Arc<Engine>),
-    Sampling(Vec<&'static str>),
+    Sampling {
+        kinds: Vec<&'static str>,
+        gauges: maintenance::SampleGauges,
+    },
 }
 
 impl Run {
@@ -293,7 +299,7 @@ impl Run {
             Self::Claim { .. } => "claim",
             Self::Retention => "retention",
             Self::Listener(_) => "listener",
-            Self::Sampling(_) => "sampling",
+            Self::Sampling { .. } => "sampling",
         }
     }
 }
@@ -312,7 +318,9 @@ fn spawn_guarded(
             _claim @ Run::Claim { .. } => claim::run_claim_loop(group, signals).await,
             Run::Retention => maintenance::run_retention(&group, token).await,
             Run::Listener(engine) => listener::run_listener(&group, &engine, token).await,
-            Run::Sampling(kinds) => maintenance::run_sampling(&group, &kinds, token).await,
+            Run::Sampling { kinds, gauges } => {
+                maintenance::run_sampling(&group, &kinds, gauges, token).await;
+            }
         }
     });
 }

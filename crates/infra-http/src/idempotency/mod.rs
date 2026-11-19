@@ -86,4 +86,8 @@ pub use stored::{CreatedText, ReplayError, ReplaySuccess, ReplayableResponse, Te
 
 pub(crate) const KEY_HEADER: &str = "Idempotency-Key";
 pub(crate) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
+pub(super) const KEY_HEADER_NAME: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("idempotency-key");
+pub(super) const REPLAYED_HEADER_NAME: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("idempotent-replayed");
 const REPLAYED_VALUE: &str = "true";

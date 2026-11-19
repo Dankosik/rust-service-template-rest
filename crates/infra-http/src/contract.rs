@@ -10,6 +10,7 @@ use axum::http::{HeaderValue, Method, header::ALLOW};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{MethodFilter, MethodRouter};
+use enum_map::{Enum, EnumMap};
 use foldhash::{HashMap, HashMapExt as _};
 use itertools::Itertools as _;
 use tower::ServiceExt as _;
@@ -88,6 +89,7 @@ pub enum Authentication {
 }
 
 #[derive(Clone)]
+#[derive_where::derive_where(Default; S: Clone + Send + Sync + 'static)]
 pub struct HttpContract<S> {
     routes: OpenApiRouter<S>,
     application: bool,
@@ -214,20 +216,6 @@ fn nested_path(prefix: &str, path: &str) -> Box<str> {
         prefix.into()
     } else {
         format!("{prefix}{path}").into()
-    }
-}
-
-impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
-    fn default() -> Self {
-        Self {
-            routes: OpenApiRouter::default(),
-            application: false,
-            extension_routers: HashMap::default(),
-            probes: Vec::new(),
-            // template:begin http-idempotency:http-mounted-operations-init
-            idempotency: IdempotentOperations::default(),
-            // template:end http-idempotency:http-mounted-operations-init
-        }
     }
 }
 
@@ -748,9 +736,78 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<CompiledPolicy>);
 
+#[derive(Clone, Copy, Debug, Enum, Eq, PartialEq)]
+enum StandardMethod {
+    Get,
+    Put,
+    Post,
+    Delete,
+    Options,
+    Head,
+    Patch,
+    Trace,
+    Query,
+}
+
+impl StandardMethod {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Put => "PUT",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+            Self::Options => "OPTIONS",
+            Self::Head => "HEAD",
+            Self::Patch => "PATCH",
+            Self::Trace => "TRACE",
+            Self::Query => "QUERY",
+        }
+    }
+
+    fn parse(method: &str) -> Option<Self> {
+        match method {
+            "GET" => Some(Self::Get),
+            "PUT" => Some(Self::Put),
+            "POST" => Some(Self::Post),
+            "DELETE" => Some(Self::Delete),
+            "OPTIONS" => Some(Self::Options),
+            "HEAD" => Some(Self::Head),
+            "PATCH" => Some(Self::Patch),
+            "TRACE" => Some(Self::Trace),
+            "QUERY" => Some(Self::Query),
+            _ => None,
+        }
+    }
+}
+
 struct RoutePolicy {
-    methods: HashMap<Box<str>, Access>,
+    standard: EnumMap<StandardMethod, Option<Access>>,
+    additional: Box<[(Box<str>, Access)]>,
     extension_allow: Option<HeaderValue>,
+}
+
+impl RoutePolicy {
+    pub(super) fn get(&self, method: &str) -> Option<&Access> {
+        match StandardMethod::parse(method) {
+            Some(standard) => self.standard[standard].as_ref(),
+            None => self
+                .additional
+                .iter()
+                .find(|(name, _)| name.as_ref() == method)
+                .map(|(_, access)| access),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &Access)> {
+        self.standard
+            .iter()
+            .filter_map(|(method, access)| access.as_ref().map(|access| (method.as_str(), access)))
+            .chain(
+                self.additional
+                    .iter()
+                    .map(|(method, access)| (method.as_ref(), access)),
+            )
+    }
 }
 
 struct CompiledPolicy {
@@ -860,34 +917,42 @@ impl Policy {
             } else {
                 None
             };
-            let mut methods = HashMap::<Box<str>, Access>::default();
-            let fixed_operations = fixed_path_operations!(item, as_ref);
+            let mut standard = EnumMap::<StandardMethod, Option<Access>>::default();
+            let fixed_operations = [
+                (StandardMethod::Get, item.get.as_ref()),
+                (StandardMethod::Put, item.put.as_ref()),
+                (StandardMethod::Post, item.post.as_ref()),
+                (StandardMethod::Delete, item.delete.as_ref()),
+                (StandardMethod::Options, item.options.as_ref()),
+                (StandardMethod::Head, item.head.as_ref()),
+                (StandardMethod::Patch, item.patch.as_ref()),
+                (StandardMethod::Trace, item.trace.as_ref()),
+                (StandardMethod::Query, item.query.as_ref()),
+            ];
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;
                 };
-                methods.insert(
-                    method.into(),
-                    compile_operation(
-                        document, path, method, operation,
-                        // template:begin http-idempotency:http-fixed-operation-mounts
-                        idempotent,
-                        // template:end http-idempotency:http-fixed-operation-mounts
-                    )?,
-                );
+                standard[method] = Some(compile_operation(
+                    document,
+                    path,
+                    method.as_str(),
+                    operation,
+                    // template:begin http-idempotency:http-fixed-operation-mounts
+                    idempotent,
+                    // template:end http-idempotency:http-fixed-operation-mounts
+                )?);
             }
+            let mut additional = Vec::with_capacity(item.additional_operations.len());
             for (method, operation) in &item.additional_operations {
-                if fixed_operations
-                    .iter()
-                    .any(|(fixed, _)| *fixed == method.as_str())
-                {
+                if StandardMethod::parse(method).is_some() {
                     return Err(FinalizeError::InvalidPolicy {
                         path: path.to_owned(),
                         method: method.clone(),
                         fault: "fixed_method_in_additional_operations",
                     });
                 }
-                methods.insert(
+                additional.push((
                     method.as_str().into(),
                     compile_operation(
                         document, path, method, operation,
@@ -895,12 +960,13 @@ impl Policy {
                         idempotent,
                         // template:end http-idempotency:http-additional-operation-mounts
                     )?,
-                );
+                ));
             }
             routes.insert(
                 path.into(),
                 RoutePolicy {
-                    methods,
+                    standard,
+                    additional: additional.into_boxed_slice(),
                     extension_allow,
                 },
             );
@@ -914,10 +980,9 @@ impl Policy {
             .iter()
             .flat_map(|(path, route)| {
                 route
-                    .methods
                     .iter()
                     .filter(|(_, access)| matches!(access, Access::Protected(..)))
-                    .map(move |(method, _)| (&**path, &**method))
+                    .map(move |(method, _)| (&**path, method))
             })
             .min()
     }
@@ -938,10 +1003,10 @@ impl Policy {
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
-        let methods = &self.0.routes.get(path)?.methods;
-        methods.get(method.as_str()).or_else(|| {
+        let route = self.0.routes.get(path)?;
+        route.get(method.as_str()).or_else(|| {
             if method == Method::HEAD {
-                methods.get("GET")
+                route.standard[StandardMethod::Get].as_ref()
             } else {
                 None
             }

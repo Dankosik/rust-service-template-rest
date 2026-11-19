@@ -44,7 +44,7 @@ pub(super) fn compose(
                     .0
                     .routes
                     .get(path)
-                    .and_then(|route| route.methods.get(method)),
+                    .and_then(|route| route.get(method)),
                 Some(Access::Protected(..))
             );
             // template:end authn:http-outcomes-operation-policy

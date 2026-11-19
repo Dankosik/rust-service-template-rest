@@ -3,9 +3,12 @@ use std::time::Duration;
 use bytesize::{ByteSize, GIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
+use serde_with::DeserializeAs;
 
 use crate::app::local_development_only;
-use crate::de::blank_secret_as_none;
+use crate::de::{
+    BlankSecretAsNone, StrictBool, StrictCount, StrictDuration, StrictEnum, StrictString,
+};
 use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, int_range, non_blank, required,
 };
@@ -40,59 +43,50 @@ enum CredentialsKind {
     WorkloadIdentity,
 }
 
-#[derive(Clone, derive_more::Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Clone, derive_more::Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ObjectStorageInput {
-    #[serde(deserialize_with = "crate::de::string_enum")]
+    #[serde_as(as = "StrictEnum")]
     provider: ProviderKind,
     /// S3 bucket name. On Railway, the bucket's `BUCKET` variable.
-    #[serde(deserialize_with = "crate::de::string")]
+    #[serde_as(as = "StrictString")]
     bucket: String,
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
-    #[serde(default, deserialize_with = "blank_string_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankStringAsNone")]
     region: Option<String>,
-    #[serde(default, deserialize_with = "blank_string_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankStringAsNone")]
     #[debug(skip)]
     endpoint: Option<String>,
-    #[serde(default, deserialize_with = "blank_string_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankStringAsNone")]
     expected_bucket_owner: Option<String>,
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     path_style: bool,
-    #[serde(deserialize_with = "crate::de::string_enum")]
+    #[serde_as(as = "StrictEnum")]
     credentials: CredentialsKind,
-    #[serde(default, deserialize_with = "blank_string_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankStringAsNone")]
     access_key_id: Option<String>,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     secret_access_key: Option<SecretString>,
+    #[educe(Default(expression = ByteSize::mib(8)))]
     max_object_bytes: ByteSize,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default = 8)]
     max_concurrency: u64,
     /// Bound for one call, retries included; GET covers the entire body
     /// through confirmed EOF from its original start.
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = Duration::from_secs(5)))]
     operation_timeout: Duration,
-}
-
-impl Default for ObjectStorageInput {
-    fn default() -> Self {
-        Self {
-            provider: ProviderKind::None,
-            bucket: String::new(),
-            region: None,
-            endpoint: None,
-            expected_bucket_owner: None,
-            path_style: false,
-            credentials: CredentialsKind::AccessKey,
-            access_key_id: None,
-            secret_access_key: None,
-            max_object_bytes: ByteSize::mib(8),
-            max_concurrency: 8,
-            operation_timeout: Duration::from_secs(5),
-        }
-    }
 }
 
 #[derive(Clone, derive_more::Debug, PartialEq, Eq)]
@@ -351,11 +345,16 @@ impl ObjectStorageInput {
     }
 }
 
-fn blank_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(crate::de::optional_string(deserializer)?.filter(|value| !value.trim().is_empty()))
+struct BlankStringAsNone;
+
+impl<'de> DeserializeAs<'de, Option<String>> for BlankStringAsNone {
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw: Option<String> = Option::<StrictString>::deserialize_as(deserializer)?;
+        Ok(raw.filter(|value| !value.trim().is_empty()))
+    }
 }
 
 fn required_text(v: &mut Violations, key: &str, value: Option<String>) -> Result<String, Rejected> {

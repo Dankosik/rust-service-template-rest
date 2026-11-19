@@ -43,13 +43,19 @@ const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 #[path = "tests/full_pipeline.rs"]
 mod full_pipeline_tests;
 
+#[derive(derive_more::Debug)]
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
     pub(crate) command_timeout: Duration,
+    #[debug(skip)]
     shared: Arc<Shared>,
+    #[debug(skip)]
     application_slots: Semaphore,
+    #[debug(skip)]
     admission_refused: Counter,
+    #[debug(skip)]
     commands_in_flight: Gauge,
+    #[debug(skip)]
     supervisor: AbortHandle,
 }
 
@@ -204,16 +210,6 @@ pub(super) fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::V
     match reply {
         redis::Value::ServerError(error) => Err(error.into()),
         data => Ok(data),
-    }
-}
-
-impl std::fmt::Debug for Link {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Link")
-            .field("server", &self.server)
-            .field("command_timeout", &self.command_timeout)
-            .finish_non_exhaustive()
     }
 }
 

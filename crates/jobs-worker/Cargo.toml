@@ -28,6 +28,7 @@ infra-http-transport = { workspace = true }
 # template:begin jobs:worker-jobs-dependencies
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
+itertools = { workspace = true, features = ["use_std"] }
 migrate = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }

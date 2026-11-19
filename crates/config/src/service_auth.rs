@@ -1,7 +1,7 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::de::{BlankAsNone, BlankSecretAsNone, StrictEnum, StrictString};
 use crate::validate::{Rejected, ValidationError, Violations, optional_pair, required_non_blank};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -15,33 +15,34 @@ enum ServiceAuthMode {
     Jwt,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Clone, derive_more::Debug, Default, Deserialize)]
+#[debug("ServiceAuthInput {{ .. }}")]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ServiceAuthInput {
-    #[serde(deserialize_with = "crate::de::string_enum")]
+    #[serde_as(as = "StrictEnum")]
     mode: ServiceAuthMode,
     /// This service's name: the audience it accepts and its tokens'
     /// `iss` and `sub`.
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     name: Option<String>,
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     jwt_type: Option<String>,
-    #[serde(default, deserialize_with = "crate::de::optional_string")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictString>")]
     trust: Option<String>,
     /// The `kid` receivers hold this service's public key under.
     /// Required together with `private_key`.
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     key_id: Option<String>,
     /// Environment-only PKCS#8 PEM of this service's EC P-256 signing
     /// key. Without it the service verifies callers but calls no one.
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     private_key: Option<SecretString>,
-}
-
-impl std::fmt::Debug for ServiceAuthInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ServiceAuthInput { .. }")
-    }
 }
 
 #[derive(Clone, Default)]

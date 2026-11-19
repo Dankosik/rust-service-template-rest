@@ -11,7 +11,7 @@ use axum::http::header::{
     CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING,
     X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderValue, StatusCode, Version};
+use axum::http::{HeaderName, HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use health::ReadinessReader;
@@ -161,13 +161,20 @@ async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next
     response
 }
 
+const DIGEST_HEADERS: [HeaderName; 4] = [
+    HeaderName::from_static("content-digest"),
+    HeaderName::from_static("repr-digest"),
+    HeaderName::from_static("digest"),
+    HeaderName::from_static("content-md5"),
+];
+
 fn normalize_overflow_response(response: &mut Response) {
     let (parts, body) = body_too_large().into_response().into_parts();
     let headers = response.headers_mut();
     for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
         headers.remove(name);
     }
-    for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+    for name in &DIGEST_HEADERS {
         headers.remove(name);
     }
     headers.extend(parts.headers);

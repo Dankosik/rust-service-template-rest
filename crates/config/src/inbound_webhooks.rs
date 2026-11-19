@@ -8,37 +8,32 @@ use crate::ValidationError;
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::{Violations, missing, validate_endpoint_id};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, educe::Educe)]
+#[educe(Default(bound(Secrets: Default)))]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct InboundWebhooksFields<Endpoint, Secrets> {
     endpoints: BTreeMap<String, Endpoint>,
     secrets: Secrets,
 }
 
-impl<Endpoint, Secrets: Default> Default for InboundWebhooksFields<Endpoint, Secrets> {
-    fn default() -> Self {
-        Self {
-            endpoints: BTreeMap::new(),
-            secrets: Secrets::default(),
-        }
-    }
-}
-
+#[serde_with::serde_as]
 #[derive(Default, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct SecretMap(
-    #[serde(deserialize_with = "crate::de::secret_map")] BTreeMap<String, SecretString>,
+    #[serde_as(as = "BTreeMap<_, crate::de::StrictSecret>")] BTreeMap<String, SecretString>,
 );
 
 pub(crate) type InboundWebhooksInput =
     InboundWebhooksFields<InboundWebhookEndpointInput, SecretMap>;
 
+#[serde_with::serde_as]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InboundWebhookEndpointInput {
-    #[serde(deserialize_with = "crate::de::string")]
+    #[serde_as(as = "crate::de::StrictString")]
     active_key: String,
-    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "crate::de::BlankAsNone")]
     previous_key: Option<String>,
 }
 
@@ -167,7 +162,7 @@ fn validate_key_ref(config_key: &str, reference: &str) -> Result<(), ValidationE
     if !is_env_addressable(reference) {
         return Err(ValidationError::new(
             config_key,
-            format!("key references must be {ADDRESSABLE_KEY_FORM}"),
+            const_format::formatcp!("key references must be {ADDRESSABLE_KEY_FORM}"),
         ));
     }
     Ok(())

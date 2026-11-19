@@ -253,7 +253,10 @@ impl Client {
 impl Service<Request<Body>> for Client {
     type Response = Response<Body>;
     type Error = tonic::Status;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = futures_util::future::Either<
+        std::future::Ready<Result<Self::Response, Self::Error>>,
+        BoxFuture<'static, Result<Self::Response, Self::Error>>,
+    >;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -261,8 +264,8 @@ impl Service<Request<Body>> for Client {
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         match self.prepare_call(request) {
-            Ok(prepared) => Box::pin(prepared.send()),
-            Err(status) => Box::pin(std::future::ready(Err(status))),
+            Ok(prepared) => futures_util::future::Either::Right(Box::pin(prepared.send())),
+            Err(status) => futures_util::future::Either::Left(std::future::ready(Err(status))),
         }
     }
 }

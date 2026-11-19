@@ -1,6 +1,8 @@
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
+use itertools::Itertools as _;
+
 use crate::load::variable_name;
 use crate::secret_policy::is_secret_key;
 
@@ -21,8 +23,9 @@ impl ValidationError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, derive_more::IntoIterator)]
 #[error("{}", join_errors(.0))]
+#[into_iterator(ref)]
 pub struct ValidationErrors(Vec<ValidationError>);
 
 impl ValidationErrors {
@@ -36,21 +39,8 @@ impl ValidationErrors {
     }
 }
 
-impl<'a> IntoIterator for &'a ValidationErrors {
-    type Item = &'a ValidationError;
-    type IntoIter = std::slice::Iter<'a, ValidationError>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
-pub(crate) fn join_errors<E: std::fmt::Display>(errors: &[E]) -> String {
-    errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
+pub(crate) fn join_errors<E: std::fmt::Display>(errors: &[E]) -> impl std::fmt::Display {
+    errors.iter().format("; ")
 }
 
 #[derive(Debug)]

@@ -534,7 +534,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     let mut stale = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
 
-    *service_tokens.lock_cached() = Cached::default();
+    service_tokens.clear_cached();
     fixture.token_json(
         StatusCode::OK,
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
