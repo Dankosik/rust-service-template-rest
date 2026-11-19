@@ -80,7 +80,7 @@ impl GrpcInput {
         if !self.enabled {
             return Ok(None);
         }
-        let addr = violations.take(required("grpc.addr", self.addr, ENABLED));
+        let addr = violations.record(required("grpc.addr", self.addr, ENABLED));
         let limits = RawListenerLimits {
             request_timeout: self.request_timeout,
             max_in_flight: self.max_in_flight,
@@ -115,7 +115,7 @@ impl GrpcInput {
         client_ca: Option<String>,
         violations: &mut Violations,
     ) -> Result<GrpcListenerSecurity, Rejected> {
-        match violations.take(required("grpc.security", security, ENABLED))? {
+        match violations.record(required("grpc.security", security, ENABLED))? {
             GrpcSecurity::Plaintext => match violations.reject_present(
                 &[
                     ("grpc.certificate", certificate.is_some()),
@@ -129,9 +129,9 @@ impl GrpcInput {
             },
             GrpcSecurity::Tls => {
                 let certificate =
-                    violations.take(required("grpc.certificate", certificate, TLS_SELECTED));
+                    violations.record(required("grpc.certificate", certificate, TLS_SELECTED));
                 let private_key =
-                    violations.take(required("grpc.private_key", private_key, TLS_SELECTED));
+                    violations.record(required("grpc.private_key", private_key, TLS_SELECTED));
                 Ok(GrpcListenerSecurity::Tls(GrpcTlsMaterial {
                     certificate: certificate?,
                     private_key: private_key?,

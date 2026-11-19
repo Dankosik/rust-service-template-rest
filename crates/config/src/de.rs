@@ -202,16 +202,27 @@ where
 
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
+pub(crate) fn blank_as_none_with<'de, D, T>(
+    deserializer: D,
+    parse: impl FnOnce(&str) -> Result<T, D::Error>,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    optional_string(deserializer)?
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(parse)
+        .transpose()
+}
+
 pub(crate) fn blank_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: From<String>,
 {
-    let raw = optional_string(deserializer)?;
-    Ok(raw.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| T::from(trimmed.to_owned()))
-    }))
+    blank_as_none_with(deserializer, |trimmed| Ok(T::from(trimmed.to_owned())))
 }
 
 pub(crate) fn blank_secret_as_none<'de, D>(
@@ -236,12 +247,7 @@ pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<Soc
 where
     D: serde::Deserializer<'de>,
 {
-    optional_string(deserializer)?
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(parse_listen_addr)
-        .transpose()
+    blank_as_none_with(deserializer, parse_listen_addr)
 }
 
 fn parse_listen_addr<E: serde::de::Error>(value: &str) -> Result<SocketAddr, E> {

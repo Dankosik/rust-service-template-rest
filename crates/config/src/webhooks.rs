@@ -6,17 +6,31 @@ use serde::Deserialize;
 
 use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct ServiceWebhooksInput {
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "the service consumes only the names of worker endpoints"
-    )]
-    endpoints: BTreeMap<String, serde::de::IgnoredAny>,
-    #[serde(rename = "max_concurrent_deliveries")]
-    _max_concurrent_deliveries: serde::de::IgnoredAny,
+pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent> {
+    endpoints: BTreeMap<String, Endpoint>,
+    max_concurrent_deliveries: MaxConcurrent,
 }
+
+impl<Endpoint, MaxConcurrent: Default> Default for WebhooksFields<Endpoint, MaxConcurrent> {
+    fn default() -> Self {
+        Self {
+            endpoints: BTreeMap::new(),
+            max_concurrent_deliveries: MaxConcurrent::default(),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(transparent)]
+struct MaxConcurrentDeliveries(
+    #[serde(deserialize_with = "crate::de::optional_unsigned_count")] Option<NonZeroU32>,
+);
+
+pub(crate) type ServiceWebhooksInput = WebhooksFields<serde::de::IgnoredAny, serde::de::IgnoredAny>;
+
+type WebhooksInput = WebhooksFields<WebhookEndpointConfig, MaxConcurrentDeliveries>;
 
 impl ServiceWebhooksInput {
     pub(crate) fn admit(self, violations: &mut Violations) -> Vec<String> {
@@ -28,7 +42,7 @@ impl ServiceWebhooksInput {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[serde(from = "WebhooksInput")]
 pub struct WebhooksConfig {
     pub endpoints: BTreeMap<String, WebhookEndpointConfig>,
     /// The most deliveries one worker process runs at once
@@ -37,8 +51,16 @@ pub struct WebhooksConfig {
     /// that answers slowly delays the worker's other job kinds for up to the
     /// 30-second attempt timeout per delivery. A value below
     /// `jobs.max_workers` keeps the difference for those kinds.
-    #[serde(deserialize_with = "crate::de::optional_unsigned_count")]
     pub max_concurrent_deliveries: Option<NonZeroU32>,
+}
+
+impl From<WebhooksInput> for WebhooksConfig {
+    fn from(input: WebhooksInput) -> Self {
+        Self {
+            endpoints: input.endpoints,
+            max_concurrent_deliveries: input.max_concurrent_deliveries.0,
+        }
+    }
 }
 
 #[derive(Clone, derive_more::Debug, Deserialize)]

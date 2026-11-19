@@ -32,7 +32,7 @@ impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let mut violations = Violations::default();
         let local_development = violations
-            .take(crate::app::validate_local_development(
+            .record(crate::app::validate_local_development(
                 &self.app.env,
                 self.app.allow_insecure_development,
             ))

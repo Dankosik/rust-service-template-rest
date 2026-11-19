@@ -2,8 +2,7 @@ use std::num::NonZeroUsize;
 
 use serde::Deserialize;
 
-use crate::ValidationError;
-use crate::validate::Violations;
+use crate::validate::{Violations, int_range};
 
 const MAX_WORKER_THREADS: usize = 512;
 
@@ -22,12 +21,11 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub(crate) fn validate(&self, v: &mut Violations) {
-        if let Some(count) = self.worker_threads
-            && count.get() > MAX_WORKER_THREADS
-        {
-            v.reject(ValidationError::new(
+        if let Some(count) = self.worker_threads {
+            v.check(int_range(
                 "runtime.worker_threads",
-                format!("must be at most {MAX_WORKER_THREADS}, got {count}"),
+                count.get(),
+                1..=MAX_WORKER_THREADS,
             ));
         }
     }

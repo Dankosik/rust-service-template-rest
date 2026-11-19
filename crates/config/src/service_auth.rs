@@ -103,23 +103,23 @@ impl ServiceAuthInput {
             }
             ServiceAuthMode::Jwt => {
                 let condition = "service_auth.mode = jwt";
-                let name = v.take(required_non_blank(
+                let name = v.record(required_non_blank(
                     "service_auth.name",
                     self.name,
                     condition,
                 ));
-                let jwt_type = v.take(required_non_blank(
+                let jwt_type = v.record(required_non_blank(
                     "service_auth.jwt_type",
                     self.jwt_type,
                     condition,
                 ));
-                let trust = v.take(required_non_blank(
+                let trust = v.record(required_non_blank(
                     "service_auth.trust",
                     self.trust,
                     condition,
                 ));
                 let signing_key = v
-                    .take(optional_pair(
+                    .record(optional_pair(
                         "service_auth.key_id",
                         self.key_id,
                         "service_auth.private_key",

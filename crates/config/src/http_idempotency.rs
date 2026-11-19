@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::de::optional_string;
+use crate::de::{blank_as_none_with, decoded_duration};
 use crate::validate::{ValidationError, Violations, duration_range, required};
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -50,12 +50,9 @@ fn blank_duration_as_none<'de, D>(deserializer: D) -> Result<Option<Duration>, D
 where
     D: serde::Deserializer<'de>,
 {
-    optional_string(deserializer)?
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|text| crate::de::decoded_duration(text, "a duration such as 24h"))
-        .transpose()
+    blank_as_none_with(deserializer, |text| {
+        decoded_duration(text, "a duration such as 24h")
+    })
 }
 
 #[cfg(test)]

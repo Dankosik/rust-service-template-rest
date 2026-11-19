@@ -195,8 +195,11 @@ fn validate_grace_and_drain(
         v.reject(ValidationError::new(
             "http.grace_period",
             format!(
-                "({grace_period:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {:?} {}",
-                tail.duration, tail.description
+                "({}) must be >= http.drain_timeout ({}) plus the {} {}",
+                crate::de::display_duration(grace_period),
+                crate::de::display_duration(drain_timeout),
+                crate::de::display_duration(tail.duration),
+                tail.description
             ),
         ));
     }

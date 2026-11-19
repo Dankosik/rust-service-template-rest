@@ -38,17 +38,20 @@ impl RawListenerLimits {
             drain_budget,
             subject,
         ));
-        violations.check(in_flight_range(
+        violations.check(int_range(
             &format!("{section}.max_in_flight"),
             self.max_in_flight,
+            0..=100_000,
         ));
-        violations.check(admission_wait_range(
+        violations.check(duration_range(
             &format!("{section}.admission_wait"),
             self.admission_wait,
+            Duration::ZERO..=Duration::from_mins(10),
         ));
-        violations.check(connection_count_range(
+        violations.check(int_range(
             &format!("{section}.max_connections"),
             self.max_connections,
+            0..=1_000_000,
         ));
         violations.check(connection_age_range(
             &format!("{section}.max_connection_age"),
@@ -63,10 +66,6 @@ impl RawListenerLimits {
                 .then_some(self.max_connection_age),
         }
     }
-}
-
-fn admission_wait_range(key: &str, value: Duration) -> Result<(), ValidationError> {
-    duration_range(key, value, Duration::ZERO..=Duration::from_mins(10))
 }
 
 fn validate_request_timeout(
@@ -93,14 +92,6 @@ fn validate_request_timeout(
         ));
     }
     Ok(())
-}
-
-fn in_flight_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, value, 0..=100_000)
-}
-
-fn connection_count_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, value, 0..=1_000_000)
 }
 
 fn connection_age_range(key: &str, value: Duration) -> Result<(), ValidationError> {
