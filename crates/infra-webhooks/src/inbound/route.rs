@@ -80,11 +80,14 @@ impl ReceiverState {
     fn active(receiver: Receiver) -> Self {
         let Receiver { pool, endpoints } = receiver;
         let endpoints = endpoints
-            .into_iter()
+            .iter()
             .map(|(endpoint_id, verifier)| {
-                let id: Arc<str> = Arc::from(endpoint_id);
+                let id: Arc<str> = Arc::from(endpoint_id.as_str());
                 let metrics = EndpointMetrics::new(SharedString::from(Arc::clone(&id)));
-                let endpoint = ConfiguredEndpoint { verifier, metrics };
+                let endpoint = ConfiguredEndpoint {
+                    verifier: Arc::clone(verifier),
+                    metrics,
+                };
                 (id, endpoint)
             })
             .collect();

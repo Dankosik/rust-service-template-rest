@@ -376,7 +376,7 @@ impl EndpointOutcomes {
     fn record_failure(&self, kind: FailureKind, status: Option<StatusCode>) {
         let outcome = kind.outcome();
         let reason = kind.reason();
-        let status = status.map(StatusCode::as_u16);
+        let status = status.map(|status| status.as_u16());
         if kind.is_permanent() {
             tracing::warn!(
                 webhook.endpoint = &*self.endpoint,
