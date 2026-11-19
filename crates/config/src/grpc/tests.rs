@@ -194,21 +194,7 @@ fn admitted_debug_names_the_mode_but_not_the_material() {
 }
 
 #[test]
-fn grpc_environment_enables_an_explicit_plaintext_listener() {
-    let cfg = load_env(&[
-        ("APP__APP__ENV", "local"),
-        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
-        ("APP__GRPC__ENABLED", "true"),
-        ("APP__GRPC__ADDR", "127.0.0.1:0"),
-        ("APP__GRPC__SECURITY", "plaintext"),
-    ]);
-    let grpc = cfg.grpc.as_ref().unwrap();
-    assert_eq!(grpc.addr.port(), 0);
-    assert_matches!(grpc.security, GrpcListenerSecurity::Plaintext);
-}
-
-#[test]
-fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
+fn grpc_listener_loads_from_the_environment_and_a_bad_limit_names_its_key() {
     let listener = [
         ("APP__APP__ENV", "local"),
         ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
@@ -230,6 +216,8 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     )
     .unwrap();
     let grpc = cfg.grpc.as_ref().unwrap();
+    assert_eq!(grpc.addr, "127.0.0.1:0".parse().unwrap());
+    assert_matches!(grpc.security, GrpcListenerSecurity::Plaintext);
     assert_eq!(grpc.request_timeout, Duration::from_secs(3));
     assert_eq!(grpc.max_in_flight.map(NonZeroU32::get), Some(32));
     assert_eq!(grpc.admission_wait, Duration::from_secs(2));

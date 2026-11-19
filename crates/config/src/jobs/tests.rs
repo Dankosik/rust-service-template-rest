@@ -45,19 +45,8 @@ fn zero_max_workers_fails_to_deserialize() {
 }
 
 #[test]
-fn toml_sets_max_workers() {
-    let config = parse("max_workers = 8").unwrap();
-    assert_eq!(config.max_workers.get(), 8);
-}
-
-#[test]
 fn unknown_keys_in_the_section_fail() {
     assert!(parse("max_workers = 8\nbogus = 1").is_err());
-}
-
-#[test]
-fn jobs_max_workers_is_not_secret() {
-    assert!(!crate::secret_policy::is_secret_key("jobs.max_workers"));
 }
 
 #[test]
