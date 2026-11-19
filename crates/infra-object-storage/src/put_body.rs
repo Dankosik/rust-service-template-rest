@@ -142,6 +142,53 @@ enum ExactLengthPhase {
     },
 }
 
+enum PhaseStep {
+    Continue,
+    Yield(Result<Frame<Bytes>, BoxError>),
+    Mismatch,
+}
+
+impl ExactLengthPhase {
+    fn advance(&mut self, polled: Option<Result<Frame<Bytes>, BoxError>>) -> PhaseStep {
+        match polled {
+            Some(Err(error)) => PhaseStep::Yield(Err(error)),
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(data) => self.on_data(data),
+                Err(trailers) => self.finish_data(Some(trailers)),
+            },
+            None => self.finish_data(None),
+        }
+    }
+
+    fn on_data(&mut self, data: Bytes) -> PhaseStep {
+        let len = data.len() as u64;
+        if len == 0 {
+            return PhaseStep::Continue;
+        }
+        let Self::Reading { remaining } = self else {
+            return PhaseStep::Mismatch;
+        };
+        let Some(next) = remaining.get().checked_sub(len) else {
+            return PhaseStep::Mismatch;
+        };
+        if let Some(remaining) = NonZeroU64::new(next) {
+            *self = Self::Reading { remaining };
+            return PhaseStep::Yield(Ok(Frame::data(data)));
+        }
+        *self = Self::AwaitingEnd { held: Some(data) };
+        PhaseStep::Continue
+    }
+
+    fn finish_data(&mut self, trailers: Option<Frame<Bytes>>) -> PhaseStep {
+        let Self::AwaitingEnd { held } = self else {
+            return PhaseStep::Mismatch;
+        };
+        let held = held.take();
+        *self = Self::Draining { held, trailers };
+        PhaseStep::Continue
+    }
+}
+
 struct ExactLength {
     inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
     phase: ExactLengthPhase,
@@ -199,49 +246,10 @@ impl Body for ExactLength {
             }
             polls_remaining -= 1;
             let polled = std::task::ready!(Pin::new(self.inner.get_mut()).poll_frame(context));
-            match polled {
-                Some(Ok(frame)) => match frame.into_data() {
-                    Ok(data) => {
-                        let len = data.len() as u64;
-                        if len == 0 {
-                            continue;
-                        }
-                        let ExactLengthPhase::Reading { remaining } = self.phase else {
-                            return self.refuse();
-                        };
-                        let Some(next) = remaining.get().checked_sub(len) else {
-                            return self.refuse();
-                        };
-                        if let Some(remaining) = NonZeroU64::new(next) {
-                            self.phase = ExactLengthPhase::Reading { remaining };
-                            return Poll::Ready(Some(Ok(Frame::data(data))));
-                        }
-                        self.phase = ExactLengthPhase::AwaitingEnd { held: Some(data) };
-                    }
-                    Err(trailers) => match &mut self.phase {
-                        ExactLengthPhase::Reading { .. } => return self.refuse(),
-                        ExactLengthPhase::AwaitingEnd { held } => {
-                            let held = held.take();
-                            self.phase = ExactLengthPhase::Draining {
-                                held,
-                                trailers: Some(trailers),
-                            };
-                        }
-                        ExactLengthPhase::Draining { .. } => {}
-                    },
-                },
-                Some(Err(error)) => return Poll::Ready(Some(Err(error))),
-                None => match &mut self.phase {
-                    ExactLengthPhase::Reading { .. } => return self.refuse(),
-                    ExactLengthPhase::AwaitingEnd { held } => {
-                        let held = held.take();
-                        self.phase = ExactLengthPhase::Draining {
-                            held,
-                            trailers: None,
-                        };
-                    }
-                    ExactLengthPhase::Draining { .. } => {}
-                },
+            match self.phase.advance(polled) {
+                PhaseStep::Continue => {}
+                PhaseStep::Yield(item) => return Poll::Ready(Some(item)),
+                PhaseStep::Mismatch => return self.refuse(),
             }
         }
     }

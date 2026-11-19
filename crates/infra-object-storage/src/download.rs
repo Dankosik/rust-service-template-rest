@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -32,23 +33,28 @@ enum State {
     Failed(ObjectStorageError),
 }
 
+enum BodyProgress {
+    Reading(NonZeroU64),
+    AwaitingEof(Option<Bytes>),
+}
+
 struct Resources {
     waker: Option<Waker>,
     context: CallContext,
     body: ByteStream,
-    remaining: u64,
-    final_chunk: Option<Bytes>,
+    progress: BodyProgress,
     guard: OperationGuard,
     _permit: OwnedSemaphorePermit,
 }
 
 impl Resources {
     fn unread_bytes(&self) -> u64 {
-        self.remaining
-            + self
-                .final_chunk
-                .as_ref()
-                .map_or(0, |chunk| chunk.len() as u64)
+        match &self.progress {
+            BodyProgress::Reading(remaining) => remaining.get(),
+            BodyProgress::AwaitingEof(final_chunk) => {
+                final_chunk.as_ref().map_or(0, |chunk| chunk.len() as u64)
+            }
+        }
     }
 }
 
@@ -133,7 +139,7 @@ impl State {
         })
     }
 
-    fn close_failed(
+    fn fail_poll(
         &mut self,
         failure: Failure,
         discarded: Option<Result<Bytes, ByteStreamError>>,
@@ -177,7 +183,7 @@ impl State {
             State::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.close_failed(Failure::stopped(stopped), None);
+            return self.fail_poll(Failure::stopped(stopped), None);
         }
         resources.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
@@ -192,7 +198,7 @@ impl State {
                 Poll::Ready(item) => item,
                 Poll::Pending => None,
             };
-            return self.close_failed(Failure::stopped(stopped), discarded);
+            return self.fail_poll(Failure::stopped(stopped), discarded);
         }
         match polled {
             Poll::Pending => (Poll::Pending, None),
@@ -200,30 +206,35 @@ impl State {
                 (Poll::Ready(Ok(ReadStep::Empty(chunk))), None)
             }
             Poll::Ready(Some(Ok(chunk))) => {
-                match resources.remaining.checked_sub(chunk.len() as u64) {
-                    Some(0) => {
-                        resources.remaining = 0;
-                        resources.final_chunk = Some(chunk);
-                        (Poll::Ready(Ok(ReadStep::Buffered)), None)
-                    }
-                    Some(remaining) => {
-                        resources.remaining = remaining;
-                        (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
-                    }
-                    None => self.close_failed(LocalFailure::ContentLength.into(), Some(Ok(chunk))),
+                let BodyProgress::Reading(remaining) = &resources.progress else {
+                    return self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk)));
+                };
+                let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
+                    return self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk)));
+                };
+                if let Some(remaining) = NonZeroU64::new(next) {
+                    resources.progress = BodyProgress::Reading(remaining);
+                    (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
+                } else {
+                    resources.progress = BodyProgress::AwaitingEof(Some(chunk));
+                    (Poll::Ready(Ok(ReadStep::Buffered)), None)
                 }
             }
             Poll::Ready(Some(Err(error))) => {
-                self.close_failed(error::from_download_body(&error), Some(Err(error)))
+                self.fail_poll(error::from_download_body(&error), Some(Err(error)))
             }
-            Poll::Ready(None) if resources.remaining == 0 => {
-                let chunk = resources.final_chunk.take();
-                (
-                    Poll::Ready(Ok(ReadStep::Chunk(chunk))),
-                    self.close(Outcome::Success, None),
-                )
-            }
-            Poll::Ready(None) => self.close_failed(LocalFailure::ContentLength.into(), None),
+            Poll::Ready(None) => match &mut resources.progress {
+                BodyProgress::AwaitingEof(final_chunk) => {
+                    let chunk = final_chunk.take();
+                    (
+                        Poll::Ready(Ok(ReadStep::Chunk(chunk))),
+                        self.close(Outcome::Success, None),
+                    )
+                }
+                BodyProgress::Reading(_) => {
+                    self.fail_poll(LocalFailure::ContentLength.into(), None)
+                }
+            },
         }
     }
 }
@@ -262,16 +273,17 @@ impl Download {
         permit: OwnedSemaphorePermit,
         context: CallContext,
     ) -> Self {
+        let progress = NonZeroU64::new(metadata.size)
+            .map_or(BodyProgress::AwaitingEof(None), BodyProgress::Reading);
         let shared = Arc::new(Mutex::new(State::Open(Resources {
             waker: None,
             context: context.clone(),
             body,
-            remaining: metadata.size,
-            final_chunk: None,
+            progress,
             guard,
             _permit: permit,
         })));
-        let exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
+        let shared_on_exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
                 terminate(
                     &shared,
@@ -283,7 +295,7 @@ impl Download {
         });
         let timer = tokio::spawn(async move {
             let stopped = context.wait_stopped().await;
-            if let Some(shared) = exit.upgrade() {
+            if let Some(shared) = shared_on_exit.upgrade() {
                 terminate(&shared, Termination::Stopped(stopped));
             }
         });
@@ -314,15 +326,11 @@ impl Download {
             let (result, completion) = match polled {
                 Ok(result) => result,
                 Err(panic) => {
-                    terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
-                    self.timer.abort();
+                    self.cancel();
                     std::panic::resume_unwind(panic);
                 }
             };
-            if let Some(completion) = completion {
-                completion.finish();
-                self.timer.abort();
-            }
+            self.finish_completion(completion);
             match std::task::ready!(result)? {
                 ReadStep::Buffered => {}
                 ReadStep::Empty(chunk) => drop(chunk),
@@ -333,22 +341,30 @@ impl Download {
 
     pub async fn into_bytes(mut self, limit: usize) -> Result<Bytes, ObjectStorageError> {
         let (buffer, completion) = self.shared.lock().collection_buffer(limit);
-        if let Some(completion) = completion {
-            completion.finish();
-            self.timer.abort();
-        }
+        self.finish_completion(completion);
         let mut buffer = buffer?;
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
         }
         Ok(Bytes::from(buffer))
     }
+
+    fn finish_completion(&self, completion: Option<Completion>) {
+        if let Some(completion) = completion {
+            completion.finish();
+            self.timer.abort();
+        }
+    }
+
+    fn cancel(&self) {
+        terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
+        self.timer.abort();
+    }
 }
 
 impl Drop for Download {
     fn drop(&mut self) {
-        terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
-        self.timer.abort();
+        self.cancel();
     }
 }
 
