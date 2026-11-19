@@ -16,8 +16,8 @@ use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
     ServiceTokenTarget, TransportBuildFailure,
     assertion::Signer,
-    options::{Admitted, admit_options},
-    request_admission::AdmissionRefusal,
+    options::{Admitted, Scheme, admit_options},
+    request_admission::{AdmissionRefusal, RequestSubject},
     token::Token,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
 };
@@ -96,14 +96,20 @@ pub struct RefreshDriver {
 
 impl RefreshDriver {
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
-        tokio::pin!(shutdown);
         let mut registration_closed = self.inner.registration.closed.clone();
+        let stop = async {
+            tokio::select! {
+                biased;
+                () = shutdown => {}
+                _ = registration_closed.changed() => {}
+                _ = &mut self.owner_gone => {}
+            }
+        };
+        tokio::pin!(stop);
         loop {
             let request = tokio::select! {
                 biased;
-                () = &mut shutdown => break,
-                _ = registration_closed.changed() => break,
-                _ = &mut self.owner_gone => break,
+                () = &mut stop => break,
                 request = self.requests.recv() => {
                     let Some(request) = request else { break };
                     request
@@ -111,9 +117,7 @@ impl RefreshDriver {
             };
             tokio::select! {
                 biased;
-                () = &mut shutdown => break,
-                _ = registration_closed.changed() => break,
-                _ = &mut self.owner_gone => break,
+                () = &mut stop => break,
                 () = self.inner.refresh_ahead(request) => {}
             }
             self.inner.cached().refresh_pending = false;
@@ -171,7 +175,7 @@ struct CompletedFailure {
 
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
-        let admitted = admit_options(options, "https", "https")?;
+        let admitted = admit_options(options, Scheme::Https, Scheme::Https)?;
         let token_http = Client::try_new(&admitted.endpoint, TOKEN_LIMITS)
             .map_err(TransportBuildFailure::token_url)?;
         Self::build(admitted, token_http).map_err(PreparationError::from)
@@ -179,7 +183,7 @@ impl Registration {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
-        let admitted = admit_options(options, "http", "https")?;
+        let admitted = admit_options(options, Scheme::Http, Scheme::Https)?;
         let token_http =
             Client::try_new_for_test_http(&admitted.endpoint, TOKEN_LIMITS).map_err(|_| {
                 ConfigurationError {
@@ -286,18 +290,29 @@ impl<Subject> TokenSource<Subject> {
 impl TokenSource {
     pub(crate) fn admit(
         &self,
-        subject: Result<Option<OnBehalfOf>, AdmissionRefusal>,
+        subject: RequestSubject,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<TokenSource<OnBehalfOf>, AdmissionRefusal> {
         self.check_admission(deadline)
             .map_err(AdmissionRefusal::Acquisition)?;
-        match (self, subject?) {
-            (Self::Service(service), None) => Ok(TokenSource::Service(service.clone())),
-            (Self::Service(_), Some(_)) => Err(AdmissionRefusal::UnexpectedSubject),
-            (Self::Exchange(exchange, ()), Some(subject)) if !subject.is_empty() => {
+        match (self, subject) {
+            (_, RequestSubject::AuthorizationConflict) => {
+                Err(AdmissionRefusal::AuthorizationConflict)
+            }
+            (Self::Service(service), RequestSubject::None) => {
+                Ok(TokenSource::Service(service.clone()))
+            }
+            (Self::Service(_), RequestSubject::OnBehalfOf(_)) => {
+                Err(AdmissionRefusal::UnexpectedSubject)
+            }
+            (Self::Exchange(exchange, ()), RequestSubject::OnBehalfOf(subject))
+                if !subject.is_empty() =>
+            {
                 Ok(TokenSource::Exchange(exchange.clone(), subject))
             }
-            (Self::Exchange(_, ()), _) => Err(AdmissionRefusal::SubjectRequired),
+            (Self::Exchange(_, ()), RequestSubject::None | RequestSubject::OnBehalfOf(_)) => {
+                Err(AdmissionRefusal::SubjectRequired)
+            }
         }
     }
 }
@@ -345,7 +360,7 @@ impl ServiceTokens {
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_admission(deadline)?;
         let now = Instant::now();
-        if let Some(token) = self.reusable_service_token(now) {
+        if let Some(token) = self.reuse_service_token_and_schedule_refresh(now) {
             return Ok(token);
         }
         Box::pin(self.acquire_service_token(deadline)).await
@@ -359,10 +374,10 @@ impl ServiceTokens {
         let _service_request =
             tokio::time::timeout_at(deadline.cutoff, inner.service_request.lock())
                 .await
-                .map_err(|_| deadline.expiry)?;
+                .map_err(|_| deadline.expiry_error)?;
         self.check_admission(deadline)?;
         let now = Instant::now();
-        if let Some(token) = self.reusable_service_token(now) {
+        if let Some(token) = self.reuse_service_token_and_schedule_refresh(now) {
             return Ok(token);
         }
         if let Some(error) = inner.completed_failure(now) {
@@ -375,7 +390,7 @@ impl ServiceTokens {
             .fetch_service_token(&inner.target, &context)
             .await;
         self.check_admission(deadline)?;
-        match result.map_err(provider_timeout) {
+        match result.map_err(timeout_as_unavailable) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
                 inner.remember_failure(error);
@@ -384,7 +399,7 @@ impl ServiceTokens {
         }
     }
 
-    fn reusable_service_token(&self, now: Instant) -> Option<Arc<Token>> {
+    fn reuse_service_token_and_schedule_refresh(&self, now: Instant) -> Option<Arc<Token>> {
         let mut cached = self.cached();
         let service = cached
             .service
@@ -485,7 +500,7 @@ impl ServiceState {
                 }
             }
             Err(error) => {
-                self.remember_failure(provider_timeout(error));
+                self.remember_failure(timeout_as_unavailable(error));
                 tracing::warn!(
                     server.address = endpoint.host(),
                     error.type = error.label(),
@@ -513,7 +528,7 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
-    expiry: AcquisitionError,
+    expiry_error: AcquisitionError,
     context: &'a RequestContext,
 }
 
@@ -524,7 +539,7 @@ impl AcquisitionDeadline<'_> {
     }
 
     fn expired_error(self) -> Option<AcquisitionError> {
-        (Instant::now() >= self.cutoff).then_some(self.expiry)
+        (Instant::now() >= self.cutoff).then_some(self.expiry_error)
     }
 
     fn stopped_error(self) -> Option<AcquisitionError> {
@@ -534,7 +549,7 @@ impl AcquisitionDeadline<'_> {
 }
 
 pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadline<'_> {
-    let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
+    let (cutoff, expiry_error) = match context.deadline().and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, AcquisitionError::Timeout),
         None => (
             Instant::now() + FETCH_TIMEOUT,
@@ -543,12 +558,12 @@ pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadl
     };
     AcquisitionDeadline {
         cutoff,
-        expiry,
+        expiry_error,
         context,
     }
 }
 
-fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
+fn timeout_as_unavailable(error: AcquisitionError) -> AcquisitionError {
     match error {
         AcquisitionError::Timeout => AcquisitionError::Unavailable,
         other => other,

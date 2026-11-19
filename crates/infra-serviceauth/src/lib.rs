@@ -82,14 +82,14 @@ pub struct InvalidJwtType;
 
 impl JwtType {
     pub fn parse(value: &str) -> Result<Self, InvalidJwtType> {
-        let short = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
-        let name = short.as_bytes();
+        let subtype = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
+        let bytes = subtype.as_bytes();
         let restricted = |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(byte);
-        if (1..=127).contains(&name.len())
-            && name[0].is_ascii_alphanumeric()
-            && name.iter().all(restricted)
+        if (1..=127).contains(&bytes.len())
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.iter().all(restricted)
         {
-            Ok(Self(Arc::from(short.to_ascii_lowercase())))
+            Ok(Self(Arc::from(subtype.to_ascii_lowercase())))
         } else {
             Err(InvalidJwtType)
         }
