@@ -195,7 +195,7 @@ pub(crate) fn fixture_client_with_resolver(
     .with_root_certificates(roots)
     .with_no_client_auth();
     let origin = policy::admit_origin(&url(&format!("https://{host}/"))).expect("fixture origin");
-    Client::from_origin(origin, limits, tls, resolver)
+    Client::with_transport(origin, limits, tls, resolver)
 }
 
 pub(crate) fn url(raw: &str) -> Url {

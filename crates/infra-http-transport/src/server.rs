@@ -491,7 +491,7 @@ where
 // template:end grpc:http2-driver
 
 #[derive(Clone)]
-struct ConnectionService<F> {
+struct ConnectionContext<F> {
     app: Router,
     driver: ConnectionDriver,
     max_connection_age: Option<Duration>,
@@ -542,7 +542,7 @@ where
             failure.send_replace(Some(observed));
         },
     );
-    let service = ConnectionService {
+    let context = ConnectionContext {
         app,
         driver,
         max_connection_age: limits.max_connection_age,
@@ -550,7 +550,7 @@ where
         scheme,
         prepare_io,
     };
-    let accept = accept_loop(bound, limits.max_connections, connections.clone(), service);
+    let accept = accept_loop(bound, limits.max_connections, connections.clone(), context);
     let accept_loop = AbortOnDropHandle::new(tokio::spawn(async move {
         let _guard = guard;
         accept.await;
@@ -572,13 +572,13 @@ async fn accept_loop<F, Fut, IO>(
     }: BoundListener,
     max_connections: Option<NonZeroU32>,
     connections: TaskTracker,
-    service: ConnectionService<F>,
+    context: ConnectionContext<F>,
 ) where
     F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let drain = &service.shutdown.drain;
+    let drain = &context.shutdown.drain;
     let permits = max_connections.map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
     loop {
@@ -611,7 +611,7 @@ async fn accept_loop<F, Fut, IO>(
             continue;
         };
         configure_accepted(&stream);
-        connections.spawn(serve_connection(stream, peer, permit, service.clone()));
+        connections.spawn(serve_connection(stream, peer, permit, context.clone()));
     }
     drop(listener);
 }
@@ -651,21 +651,21 @@ fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
     permit: Option<OwnedSemaphorePermit>,
-    service: ConnectionService<F>,
+    context: ConnectionContext<F>,
 ) -> impl Future<Output = ()>
 where
     F: Fn(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let age_deadline = service
+    let age_deadline = context
         .max_connection_age
-        .map(|age| deadline_after(spread(age)));
+        .map(|age| deadline_after(jitter_age(age)));
     async move {
         let _permit = permit;
-        let force = service.shutdown.force.clone();
+        let force = context.shutdown.force.clone();
         let forced = Arc::new(AtomicBool::new(false));
-        let serve = drive_connection(stream, peer, service, age_deadline, Arc::clone(&forced));
+        let serve = drive_connection(stream, peer, context, age_deadline, Arc::clone(&forced));
         tokio::select! {
             biased;
             () = async {
@@ -684,7 +684,7 @@ where
 async fn drive_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
-    service: ConnectionService<F>,
+    context: ConnectionContext<F>,
     age_deadline: Option<Instant>,
     forced: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -693,15 +693,15 @@ where
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnectionService {
+    let ConnectionContext {
         app,
         driver,
         shutdown,
         scheme,
         prepare_io,
         ..
-    } = service;
-    let closing = wind_down(&shutdown.drain, age_deadline);
+    } = context;
+    let closing = wait_for_close(&shutdown.drain, age_deadline);
     tokio::pin!(closing);
     let io = tokio::select! {
         biased;
@@ -749,7 +749,7 @@ where
     }
 }
 
-async fn wind_down(drain: &CancellationToken, age_deadline: Option<Instant>) {
+async fn wait_for_close(drain: &CancellationToken, age_deadline: Option<Instant>) {
     if let Some(deadline) = age_deadline {
         drain
             .run_until_cancelled(tokio::time::sleep_until(deadline))
@@ -759,7 +759,7 @@ async fn wind_down(drain: &CancellationToken, age_deadline: Option<Instant>) {
     }
 }
 
-fn spread(age: Duration) -> Duration {
+fn jitter_age(age: Duration) -> Duration {
     const AGE_SPREAD_PERMILLE: u32 = 100;
     let draw = RandomState::new().build_hasher().finish() % u64::from(2 * AGE_SPREAD_PERMILLE + 1);
     let permille = 1000 - AGE_SPREAD_PERMILLE + u32::try_from(draw).unwrap_or(AGE_SPREAD_PERMILLE);

@@ -4,9 +4,9 @@ use axum::http::{HeaderMap, HeaderValue};
 const TRACEPARENT_V0_LEN: usize = 55;
 
 pub fn admit_trace_context(headers: &mut HeaderMap, trusted: bool) -> bool {
-    let accepted = trusted && normalize_parent(headers);
+    let accepted = trusted && admit_traceparent(headers);
     if accepted {
-        normalize_state(headers);
+        normalize_tracestate(headers);
     } else {
         headers.remove("traceparent");
         headers.remove("tracestate");
@@ -14,7 +14,7 @@ pub fn admit_trace_context(headers: &mut HeaderMap, trusted: bool) -> bool {
     accepted
 }
 
-fn normalize_parent(headers: &mut HeaderMap) -> bool {
+fn admit_traceparent(headers: &mut HeaderMap) -> bool {
     let Entry::Occupied(mut entry) = headers.entry("traceparent") else {
         return false;
     };
@@ -56,7 +56,7 @@ fn validate_traceparent_prefix(wire: &[u8]) -> Option<&[u8]> {
         .then_some(prefix)
 }
 
-fn normalize_state(headers: &mut HeaderMap) {
+fn normalize_tracestate(headers: &mut HeaderMap) {
     let Entry::Occupied(mut entry) = headers.entry("tracestate") else {
         return;
     };

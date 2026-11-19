@@ -195,7 +195,7 @@ async fn receive(
     let body = match context.read_body_bytes(body, MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) if caused_by_length_limit(&error) => {
-            metrics.record(OutcomeSlot::BodyTooLarge);
+            metrics.record_protocol_rejection(ProtocolError::BodyTooLarge);
             return body_too_large().into_response();
         }
         Err(_) => {
@@ -253,38 +253,24 @@ enum OutcomeSlot {
     Duplicate,
     Unavailable,
     DeadlineExceeded,
-    BodyTooLarge,
     BodyUnreadable,
-    MissingHeader,
-    ConflictingHeader,
-    InvalidMessageId,
-    InvalidTimestamp,
-    TimestampOutOfWindow,
-    InvalidSignature,
     PayloadTooLarge,
 }
 
+enum OutcomeLabel {
+    Outcome(&'static str),
+    Rejected(&'static str),
+}
+
 impl OutcomeSlot {
-    const fn labels(self) -> (&'static str, Option<&'static str>) {
+    const fn label(self) -> OutcomeLabel {
         match self {
-            Self::Accepted => ("accepted", None),
-            Self::Duplicate => ("duplicate", None),
-            Self::Unavailable => ("unavailable", None),
-            Self::DeadlineExceeded => ("deadline_exceeded", None),
-            Self::BodyTooLarge => ("rejected", Some(ProtocolError::BodyTooLarge.reason())),
-            Self::BodyUnreadable => ("rejected", Some("body_unreadable")),
-            Self::MissingHeader => ("rejected", Some(ProtocolError::MissingHeader.reason())),
-            Self::ConflictingHeader => {
-                ("rejected", Some(ProtocolError::ConflictingHeader.reason()))
-            }
-            Self::InvalidMessageId => ("rejected", Some(ProtocolError::InvalidMessageId.reason())),
-            Self::InvalidTimestamp => ("rejected", Some(ProtocolError::InvalidTimestamp.reason())),
-            Self::TimestampOutOfWindow => (
-                "rejected",
-                Some(ProtocolError::TimestampOutOfWindow.reason()),
-            ),
-            Self::InvalidSignature => ("rejected", Some(ProtocolError::InvalidSignature.reason())),
-            Self::PayloadTooLarge => ("rejected", Some(PAYLOAD_TOO_LARGE.reason())),
+            Self::Accepted => OutcomeLabel::Outcome("accepted"),
+            Self::Duplicate => OutcomeLabel::Outcome("duplicate"),
+            Self::Unavailable => OutcomeLabel::Outcome("unavailable"),
+            Self::DeadlineExceeded => OutcomeLabel::Outcome("deadline_exceeded"),
+            Self::BodyUnreadable => OutcomeLabel::Rejected("body_unreadable"),
+            Self::PayloadTooLarge => OutcomeLabel::Rejected(PAYLOAD_TOO_LARGE.reason()),
         }
     }
 }
@@ -292,6 +278,7 @@ impl OutcomeSlot {
 struct EndpointMetrics {
     endpoint: SharedString,
     outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
+    protocol_rejections: [OnceLock<Counter>; ProtocolError::ALL.len()],
     custom_rejections: Mutex<HashMap<&'static str, Counter>>,
 }
 
@@ -300,36 +287,43 @@ impl EndpointMetrics {
         Self {
             endpoint,
             outcomes: EnumMap::default(),
+            protocol_rejections: [const { OnceLock::new() }; ProtocolError::ALL.len()],
             custom_rejections: Mutex::new(HashMap::default()),
         }
     }
 
     fn record(&self, slot: OutcomeSlot) {
         self.outcomes[slot]
-            .get_or_init(|| {
-                let endpoint = self.endpoint.clone();
-                match slot.labels() {
-                    (outcome, None) => metrics::counter!(
-                        WEBHOOK_INGRESS_OUTCOMES_METRIC,
-                        "endpoint" => endpoint,
-                        "outcome" => outcome
-                    ),
-                    (outcome, Some(reason)) => metrics::counter!(
-                        WEBHOOK_INGRESS_OUTCOMES_METRIC,
-                        "endpoint" => endpoint,
-                        "outcome" => outcome,
-                        "reason" => reason
-                    ),
-                }
+            .get_or_init(|| match slot.label() {
+                OutcomeLabel::Outcome(outcome) => metrics::counter!(
+                    WEBHOOK_INGRESS_OUTCOMES_METRIC,
+                    "endpoint" => self.endpoint.clone(),
+                    "outcome" => outcome
+                ),
+                OutcomeLabel::Rejected(reason) => self.rejection_counter(reason),
             })
             .increment(1);
     }
 
+    fn record_protocol_rejection(&self, error: ProtocolError) {
+        self.protocol_rejections[error.index()]
+            .get_or_init(|| self.rejection_counter(error.reason()))
+            .increment(1);
+    }
+
     fn record_rejection(&self, reason: &'static str) {
+        if let Some(error) = ProtocolError::ALL
+            .iter()
+            .copied()
+            .find(|error| error.reason() == reason)
+        {
+            self.record_protocol_rejection(error);
+            return;
+        }
         if let Some((slot, _)) = self
             .outcomes
             .iter()
-            .find(|(slot, _)| slot.labels().1 == Some(reason))
+            .find(|(slot, _)| matches!(slot.label(), OutcomeLabel::Rejected(r) if r == reason))
         {
             self.record(slot);
             return;
@@ -338,16 +332,18 @@ impl EndpointMetrics {
             .custom_rejections
             .lock()
             .entry(reason)
-            .or_insert_with(|| {
-                metrics::counter!(
-                    WEBHOOK_INGRESS_OUTCOMES_METRIC,
-                    "endpoint" => self.endpoint.clone(),
-                    "outcome" => "rejected",
-                    "reason" => reason
-                )
-            })
+            .or_insert_with(|| self.rejection_counter(reason))
             .clone();
         counter.increment(1);
+    }
+
+    fn rejection_counter(&self, reason: &'static str) -> Counter {
+        metrics::counter!(
+            WEBHOOK_INGRESS_OUTCOMES_METRIC,
+            "endpoint" => self.endpoint.clone(),
+            "outcome" => "rejected",
+            "reason" => reason
+        )
     }
 }
 

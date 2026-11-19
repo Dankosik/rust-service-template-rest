@@ -468,7 +468,7 @@ async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
 #[test]
 fn a_connection_age_is_spread_within_a_tenth() {
     let age = Duration::from_mins(30);
-    let spreads = Vec::from_fn(64, |_| spread(age));
+    let spreads = Vec::from_fn(64, |_| jitter_age(age));
     assert!(
         spreads
             .iter()
@@ -476,7 +476,7 @@ fn a_connection_age_is_spread_within_a_tenth() {
         "{spreads:?}"
     );
     assert!(spreads.iter().any(|spread| *spread != spreads[0]));
-    assert_eq!(spread(Duration::MAX), Duration::MAX);
+    assert_eq!(jitter_age(Duration::MAX), Duration::MAX);
 }
 
 #[tokio::test]
