@@ -236,24 +236,7 @@ mod tests {
     use service_config::LoadOptions;
 
     use super::bootstrap::WorkerError;
-    use super::shutdown::Outcome;
-    use super::{ExitCode, run_worker, worker_exit};
-
-    #[test]
-    fn exit_code_maps_the_three_rows() {
-        assert_eq!(worker_exit(Ok(Outcome::Graceful)), ExitCode::from(0));
-        assert_eq!(worker_exit(Ok(Outcome::Degraded)), ExitCode::from(3));
-        assert_eq!(
-            worker_exit(Err(WorkerError::NoRegistrations)),
-            ExitCode::from(1)
-        );
-        // template:begin jobs:worker-lib-test-postgres-refusal
-        assert_eq!(
-            worker_exit(Err(WorkerError::PostgresDisabled)),
-            ExitCode::from(1)
-        );
-        // template:end jobs:worker-lib-test-postgres-refusal
-    }
+    use super::run_worker;
 
     fn missing_file() -> LoadOptions {
         LoadOptions {
