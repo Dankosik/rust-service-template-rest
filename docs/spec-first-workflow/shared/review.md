@@ -107,7 +107,7 @@ The phase adapter owns lenses and threshold, while the artifact, ledger, or
 | Fixed boundary | Adapter |
 | --- | --- |
 | Standalone research synthesis | [Research](../phases/research.md#review) |
-| Completed specification | [Specification Review](../phases/specification-review.md) |
+| Definition result (specification or no-delta package) | [Specification Review](../phases/specification-review.md) |
 | Technical design (system and Rust architecture) | [Technical Design Review](../phases/technical-design-review.md) |
 | Planning result | [Task Review / Readiness](../phases/task-review-readiness.md) |
 | Implementation delivery (assembled ledger, single-unit, or standalone review) | [Implementation Review](../phases/implementation-review.md) |

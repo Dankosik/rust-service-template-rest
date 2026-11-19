@@ -20,7 +20,8 @@ Primary sources contradict a baseline premise of `intent.md`. If
 return `result: specs/<task>/spec.md`; otherwise return the discrepancy inline
 without creating a stub file. Emit [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
-`owner: Definition`, `review: none`, `reopen_owner: Intake`).
+`owner: Definition`, `review: <review result when triggered from review,
+otherwise none>`, `reopen_owner: Intake`).
 
 ## Already-Satisfied No-Delta
 
@@ -66,5 +67,6 @@ fork under its parent `B<n>` per [Specification
 V1](../../interfaces/spec-v1.md). Save resolved rules and `Blocked decisions` in
 `spec.md` at `status: blocked`, and return [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
-`owner: Definition`, `result: specs/<task>/spec.md`, `review: none`,
-`reopen_owner: Intake` or external policy owner) without review.
+`owner: Definition`, `result: specs/<task>/spec.md`, `review: <review result
+when triggered from step 5, otherwise none>`, `reopen_owner: Intake` or
+external policy owner) without another review.
