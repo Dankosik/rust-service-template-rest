@@ -9,14 +9,15 @@ internals to Implementation.
 ## Steps
 
 1. **Ground in primary sources (static, read-only).**
-   - Verify every assumption against real code, callers, schemas, migrations,
-     config, `api/`, `Cargo.toml` `[workspace.lints]`, `clippy.toml`,
-     `vendor/*/PATCHES.md`, locked crate sources (`cargo metadata --locked
-     --offline --format-version 1`),
+   - Verify assumptions against touched code, callers, schemas, migrations,
+     config, `api/`, [Repository Architecture](../../repo-architecture.md),
+     `docs/decisions/`, and [Production Contract](../../production-contract.md).
+     When proposing new Rust seams or crate usage, also ground against
      [`quality/architecture.json`](../../../quality/architecture.json),
-     [Repository Architecture](../../repo-architecture.md), `docs/decisions/`,
+     `Cargo.toml` `[workspace.lints]`, `clippy.toml`, `vendor/*/PATCHES.md`,
      [Backend Library Selection](../../backend-library-selection.md), and
-     [Production Contract](../../production-contract.md).
+     locked crate sources (`cargo metadata --locked --offline --format-version
+     1`).
    - Inspect **one existing sibling subsystem** and adopt its error, config,
      wiring, and telemetry idioms by default; justify any deliberate divergence
      in `D<n>`.
@@ -56,10 +57,11 @@ internals to Implementation.
 3. **Close technical architecture (HOW).**
    - **Boundary rule:** close every choice that can collide across parallel
      tasks, alter a caller, wire, schema, config, or operator contract, break an
-     invariant or bound, or lock in a **one-way door** (persisted schema or
-     durable state machine, external wire/API contract, ≥2-consumer cross-crate
-     seam, async durability/recovery topology, or new crate, dependency, or
-     profile). Leave internals behind one module's seam open to Implementation.
+     invariant or bound, or lock in a **one-way door**. One-way doors include
+     persisted schemas or durable state machines, external wire/API contracts,
+     `≥2`-consumer cross-crate seams, async durability/recovery topologies, and
+     new crates, dependencies, or profiles. Leave internals behind one module's
+     seam open to Implementation.
    - Disclose only the branches this change triggers (keep `rust-coder`,
      `rust-testing`, `rust-debugging`, and `rust-verification` for
      Implementation):
@@ -160,7 +162,7 @@ status: draft | ready
 - **Shared mutated surfaces:** <canonical repo-relative lock paths + high-fan-out exhaustive types>
 - **Superseded paths & generated contracts:** <code/tests to delete; `api/`, `.sqlx/`, etc. to regenerate>
 - **Durable doc updates:** <updates to `docs/decisions/`, `docs/repo-architecture.md`, `docs/production-contract.md`, or `docs/backend-library-selection.md` when one-way door + surprising + real trade-off, or overturning a rejected choice>
-- **Planning hooks:** <applicable shape tags from Planning, if any>
+- **Execution risks & staging:** <unverified integration seams, wide-refactor blast radius, or multi-release rollout boundaries, if any>
 
 ## Assumptions & reopen triggers
 - **A1 — <name>:** <bounded assumption preserving intent> — **Reopen if:** <objective trigger or owner>

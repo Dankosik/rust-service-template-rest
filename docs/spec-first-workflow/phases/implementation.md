@@ -10,9 +10,11 @@ Frontier` through final verification, independent review, and closeout.
   and review triggers).
 - **Named ledger (`tasks.md`):** inspect its status. If runtime state exists or
   work was interrupted, reconcile under [Resume](../shared/resume.md). Report a
-  completed (`done`) ledger, return an unready plan to its owner, or run a
-  `ready` ledger as root Ledger Orchestrator (`LEDGER_ORCHESTRATOR`)—including
-  a one-task ledger.
+  `done` ledger, resolve a `blocked` ledger from `Blocked stop:`, route a
+  `draft` ledger through [Planning](planning.md) and [Plan
+  Review](plan-review.md) before executing (or stop and report if restricted to
+  implementation-only), or run a `ready` ledger as root Ledger Orchestrator
+  (`LEDGER_ORCHESTRATOR`)—including a one-task ledger.
 
 ## Orchestrator Loop
 
@@ -37,8 +39,8 @@ coding and repair edits strictly to fresh `ACCEPTANCE_UNIT_LEAD` subagents.
   record `Commit mode: no-commit`, serialize writers in one checkout, compare
   working-tree deltas before and after each writer against its grant, mark
   verified new candidate files intent-to-add (`git add -N -- <paths>`,
-  excluding `specs/<task>/`), and use `git diff <Base>` as the assembled
-  candidate.
+  excluding `specs/<task>/`), and use `git diff <Base>` (scoped to verified
+  candidate paths if unrelated dirty edits exist) as the assembled candidate.
 - *Done when:* `Base:` is pinned on the integration branch and the initial
   `Ready Frontier` is verified.
 
@@ -86,8 +88,8 @@ task and ignoring completed duplicates; on interruption, compare Git and
 ### 4. Final Verification, Review, And Repair
 
 Because the Orchestrator wrote zero unit code, it owns assembled verification
-directly on the frozen integration candidate (`git diff <Base>..HEAD`, or `git
-diff <Base>` in `no-commit` mode):
+directly on the frozen integration candidate (`git diff <Base>..HEAD`, or the
+scoped `no-commit` candidate diff from Step 1):
 
 1. **Verify assembled proof:** run required [Validation
    budget](../../../AGENTS.md#validation-budget) checks plus any
@@ -109,7 +111,16 @@ diff <Base>` in `no-commit` mode):
    - `NEEDS_PARENT`: resolve missing input or unavailable required proof under
      [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery) (or
      hold at `status: blocked`).
-   - `FAIL`: verify findings against live code and enter Step 4.3.
+   - `FAIL`: verify every finding against live code before editing or
+     escalating:
+     - Confirmed `UPSTREAM_GAP`: resolve under [Parent-Owned
+       Recovery](../shared/transition.md#parent-owned-recovery) (update
+       `spec.md`/`design.md`/packets in place if technical; reopen the user only
+       for a product/risk contradiction or missing external authority).
+     - Confirmed `TASK_DEFECT` or `INTEGRATION_DEFECT`: batch into Step 4.3.
+     - Complete refutation (zero code changes): never self-approve past `FAIL`;
+       dispatch `adjudicator-agent` with both sides' primary anchors under
+       [Review Lifecycle](../shared/review.md#lifecycle).
 3. **Repair confirmed defects:** batch confirmed `TASK_DEFECT` and
    `INTEGRATION_DEFECT` findings (or pre-review Step 4.1 failures) into one
    fresh [Repair Lead](implementation/repair.md) with combined writable scope
@@ -120,11 +131,12 @@ diff <Base>` in `no-commit` mode):
      re-run invalidated checks. If initial review has not run yet, return to
      Step 4.2; otherwise dispatch one fresh `Delta Recheck` reviewer (or a fresh
      full review if repair expanded scope, interfaces, or risk).
-   - On complete refutation: retire the Repair Lead without a landing and
-     follow [Review Lifecycle](../shared/review.md#lifecycle) (never
-     self-approve past `FAIL`: present verified refuting anchors in a fresh
-     `Delta Recheck`, escalating a surviving evidence-backed conflict to
-     `adjudicator-agent`).
+   - On complete refutation (`Blocked`, `next_owner: Orchestrator — refuted
+     findings`): retire the Repair Lead without a landing, never self-approve
+     past `FAIL`, and dispatch `adjudicator-agent` with both sides' primary
+     anchors under [Review Lifecycle](../shared/review.md#lifecycle) (repairing
+     if adjudication confirms the defect, or recording the resolution and
+     clearing if it rejects the finding with primary proof).
 - *Done when:* every required local check and `Observable claim` passes on the
   current candidate and required review clears (`PASS`).
 
@@ -135,8 +147,7 @@ diff <Base>` in `no-commit` mode):
 - `Accepted` holds when Step 4 clears and every explicitly requested external
   outcome in `Completion` has direct evidence and authority.
   - On `Accepted`: record the final receipt, flip `tasks.md` to `status: done`,
-    and run [Cleanup](../shared/cleanup.md) (running `just docs-check` and
-    `just typos` if cleanup edits tracked docs).
+    and run [Cleanup](../shared/cleanup.md).
   - If local proof and review pass while an explicitly requested external gate
     remains pending—or if recovery cannot close a required blocker—preserve
     partial work and hold `tasks.md` at `status: blocked` with `Blocked stop:`

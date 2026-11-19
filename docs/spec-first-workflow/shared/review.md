@@ -14,20 +14,16 @@ standalone `research only` syntheses.
 - **Implementation delivery (ledgers and Direct Work):** keep unit coding and
   tests moving along the ready frontier; select one review disposition at the
   assembled delivery boundary:
-  - **Full review:** required for any persisted ledger (`tasks.md`) with
-    behavioral code changes, or for Direct Work when requested by the user,
-    when changes touch authorization, money, data integrity, concurrency, or
-    hard-to-reverse migration, when same-thread edits alter non-trivial
-    production behavior without a pre-existing independent test/contract
-    oracle, or when a material correctness question remains uncertain. Use the
-    2-lens [Complementary Panel](../phases/implementation-review.md#complementary-panel)
-    for multi-task ledgers (`≥2` planned code tasks) or high-risk structural
+  - **Full review:** required for any persisted ledger (`tasks.md`) with code
+    changes, or whenever a [Direct Work](../../../AGENTS.md#direct-work) Full
+    review gate fires. Use the 2-lens [Complementary
+    Panel](../phases/implementation-review.md#complementary-panel) for
+    multi-task ledgers (`≥2` planned code tasks) or high-risk structural
     changes; use one fresh 4-axis reviewer otherwise.
-  - **Structure-only review:** when Full review is untriggered and the diff
-    adds a workspace crate, dependency/feature, trait/layer, custom general
-    mechanism, config key, or fallback/shim/parallel path; route to
+  - **Structure-only review:** when Full review does not apply and a [Direct
+    Work](../../../AGENTS.md#direct-work) Structure review gate fires; route to
     [Structure-Only Review](../phases/implementation-review.md#structure-only-review).
-  - **Direct completion:** when neither trigger holds; finish local validation
+  - **Direct completion:** when neither gate applies; finish local validation
     directly and record the checked trigger signals.
 
 ## Lifecycle
@@ -42,8 +38,10 @@ standalone `research only` syntheses.
   defects must close.
 - **Verify before repairing:** check every finding's anchor and witness against
   primary code before editing or escalating. Never self-approve past `FAIL`:
-  present refuting primary anchors in a bounded recheck (or escalate a
-  surviving evidence-backed conflict to `adjudicator-agent`).
+  present partial refutations alongside fixes in a fresh `Delta Recheck`, and
+  dispatch `adjudicator-agent` with both sides' primary anchors for a complete
+  refutation (zero code changes) or a surviving evidence-backed conflict across
+  panel lenses or recheck.
 - **Evaluate proposed remedies:** a repair closes the finding; any suggested
   fix is evidence. Every recheck also checks repair structure against
   [Engineering](../../../AGENTS.md#engineering)—a fix that introduces an

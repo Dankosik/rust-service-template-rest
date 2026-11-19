@@ -9,13 +9,12 @@ the user's frontier—the agent owns those autonomously once requirements settle
 1. **Ground fast and map the design tree.**
    - Carry forward settled decisions from any prior `/grilling`, `/idea-refine`,
      or existing `specs/<task>/` artifact without re-asking them.
-   - Run an **XY check**: separate the user's underlying problem from any
-     casually suggested mechanism.
-   - Inspect affected external contracts (`api/`, config, CLI), current callers,
-     [Domain Vocabulary](../../repo-architecture.md#domain-vocabulary), and
-     relevant `docs/decisions/` before Round 1. Offload wide scans to a fresh
-     `evidence-agent` via [Read-Only
-     Delegation](../shared/read-only-delegation.md) to protect the smart zone.
+   - Separate the underlying user or operator problem from any suggested
+     mechanism (**XY check**), and inspect affected external contracts (`api/`,
+     config, CLI), callers, [Domain
+     Vocabulary](../../repo-architecture.md#domain-vocabulary), and relevant
+     `docs/decisions/` before Round 1 (offloading wide scans to a fresh
+     `evidence-agent` to protect the smart zone).
    - Adapt entry by situation:
      - *Premise conflict or already-satisfied request:* surface the verified
        code or `docs/decisions/` contradiction (with its `Why` / `Reopen if`) at
@@ -30,10 +29,8 @@ the user's frontier—the agent owns those autonomously once requirements settle
      - *Small, local, reversible, single-owner change:* confirm understanding
        and execute directly under [Direct Work](../../../AGENTS.md#direct-work).
    - Map open branches across [Blind-Spot Coverage](#blind-spot-coverage) and
-     classify each branch using [Grilling](../shared/grilling.md)'s four buckets
-     (resolve facts yourself; keep technical choices internal; label safe
-     conventions as assumptions; put only requester-owned decisions on the
-     frontier).
+     classify each branch under [Grilling](../shared/grilling.md) so the user's
+     frontier holds strictly requester-owned decisions.
    - *Done when:* local facts and `docs/decisions/` constraints are verified and
      the user's frontier holds strictly requester-owned decisions.
 

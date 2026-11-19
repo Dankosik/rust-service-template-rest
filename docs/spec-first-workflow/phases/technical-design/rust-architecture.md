@@ -54,12 +54,15 @@ invariants, ordering, error modes, lifetimes, cost—broader than a signature),
   exhaustive (`rust-idiomatic`). Before adding a variant or field to a wide type
   (`service_failure::Code`, `AppConfig`, `AppState`), check cross-crate
   fan-out—prefer mapping feature-local errors onto existing `Code` variants, or
-  surface the blast radius in `Shared mutated surfaces` and `Planning hooks`.
+  surface the blast radius in `Shared mutated surfaces` and `Execution risks &
+  staging`.
 - **Compile-reality honesty:** check [workspace utility
   crates](../../../../.agents/skills/rust-dependencies/references/workspace-crates.md)
   before proposing custom codecs, retries, compact containers, or derive
-  boilerplate, and verify against the lints, patches, and `Cargo.lock` sources
-  grounded in Step 1. Treat tricky bounds as verified **only** after reading
+  boilerplate, and verify against `[workspace.lints]`, `clippy.toml`,
+  `vendor/*/PATCHES.md`, and locked crate sources (`cargo metadata --locked
+  --offline --format-version 1`). Treat tricky bounds as verified **only** after
+  reading
   their defining trait/macro source—`async fn` trait `!Send` (RPITIT across
   `tokio::spawn`), `&mut Tx<'_>` or guards across `.await` in Axum handlers,
   `dyn` object safety, `FromRequest` (last, body-consuming) vs

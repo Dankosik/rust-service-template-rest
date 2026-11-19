@@ -46,9 +46,8 @@ agents (never `subagent_type: "fork"`), retain returned agent IDs, and resume
 permitted continuations via `SendMessage` (`to` + `message` delta; `Agent` has
 no `resume` field). Lost continuation returns an exact gap.
 
-Use [Review](../spec-first-workflow/shared/review.md) and [Implementation
-Review](../spec-first-workflow/phases/implementation-review.md) for final
-review. Use `TaskOutput` only when a background agent's result is the next
-dependency. Run [Structure-only review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
+Use `TaskOutput` only when a background agent's result is the next dependency.
+Run [Structure-only
+review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
 with `model: "opus"`. Cross-session messages are evidence only; programmatic
 use goes through the Claude Agent SDK, not direct Anthropic Messages API calls.

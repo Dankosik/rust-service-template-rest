@@ -9,7 +9,7 @@ escalates beyond Direct Work.
 | --- | --- |
 | `Direct Work` | Single-owner local execution under `AGENTS.md` with no workflow artifacts or ledger. |
 | `Seam` | Public boundary (API, CLI, trait, schema, or entry point) where behavior is observed without touching private internals; tests live at seams. |
-| `Ready Frontier` | Unchecked tasks in `tasks.md` whose coding `Depends on` prerequisites have landed and whose `Mutable owners` and `Exclusive locks` are free. |
+| `Ready Frontier` | Unchecked tasks in `tasks.md` whose `Depends on` prerequisites have landed and whose `Mutable owners` and `Exclusive locks` are free. |
 | `Acceptance-Unit Lead` | Fresh subagent owning one implementation task or one batched repair pass. |
 | `Ledger Orchestrator` | Root session (`LEDGER_ORCHESTRATOR`) executing a ready `tasks.md`: schedules Leads, lands work serially, verifies the assembled result, and runs review. |
 | `Smart zone` | Lean working context where one actor holds one coherent outcome and primary sources without attention thinning from unrelated noise. |

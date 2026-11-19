@@ -122,8 +122,7 @@ workflow; [Prompt Composition](prompt-composition.md) owns task messages;
 code, OpenAPI, tests, and generated sources own repository/runtime facts.
 
 [Skill Authoring](skill-authoring.md) owns skill invocation, metadata,
-body/reference boundaries, and catalog constraints. Propagation to derived
-repositories follows the portable-adoption policy when that lifecycle is in use.
+body/reference boundaries, and catalog constraints.
 
 ## Change And Proof
 

@@ -18,7 +18,12 @@ Lifecycle](../shared/review.md#lifecycle).
 - Every reviewer runs with fresh context (no parent chat history or author
   rationale) and inspects primary code statically (no builds, tests, or live
   services). Every assigned axis must clear independently on the same fixed
-  bundle.
+  bundle; return `REVIEW_HANDOFF_INVALID` if required bundle files or linked
+  packets are missing or unreadable.
+- On a bounded **Delta Recheck** after local plan repairs, inspect only the
+  edited clauses, refutations, and directly dependent tasks or anchors;
+  escalate to a full review whenever repairs resliced tasks or changed
+  interfaces.
 
 ## Checks
 
@@ -69,11 +74,12 @@ locator>`. On a failing check give anchor, concrete witness, classification
 
 ## Zero-Delta Check
 
-For a zero-coding-delta result (no `tasks.md`), one fresh reviewer verifies
-against primary code and callers that every accepted obligation already holds
-(or has an authorized scope exit), no integrated work awaits acceptance, and
-any remaining external effects name their owner and stage. Return `PASS` or
-`FAIL` only.
+For a zero-coding-delta result (no `tasks.md`), one fresh reviewer inspects the
+confirmed requirements (from the brief, `intent.md`, or `spec.md`), claimed
+primary-source locators, live code, and callers to verify that every accepted
+obligation already holds (or has an authorized scope exit), no integrated work
+awaits acceptance, and any remaining external effects name their owner and
+stage. Return `PASS` or `FAIL` only.
 
 ## Verdict
 

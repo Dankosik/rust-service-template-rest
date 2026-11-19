@@ -58,7 +58,9 @@ Orchestrator owns assembled validation and review.
 
 ## Escalation
 
-- Request any path or lock expansion from the Orchestrator before editing.
+- Request any path or lock expansion from the Orchestrator before editing,
+  leaving the live worktree untouched (no WIP commit) so work can continue once
+  granted.
 - For an ungranted Cargo crate or feature, keep manifests and `Cargo.lock`
   untouched and return the dependency request to the Orchestrator.
 - If live evidence shows `Outcome` already holds or invalidates behavior or

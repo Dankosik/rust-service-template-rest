@@ -87,11 +87,13 @@ reranking, resolving an evidence-backed lens conflict via `adjudicator-agent`.
 
 ## Delta Recheck
 
-Inspect the pinned repair delta, repaired and open findings, refutations, repair
+Inspect the pinned repair delta (or updated candidate diff in `no-commit` mode),
+repaired and open findings, any partial refutations alongside fixes, repair
 decisions, and invalidated proof across all four axes: falsify root-cause
 closure, preserved spec parity, clean repair structure (`Engineering` / `Rust
 Change Surface`), and run the Mutation Mental Test on every new or edited
-regression test. Keep unaffected closed reasoning intact.
+regression test. Keep unaffected closed reasoning intact. (Complete refutations
+with zero code changes route directly to `adjudicator-agent`.)
 
 ## Structure-Only Review
 

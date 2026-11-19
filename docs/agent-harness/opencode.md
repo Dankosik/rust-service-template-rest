@@ -36,8 +36,6 @@ OpenCode 2 translates their shared agent files and permission rules. It reads
 the nesting limit from `experimental.subagent_depth`; OpenCode 1 reads the
 top-level `subagent_depth`. Use the native subagent catalog in 2.x. Project
 instructions and role dispatch are independent of the 1.x Task plugin.
-Apply [Implementation](../spec-first-workflow/phases/implementation.md#orchestrator-loop)
-for implementation scheduling and final acceptance.
 
 ## OpenCode 1
 
@@ -75,6 +73,3 @@ session IDs before waiting (missing identity is a carrier failure) and omit
 the Orchestrator primary prefers plain-text rounds under
 [Grilling](../spec-first-workflow/shared/grilling.md) and uses `question` only
 when it preserves full trade-off context and free-form qualification.
-
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md).

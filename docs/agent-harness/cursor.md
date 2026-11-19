@@ -45,6 +45,5 @@ Execution](../agent-harness.md#nested-execution): retain every returned agent
 ID before waiting (missing identity is a carrier failure), omit `resume` on new
 lanes and initial reviews, and use `resume` only for permitted continuations.
 
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md);
-raise `reviewer-agent` Task `model` only for highest-consequence boundaries.
+Raise `reviewer-agent` Task `model` only for highest-consequence review
+boundaries.

@@ -22,8 +22,9 @@ availability alone does not authorize use.
   Implementation](../spec-first-workflow/phases/implementation/unit.md) or
   [Repair Assignment](../spec-first-workflow/phases/implementation/repair.md) as
   Method and that packet or repair scope as boundary (it is Acceptance-Unit
-  Lead; `worker-agent` and read-only roles lack acceptance authority). The
-  Ledger Orchestrator owns assembled verification and review dispatch directly.
+  Lead; `worker-agent` and read-only roles cannot lead a unit or repair pass).
+  The Ledger Orchestrator owns assembled verification and review dispatch
+  directly.
 - When [Agent Harness](../agent-harness.md) selects isolation, assign a
   repo-native Git worktree's absolute root; share checkouts only with disjoint
   writable owners and locks. Report missing tools, config, or write access as
@@ -86,15 +87,12 @@ model/effort: escalate by stopping the old lane, reconciling its edits, and
 spawning a fresh agent. Never wait on an idle lane or blindly repeat uncertain
 dispatch; reconcile once from native status, ledger, and Git candidate identity.
 
-For isolated work, validate worktree and base before accepting bytes. An
-`Implemented` Worktree Lead returns [Acceptance
+For isolated work, validate the worktree and base before accepting bytes. An
+isolated Acceptance-Unit Lead returns [Acceptance
 Result](../spec-first-workflow/interfaces/acceptance-result-v1.md) with a fixed
-`candidate`; the Orchestrator lands it serially without re-adjudicating.
-
-## Review And Recovery
-
-When [Review](../spec-first-workflow/shared/review.md) selects independent
-review, spawn a fresh `reviewer-agent` (`fork_turns: "none"`) with the phase
-review Method. Keep agent identities across [Recovery And
+`candidate`; the Orchestrator integrates it serially under [Implementation Step
+3](../spec-first-workflow/phases/implementation.md#3-acceptance-transition).
+Spawn independent reviews as fresh `reviewer-agent` (`fork_turns: "none"`) with
+the phase review Method, and retain agent identities across [Recovery And
 Handoff](../spec-first-workflow/shared/transition.md) interruptions to reconcile
 completion and resume from the verified checkout.

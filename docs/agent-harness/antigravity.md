@@ -42,10 +42,10 @@ workflow (Direct Work still runs in-session).
 ## Models And Dispatch
 
 Generated agents in `.agents/agents` omit `model`, so every role inherits the
-session model; the native field accepts only `inherit`, `flash`, or `pro`.
-Choose the session model with `--model`/`--effort` or the App selector when
-[Agent Harness](../agent-harness.md) capability routing or user selection
-requires it; never encode model names only in prompt text.
+session model; the native `Model` field accepts only its schema tiers (such as
+`inherit`, `flash`, or `pro`). Choose the session model with `--model`/`--effort`
+or the App selector when [Agent Harness](../agent-harness.md) capability routing
+or user selection requires it; never encode model names only in prompt text.
 
 Pass [delegation interface](../agent-harness.md#delegation-interface) fields
 through `invoke_subagent` (role, initial prompt, workspace option). Subagents
@@ -54,6 +54,3 @@ Lifetime](../agent-harness.md#context-and-lifetime): retain every returned
 conversation ID before waiting (missing identity is a carrier failure), use
 `send_message` to an idle subagent only for permitted continuations, and kill
 finished lanes before releasing scope.
-
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md).

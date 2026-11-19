@@ -53,6 +53,3 @@ rejected spawn is a carrier failure). Omit `resume_from` on new lanes and
 initial reviews; resume only a completed child from the same parent and agent
 type (replacing the locator if a new ID returns), and track primary Leads and
 subtrees explicitly (stopping one primary does not stop siblings).
-
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md).

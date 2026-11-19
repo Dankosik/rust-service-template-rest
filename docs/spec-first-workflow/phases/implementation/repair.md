@@ -1,6 +1,6 @@
 # Repair Assignment
 
-Fix one batched set of confirmed final-validation or review defects as a fresh
+Fix one batched set of confirmed final-verification or review defects as a fresh
 `ACCEPTANCE_UNIT_LEAD` inside the granted writable scope, then return an
 [Implementation
 Result](../../interfaces/acceptance-result-v1.md#implementation-result).

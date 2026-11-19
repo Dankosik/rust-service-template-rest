@@ -1,9 +1,7 @@
 # Design It Twice
 
-Triggered from [Spec And Design](../spec-and-design.md#steps) under
-[Generative Candidate
-Lanes](../../shared/read-only-delegation.md#generative-candidate-lanes) for a
-qualifying **one-way door** open fork.
+Triggered from [Spec And Design](../spec-and-design.md#steps) for a qualifying
+**one-way door** open fork with competing topologies or interfaces.
 
 ## Steps
 
@@ -13,8 +11,8 @@ qualifying **one-way door** open fork.
    Architecture](rust-architecture.md#vocabulary-and-deep-module-discipline)
    vocabulary. Describe **only the problem**—constraints, existing call site or
    runtime entry, and consumer need via a short grounding code sketch or flow
-   context—keeping the frame free of a preferred solution. For an open-ended fork,
-   leave mechanisms, new types and crates to the lanes.
+   context—keeping the frame free of a preferred solution. For an open-ended
+   fork, leave mechanisms, new types, and crates to the lanes.
 
 2. **Dispatch 3 parallel fresh `specialist-agent` lanes with contrasting
    pressures** *(use 2 only for a strictly binary fork between two concrete
@@ -22,9 +20,10 @@ qualifying **one-way door** open fork.
    boundary, `Method:
    docs/spec-first-workflow/shared/read-only-delegation.md#candidate-proposal-v1`
    (plus matching domain skills), and **strictly its own pressure** (omit
-   sibling pressures and any parent hypothesis). For a binary fork, identify the two admissible mechanisms in the common
-   constraints and let each lane develop its assigned side. Each lane pushes its pressure
-   to its honest extreme and returns [Candidate Proposal
+   sibling pressures and any parent hypothesis). For a binary fork, name the two
+   admissible mechanisms in the common constraints and let each lane develop its
+   assigned side. Each lane pushes its pressure to its honest extreme and
+   returns [Candidate Proposal
    V1](../../shared/read-only-delegation.md#candidate-proposal-v1).
    - **Derive problem-specific incompatible pressures first** when concrete
      alternatives solve the same problem (for example, minimize lock wait
@@ -49,7 +48,9 @@ qualifying **one-way door** open fork.
    decisive claims and crate/trait assumptions against primary sources. Adopt a
    **hybrid synthesis** only when combining pieces removes complexity or an
    abstraction while keeping the winning invariant. Select under [Decision
-   Ownership](../../../../AGENTS.md#decision-ownership), recording `D<n>` with
-   the strongest rejected candidate as steelman; escalate to the user only when
-   surviving candidates differ strictly on a user-owned product or risk
-   trade-off.
+   Ownership](../../../../AGENTS.md#decision-ownership) and escalate to the user
+   only when surviving candidates differ strictly on a user-owned product or
+   risk trade-off.
+   - *Done when:* `D<n>` records the chosen architecture and its strongest
+     rejected candidate as steelman (or the single product/risk trade-off is
+     returned to the user).

@@ -38,7 +38,7 @@ and stop at the ready handoff for a fresh Implementation session.
      outcome or prerequisite. Keep post-deploy `multi-release` `Contract` steps
      outside Release 1's ledger.
    - *Done when:* every task has a clear vertical boundary, minimal lock
-     contention, and compiles/verifies cleanly on top of its coding
+     contention, and compiles and verifies cleanly on top of its `Depends on`
      prerequisites.
 
 3. **Write `specs/<task>/tasks.md` and `specs/<task>/tasks/<ID>-<slug>.md`.**
@@ -74,16 +74,19 @@ and stop at the ready handoff for a fresh Implementation session.
 
 ## Task Shapes And Granularity
 
-- **Split** only for: (1) independent observable outcomes compiling and
-  verifying alone; (2) genuine parallelism across disjoint `Mutable owners`,
-  `Exclusive locks`, and exhaustive-type updates; (3) isolating an unverified
-  integration seam or external gate; (4) smart-zone or blast-radius overload
-  across independent subsystems; or (5) a prerequisite shape below.
-- **Merge** tasks of one outcome sharing an `Exclusive lock` or `Mutable owner`
-  unless risk/gate isolation (3), smart-zone overload (4), or a prerequisite
-  shape (5) applies; tasks split solely for concurrency that serialize on a
-  lock; horizontal layers (`types -> repo -> handler -> tests`); or standalone
-  cleanup/docs tails (fold into the landing slice, except `Contract`).
+- **Split only when earned:**
+  - independent observable outcomes that compile and verify alone;
+  - genuine parallelism across disjoint `Mutable owners`, `Exclusive locks`, and
+    exhaustive-type updates;
+  - isolating an unverified integration seam or external gate;
+  - smart-zone or blast-radius overload across independent subsystems; or
+  - a prerequisite shape below.
+- **Merge instead of over-slicing:** combine tasks of one outcome that share an
+  `Exclusive lock` or `Mutable owner` (unless risk isolation, smart-zone
+  overload, or a prerequisite shape applies); combine tasks split solely for
+  concurrency that serialize on a lock; collapse horizontal layers (`types ->
+  repo -> handler -> tests`); and fold standalone cleanup or doc tails into the
+  landing slice (except post-deploy `Contract`).
 
 | Shape | Tag | When to use | Guardrail |
 | --- | --- | --- | --- |
@@ -106,16 +109,18 @@ Global constraints: <active rules, cross-task pinned identifiers, already-holds 
 ## Tasks
 
 - [ ] T<ID>: <one-line observable outcome> [<shape; omit for vertical slice>]
-  - Depends on: <T<ID> [stage], <gate> [effect:<action>], or none>
+  - Depends on: <T<ID> list, external gate if any, or none>
   - Packet: tasks/<ID>-<slug>.md
 ```
 
 - Order tasks **topologically** and by dispatch priority (risk retirement,
   `prefactor`, `shared-contract`, and critical-path blockers first).
-- **Stage syntax:** unannotated `T1` gates coding on `T1`'s integrated code
-  (required whenever compiling against a type, trait, config field, exhaustive
-  type, dependency, or SQLx schema from `T1`); `T1 [acceptance]` gates final
-  verification only; `<gate> [effect:<action>]` gates an external action.
+- **`Depends on` semantics:** listing `T1` means this task starts only after
+  `T1` lands on the integration branch—required whenever compiling against a
+  type, trait, config field, exhaustive type, dependency, or SQLx schema from
+  `T1`, or gating risk-dependent slices on an `[integration-first]` task.
+  Request-level external outcomes live in `Completion`; name an external gate
+  in `Depends on` only when it directly blocks a specific task.
 - Runtime fields (`Base:`, `[x]`, receipts) are owned by Implementation under
   [Acceptance Result V1](../interfaces/acceptance-result-v1.md#ledger-runtime-state).
 
@@ -129,7 +134,7 @@ Outcome:
 <current -> target delta observed at this task's seam when this task alone lands>
 
 Depends on:
-- <T<ID> [stage] — consumed seam/gate, or none>
+- <T<ID> — consumed seam or retired risk, external gate, or none>
 
 Sources:
 - <exact spec.md#r1-... / design.md#d1-... anchor, verified path::Symbol, or crate@version::item> — <rule or contract>
@@ -155,17 +160,19 @@ Reopen if:
 - <assumption, uncached crate check, or integration/concern trigger with owner, or none>
 ```
 
-- **`Outcome` vs `Observable claim` vs `Completion`:** `Outcome` is unit-local
-  when `T<ID>` lands over its `Depends on`; `Observable claim` is proved on the
-  assembled candidate (for default vertical slices, a base-commit-failing
-  public-seam falsifier such as `POST /webhooks` with a tampered signature
-  returns `401 invalid_signature` and writes zero inbox rows, paired with `G1`,
-  leaving test names and commands to Implementation; for `[prefactor]`,
-  preserved `G<n>` + unlocked internal seam; for `[shared-contract]`, compiling
-  contract and boundary invariants; for `[integration-first]` / `[expand]` /
-  `[migrate]` / `[contract]`, follow [Conditional Claim
-  Rules](planning/conditional-branches.md#claim-rules)); cross-slice and
-  external outcomes live in `tasks.md`'s `Completion`.
+- **Three scopes, never duplicated:**
+  - `Outcome` (unit-local): what changes at this task's seam when `T<ID>` lands
+    over its `Depends on`.
+  - `Observable claim` (assembled candidate): for default vertical slices, a
+    base-commit-failing public-seam falsifier (for example, `POST /webhooks`
+    with a tampered signature returns `401 invalid_signature` and writes zero
+    inbox rows) paired with `G<n>`, leaving test names and commands to
+    Implementation. For `[prefactor]`, pin preserved `G<n>` plus the unlocked
+    internal seam; for `[shared-contract]`, pin the compiling contract and
+    boundary invariants; for conditional shapes, apply [Conditional Claim
+    Rules](planning/conditional-branches.md#claim-rules).
+  - `Completion` (`tasks.md`): cross-slice integration and any requested
+    external outcome.
 - **Producer isolation:** a Unit Lead reads only its own packet, so when
   another task depends on `T<ID>`, `Provides` + `Sources` must pin every
   consumed symbol, signature, error variant, config key, and invariant. Cite

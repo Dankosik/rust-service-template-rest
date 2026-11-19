@@ -16,9 +16,13 @@ and artifact state directly instead of trusting a compaction summary.
      `tasks.md`, Git tips, and live native task state (a stored `Execution:`
      locator alone does not prove a task is still running).
    - `status: draft`: resume [Planning](../phases/planning.md).
-   - Before `tasks.md` exists: read `specs/<task>/spec.md` (and `design.md` if
-     present) or `specs/<task>/intent.md` and resume from the earliest
-     unfinished step.
+   - Before `tasks.md` exists: if `specs/<task>/spec.md` exists (with optional
+     `design.md`), confirm it is complete under [Spec And
+     Design](../phases/spec-and-design.md) and continue into
+     [Planning](../phases/planning.md); otherwise, if `specs/<task>/intent.md`
+     exists, resume [Intake](../phases/intake.md) when `status: draft` or
+     continue into [Spec And Design](../phases/spec-and-design.md) when
+     `status: ready`.
 3. **Handle mid-task steering in place:** when new user guidance changes
    behavior, scope, or constraints mid-flight, update the affected clause in
    `spec.md`/`design.md` and impacted task packets in place, notify affected

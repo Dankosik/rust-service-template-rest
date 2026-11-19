@@ -41,8 +41,3 @@ interface](../agent-harness.md#delegation-interface) fields natively, and
 retain `task_id`. `list_agents` and `send_message` (`task_id`) continue
 background agents; foreground nested results return inline (report an exact gap
 if no continuation exists rather than inventing a resume field).
-
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md)
-once local checks pass under [Implementation Step
-4](../spec-first-workflow/phases/implementation.md#4-final-verification-review-and-repair).

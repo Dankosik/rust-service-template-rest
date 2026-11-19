@@ -11,8 +11,8 @@ Review](../phases/plan-review.md) with a `status: ready` `tasks.md`, leave the
 plan bundle in the same checkout and present a compact one-screen overview in
 the user's language:
 
-- each task's `T<ID>`, one-line deliverable, non-default shape tag, `Depends
-  on`, and `Completion` target;
+- each task's `T<ID>`, one-line deliverable, non-default shape tag, and `Depends
+  on`, plus the ledger's `Completion` target;
 - execution waves (initial `Ready Frontier`, parallel waves vs shared-lock
   serializations);
 - any carried `CONCERNS` or `Reopen if` risks.
