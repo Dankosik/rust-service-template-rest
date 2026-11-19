@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::Extensions;
@@ -84,7 +86,7 @@ where
 {
     layer_routes(contract, |router| {
         router.route_layer(middleware::from_fn_with_state(
-            AuthState { verifier, policy },
+            Arc::new(AuthState { verifier, policy }),
             authenticate,
         ))
     })
@@ -95,19 +97,18 @@ pub(crate) struct ProtectedAccess {
     pub(crate) delegate: bool,
 }
 
-#[derive(Clone)]
 struct AuthState {
     verifier: Verifier,
     policy: Policy,
 }
 
 async fn authenticate(
-    State(state): State<AuthState>,
+    State(state): State<Arc<AuthState>>,
     mut request: Request,
     next: Next,
 ) -> Response {
     strip_identity(request.extensions_mut());
-    let AuthState { verifier, policy } = state;
+    let AuthState { verifier, policy } = state.as_ref();
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
         return wiring_failure("path_missing");
     };
@@ -119,7 +120,7 @@ async fn authenticate(
                 .await
         }
         Some(Access::Protected(required)) => {
-            authenticate_protected(&verifier, required, request, next).await
+            authenticate_protected(verifier, required, request, next).await
         }
     }
 }

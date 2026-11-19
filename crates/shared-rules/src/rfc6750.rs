@@ -6,7 +6,6 @@ pub enum NoBearer {
     Malformed,
 }
 
-/// RFC 6750 §2.1
 pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, NoBearer> {
     std::str::from_utf8(token_bytes(values)?).map_err(|_| NoBearer::Malformed)
 }

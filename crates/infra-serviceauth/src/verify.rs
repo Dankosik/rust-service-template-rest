@@ -225,14 +225,15 @@ impl Verifier {
         }
         if !header
             .typ
-            .as_deref()
-            .is_some_and(|typ| self.0.jwt_type.admits(typ))
+            .as_ref()
+            .is_some_and(|typ| self.0.jwt_type.admits(typ.as_str()))
         {
             return Err(Reason::Type);
         }
         let kid = header
             .kid
-            .as_deref()
+            .as_ref()
+            .map(BorrowableString::as_str)
             .filter(|kid| !kid.is_empty())
             .ok_or(Reason::KeyId)?;
         let payload = URL_SAFE_NO_PAD
@@ -240,14 +241,17 @@ impl Verifier {
             .map_err(|_| Reason::Claims)?;
         let payload = std::str::from_utf8(&payload).map_err(|_| Reason::Claims)?;
         let claims: Claims<'_> = serde_json::from_str(payload).map_err(|_| Reason::Claims)?;
-        let issuer = claims.iss.as_deref().ok_or(Reason::Issuer)?;
+        let issuer = claims
+            .iss
+            .as_ref()
+            .map(BorrowableString::as_str)
+            .ok_or(Reason::Issuer)?;
         let (caller, keys) = self.0.trust.caller(issuer).ok_or(Reason::Issuer)?;
-        let key = keys
-            .iter()
-            .find(|key| key.kid.as_str() == kid)
-            .ok_or(Reason::UnknownKey)?;
-        verify_signature(&key.public_key, message, signature)?;
-        if claims.sub.as_deref() != Some(issuer) {
+        let index = keys
+            .binary_search_by(|key| key.kid.as_str().cmp(kid))
+            .map_err(|_| Reason::UnknownKey)?;
+        verify_signature(&keys[index].public_key, message, signature)?;
+        if claims.sub.as_ref().map(BorrowableString::as_str) != Some(issuer) {
             return Err(Reason::Subject);
         }
         if !claims
@@ -325,9 +329,9 @@ struct TokenHeader<'a> {
     #[serde(borrow)]
     alg: Cow<'a, str>,
     #[serde(borrow)]
-    typ: Option<Cow<'a, str>>,
+    typ: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    kid: Option<Cow<'a, str>>,
+    kid: Option<BorrowableString<'a>>,
     #[serde(rename = "crit", default, deserialize_with = "present")]
     has_crit: bool,
 }
@@ -335,9 +339,9 @@ struct TokenHeader<'a> {
 #[derive(Deserialize)]
 struct Claims<'a> {
     #[serde(borrow)]
-    iss: Option<Cow<'a, str>>,
+    iss: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    sub: Option<Cow<'a, str>>,
+    sub: Option<BorrowableString<'a>>,
     #[serde(borrow)]
     aud: Option<Audience<'a>>,
     iat: Option<NumericDate>,
@@ -405,6 +409,12 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
 
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
+
+impl BorrowableString<'_> {
+    fn as_str(&self) -> &str {
+        self.0.as_ref()
+    }
+}
 
 impl Audience<'_> {
     fn is_only(&self, name: &str) -> bool {
@@ -741,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn audience_borrows_strings_decodes_escapes_and_checks_trailing_array_types() {
+    fn token_strings_accept_escapes_and_audience_checks_trailing_array_types() {
         let single: Claims<'_> = serde_json::from_str(
             r#"{"iss":"orders","sub":"orders","aud":"catalog","iat":1800000000,"exp":1800000060}"#,
         )
@@ -761,7 +771,7 @@ mod tests {
         ));
 
         let escaped_payload = format!(
-            r#"{{"iss":"orders","sub":"orders","aud":"cata\u006cog","iat":{NOW},"exp":{}}}"#,
+            r#"{{"iss":"ord\u0065rs","sub":"order\u0073","aud":"cata\u006cog","iat":{NOW},"exp":{}}}"#,
             NOW + 60
         );
         let escaped_claims: Claims<'_> = serde_json::from_str(&escaped_payload).unwrap();
@@ -772,7 +782,7 @@ mod tests {
 
         let case = Case::new();
         let escaped_token = case.orders.sign_raw(
-            Case::header(&case.orders).to_string().as_bytes(),
+            br#"{"alg":"ES256","typ":"example-svc\u002bjwt","kid":"orders\/2026-10"}"#,
             escaped_payload.as_bytes(),
         );
         assert_eq!(case.check(&escaped_token), Ok("orders".to_owned()));
