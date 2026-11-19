@@ -4,12 +4,14 @@ Load from [Specification](../specification.md) only when triggered.
 
 ## Reopen Or Resume From Blocked
 
-Read existing `specs/<task>/spec.md` alongside `intent.md`. Reconcile only
-invalidated clauses under [Artifacts](../../shared/artifacts.md), preserve ID
-stability and re-verify prior `Carried concerns` per [Specification
+Read existing `specs/<task>/spec.md` alongside `intent.md`, keeping `spec.md`
+untouched through step 1 grounding so early exits do not leave a half-edited
+draft. Reconcile only invalidated clauses under
+[Artifacts](../../shared/artifacts.md), preserve ID stability and re-verify
+prior `Carried concerns` per [Specification
 V1](../../interfaces/spec-v1.md#field-rules), and drop every resolved `B<n>`
-entry before either writing `status: draft` in step 3 or updating `Blocked
-decisions` for newly uncovered child forks. Continue
+(removing `## Blocked decisions` completely before writing `status: draft` in
+step 3, or updating it for newly uncovered child forks). Continue
 [Specification](../specification.md) from step 1.
 
 ## Wrong Premise In Intent
@@ -21,7 +23,7 @@ return `result: specs/<task>/spec.md`; otherwise return the discrepancy inline
 without creating a stub file. Emit [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
 `owner: Definition`, `review: <review result when triggered from review,
-otherwise none>`, `reopen_owner: Intake`).
+otherwise none>`, `reopen_owner: Intake`, `next_owner: none`).
 
 ## Already-Satisfied No-Delta
 
@@ -32,15 +34,18 @@ or technical work remains.
    mapping every `intent.md` obligation and `Success signal` to verified primary
    locators (`file:line`/symbol, `api/`, migration, config, callers).
 2. Submit to 1 fresh `reviewer-agent` running [Specification
-   Review](../specification-review.md#already-satisfied-no-delta) under
-   [Review](../../shared/review.md).
-3. Handle the verdict (`PASS | FAIL` only):
+   Review](../specification-review.md#already-satisfied-no-delta) under [Review
+   Lifecycle](../../shared/review.md#lifecycle), passing strictly `intent.md`,
+   the inline Primary No-Delta Evidence, `research/*.md` when present, and the
+   method path.
+3. Handle the verdict:
    - **`PASS`** *(or review closure under [Review
      Lifecycle](../../shared/review.md#lifecycle))*: remove any superseded
      `specs/<task>/spec.md` and `specs/<task>/workflow-plan.md` under
      [Artifacts](../../shared/artifacts.md), and return [Transition Result
      V1](../../shared/transition.md#transition-result-v1) (`status: ready`,
-     `owner: Definition`, `result: <evidence>`, `next_owner: none`).
+     `owner: Definition`, `result: <evidence>`, `review: <Review Result V1
+     locator or inline result>`, `next_owner: none`).
    - **`FAIL`:** verify citations and handle any refuted finding under [Review
      Lifecycle](../../shared/review.md#lifecycle). On confirmed
      `reopen_owner: Specification`, enter [Specification](../specification.md)
@@ -59,14 +64,13 @@ excluding non-behavioral goals routed to `Downstream handoff`.
 ## Blocked Frontier
 
 When step 2, step 4, or a confirmed step 5 `UPSTREAM_GAP` surfaces an
-undelegated requester- or policy-owned fork: finish all independent branches of
-step 2 to collect the full **independent frontier**, frame each root `B<n>` in
-requester behavior and consequences (worded so `"yes"` accepts the
-recommendation when supported), and attach any already-known dependent child
-fork under its parent `B<n>` per [Specification
-V1](../../interfaces/spec-v1.md). Save resolved rules and `Blocked decisions` in
+undelegated requester- or policy-owned fork or an unresolved behavioral
+authority conflict: finish all independent branches of step 2 to collect the
+full **independent frontier**, record the root frontier and any known dependent
+child forks in `Blocked decisions` per [Specification
+V1](../../interfaces/spec-v1.md), save resolved rules and `Blocked decisions` in
 `spec.md` at `status: blocked`, and return [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
 `owner: Definition`, `result: specs/<task>/spec.md`, `review: <review result
 when triggered from step 5, otherwise none>`, `reopen_owner: Intake` or
-external policy owner) without another review.
+external policy/evidence owner, `next_owner: none`) without another review.

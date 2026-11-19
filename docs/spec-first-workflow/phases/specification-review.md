@@ -61,22 +61,21 @@ checks only)**:
 ### Phase B — Grounding, Fidelity & Codebase Reality
 
 2. **Intent fidelity, authority & decision discipline.** Confirm `intent.md` is
-   at `status: ready` and independently map material `intent.md` items (settled
-   interview decisions `I<n>` including `Binding` strength, `Rejected`
-   exclusions, and `Why`, `Concrete scenarios`, hard constraints and `Must not`,
-   `Suggested mechanisms`, `Priority / tie-breakers`, assumptions `A<n>`,
-   `Success signal`, delegated limits, `Open questions`) and
-   `research/*.md` unknowns/conflicts/refresh triggers to `spec.md`. `FAIL` on:
+   at `status: ready` and independently map every material
+   [Intent](../interfaces/intent.md) obligation and `research/*.md`
+   unknown, conflict, or refresh trigger to `spec.md`. `FAIL` on:
    - unconfirmed `draft` `intent.md`, dropped `I<n>` or `Concrete scenarios`
-     obligation, weakened `Binding: hard` decision, resurrected `Rejected`
-     option, weakened constraint, `Suggested mechanism` enforced without
-     hard-constraint authority, unauthorized breaking change, or decision
-     smuggled into `Non-goals`/`Falsifier`;
+     obligation, weakened `Binding: hard` decision, unjustified `Binding:
+     default` adjustment (lacking a primary-code/hard-constraint conflict,
+     violating `Why`, or missing `Reopen if`), resurrected `Rejected` option,
+     weakened constraint, `Suggested mechanism` enforced without hard-constraint
+     authority, unauthorized breaking change, or decision smuggled into
+     `Non-goals`/`Falsifier`;
    - `Delegated decision` exceeding limits or lacking a steelman alternative,
      reason, or objective `Reopen if`;
    - `Bounded assumption` lacking an objective `Reopen if` or disguising an
      undelegated one-way fork (`UPSTREAM_GAP`, `reopen_owner: Intake` or
-     external policy owner);
+     external policy/evidence owner);
    - unresolved `research/*.md` behavioral authority conflict not blocked or
      returned to its evidence owner ([Conflict Or
      Freshness](research-branches.md#conflict-or-freshness)), or bounded
@@ -90,8 +89,8 @@ checks only)**:
    - uncited codebase interaction missed by `spec.md` across Probes #1–#6, or
      generic filler in `Preserved guarantees`;
    - reversing/adopting a rejected `docs/decisions/` choice without meeting its
-     reopen condition or explicit user request, or omitting a required `Durable
-     contract update` (`Domain Vocabulary`, `Production Contract`, or
+     reopen condition or an explicit `intent.md` mandate, or omitting a required
+     `Durable contract update` (`Domain Vocabulary`, `Production Contract`, or
      `docs/decisions/`).
 
 ### Phase C — Behavioral Tightness & Mechanism Purity
@@ -108,44 +107,47 @@ no external observer can distinguish them**.
    response, status, event, or ack for *false-positive success* and
    *unobservable completion*.
 5. **Two-implementations divergence (Probes #1, #2, #3, #4, and #6).** Probe
-   [Behavioral Probes](specification/behavioral-probes.md) **#1, #2, #3, #4, and
-   #6**—plus any **stated** `spec.md` existing-state, compatibility, or
-   breaking-change rules (`Former-caller outcome:`, `Mixed-version overlap:`),
-   leaving uncited codebase blast-radius scanning to Check 3—for two
-   implementations both satisfying `spec.md` yet yielding **materially different
-   external outcomes** (status/code, persisted state, side effect, error
-   recoverability, authz/privacy exposure, compatibility, or success signal)
-   without an explicit `Open to Technical Design:` invariant. Check breaking
-   changes are placed in `Behavior delta` (not `Preserved guarantees`),
-   vocabulary consistency (`Terminology` + `not <confused sense>`), missing
-   table cells or unanchored table rules outside `R<n>`, and
-   [Research](research.md) quantity labels on numeric bounds.
+   [Behavioral Probes](specification/behavioral-probes.md) **#1, #2, #3
+   (retries, replays, timeouts, and partial failures), #4, and #6**—plus any
+   **stated** `spec.md` existing-state, compatibility, or breaking-change rules
+   (`Former-caller outcome:`, `Mixed-version overlap:`), leaving uncited
+   codebase blast-radius scanning to Check 3—for two implementations both
+   satisfying `spec.md` yet yielding **materially different external outcomes**
+   (status/code, persisted state, side effect, error recoverability,
+   authz/privacy exposure, compatibility, or success signal) without an explicit
+   `Open to Technical Design:` invariant. Verify [Specification
+   V1](../interfaces/spec-v1.md#field-rules) structural invariants: breaking
+   changes placed in `Behavior delta` (not `Preserved guarantees`), vocabulary
+   consistency (`Terminology` + `not <confused sense>`), total tables anchored
+   inside `R<n>`, and [Research](research.md) quantity labels on numeric bounds.
 6. **Mechanism leak & deletion test.** Apply the deletion test to every inferred
    clause. `FAIL` on leaked mechanisms, crate/file placement, task slicing,
    invented unfixed internal/operator identifier spellings left open by
-   `intent.md` and `api/` (owned by Technical Design's [Pinned shared
-   identifiers](../interfaces/design-v1.md)), or clauses excluding a
-   contract-valid design without protecting an accepted external guarantee.
+   `intent.md`, `api/`, existing code/config, and external standards (owned by
+   Technical Design's [Pinned shared identifiers](../interfaces/design-v1.md)),
+   or clauses excluding a contract-valid design without protecting an accepted
+   external guarantee.
 
 ## Already-Satisfied No-Delta
 
-Independently verify every functional, operational, quantitative, and technical
-`intent.md` obligation and `Success signal` against Axis 1's primary sources
-and callers, recording inspected locators in `evidence_boundary`. Return
-**`PASS | FAIL` only** (never `CONCERNS`):
+Confirm `intent.md` is at `status: ready` and independently verify every
+functional, operational, quantitative, and technical `intent.md` obligation and
+`Success signal` against Axis 1's primary sources and callers, recording
+inspected locators in `evidence_boundary`. Return **`PASS | FAIL` only** (never
+`CONCERNS`):
 
 - `PASS`: primary evidence proves zero delta remains across all affected
   surfaces and callers.
-- `FAIL`: `UPSTREAM_GAP` (`reopen_owner: Intake`) on a verified false premise,
-  or `PHASE_DEFECT` (`reopen_owner: Specification`) if any delta (including
-  behavior-preserving or quantitative work) remains.
+- `FAIL`: `UPSTREAM_GAP` (`reopen_owner: Intake`) on a non-`ready` `intent.md`
+  or verified false premise, or `PHASE_DEFECT` (`reopen_owner: Specification`)
+  if any delta (including behavior-preserving or quantitative work) remains.
 
 ## Blocking Bar And Verdict *(Draft Specification)*
 
 | Disposition | Bar |
 | --- | --- |
-| Blocking (`FAIL`) | Surviving witnessed check with anchor, classification (`PHASE_DEFECT` or `UPSTREAM_GAP`), and smallest owner (`Specification`, `Intake`, or external policy owner). |
-| Bounded (`CONCERNS`) | Strictly a bounded downstream proof or external risk over closed behavior—never behavioral ambiguity (`FAIL`); return `CONCERN` per [Review Result V1](../interfaces/review-result-v1.md). |
+| Blocking (`FAIL`) | Surviving witnessed check with anchor, classification (`PHASE_DEFECT` or `UPSTREAM_GAP`), and smallest owner (`Specification`, `Intake`, or external policy/evidence owner). |
+| Bounded (`CONCERNS`) | `CONCERN` per [Review Result V1](../interfaces/review-result-v1.md) over closed behavior—never behavioral ambiguity (`FAIL`). |
 | Non-blocking (never blocks `PASS`) | Downstream Technical Design choices, equivalent phrasing with no external divergence, or speculative scenarios outside `intent.md` and affected surfaces. |
 
 Return `PASS` when every assigned check clears with per-check proof of attack
