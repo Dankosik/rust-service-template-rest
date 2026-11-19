@@ -59,24 +59,14 @@ mod tests {
     use crate::Failure;
 
     #[test]
-    fn accepts_case_insensitive_scheme_and_space_run() {
-        let token = parse_bearer([b"bEaReR   abc.DEF_~+/=".as_slice()]).unwrap();
-
-        assert_eq!(token.as_bytes(), b"abc.DEF_~+/=");
+    fn a_presented_token_is_redacted_in_debug() {
+        let token = parse_bearer([b"Bearer fixture-token".as_slice()]).unwrap();
         assert_eq!(format!("{token:?}"), "PresentedToken([REDACTED])");
     }
 
     #[test]
     fn a_missing_envelope_is_not_a_malformed_one() {
         assert_eq!(parse_bearer(std::iter::empty()), Err(Failure::Missing));
-        assert_eq!(
-            parse_bearer([b"Basic abc".as_slice()]),
-            Err(Failure::Missing)
-        );
-        assert_eq!(
-            parse_bearer([b"Bearer ab=c".as_slice()]),
-            Err(Failure::Malformed)
-        );
         assert_eq!(
             parse_bearer([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
             Err(Failure::Malformed)

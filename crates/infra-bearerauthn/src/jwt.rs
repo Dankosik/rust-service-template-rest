@@ -396,6 +396,13 @@ mod tests {
         verifier.verify(&token).await.map_err(|error| error.reason)
     }
 
+    fn with_damaged_signature(token: &str) -> String {
+        let (message, signature) = token.rsplit_once('.').unwrap();
+        let mut signature = URL_SAFE_NO_PAD.decode(signature).unwrap();
+        signature[0] ^= 1;
+        format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
     #[tokio::test]
     async fn unavailable_clock_refuses_even_extreme_expiry_and_recovers() {
         let verifier = verifier(
@@ -814,10 +821,7 @@ mod tests {
             check(&verifier, &token).await.unwrap().subject(),
             Some("subject")
         );
-        let (unsigned, signature) = token.rsplit_once('.').unwrap();
-        let mut signature = URL_SAFE_NO_PAD.decode(signature).unwrap();
-        signature[0] ^= 1;
-        let damaged = format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode(signature));
+        let damaged = with_damaged_signature(&token);
         assert_eq!(
             check(&verifier, &damaged).await.unwrap_err(),
             VerificationReason::Signature
@@ -1850,10 +1854,10 @@ mod tests {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
         let good = ec_token(&signing, "k", &serde_json::json!({}));
-        let (message, signature) = good.rsplit_once('.').unwrap();
-        let tampered = format!(
-            "{message}.{}",
-            signature.replacen(signature.get(..2).unwrap(), "AA", 1)
+        let damaged = with_damaged_signature(&good);
+        assert_eq!(
+            verify_at(&memo, &damaged, 1_000).await.unwrap_err(),
+            VerificationReason::Signature
         );
         let claim_refusals = [
             ec_token(&signing, "k", &serde_json::json!({"aud": "other"})),
@@ -1867,7 +1871,7 @@ mod tests {
             ec_token(&signing, "k", &serde_json::json!({"sub": null})),
             ec_token(&signing, "k", &serde_json::json!({"scope": "a\"b"})),
         ];
-        for token in std::iter::once(&tampered).chain(&claim_refusals) {
+        for token in &claim_refusals {
             for _ in 0..2 {
                 assert!(verify_at(&memo, token, 1_000).await.is_err());
             }
