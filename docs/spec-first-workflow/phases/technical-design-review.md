@@ -14,20 +14,24 @@ Result](#no-open-decisions-result).
 
 ## Review Topology
 
-Run only assigned checks; whenever Phase A (check **1**) is assigned, respect
-the cold-start boundary (**never open uncited files before completing Phase
-A**):
+For a draft design, dispatch two fresh reviewers when both System Design and
+Rust Architecture apply and the design spans multiple crates or crossings,
+closes a one-way-door fork, or requires a non-trivial rollout. Otherwise
+dispatch one fresh reviewer. Apply the [Review Lifecycle](../shared/review.md#lifecycle)
+to the fixed candidate.
 
-- **Single-reviewer (default, 1 fresh `reviewer-agent`):** Phase A (`1`, cold)
-  → Phase B (`2`, applicable `3a` / `3b`, `4`) → Phase C (applicable `5`, `6`).
-- **Two-axis parallel (2 fresh `reviewer-agent` lanes):** run strictly the
-  assigned non-overlapping lens; review clears only when **both** axes return
-  `PASS` or `CONCERNS` on the same candidate:
-  - **Axis 1 — Spec Fidelity, System Mechanics, System Deletion & Rollout:**
-    checks **2**, **3a**, **5**, and **6**.
-  - **Axis 2 — Cold-Start Handoff, Rust Architecture & Source/Compile Truth:**
-    Phase A (**1**, cold — `intent.md`, `spec.md`, `design/`, `rollout.md`, and
-    explicitly cited anchors only) → Phase B (**3b** and **4**).
+- **Single reviewer:** check 1 first, then 2, applicable parts of 3, 4, and
+  applicable checks 5–6.
+- **Axis 1 — specification, system and rollout:** checks 2, 3a, 5 and 6 as
+  applicable. Include prior task research for the fidelity check.
+- **Axis 2 — cold-start handoff and Rust architecture:** check 1 first, then
+  3b and 4.
+
+For check 1, brief the reviewer with the method, assigned checks, fixed
+candidate (including linked siblings and rollout), accepted baseline and
+explicitly cited anchors only. A single reviewer may open uncited task
+research in Phase B. Review clears once every active lane clears on the same
+candidate under the shared lifecycle.
 
 ## Adversarial Checks
 
@@ -36,15 +40,13 @@ symbol, or crossing>` when clear). Keep findings compact (`anchor`,
 `classification`, `falsified claim or constraint`, `concrete witness`,
 `smallest owner`). Stop a broken path at its first unsupported edge while
 continuing independent paths. **Repo standards override generic taste:**
-suppress objections endorsed by [AGENTS.md](../../../AGENTS.md), [Repository
+suppress taste objections to choices endorsed by [AGENTS.md](../../../AGENTS.md), [Repository
 Architecture](../../repo-architecture.md), `docs/decisions/`, or [Backend
 Library Selection](../../backend-library-selection.md).
 
 ### Phase A — Cold-Start & Handoff *(run first, before opening uncited files)*
 
-1. **Planning cold-start, two-Leads divergence & boundary discipline.** Walk
-   `intent.md`, `spec.md`, `design/design.md` (and `rollout.md`), and
-   **explicitly cited anchors** with **zero chat history**. `FAIL`
+1. **Planning cold-start, two-Leads divergence & boundary discipline.** Walk the check 1 brief with **zero chat history**. `FAIL`
    (`PHASE_DEFECT` or `UPSTREAM_GAP`) on anything observable without opening
    uncited files:
    - Planning or parallel Leads must invent a mechanism, error/retryability
@@ -66,22 +68,21 @@ Library Selection](../../backend-library-selection.md).
 mechanism, or architecture/compile violation, skip Phase C deep attacks on
 malformed sections while still reporting upstream gaps found in the same pass.*
 
-2. **Obligation trace, spec fidelity & scope.** Verify `intent.md` (when
-   present) and `spec.md` (or a valid skipped-Definition fixed external
-   contract) are `status: ready`, then independently map `intent.md` (`I<n>`
+2. **Obligation trace, spec fidelity & scope.** Verify the accepted baseline under [Technical Design](technical-design.md#steps),
+   including the cited contract when Definition was skipped. Independently
+   map the applicable obligations from `intent.md` (`I<n>`
    including `Binding` strength) + `spec.md` (all `R<n>`, `Open to
    Technical Design:`, `G<n>`, `Terminology`, `Non-goals`, `Decisions,
    assumptions, and reopen triggers`, `Downstream handoff`, `Durable contract
    update`, `Carried concerns`) + `api/` `->` decision/mechanism `->` owner `->`
    proving surface. `FAIL` on any unsupported obligation, tripped `spec.md`
-   `Reopen if`, resurrected `intent.md` `Rejected` option without reopening
-   Intake, altered behavior, terminology collision, or leaked `Non-goal`.
+   `Reopen if`, choice contradicting settled intent without renewed Intake authority, altered behavior, terminology collision, or leaked `Non-goal`.
 3. **Simplicity, deletion test, steelman `D<n>` & durable docs** *(split by
    subject across axes; both consult `intent.md`, `docs/decisions/`, and
    `docs/backend-library-selection.md` for their subject and `FAIL` on a
    strawman `D<n>`, missing decisive constraint or objective `Reopen if`, or
-   reversing a rejected choice without meeting its reopen condition, reopening
-   Intake, or an explicit user request)*:
+   reversing a rejected choice outside the applicable Intent or repository
+   decision rules in [Technical Design](technical-design.md#steps))*:
    - **3a — System mechanisms & contract docs:** try to delete or collapse
      every added system mechanism, queue, cache, worker, fallback, or config
      key onto an existing owner unless forced by `spec.md`. `FAIL` on
@@ -101,8 +102,9 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    [`quality/architecture.json`](../../../quality/architecture.json)
    (`allow_dependents`), `template/profiles.json`, `Cargo.toml`
    `[workspace.lints]`, `clippy.toml`, and `vendor/` forks. `FAIL` on:
-   - any contradicted or uninspected anchor (genuinely uncached crates carried
-     in `Assumptions and reopen triggers` are `CONCERNS`);
+   - any contradicted or uninspected `Verified anchors` claim. Classify an
+     explicitly recorded evidence gap by its effect on the decision under
+     [Verdict](#verdict);
    - any `quality/architecture.json`, [Repository
      Architecture](../../repo-architecture.md#global-invariants), profile, or
      unaddressed exhaustive-type fan-out violation;
@@ -111,10 +113,8 @@ malformed sections while still reporting upstream gaps found in the same pass.*
      mutated surfaces`, or any superseded code/test or affected generated
      contract (`api/`, `.sqlx/`, `crates/grpc-contracts`) omitted from
      `Superseded paths and generated contracts`;
-   - any `S<n>` violating lints or [Rust Architecture's compile-reality
-     rules](technical-design/rust-architecture.md#rust-contracts-compile-reality-and-workspace-graph)
-     without primary-source trait verification or `Reopen if` +
-     `integration-first`, or forcing `pub` internal leaks to test.
+   - any lint violation, unsupported verified bound, or test-only `pub` leak.
+     Assess unproved bounds under the author's [uncertainty disposition](technical-design.md#steps).
 
 ### Phase C — System Mechanics & Rollout
 
@@ -133,9 +133,8 @@ malformed sections while still reporting upstream gaps found in the same pass.*
 
 ## No-Open-Decisions Result
 
-Always 1 fresh `reviewer-agent`. Verify check **2**'s input preconditions
-(plus zero tripped `spec.md` `Reopen if` and no non-trivial `rollout.md`
-required). Inspect primary code, `quality/architecture.json`, and non-obvious
+Use one fresh reviewer. Verify the accepted baseline and the exit conditions
+in [Technical Design](technical-design.md#steps). Inspect primary code, `quality/architecture.json`, and non-obvious
 `Cargo.lock` sources for every obligation in check **2**'s scope. Try to
 construct **one realistic two-engineer divergence** (mechanism, unpinned
 identifier, error/retryability, config rule, rollout path, owner, or seam) or
@@ -156,6 +155,6 @@ Exit](technical-design/non-standard-paths.md#no-open-decisions-exit), and apply
   closed design or forced-owner package (e.g., genuinely uncached `Cargo.lock`
   source or optional benchmark). Return `CONCERN` naming **risk, downstream
   owner, and closing action**.
-- `FAIL`: any surviving witnessed check. Return `PHASE_DEFECT` or
+- `FAIL`: any surviving witnessed defect or missing decision-critical input. Return `PHASE_DEFECT` or
   `UPSTREAM_GAP` with anchor, concrete witness, and smallest owner (`Technical
   Design`, `Specification`, `Intake`, or external authority).
