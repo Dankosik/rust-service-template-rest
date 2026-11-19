@@ -204,7 +204,6 @@ class Coverage(unittest.TestCase):
         passed = check("links")
         self.assertEqual(passed.returncode, 0, passed.stderr)
         self.assertEqual(passed.stdout.splitlines().count("repository link check"), 1)
-        self.assertNotIn("image-inputs-check", passed.stdout)
 
         failed = check("links", lychee_status=7)
         self.assertNotEqual(failed.returncode, 0, failed.stdout)
@@ -215,7 +214,7 @@ class Coverage(unittest.TestCase):
                 rejected = check(invalid)
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertIn("expects DOCS_CHECK_PART=all|links|image-inputs", rejected.stderr)
-                self.assertNotIn("image-inputs-check", rejected.stderr)
+                self.assertNotRegex(rejected.stderr, r"(?m)^image-inputs-check:")
                 self.assertNotIn("repository link check", rejected.stdout)
 
         (self.root / IAC).write_text(FIXTURE[IAC], encoding="utf-8")
@@ -223,9 +222,14 @@ class Coverage(unittest.TestCase):
             with self.subTest(part=part):
                 passed = check(part)
                 self.assertEqual(passed.returncode, 0, passed.stderr)
-                image, links = passed.stdout.splitlines()
-                self.assertIn(f"{IAC} covers", image)
-                self.assertEqual(links, "repository link check")
+                checks = [
+                    line for line in passed.stdout.splitlines()
+                    if line.startswith("image-inputs-check:") or line == "repository link check"
+                ]
+                self.assertEqual(checks, [
+                    f"image-inputs-check: {IAC} covers admitted image input families",
+                    "repository link check",
+                ])
 
         isolated_bin = self.root / "image-only-bin"
         isolated_bin.mkdir()
