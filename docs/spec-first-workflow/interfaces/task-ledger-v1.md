@@ -37,9 +37,11 @@ Global constraints: <active execution instructions, shared non-obvious invariant
 
 ## Runtime State (Orchestrator-owned)
 
-Managed under [Ledger Execution](../phases/implementation/ledger-execution.md);
+Managed under [Implementation](../phases/implementation.md#orchestrator-loop);
 Planning omits these fields.
 
+- `Base: <commit SHA>` (header, pinned before the first dispatch so worktrees,
+  Final Validation, and Review share one exact diff baseline).
 - `Blocked stop: <unavailable required input and owner>` (header, only when
   blocked).
 - Routing fields per task (not acceptance evidence): `Execution: <native task or

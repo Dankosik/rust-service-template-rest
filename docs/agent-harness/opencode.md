@@ -38,7 +38,7 @@ OpenCode 2 translates their shared agent files and permission rules. It reads
 the nesting limit from `experimental.subagent_depth`; OpenCode 1 reads the
 top-level `subagent_depth`. Use the native subagent catalog in 2.x. Project
 instructions and role dispatch are independent of the 1.x Task plugin.
-Apply [Ledger Execution](../spec-first-workflow/phases/implementation/ledger-execution.md)
+Apply [Implementation](../spec-first-workflow/phases/implementation.md#orchestrator-loop)
 for implementation scheduling and final acceptance.
 
 ## OpenCode 1
@@ -46,7 +46,7 @@ for implementation scheduling and final acceptance.
 - Dispatch ready units via Task (`subagent_type: "acceptance-unit-lead"`), even
   if `.opencode/plugins/task-subagents.js` blurbs are stale; never substitute
   `general`, `explore`, `scout`, or generic workers. Integrate candidates via
-  [acceptance transition](../spec-first-workflow/phases/implementation/ledger-execution.md#acceptance-transition)
+  [acceptance transition](../spec-first-workflow/phases/implementation.md#3-acceptance-transition)
   from [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
 - Report a carrier gap only if Task rejects the call, returns unknown agent or
   no identity, or `subagent_depth` is 1. `opencode.json` sets `subagent_depth: 3`

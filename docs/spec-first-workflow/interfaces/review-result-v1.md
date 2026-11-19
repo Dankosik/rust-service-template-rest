@@ -22,7 +22,7 @@ Implementation finding classification is closed:
 | --- | --- | --- |
 | `TASK_DEFECT` | The candidate falsifies the current task packet. | `FAIL`; repair the same task. |
 | `UPSTREAM_GAP` | An accepted input or dependency output is missing or invalid. | `NEEDS_PARENT`; reopen the smallest upstream owner. |
-| `INTEGRATION_DEFECT` | A seam or assembly between implemented outputs fails. | `FAIL`; route repair under [Integrated Candidate](../phases/implementation-review.md#integrated-candidate) to one owning Lead (with combined seam writable scope when needed), preserving unaffected implementation and valid final evidence. Reopen Planning only when accepted behavior or ledger scope must change. |
+| `INTEGRATION_DEFECT` | A seam or assembly between implemented outputs fails. | `FAIL`; route repair under [Integrated Candidate](../phases/implementation-review.md#integrated-candidate) to one fresh Lead (with combined seam writable scope when needed), preserving unaffected implementation and valid final evidence. Reopen Planning only when accepted behavior or ledger scope must change. |
 | `FOLLOW_UP` | An improvement is outside the current packet and does not falsify it. | It cannot block `PASS`; route separately through Planning if accepted. |
 
 Non-implementation adapters use `PASS | CONCERNS | FAIL`. Implementation uses

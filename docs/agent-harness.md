@@ -15,10 +15,12 @@ unchanged.
 Brief each delegated lane with its checkable outcome, relevant context and
 paths, writable scope when mutating, and stop or proof boundary without copying
 repository-wide rules.
-Share the checkout across read-only lanes, and across concurrent mutable units
-or lanes when writable owners and locks are disjoint; serialize overlapping
-mutations, reserving isolated worktrees for concurrent conflicting edits where
-isolation costs less than waiting.
+Share the checkout across read-only lanes and when only one mutable writer is
+active. For two or more concurrent mutable units, use isolated worktrees
+anchored to the integration tip whenever the selected adapter supports them
+(avoiding Cargo `target/` lock contention, transitive build breakage, and mixed
+diffs); serialize overlapping mutations and scope edits/checks strictly to own
+paths when the adapter lacks worktree isolation.
 
 Count the active tree (Leads, mutable descendants, review and validation lanes)
 against capacity, reserving slots for review, unlock, and landing.
@@ -48,7 +50,7 @@ leaf lanes via `evidence-agent`, `specialist-agent`, `worker-agent`,
 | --- | --- |
 | Orchestrator | The ledger; recover from canonical state if unreliable. |
 | Architect / phase owner | Macro phase; independent design or new phase uses a fresh actor. |
-| Lead | Its unit; related-unit reuse only under [Ledger Execution](spec-first-workflow/phases/implementation/ledger-execution.md#dispatch). |
+| Lead | Its unit until integrated; fresh Lead per task and per final-validation repair under [Implementation](spec-first-workflow/phases/implementation.md#orchestrator-loop). |
 | Execution lane | One bounded brief and its corrections, including smaller models. |
 | Evidence lane | One bounded evidence brief and related follow-ups below. |
 
@@ -79,7 +81,7 @@ edits or broadcasting to unaffected lanes.
 Use a fresh agent (stopping the old child and reconciling its partial edits
 first) when a change alters outcome, reassigns or narrows writable scope, or
 changes required capability, or for an unrelated investigation or independent
-judgment (Lead reuse excludes execution lanes). On stalled diagnosis or
+judgment. On stalled diagnosis or
 unreliable context, change strategy via the parent rather than copying failed
 transcripts or rotating by time/turn count. Follow-ups continue history without
 resetting context.

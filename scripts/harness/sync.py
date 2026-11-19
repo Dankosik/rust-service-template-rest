@@ -439,7 +439,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     )
     orchestrator_method = f"Apply [Implementation as Ledger Orchestrator]({implementation}#carrier)\n"
     lead_tail = (
-        "Apply the fixed unit packet and its named Method. Return\n"
+        "Apply the assigned packet, repair brief, or ledger scope and its named Method. Return\n"
         "`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.\n"
     )
     rendered[".claude/agents"]["acceptance-unit-lead.md"] = (
