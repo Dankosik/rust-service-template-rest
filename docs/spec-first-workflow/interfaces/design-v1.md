@@ -1,59 +1,63 @@
 # Design V1
 
 `specs/<task>/design/design.md` is the reviewed technical architecture for one
-structured task. It closes every technical choice where two competent Rust
-engineers reading `spec.md` and current code could build incompatible
-mechanisms, contracts, failure semantics, or crate/module seams—preserving
-`spec.md`'s observable behavior while leaving task slicing to Planning and
-function bodies, private file layout, and test implementation to
-Implementation.
+structured task—closing every choice where two competent Rust engineers reading
+`spec.md` and current code could build incompatible mechanisms, contracts,
+failure or trust semantics, rollout paths, or seams.
 
 ```markdown
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
 Basis: intent.md, spec.md[, research/<topic>.md ...][, rollout.md]
-Carried concerns: <bounded review CONCERNS carried downstream; omit when none>
+Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit when none>
 
 ## Obligation trace
 
-| Obligation | Decision / Mechanism | Semantic owner |
-| --- | --- | --- |
-| `spec.md#r1-...` / `G1` / carried concern | `D1` — <selected mechanism or forced existing path> | `<crate>::<module>` |
+| Obligation | Decision / Mechanism | Semantic owner | Proving surface |
+| --- | --- | --- | --- |
+| `spec.md#r1-...` / `G1` / carried concern | `D1` — <mechanism> or `forced:` <existing owner> | `<crate>::<module>` | <public seam, schema/probe, or durable effect; note required external input> |
 
 ## Key decisions
 
+<Omit when every obligation is forced by existing owners.>
+
 ### D1 — <short decision name>
 
-- **Choice:** <selected mechanism, seam, or dependency>
-- **Decisive constraint:** <accepted obligation, invariant, or verified source fact forcing this choice>
-- **Strongest rejected alternative:** <simplest or strongest viable substitute> — rejected because <concrete invariant, cost, or constraint it violates>
-- **Accepted cost:** <trade-off accepted>
-- **Reopen if:** <objective condition or owner that would reverse the choice>
-- **Durable record:** <`docs/decisions/...`, `docs/backend-library-selection.md`, or `docs/repo-architecture.md` update required in Implementation, or `none`>
+- **Choice:** <concrete mechanism, seam, or dependency>
+- **Decisive constraint:** <specific `R<n>`, `G<n>`, invariant, bound, or verified source fact>
+- **Strongest rejected alternative:** <steelman simplest/strongest substitute> — rejected because <exact obligation, invariant, or bound it breaks>
+- **Accepted cost:** <concrete trade-off accepted>
+- **Reopen if:** <objective condition or owner reversing the choice>
+- **Durable record:** <`docs/decisions/...`, `docs/backend-library-selection.md`, or `docs/repo-architecture.md` update in Implementation, or `none`>
 
 ## System flows, invariants, and failure semantics
 
-<Omit when the System Design branch did not trigger.>
+<Omit when System Design did not trigger.>
 
-- **Flows & source of truth:** <actor/trigger to caller-visible completion or durable finality; canonical writer and representation; compact diagram only when ordering, fan-out, or recovery is clearer visually>
-- **Failure, cancellation, and concurrency:** <failure points, `CommitUnknown` / ambiguous outcome handling, idempotency/replay/reconciliation, drop/cancellation safety, race serialization>
-- **Enforcement & blast radius:** <mechanism and boundary enforcing each critical invariant, effectful bypass paths closed, mixed-version or consumer compatibility>
-- **Operator signals & lifecycle:** <distinct log event, metric label, span outcome, or probe state per failure, degradation, or recovery path; readiness and staged shutdown participation>
-- **Unit cost & bound:** <round trips, queries, held locks, and buffered bytes per request, message, job, or caller-controlled input, and what bounds them>
-- **Deployment impact:** <`none`, `standard single-step deploy`, or link to `rollout.md`>
+- **Flows, data & truth:** <trigger -> finality; canonical writer; atomic tx scope (zero network I/O in DB tx), schema/index/retention/cache rules; compact diagram only if clearer>
+- **Failure, cancellation & concurrency:** <`CommitUnknown` recovery, retry owner/budget, idempotency key/store/TTL (in-flight / committed / expired), drop/cancel safety, serialization primitive, interleaving witness>
+- **Trust & enforcement:** <enforcing boundary, closed bypass paths, AuthN/AuthZ & tenant isolation, secret/PII redaction, egress/parser bounds>
+- **Budgets, cost & signals:** <deadline/retry/drain budget arithmetic (`OperationContext`, bootstrap); per-unit cost formula + hard limit; exact discriminating log/metric/span/probe signal per non-success path and readiness>
+- **Deployment impact:** <`none`, `standard single-step deploy`, or link to `rollout.md` + mixed-version rule>
 
 ## Rust architecture, seams, and ownership
 
-<Omit when the Rust Architecture branch did not trigger.>
+<Omit when Rust Architecture did not trigger.>
 
-- **Semantic owners:** <per changed responsibility: `<crate>::<module>` (`extend | add | replace | delete`), `quality/architecture.json` role and optional profile fit, superseded code/paths deleted>
-- **Deep modules & seams:** <cross-crate or cross-boundary interfaces—types, ownership/lifetimes, error mapping, type-enforced invariants, hidden complexity, dependency category, and test surface; compact Rust type/trait/enum or SQL snippet only when more precise than prose>
-- **Verified anchors:** <source-verified `path::Symbol` and `crate@version::item` depended on or reused, plus any uncached crate check carried in `Reopen if`>
-- **Shared mutated surfaces:** <shared surfaces actually mutated—`Cargo.toml`/`Cargo.lock`, `migrations/`, `api/openapi/service.yaml`, `api/proto/`, `quality/architecture.json`, `crates/service` bootstrap, `crates/config`—or `none`>
-- **Planning hooks:** <prerequisite shared seam, riskiest unverified integration seam, or wide blast-radius `expand -> migrate -> contract` constraint Planning must sequence; omit when none>
+- **Semantic owners:** <`<crate>::<module>` (`extend | add | replace | delete`), `quality/architecture.json` role/`allow_dependents`/profile fit, superseded paths deleted>
+- **Deep modules & seams:** <interface (types, invariants, ordering, error mapping, lifetimes), hidden complexity, dependency category/adapters, test surface; compact Rust signature + 3–8 line caller usage sketch per non-trivial new/changed seam>
+
+## Grounding and planning handoff
+
+- **Verified anchors:** <source-verified `path::Symbol`, `crate@version::item`, and schema/config anchors, plus any uncached crate in `Reopen if`>
+- **Pinned shared identifiers:** <exact new/changed config keys, error codes, metric/span names, wire/event/job/table/column names, or cross-unit symbols; omit when none>
+- **Shared mutated surfaces:** <canonical repo-relative lock paths actually mutated—e.g. `Cargo.toml`, `Cargo.lock`, `api/openapi/service.yaml`, `api/proto/`, `migrations/`, `.sqlx/`, `quality/architecture.json`, `crates/config/`, `crates/service/src/`, `crates/jobs-worker/src/`, `crates/migrate/src/`, `make/template.mk`, `template-owned.paths`, `scripts/template/profiles.json`, or shared crate `lib.rs`—or `none`>
+- **Planning hooks:** <`prefactor`, `shared seam` (≥2 parallel consumers only), `integration-first`, or `expand -> migrate -> contract`; omit when none>
 
 ## Assumptions and reopen triggers
+
+<Omit when none.>
 
 - **<Bounded assumption>:** <assumption preserving accepted intent and spec> — **Reopen if:** <objective condition or owner>
 ```
@@ -62,39 +66,37 @@ Carried concerns: <bounded review CONCERNS carried downstream; omit when none>
 
 - **Lifecycle (`status`):** start at `draft`; flip to `ready` only after
   [Technical Design Review](../phases/technical-design-review.md) returns
-  `PASS` or `CONCERNS` and any carried obligations are recorded in `Carried
-  concerns`. Use `blocked` when preserving partial work alongside a `blocked`
-  handoff upstream.
-- **Single entry point, task-adaptive sections:** keep
-  `specs/<task>/design/design.md` as the default index and single-file home;
-  split a large section (such as a component inventory) into a linked sibling
-  file under `specs/<task>/design/` only when splitting creates a clearer
-  review unit. Omit `Carried concerns`, `Key decisions` (when every path is
-  forced), `System flows...`, `Rust architecture...`, `Planning hooks`, or
-  `Assumptions...` when untriggered or empty instead of writing `N/A`
-  boilerplate. Persist `specs/<task>/rollout.md` alongside `design.md` only
-  when [Release Closure](../rubrics/release-closure.md) requires a non-trivial
-  rollout sequence.
-- **Addressable decisions (`D1`, `D2`, …) and full traceability:** every
-  `R<n>`, `G<n>`, and `Carried concerns` item in [Specification
-  V1](spec-v1.md) appears in `Obligation trace` (closing each upstream concern
-  with a decision or carrying it into `Carried concerns` if it remains a
-  bounded downstream risk). Planning packets cite `design/design.md#d1-...`
-  directly without copying design prose.
-- **Interfaces, not implementation:** inline a compact Rust type/trait/enum
-  signature, SQL schema/constraint, state table, or exact wire/signing vector
-  (including one deterministic non-secret vector for signature-sensitive
-  shapes) when it pins a boundary invariant more precisely than prose. Leave
-  function bodies, speculative internal `.rs` file lists, task slicing, and
-  test cases/fixtures/commands to Planning and Implementation.
-- **Proof boundary:** design ensures module interfaces are testable at their
-  natural seams without mock-only traits and names the proving surface, while
-  keeping a proposed check distinct from a mandatory local or live acceptance
-  gate ([Evidence Contract](../shared/evidence-contract.md#design-proof)).
+  `PASS` or `CONCERNS` and carried obligations appear in `Carried concerns`.
+  Use `blocked` when saving partial work alongside an upstream `blocked`
+  handoff.
+- **Proportionality & single home:** size `design.md` to the genuine open forks
+  (one local choice can be half a page). Omit empty optional sections instead
+  of writing `N/A`, split a large inventory into a linked sibling under
+  `design/` only when that sharpens review, and link unchanged code, schemas,
+  and `research/*.md` rather than copying them. Persist `specs/<task>/rollout.md`
+  only when [Release Closure](../rubrics/release-closure.md) requires a
+  non-trivial rollout sequence.
+- **Concrete commitments:** bind exact keys, TTLs, budget formulas, error
+  codes, signal names, serialization primitives, and canonical repo-relative
+  lock paths so Planning and parallel Leads converge without inventing
+  architecture. Preserve canonical nouns from `spec.md`, code, and
+  `docs/repo-architecture.md`.
+- **Steelman `D<n>` & traceability:** add `D<n>` only for genuine open choices
+  (forced paths stay in `Obligation trace`); each `Strongest rejected
+  alternative` must be a serious simplest/strongest substitute, never a
+  strawman. Every `R<n>`, `G<n>`, and `spec.md` `Carried concerns` item appears
+  in `Obligation trace`; Planning packets cite `design/design.md#d1-...`
+  directly.
+- **Seams & sketches, not implementation:** inline a compact Rust signature +
+  3–8 line caller usage sketch, SQL constraint, state table, or exact
+  wire/signing vector (with one deterministic non-secret vector for
+  signature-sensitive shapes) when it pins an invariant better than prose.
+  Keep function bodies, private file layout, task slicing, and test
+  cases/fixtures/proving layers/commands out of `design.md` ([Evidence
+  Contract](../shared/evidence-contract.md#design-proof)).
 - **Durable record gate:** mark a durable update to `docs/decisions/`,
   [Backend Library Selection](../../backend-library-selection.md), or
   [Repository Architecture](../../repo-architecture.md) only when all three
-  hold—(1) hard to reverse, (2) surprising to a future reader without context,
-  and (3) a real trade-off with a rejected alternative—or whenever reopening a
-  previously rejected choice in those records. Implementation lands the doc
-  update in the same change.
+  hold—(1) hard to reverse, (2) surprising without context, and (3) a real
+  trade-off with a rejected alternative—or when reopening a previously rejected
+  choice there. Implementation lands the doc update in the same change.
