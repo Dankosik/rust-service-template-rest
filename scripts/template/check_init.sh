@@ -209,13 +209,13 @@ graph_selection_self_test() {
 		{ echo "default artifact selection must include every release representative" >&2; return 1; }
 	for invalid in '' 0 69 01 '1,1' '2,,3' '1,'; do
 		status=0
-		failure=$(CI=false ALLOW_FULL= bash "$0" --runtime-graphs "${invalid}" 2>&1) || status=$?
+		failure=$(CI=false ALLOW_FULL='' bash "$0" --runtime-graphs "${invalid}" 2>&1) || status=$?
 		[[ ${status} == 2 && ${failure} == "--runtime-graphs requires distinct comma-separated graph IDs 1..68" ]] ||
 			{ echo "invalid runtime selection was not rejected: ${invalid}" >&2; return 1; }
 	done
 	for invalid in '' 2 48 '1,7,7' '1,65,64'; do
 		status=0
-		failure=$(CI=false ALLOW_HEAVY= bash "$0" --artifact-graphs "${invalid}" 2>&1) || status=$?
+		failure=$(CI=false ALLOW_HEAVY='' bash "$0" --artifact-graphs "${invalid}" 2>&1) || status=$?
 		[[ ${status} == 2 && ${failure} == "--"*' distinct '* ]] ||
 			{ echo "invalid artifact selection was not rejected: ${invalid}" >&2; return 1; }
 	done
