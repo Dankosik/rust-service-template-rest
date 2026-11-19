@@ -41,7 +41,7 @@ CELLS.update({
     "exchange": Cell("exchange"),
 })
 for scenario, final, diagnostics in (
-    ("http-buffered", ("empty", "one", "multi"), (
+    ("http-buffered", ("empty", "empty-post", "empty-put", "empty-patch", "one", "multi"), (
         "large", "tiny", "canonical", "alternate", "mixed", "caller-host", "late-error",
         "bad-scheme", "bad-port", "bad-origin", "userinfo", "retry", "unstarted-retry",
     )),
@@ -342,6 +342,11 @@ def run_cell(args, tools, cell_dir, cell, artifact, identities, deadline):
             probes = (cell_dir / "caller.stderr").read_text().count(marker)
             invocation["unstarted_retry_probe_count"] = probes
             valid = valid and probes == 1
+        if valid and cell.scenario != "service-demand":
+            connection_error = validate_peer_connections(cell, raw)
+            if connection_error:
+                invocation["connection_validation_error"] = connection_error
+                valid = False
         no_timing = cell.scenario in {"service-demand", "http-retain"} or not valid
         invocation["windows"] = summarize_windows(raw, no_timing)
         if valid and any(window["offered"] != args.calls for window in invocation["windows"]):
@@ -369,16 +374,34 @@ def caller_work(window):
 def measured_peer_work(receipt):
     before = receipt.get("peer_before", receipt.get("before"))
     after = receipt.get("peer_after", receipt.get("after"))
-    counters = ("service_grants", "service_responses", "exchange_grants", "exchange_responses",
+    connections = ("http_connections", "grpc_connections")
+    if not all(isinstance(snapshot, dict) and all(key in snapshot for key in connections)
+               for snapshot in (before, after)):
+        return None
+    counters = (*connections, "service_grants", "service_responses", "exchange_grants", "exchange_responses",
                 "invalid_grants", "resources", "old_token_requests", "replacement_token_requests",
                 "exchange_token_requests", "unauthorized", "anonymous_requests", "http_request_bytes",
                 "http_response_bytes", "http_response_aborts", "http_late_errors", "grpc_requests",
                 "grpc_messages", "grpc_traceparent", "grpc_request_bytes", "grpc_old_token_requests",
                 "grpc_replacement_token_requests", "grpc_exchange_token_requests", "grpc_unauthorized",
                 "grpc_anonymous_requests")
-    if isinstance(before, dict) and isinstance(after, dict):
-        observed = {key: after[key] - before[key] for key in counters if key in before and key in after}
-        return observed or None
+    return {key: after[key] - before[key] for key in counters if key in before and key in after}
+
+
+def validate_peer_connections(cell, receipt):
+    work = measured_peer_work(receipt)
+    if work is None or work["http_connections"] < 0 or work["grpc_connections"] < 0:
+        return "missing or decreasing peer connection counts"
+    warm_http = cell.scenario in {"service-before", "service-refresh", "exchange", "http-retain"} or (
+        cell.scenario == "http-buffered" and cell.shape not in {
+            "caller-host", "bad-scheme", "bad-port", "bad-origin", "userinfo",
+            "late-error", "retry", "unstarted-retry",
+        }
+    )
+    if warm_http:
+        before = receipt.get("peer_before", receipt.get("before"))
+        if before["http_connections"] < 1 or work["http_connections"] != 0:
+            return "warm HTTP window did not reuse established connections throughout"
     return None
 
 

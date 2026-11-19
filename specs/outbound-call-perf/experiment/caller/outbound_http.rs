@@ -14,6 +14,7 @@ struct Workload {
     canonical: http::Uri,
     alternate: http::Uri,
     method: Method,
+    body: Bytes,
     caller_host: bool,
     mixed: bool,
     headers_only: bool,
@@ -40,6 +41,7 @@ impl Workload {
             alternate_authority = format!("synthetic@{authority}");
         }
         let resource = match config.shape.as_str() {
+            "empty-post" | "empty-put" | "empty-patch" => "empty",
             "empty" | "one" | "multi" | "tiny" | "large" | "late-error" => &config.shape,
             _ => "one",
         };
@@ -56,10 +58,16 @@ impl Workload {
             client: Client::try_new(&origin, limits())?,
             canonical,
             alternate,
-            method: if resource == "empty" {
-                Method::HEAD
+            method: match config.shape.as_str() {
+                "empty" => Method::HEAD,
+                "empty-put" => Method::PUT,
+                "empty-patch" => Method::PATCH,
+                _ => Method::POST,
+            },
+            body: if resource == "empty" {
+                Bytes::new()
             } else {
-                Method::POST
+                BODY.clone()
             },
             caller_host: config.shape == "caller-host",
             mixed: config.shape == "mixed",
@@ -81,12 +89,12 @@ impl Workload {
         if self.retry_probe && index == 0 {
             builder = builder.header("x-outbound-perf-retry-probe", "1");
         }
-        let body = if self.method == Method::HEAD {
-            Bytes::new()
-        } else {
-            BODY.clone()
-        };
-        Ok(builder.body(body)?)
+        if self.body.is_empty() {
+            builder = builder
+                .header(http::header::CONTENT_LENGTH, "7")
+                .header(http::header::TRANSFER_ENCODING, "chunked");
+        }
+        Ok(builder.body(self.body.clone())?)
     }
 
     async fn buffered(
@@ -142,7 +150,10 @@ fn observe_error(error: Error, status: Option<u16>) -> Observation {
 }
 
 fn expected(config: &Config) -> Observation {
-    if config.shape == "empty" {
+    if matches!(
+        config.shape.as_str(),
+        "empty" | "empty-post" | "empty-put" | "empty-patch"
+    ) {
         return Observation::success(204, &[]);
     }
     if matches!(
@@ -363,16 +374,15 @@ fn wire_matches(
         .ok_or("missing canonical authority")?
         .as_str();
     let target = workload.canonical.path();
-    let body_bytes = if workload.method == Method::HEAD {
-        0
+    let body_bytes = workload.body.len();
+    let content_length = if body_bytes > 0
+        || matches!(workload.method, Method::POST | Method::PUT | Method::PATCH)
+    {
+        json!([body_bytes.to_string()])
     } else {
-        BODY.len()
+        json!([])
     };
-    let length = if body_bytes == 0 {
-        Value::Null
-    } else {
-        json!(body_bytes.to_string())
-    };
+    let transfer_encoding = json!([]);
     let wire_count = |stats: &Value| -> Result<u64> {
         let rows = stats["http_wire"]
             .as_array()
@@ -383,7 +393,8 @@ fn wire_matches(
                 entry["method"] == workload.method.as_str()
                     && entry["target"] == target
                     && entry["host"] == host
-                    && entry["content_length"] == length
+                    && entry["content_length"] == content_length
+                    && entry["transfer_encoding"] == transfer_encoding
                     && entry["body_bytes"] == body_bytes
             })
             .filter_map(|entry| entry["requests"].as_u64())

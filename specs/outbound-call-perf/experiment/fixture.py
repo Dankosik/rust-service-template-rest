@@ -137,11 +137,12 @@ class Fixture:
                         "method": method,
                         "target": target,
                         "host": host,
-                        "content_length": length,
+                        "content_length": lengths,
+                        "transfer_encoding": encodings,
                         "body_bytes": body_bytes,
                         "requests": count,
                     }
-                    for (method, target, host, length, body_bytes), count in self.http_wire.items()
+                    for (method, target, host, lengths, encodings, body_bytes), count in self.http_wire.items()
                 ],
                 "grpc_methods": dict(self.grpc_methods),
                 "grpc_status": dict(self.grpc_status),
@@ -246,7 +247,12 @@ class ResourceHandler(HttpHandler):
                     self.fixture.count["service_pending"] -= 1
 
     def resource(self, path: str, request_bytes: int) -> None:
-        wire = (self.command, self.path, self.headers.get("Host"), self.headers.get("Content-Length"), request_bytes)
+        wire = (
+            self.command, self.path, self.headers.get("Host"),
+            tuple(self.headers.get_all("Content-Length", ())),
+            tuple(self.headers.get_all("Transfer-Encoding", ())),
+            request_bytes,
+        )
         with self.fixture.lock:
             self.fixture.count["resources"] += 1
             self.fixture.count["http_request_bytes"] += request_bytes

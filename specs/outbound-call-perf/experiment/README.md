@@ -51,6 +51,10 @@ Set `caller_cpus` and `fixture_cpus` to disjoint Linux CPU lists sized to keep t
 
 Pilot on the authorized host only. Use the same offered and warm-up counts on both sides. Reduce counts if necessary to keep each service hit window wholly before the early-refresh trigger or inside the positively gated refresh period, as applicable. Keep pilot data and tuned population counts. In each trial, TLS, transports, and tokens warm before caller CPU collection starts. Every caller process starts with `SSL_CERT_FILE` set to the fresh fixture CA. The gRPC connector trusts the same CA explicitly and negotiates h2. Fixture calls use synthetic secrets in a temporary directory, and receipts exclude those secrets.
 
+The default buffered matrix keeps the empty HEAD cell and measures empty POST, PUT, and PATCH separately. The fixture checks the method, origin-form target, Host, body byte count, and all values of both framing headers. The empty cells supply a length and transfer encoding at admission so the peer can confirm their replacement or removal.
+
+Ordinary buffered, retained, and credential-hit cells require established HTTPS connections before the window and zero new HTTPS connections during it. Headers-only, post-header failure, and retry diagnostics can establish connections as part of their workload. Paired peer work includes established HTTP and gRPC connection deltas.
+
 | Variant pairing | Cells |
 | --- | --- |
 | Candidate vs. `host-insertion` | `http-buffered-canonical`, `http-buffered-alternate`, `http-buffered-caller-host`, `http-buffered-ipv6`, `http-buffered-retry` |
