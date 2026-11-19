@@ -127,7 +127,7 @@ impl RunFailure {
     }
 }
 
-const RECORD_TARGET: &str = "migrate_record";
+pub const RECORD_TARGET: &str = "migrate_record";
 
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     deadline_instant(options.deadline)?;

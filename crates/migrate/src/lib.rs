@@ -4,6 +4,8 @@ mod run;
 use sqlx::migrate::Migrator;
 
 pub use history::{HISTORY_VERIFY_BUDGET, HistoryError, verify_history};
+#[doc(hidden)]
+pub use run::RECORD_TARGET;
 pub use run::{Report, RunError, RunFailure, RunOptions, run};
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");

@@ -170,7 +170,7 @@ impl OperationDeadline {
         .bind(self.armed_timeout_ms)
         .fetch_one(conn)
         .await;
-        let (_, deadline_controls_statement_timeout) = self.check_result(result).await?;
+        let (_, deadline_controls_statement_timeout) = self.observe_cancellation(result).await?;
         self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
         self.remaining_ms_or_expire()
             .await
@@ -178,7 +178,7 @@ impl OperationDeadline {
             .ok_or_else(deadline_elapsed_error)
     }
 
-    fn check_result<T>(
+    fn observe_cancellation<T>(
         &mut self,
         result: Result<T, sqlx::Error>,
     ) -> impl Future<Output = Result<T, sqlx::Error>> + use<T> {
@@ -258,7 +258,7 @@ impl<M: TxMode> Tx<'_, M> {
         Box::pin(async move {
             budget.arm(conn).await?;
             let result = call(conn).await;
-            budget.check_result(result).await
+            budget.observe_cancellation(result).await
         })
     }
 
@@ -290,7 +290,7 @@ impl<M: TxMode> Tx<'_, M> {
                     budget.expired = true;
                     deadline_elapsed_error()
                 })?;
-            budget.check_result(response).await?;
+            budget.observe_cancellation(response).await?;
         } else {
             rollback.await?;
         }
@@ -313,7 +313,11 @@ struct Notification {
 }
 
 impl Notification {
-    fn take_slot(&self, last_sent: &mut BTreeMap<NotificationKey, Instant>, now: Instant) -> bool {
+    fn record_if_due(
+        &self,
+        last_sent: &mut BTreeMap<NotificationKey, Instant>,
+        now: Instant,
+    ) -> bool {
         match last_sent.entry(self.key) {
             std::collections::btree_map::Entry::Occupied(entry)
                 if now.saturating_duration_since(*entry.get()) < self.min_interval =>
@@ -342,7 +346,7 @@ fn dispatch_notifications(
     }
     let now = Instant::now();
     let mut last_sent = LAST_SENT.lock();
-    notifications.retain(|notification| notification.take_slot(&mut last_sent, now));
+    notifications.retain(|notification| notification.record_if_due(&mut last_sent, now));
     drop(last_sent);
     if notifications.is_empty() {
         return;
@@ -410,7 +414,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
                     budget.arm(conn).await?;
                     Ok(conn
                         .fetch_many(SingleStatement(query))
-                        .then(move |item| budget.check_result(item)))
+                        .then(move |item| budget.observe_cancellation(item)))
                 }
                 .try_flatten_stream(),
             ) as DriverStream<'_, _>
@@ -433,7 +437,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
             let row = if let Some(budget) = self.mode.operation_deadline() {
                 budget.arm(self.conn).await?;
                 budget
-                    .check_result(self.conn.fetch_optional(SingleStatement(query)).await)
+                    .observe_cancellation(self.conn.fetch_optional(SingleStatement(query)).await)
                     .await?
             } else {
                 self.conn.fetch_optional(query).await?
@@ -595,7 +599,7 @@ where
 async fn transaction<M: TxModeExt<E>, T, E, F>(
     pool: &PgPool,
     options: TxOptions,
-    deadline: Option<tokio::time::Instant>,
+    acquire_deadline: Option<tokio::time::Instant>,
     mode: M,
     f: F,
 ) -> Result<T, E>
@@ -607,8 +611,10 @@ where
     let mut observation = TransactionObservation::start(span.clone());
     async {
         let acquired = Box::pin(async {
-            match deadline {
-                Some(deadline) => acquire_until(pool, "transaction", deadline).await,
+            match acquire_deadline {
+                Some(acquire_deadline) => {
+                    acquire_until(pool, "transaction", acquire_deadline).await
+                }
                 None => acquire(pool, "transaction").await,
             }
         })
@@ -696,8 +702,8 @@ mod tests {
             },
             min_interval: interval,
         };
-        assert!(first.take_slot(&mut last_sent, now));
-        assert!(!first.take_slot(&mut last_sent, now + interval / 2));
+        assert!(first.record_if_due(&mut last_sent, now));
+        assert!(!first.record_if_due(&mut last_sent, now + interval / 2));
         for key in [
             NotificationKey {
                 channel: "jobs",
@@ -712,9 +718,9 @@ mod tests {
                 key,
                 min_interval: interval,
             };
-            assert!(other.take_slot(&mut last_sent, now + interval / 2));
+            assert!(other.record_if_due(&mut last_sent, now + interval / 2));
         }
-        assert!(first.take_slot(&mut last_sent, now + interval));
+        assert!(first.record_if_due(&mut last_sent, now + interval));
     }
 
     async fn proof_after(items: Vec<Result<u8, sqlx::Error>>, take: usize) -> bool {
@@ -779,7 +785,7 @@ mod tests {
                 expired: false,
             };
             let original = crate::error::tests::database(sqlstate);
-            let result = budget.check_result(Err::<(), _>(original)).await;
+            let result = budget.observe_cancellation(Err::<(), _>(original)).await;
             assert_eq!(
                 crate::sqlstate(&result.unwrap_err()).as_deref(),
                 Some(sqlstate)
