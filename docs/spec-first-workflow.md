@@ -62,7 +62,7 @@ Evaluate these triggers before loading a phase owner:
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
 | Structured work lacks a ready behavior delta | [Specification](spec-first-workflow/phases/specification.md) |
 | Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery behavior, or rollout mechanism | [System / Integration Design](spec-first-workflow/phases/system-integration-design.md) |
-| Package/file ownership is not mechanically forced by current code and accepted design | [Rust Code / Ownership Design](spec-first-workflow/phases/rust-code-ownership-design.md) |
+| Rust placement is open, or a choice changes which module enforces an invariant, what its callers must guarantee, or which module may depend on another, even with fixed files | [Rust Code / Ownership Design](spec-first-workflow/phases/rust-code-ownership-design.md) |
 | Preparation needs a ready ledger for handoff, or other structured work lacks a ready unit or ledger | [Planning](spec-first-workflow/phases/planning.md) |
 | The user starts a ready plan in a new session, or an accepted inline unit or active implementation task is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 
