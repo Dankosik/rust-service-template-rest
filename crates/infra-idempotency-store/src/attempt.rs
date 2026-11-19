@@ -36,18 +36,20 @@ pub struct ScopeKey {
 impl ScopeKey {
     #[must_use]
     pub fn new(caller: CallerIdentity, key: &[u8]) -> Self {
+        fn update_len_prefixed(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_be_bytes());
+            hash.update(bytes);
+        }
+
         let mut hash = Sha256::new();
         hash.update(b"http-idempotency/scope/v2\0");
-        hash.update((caller.issuer.len() as u64).to_be_bytes());
-        hash.update(caller.issuer.as_bytes());
+        update_len_prefixed(&mut hash, caller.issuer.as_bytes());
         hash.update([match caller.kind {
             CallerKind::Subject => 1,
             CallerKind::Client => 2,
         }]);
-        for field in [caller.value.as_bytes(), key] {
-            hash.update((field.len() as u64).to_be_bytes());
-            hash.update(field);
-        }
+        update_len_prefixed(&mut hash, caller.value.as_bytes());
+        update_len_prefixed(&mut hash, key);
         Self {
             digest: hash.finalize().into(),
             caller,
@@ -66,7 +68,7 @@ impl ScopeKey {
 
     fn validate_caller(&self) -> Result<(), AttemptError> {
         if self.caller.issuer.contains('\0') || self.caller.value.contains('\0') {
-            return Err(store_failed(
+            return Err(log_failure(
                 "caller_identity",
                 AttemptError::Internal,
                 "unstorable_caller",
@@ -210,7 +212,7 @@ impl Store {
         let record = work(tx).await.map_err(Stop::RolledBack)?;
         if record.is_terminal_refusal() {
             if !self.terminal_refusals {
-                return Err(Stop::Failed(store_failed(
+                return Err(Stop::Failed(log_failure(
                     "command",
                     AttemptError::Internal,
                     "undeclared_terminal_refusal",
@@ -271,7 +273,7 @@ async fn arbitrate(
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
     if !probe.writable {
-        return Err(store_failed(
+        return Err(log_failure(
             "writer_check",
             AttemptError::Unavailable,
             "not_writable",
@@ -323,16 +325,16 @@ fn decide_live(
         return Ok(Decision::Mismatch);
     }
     let body =
-        body.ok_or_else(|| store_failed("decode_record", AttemptError::Integrity, "decode"))?;
+        body.ok_or_else(|| log_failure("decode_record", AttemptError::Integrity, "decode"))?;
     Record::decode(status, headers, Bytes::from(body))
         .map(|record| Decision::Replay(Box::new(record)))
-        .map_err(|err| store_failed("decode_record", AttemptError::Integrity, err.cause()))
+        .map_err(|err| log_failure("decode_record", AttemptError::Integrity, err.cause()))
 }
 
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
     match err {
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
-            failed(err, "decode_record", AttemptError::Integrity, None)
+            log_sql_failure(err, "decode_record", AttemptError::Integrity, None)
         }
         _ => sql_failed(err, phase),
     }
@@ -379,7 +381,7 @@ async fn write(
     if written.rows_affected() == 1 {
         Ok(())
     } else {
-        Err(store_failed(
+        Err(log_failure(
             "write_record",
             AttemptError::Internal,
             "record_not_written",
@@ -422,14 +424,14 @@ fn tx_failed(err: &TxError) -> AttemptError {
         ),
         TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
     };
-    failed(err.driver(), phase, class, commit_outcome)
+    log_sql_failure(err.driver(), phase, class, commit_outcome)
 }
 
 fn sql_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
-    failed(err, phase, AttemptError::classify_sql(err), None)
+    log_sql_failure(err, phase, AttemptError::classify_sql(err), None)
 }
 
-fn failed(
+fn log_sql_failure(
     err: &sqlx::Error,
     phase: &'static str,
     class: AttemptError,
@@ -446,7 +448,7 @@ fn failed(
     class
 }
 
-fn store_failed(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
+fn log_failure(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,

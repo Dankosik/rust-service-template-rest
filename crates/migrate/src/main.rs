@@ -6,15 +6,13 @@ use infra_postgres::{Dsn, DsnError};
 use infra_telemetry::{
     LoggerGuard, LoggingFormat, LoggingOptions, install_panic_hook, install_subscriber,
 };
-use migrate::{MIGRATOR, Report, RunFailure, RunOptions};
+use migrate::{MIGRATOR, RECORD_TARGET, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
 use service_config::{BuildInfo, LoadOptions, MigrationConfig, MigrationLoadError};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
-
-const RECORD_TARGET: &str = "migrate_record";
 
 fn record_level(base: &str) -> String {
     format!("{base},{RECORD_TARGET}=info")
