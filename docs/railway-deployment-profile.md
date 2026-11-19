@@ -76,8 +76,7 @@ automatically during deploys):
   producers and workers using that endpoint. Workers pick up jobs by polling.
 <!-- template:end jobs:docs-railway-postgres-notifications -->
 
-`make docs-check` (`scripts/checks/image_inputs.py`) verifies that
-`build.watchPatterns` in `.railway/railway.ts` covers `Dockerfile`,
+Keep `build.watchPatterns` in `.railway/railway.ts` aligned with `Dockerfile`,
 `.dockerignore`, and `rust-toolchain.toml` inputs so docs/CI/agent edits do not
 trigger redeployments.
 
@@ -119,7 +118,7 @@ Keep `deploy.drainingSeconds` in `.railway/railway.ts` (and container/orchestrat
 stop grace elsewhere) at least 5 s above `http.grace_period` validated by
 `crates/service/src/bootstrap`: a teardown that spends its whole budget exits at
 the end of the grace period, and an equal platform limit can `SIGKILL` it first,
-replacing exit code `3` with `137`. Rerun `ALLOW_HEAVY=1 make runtime-image-check`
+replacing exit code `3` with `137`. Rerun `make image-build && make image-check`
 when lifecycle budgets move.
 
 ## Operator-owned configuration

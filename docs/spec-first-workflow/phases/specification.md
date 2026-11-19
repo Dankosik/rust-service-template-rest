@@ -27,7 +27,7 @@ systems) can rely on.
      still an unconfirmed `draft`), `specs/<task>/workflow-plan.md` (when
      present), prior `research/*.md`, [Domain
      Vocabulary](../../repo-architecture.md#domain-vocabulary), and primary
-     sources: `api/`, code, migrations, config, `scripts/template/profiles.json`,
+     sources: `api/`, code, migrations, config, `template/profiles.json`,
      tests, `docs/decisions/`, and [Production
      Contract](../../production-contract.md) when service-wide promises apply.
    - Trace live callers, consumers, trust boundaries, and persisted/in-flight

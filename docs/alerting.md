@@ -8,7 +8,7 @@ capacity, crash loops, a starved runtime and work that stopped draining. Each al
 `severity` (`page` or `ticket`) and a `runbook_url` to its section below.
 [`env/monitoring/tests/service-rules.yml`](../env/monitoring/tests/service-rules.yml) proves
 every alert fires on its fault and stays silent otherwise; `make
-monitoring-rules` (`scripts/checks/monitoring_rules.sh`) runs it with the
+monitoring-rules` (`scripts/check-monitoring.sh`) runs it with the
 pinned `promtool`. Rules for a profile ship
 only with that profile.
 

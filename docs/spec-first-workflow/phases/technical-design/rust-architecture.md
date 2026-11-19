@@ -67,7 +67,7 @@ invariants, ordering, error modes, lifetimes, cost—broader than a signature),
   `Planning hooks: integration-first`.
 - **Workspace graph & profiles:** reconcile crate placement, dependency edges,
   `allow_dependents`, `crates/shared-rules` (`std`-only), optional profiles
-  (`scripts/template/profiles.json`), and canonical generated-contract writers
+  (`template/profiles.json`), and canonical generated-contract writers
   against [`quality/architecture.json`](../../../../quality/architecture.json)
   and [Repository
   Architecture](../../../repo-architecture.md#global-invariants), sharing

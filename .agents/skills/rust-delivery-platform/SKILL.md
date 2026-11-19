@@ -9,7 +9,7 @@ description: "Gate chain. Use when a CI job, tool pin, Dockerfile, image check, 
 
 **Routing owners.** Follow [CI/CD production readiness](../../../docs/ci-cd-production-ready.md) and [validation routing](../../../docs/validation-routing.md), inspecting live `.github/workflows/` and `scripts/` owners so local, pull-request, and post-merge stages each cover their assigned surface.
 
-**Selection and aggregation.** Ensure every selected required job executes non-empty checks and fails closed on cancellation or missing results, allowing skips only where `scripts/verify/surfaces.py` intentionally leaves a surface unselected. Register new path families in the existing classifier alongside its self-test.
+**Selection and aggregation.** Ensure every selected required job executes non-empty checks and fails closed on cancellation or missing results, allowing skips only where `.github/actions/detect-changes/detect.py` intentionally leaves a surface unselected. Register new path families in the existing classifier alongside its unit test.
 
 **Pins and waivers.** Keep toolchain, crate, CLI tool (`tools/versions.env`), and container base pins canonical, delegating manifest, lockfile, artifact-path, and descriptor queries to structured Cargo, Git, and OCI outputs and verifying resolved digests and inventories so scanners, SBOMs, and provenance inspect the true artifact. Record every waiver with its owner, reason, scope, and expiry or reopen trigger.
 

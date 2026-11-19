@@ -25,7 +25,9 @@ struct Emulator {
 impl Emulator {
     fn from_env() -> Self {
         let endpoint = std::env::var("OBJECT_STORAGE_TEST_ENDPOINT").unwrap_or_else(|_| {
-            panic!("OBJECT_STORAGE_TEST_ENDPOINT is unset; run scripts/profiles/integration.sh object-storage")
+            panic!(
+                "OBJECT_STORAGE_TEST_ENDPOINT is unset; run scripts/integration.sh object-storage"
+            )
         });
         Self {
             endpoint,

@@ -75,7 +75,7 @@ fixtures, proving layers, and test commands to Implementation.
    - Slice under [Task Shapes And Granularity](#task-shapes-and-granularity),
      honoring `Planning hooks` (if declining a hook, pass why in the Step 6
      Axis 1 / Full brief). Keep `quality/architecture.json`,
-     `scripts/template/profiles.json`, and `Cargo.toml`/`Cargo.lock` updates
+     `template/profiles.json`, and `Cargo.toml`/`Cargo.lock` updates
      atomic with their slice, and update broken `--all-targets` callers inside
      the mutating task (or via additive `expand -> migrate -> contract`).
    - **Two-way alternative-cut check:**
@@ -105,7 +105,7 @@ fixtures, proving layers, and test commands to Implementation.
 
 5. **Run mechanical check and semantic pre-review audit (static).**
    - **Mechanical gate:** run `make ledger-check TASK=<task>` (`python3
-     scripts/verify/check_ledger.py specs/<task>`) and fix every error.
+     scripts/check-ledger.py specs/<task>`) and fix every error.
    - **Semantic audit (close gaps in place, or take [Blocked
      Exit](#blocked-exit) on upstream gaps):**
      - *Producer isolation:* for each edge `T_a -> T_b`, read *only* `T_a`'s

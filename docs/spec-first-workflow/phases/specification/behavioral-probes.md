@@ -26,7 +26,7 @@ Single source of truth for the six divergence axes walked during
    rows and in-flight work** at deploy time (backfill, lazy upgrade,
    grandfather, reject) and during mixed-version overlap? Which callers,
    consumers, boot paths, or optional profiles
-   (`scripts/template/profiles.json`) must hold—and for any authorized breaking
+   (`template/profiles.json`) must hold—and for any authorized breaking
    change, what do former callers see?
 6. **Operational & quantitative** *(when triggered)*: Which invalid config or
    dependency failures reject startup vs degrade at runtime? Which operator or

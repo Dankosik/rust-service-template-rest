@@ -66,7 +66,8 @@ fn shipped_binary_refuses_before_unconfigured_dependency_admission() {
     );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let failure = failures[0].1;
-    if root.join("template.lock").exists()
+    if !root.join("crates/infra-webhooks/Cargo.toml").is_file()
+        && !root.join("crates/infra-messaging/src/outbox.rs").is_file()
         && !failure.contains("postgres.enabled must be true to run the jobs worker")
     {
         assert!(

@@ -12,9 +12,7 @@ and `Cargo.toml` documents `[profile.dev]` and `[profile.release]` settings.
   `CARGO_TARGET_DIR` at a separate directory with `CARGO_PROFILE_DEV_DEBUG=full`
   and `--config 'profile.dev.package."*".debug="full"'`.
 - Keep each Git worktree's `target/` separate to avoid Cargo lock serialization
-  and artifact corruption ([cargo#16804][cargo-16804]), and serialize heavy
-  commands across checkouts with [`python3 scripts/verify/lock.py -- <cmd>`](../scripts/verify/lock.py)
-  (`--status` inspects the active holder).
+  and artifact corruption ([cargo#16804][cargo-16804]).
 - Add new integration cases as submodules under `tests/<area>/main.rs` rather
   than separate `tests/*.rs` binaries that re-link the dependency graph; profile
   compile bottlenecks with `cargo build --timings --locked`.
@@ -41,8 +39,7 @@ and `Cargo.toml` documents `[profile.dev]` and `[profile.release]` settings.
 - **Local `linux/amd64` builds on Apple Silicon:** Pass
   `RUNTIME_IMAGE_CACHE_FROM` / `RUNTIME_IMAGE_CACHE_TO` (`type=local`) to reuse
   the `cooked` layer, or cross-compile from `$BUILDPLATFORM` with
-  `x86_64-unknown-linux-gnu` cross toolchains in a workstation-only Dockerfile
-  under `python3 scripts/verify/lock.py --`.
+  `x86_64-unknown-linux-gnu` cross toolchains in a workstation-only Dockerfile.
 
 ## Rejected options
 

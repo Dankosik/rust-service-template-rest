@@ -107,7 +107,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     metrics::set_global_recorder(recorder).expect("this binary installs one recorder");
 
     let url = std::env::var("NATS_URL")
-        .expect("NATS_URL is required; run scripts/profiles/integration.sh messaging");
+        .expect("NATS_URL is required; run scripts/integration.sh messaging");
     let broker = async_nats::connect(&url)
         .await
         .expect("NATS_URL must point to the JetStream broker selected for this suite");

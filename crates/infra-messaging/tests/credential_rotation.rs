@@ -120,7 +120,7 @@ fn verify_upstream_reference() {
 async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_client() {
     verify_upstream_reference();
     let url = std::env::var("NATS_AUTH_URL")
-        .expect("NATS_AUTH_URL is required; run scripts/profiles/integration.sh messaging");
+        .expect("NATS_AUTH_URL is required; run scripts/integration.sh messaging");
     let anonymous = timeout(Duration::from_secs(5), async_nats::connect(&url))
         .await
         .unwrap()
