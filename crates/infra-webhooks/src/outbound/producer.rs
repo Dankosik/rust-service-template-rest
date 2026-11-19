@@ -6,10 +6,11 @@ use http::HeaderValue;
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
 use infra_postgres::{Tx, TxMode};
 
-use super::{Delivery, EMPTY_DELIVERY_JSON, delivery_version};
+use super::{Delivery, delivery_version};
 use crate::protocol::MAX_BODY_BYTES;
 
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
+const JSON_STRING_QUOTES_BYTES: usize = 2;
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 
@@ -62,15 +63,16 @@ impl Producer {
             return Err(OutboundError::UnknownEndpoint);
         }
 
+        let empty_len = Delivery::empty_serialized_len().map_err(EnqueueError::Serialize)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        let mut serialized_len = EMPTY_DELIVERY_JSON.len() + encoded_body_len;
-        serialized_len += escaped_len(content_type, &mut budget, |fragment| {
+        let content_type_len = escaped_len(content_type, &mut budget, |fragment| {
             HeaderValue::from_bytes(fragment.as_bytes())
                 .map(drop)
                 .map_err(|_| OutboundError::InvalidContentType)
         })
         .await?;
-        serialized_len += escaped_len(endpoint_id, &mut budget, |_| Ok(())).await?;
+        let endpoint_id_len = escaped_len(endpoint_id, &mut budget, |_| Ok(())).await?;
+        let serialized_len = empty_len + encoded_body_len + content_type_len + endpoint_id_len;
         if serialized_len > infra_jobs::MAX_PAYLOAD_BYTES {
             return Err(EnqueueError::PayloadTooLarge {
                 bytes: serialized_len,
@@ -97,7 +99,8 @@ async fn escaped_len(
         }
         let (fragment, tail) = rest.split_at(end);
         admit(fragment)?;
-        len += json_payload_len(fragment).map_err(EnqueueError::Serialize)? - 2;
+        len +=
+            json_payload_len(fragment).map_err(EnqueueError::Serialize)? - JSON_STRING_QUOTES_BYTES;
         *budget -= end;
         rest = tail;
     }

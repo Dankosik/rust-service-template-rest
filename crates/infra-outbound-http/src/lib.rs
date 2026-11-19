@@ -232,16 +232,16 @@ impl Client {
         mut request: Request<Bytes>,
         context: RequestContext,
     ) -> Result<PreparedRequest<'_>, Error> {
-        let stops = context.for_request(
+        let context = context.for_request(
             Deadline::after(self.limits.operation_timeout),
             request.extensions_mut().remove::<OperationContext>(),
         );
-        stops.check()?;
+        context.check()?;
         let request = policy::admit_request(&self.origin, request)?;
         Ok(PreparedRequest {
             client: self,
             request,
-            stops,
+            context,
         })
     }
 }
@@ -251,27 +251,27 @@ impl Client {
 pub struct PreparedRequest<'a> {
     client: &'a Client,
     request: Request<Bytes>,
-    stops: RequestContext,
+    context: RequestContext,
 }
 
 impl PreparedRequest<'_> {
     #[must_use]
     pub const fn deadline(&self) -> Option<Deadline> {
-        self.stops.deadline()
+        self.context.deadline()
     }
 
     #[must_use]
     pub fn stopped(&self) -> Option<Stopped> {
-        self.stops.stopped()
+        self.context.stopped()
     }
 
     pub async fn wait_stopped(&self) -> Stopped {
-        self.stops.wait_stopped().await
+        self.context.wait_stopped().await
     }
 
     #[must_use]
     pub const fn context(&self) -> &RequestContext {
-        &self.stops
+        &self.context
     }
 
     pub fn set_authorization(&mut self, value: http::HeaderValue) {
@@ -282,10 +282,10 @@ impl PreparedRequest<'_> {
 
     pub async fn send(
         self,
-        check: impl FnOnce() -> bool + Send,
+        admit_dispatch: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
-        self.send_with_response(check, on_status, buffer_response)
+        self.send_with_response(admit_dispatch, on_status, buffer_response)
             .await
             .map_err(ExchangeError::into_error)
     }
@@ -303,23 +303,23 @@ impl PreparedRequest<'_> {
         let Self {
             client,
             mut request,
-            stops,
+            context,
         } = self;
-        stops
+        context
             .check()
             .map_err(Error::from)
             .map_err(ExchangeError::BeforeResponse)?;
         let template = request.extensions_mut().remove::<UrlTemplate>();
         let mut attempt =
-            observe::Attempt::start(request.method(), template, &client.server, &stops);
+            observe::Attempt::start(request.method(), template, &client.server, &context);
         if client.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
         let span = attempt.span();
         let exchange = async {
-            stops.check()?;
+            context.check()?;
             let admitted = admit_dispatch();
-            stops.check()?;
+            context.check()?;
             if !admitted {
                 return Err(Error::DispatchRefused);
             }
@@ -332,16 +332,16 @@ impl PreparedRequest<'_> {
                 })?;
             attempt.record_status(response.status());
             on_status(response.status());
-            stops.check()?;
-            consume(response, client.limits.response_body_bytes, &stops).await
+            context.check()?;
+            consume(response, client.limits.response_body_bytes, &context).await
         };
         let result = tokio::select! {
             biased;
-            reason = stops.wait_stopped() => Err(Error::from(reason)),
+            reason = context.wait_stopped() => Err(Error::from(reason)),
             result = exchange.instrument(span) => result,
         }
         .and_then(|response| {
-            stops.check()?;
+            context.check()?;
             Ok(response)
         });
         let status = attempt.status();
@@ -356,7 +356,7 @@ impl PreparedRequest<'_> {
 async fn buffer_response(
     response: Response<hyper::body::Incoming>,
     limit: usize,
-    stops: &RequestContext,
+    context: &RequestContext,
 ) -> Result<Response<Bytes>, Error> {
     if hyper::body::Body::size_hint(response.body())
         .exact()
@@ -369,7 +369,7 @@ async fn buffer_response(
     let mut body = Limited::new(body, limit);
     let mut collected = Vec::new();
     loop {
-        stops.check()?;
+        context.check()?;
         let Some(frame) = body.frame().await else {
             break;
         };
