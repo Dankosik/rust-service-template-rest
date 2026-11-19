@@ -19,8 +19,10 @@ fresh reviewer(s) when full or structure-only review applies.
   behavioral code changes, or for any candidate (including Direct Work and
   inline units) when requested by the user, when changed behavior affects
   authorization, money, data integrity, concurrency safety, or hard-to-reverse
-  migration, or when a material correctness question remains uncertain. Use the
-  2-lens [Complementary
+  migration, when a same-thread build-and-validate change (Direct Work or
+  root-local inline unit) alters non-trivial production behavior without a
+  pre-existing independent test or contract oracle, or when a material
+  correctness question remains uncertain. Use the 2-lens [Complementary
   Panel](../phases/implementation-review.md#complementary-panel) for multi-task
   ledgers (≥2 planned code tasks) or high-risk changes adding structure; use
   one fresh 4-axis reviewer for all other Full reviews (including a 1-task
@@ -41,8 +43,12 @@ fresh reviewer(s) when full or structure-only review applies.
 ## Lifecycle
 
 The owner fixes one candidate, its authoritative inputs, phase adapter, and
-evidence boundary. The reviewer keeps that boundary read-only, attempts to
-falsify it, and returns [Review Result V1](../interfaces/review-result-v1.md).
+evidence boundary. Pass only the fixed candidate (diff or artifact), primary
+authoritative requirements, and executed proof receipts — omit the author's
+narrative rationale, self-review claims, or justifications so builder framing
+does not anchor independent judgment. The reviewer keeps that boundary
+read-only, attempts to falsify it, and returns [Review Result
+V1](../interfaces/review-result-v1.md).
 Review never owns repair, integration, acceptance, or movement. It reuses
 available evidence and investigates concrete defects within that boundary,
 rather than starting a second verification project. Missing optional proof and
