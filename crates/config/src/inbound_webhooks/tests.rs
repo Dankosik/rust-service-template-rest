@@ -24,7 +24,7 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
         },
     );
     if is_env_addressable(active_key) {
-        config.secrets.insert(
+        config.secrets.0.insert(
             active_key.to_owned(),
             SecretString::from("fixture-secret".to_owned()),
         );
@@ -32,7 +32,7 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
     if let Some(previous) = previous_key
         && is_env_addressable(previous)
     {
-        config.secrets.insert(
+        config.secrets.0.insert(
             previous.to_owned(),
             SecretString::from("fixture-previous-secret".to_owned()),
         );

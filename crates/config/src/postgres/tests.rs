@@ -75,7 +75,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
     let input = PostgresInput {
         enabled,
         dsn: Some(dsn()),
-        max_connections: PoolCapacity(NonZeroU32::new(501).unwrap()),
+        max_connections: MaxConnectionsInput(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -86,7 +86,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
 fn every_postgres_violation_is_reported_together() {
     let input = PostgresInput {
         enabled: true,
-        max_connections: PoolCapacity(NonZeroU32::new(501).unwrap()),
+        max_connections: MaxConnectionsInput(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();

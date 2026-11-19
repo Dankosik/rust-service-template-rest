@@ -159,7 +159,8 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
-        let Some(scan_dir) = generation.as_deref() else {
+        let active = generation.take();
+        let Some(scan_dir) = active.as_deref() else {
             generation = projected_generation(dir)?;
             continue;
         };
@@ -171,7 +172,7 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
                 Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
                     if error.kind() == io::ErrorKind::NotFound
             );
-        if current == generation && !retry_not_found {
+        if current == active && !retry_not_found {
             return variables;
         }
         generation = current;
