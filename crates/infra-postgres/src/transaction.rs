@@ -98,8 +98,11 @@ impl<E: From<TxError>> TxModeExt<E> for () {
         Ok(())
     }
 
-    async fn check_before_commit(&mut self, _: &mut TransactionObservation) -> Result<(), E> {
-        Ok(())
+    fn check_before_commit(
+        &mut self,
+        _: &mut TransactionObservation,
+    ) -> impl Future<Output = Result<(), E>> + Send {
+        std::future::poll_fn(|_| Poll::Ready(Ok(())))
     }
 }
 
