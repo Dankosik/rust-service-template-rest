@@ -38,6 +38,9 @@ mod jobs;
 // template:begin webhooks:config-webhooks-module
 mod webhooks;
 // template:end webhooks:config-webhooks-module
+// template:begin worker:worker-config
+mod worker;
+// template:end worker:worker-config
 
 mod cli;
 mod de;
@@ -52,6 +55,9 @@ mod validate;
 use serde::Deserialize;
 
 use validate::admit_with;
+// template:begin worker:worker-input-import
+use worker::WorkerInput;
+// template:end worker:worker-input-import
 
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
@@ -60,9 +66,10 @@ pub use http::{HttpConfig, HttpListenerConfig, ShutdownTail};
 // template:begin worker:config-worker-export
 pub use http::WorkerHttpConfig;
 pub use load::load_worker;
+pub use worker::WorkerConfig;
 // template:end worker:config-worker-export
 // template:begin grpc:config-export
-pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity, GrpcTlsMaterial};
+pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcTlsMaterial};
 // template:end grpc:config-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhookKey};
@@ -88,6 +95,9 @@ pub use authn::{Audiences, AuthnConfig};
 // template:begin oidc-jwt:config-jwt-input-exports
 pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
+// template:begin oidc-introspection:config-introspection-exports
+pub use authn::IntrospectionCacheConfig;
+// template:end oidc-introspection:config-introspection-exports
 // template:begin service-auth:config-service-auth-export
 pub use service_auth::{ServiceAuthConfig, ServiceSigningKey};
 // template:end service-auth:config-service-auth-export
@@ -127,7 +137,7 @@ pub(crate) struct ConfigInput {
     health: HealthConfig,
     log: LogConfig,
     runtime: RuntimeConfig,
-    observability: ObservabilityConfig,
+    observability: observability::ObservabilityInput,
     // template:begin cache:config-input-field
     cache: cache::CacheInput,
     // template:end cache:config-input-field
@@ -175,7 +185,7 @@ impl ConfigInput {
             self.health.validate(v);
             self.log.validate(v);
             self.runtime.validate(v);
-            self.observability.validate(v);
+            let observability = self.observability.admit(v);
             // template:begin cache:config-admit
             let cache = self.cache.admit(self.app.is_local_development(), v);
             // template:end cache:config-admit
@@ -206,7 +216,7 @@ impl ConfigInput {
             // template:begin http-idempotency:config-http-idempotency-validate
             self.http_idempotency.validate(v);
             // template:end http-idempotency:config-http-idempotency-validate
-            Ok(Config(ServiceSections {
+            Ok(Config {
                 app: self.app,
                 http,
                 // template:begin grpc:config-admitted-field
@@ -221,7 +231,7 @@ impl ConfigInput {
                 health: self.health,
                 log: self.log,
                 runtime: self.runtime,
-                observability: self.observability,
+                observability,
                 // template:begin cache:config-admitted-field
                 cache: cache?,
                 // template:end cache:config-admitted-field
@@ -240,15 +250,144 @@ impl ConfigInput {
                 // template:begin http-idempotency:config-http-idempotency-admitted-field
                 http_idempotency: self.http_idempotency,
                 // template:end http-idempotency:config-http-idempotency-admitted-field
-            }))
+            })
         })
     }
 }
 
-#[derive(Clone, Debug, derive_more::Deref)]
-pub struct Config(ServiceSections);
+#[derive(Clone, Debug)]
+pub struct Config {
+    app: AppConfig,
+    http: HttpConfig,
+    // template:begin grpc:config-field
+    grpc: Option<GrpcConfig>,
+    // template:end grpc:config-field
+    // template:begin inbound-webhooks:config-inbound-webhooks-field
+    inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
+    // template:end inbound-webhooks:config-inbound-webhooks-field
+    // template:begin webhooks:config-outbound-webhooks-field
+    outbound_webhook_endpoints: Vec<String>,
+    // template:end webhooks:config-outbound-webhooks-field
+    health: HealthConfig,
+    log: LogConfig,
+    runtime: RuntimeConfig,
+    observability: ObservabilityConfig,
+    // template:begin cache:config-field
+    cache: Option<CacheConfig>,
+    // template:end cache:config-field
+    // template:begin object-storage:config-field
+    object_storage: Option<ObjectStorageConfig>,
+    // template:end object-storage:config-field
+    // template:begin authn:config-field
+    authn: AuthnConfig,
+    // template:end authn:config-field
+    // template:begin service-auth:config-service-auth-field
+    service_auth: ServiceAuthConfig,
+    // template:end service-auth:config-service-auth-field
+    // template:begin postgres:config-field
+    postgres: Option<PostgresConfig>,
+    // template:end postgres:config-field
+    // template:begin http-idempotency:config-http-idempotency-field
+    http_idempotency: HttpIdempotencyConfig,
+    // template:end http-idempotency:config-http-idempotency-field
+}
 
 impl Config {
+    #[must_use]
+    pub const fn app(&self) -> &AppConfig {
+        &self.app
+    }
+
+    #[must_use]
+    pub const fn http(&self) -> &HttpConfig {
+        &self.http
+    }
+
+    // template:begin grpc:config-accessor
+    #[must_use]
+    pub const fn grpc(&self) -> Option<&GrpcConfig> {
+        self.grpc.as_ref()
+    }
+    // template:end grpc:config-accessor
+
+    // template:begin inbound-webhooks:config-inbound-webhooks-accessor
+    #[must_use]
+    pub const fn inbound_webhooks(
+        &self,
+    ) -> &std::collections::BTreeMap<String, InboundWebhookEndpointConfig> {
+        &self.inbound_webhooks
+    }
+    // template:end inbound-webhooks:config-inbound-webhooks-accessor
+
+    // template:begin webhooks:config-outbound-webhooks-accessor
+    #[must_use]
+    pub fn outbound_webhook_endpoints(&self) -> &[String] {
+        &self.outbound_webhook_endpoints
+    }
+    // template:end webhooks:config-outbound-webhooks-accessor
+
+    #[must_use]
+    pub const fn health(&self) -> &HealthConfig {
+        &self.health
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> &LogConfig {
+        &self.log
+    }
+
+    #[must_use]
+    pub const fn runtime(&self) -> &RuntimeConfig {
+        &self.runtime
+    }
+
+    #[must_use]
+    pub const fn observability(&self) -> &ObservabilityConfig {
+        &self.observability
+    }
+
+    // template:begin cache:config-accessor
+    #[must_use]
+    pub const fn cache(&self) -> Option<&CacheConfig> {
+        self.cache.as_ref()
+    }
+    // template:end cache:config-accessor
+
+    // template:begin object-storage:config-accessor
+    #[must_use]
+    pub const fn object_storage(&self) -> Option<&ObjectStorageConfig> {
+        self.object_storage.as_ref()
+    }
+    // template:end object-storage:config-accessor
+
+    // template:begin authn:config-accessor
+    #[must_use]
+    pub const fn authn(&self) -> &AuthnConfig {
+        &self.authn
+    }
+    // template:end authn:config-accessor
+
+    // template:begin service-auth:config-service-auth-accessor
+    #[must_use]
+    pub const fn service_auth(&self) -> &ServiceAuthConfig {
+        &self.service_auth
+    }
+    // template:end service-auth:config-service-auth-accessor
+
+    // template:begin postgres:config-accessor
+    #[must_use]
+    pub const fn postgres(&self) -> Option<&PostgresConfig> {
+        self.postgres.as_ref()
+    }
+    // template:end postgres:config-accessor
+
+    // template:begin http-idempotency:config-http-idempotency-accessor
+    #[must_use]
+    pub const fn http_idempotency(&self) -> &HttpIdempotencyConfig {
+        &self.http_idempotency
+    }
+    // template:end http-idempotency:config-http-idempotency-accessor
+
     #[must_use]
     pub fn finite_listener_connection_caps(&self) -> u64 {
         finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
@@ -267,46 +406,3 @@ fn finite_http_connection_caps(http: &HttpListenerConfig, metrics: &MetricsConfi
         u64::from(cap.get()) * (1 + u64::from(metrics.addr.is_some()))
     })
 }
-
-#[derive(Clone, Debug)]
-pub struct ServiceSections {
-    pub app: AppConfig,
-    pub http: HttpConfig,
-    // template:begin grpc:config-field
-    pub grpc: Option<GrpcConfig>,
-    // template:end grpc:config-field
-    // template:begin inbound-webhooks:config-inbound-webhooks-field
-    pub inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
-    // template:end inbound-webhooks:config-inbound-webhooks-field
-    // template:begin webhooks:config-outbound-webhooks-field
-    pub outbound_webhook_endpoints: Vec<String>,
-    // template:end webhooks:config-outbound-webhooks-field
-    pub health: HealthConfig,
-    pub log: LogConfig,
-    pub runtime: RuntimeConfig,
-    pub observability: ObservabilityConfig,
-    // template:begin cache:config-field
-    pub cache: Option<CacheConfig>,
-    // template:end cache:config-field
-    // template:begin object-storage:config-field
-    pub object_storage: Option<ObjectStorageConfig>,
-    // template:end object-storage:config-field
-    // template:begin authn:config-field
-    pub authn: AuthnConfig,
-    // template:end authn:config-field
-    // template:begin service-auth:config-service-auth-field
-    pub service_auth: ServiceAuthConfig,
-    // template:end service-auth:config-service-auth-field
-    // template:begin postgres:config-field
-    pub postgres: Option<PostgresConfig>,
-    // template:end postgres:config-field
-    // template:begin http-idempotency:config-http-idempotency-field
-    pub http_idempotency: HttpIdempotencyConfig,
-    // template:end http-idempotency:config-http-idempotency-field
-}
-
-// template:begin worker:worker-config
-mod worker;
-use worker::WorkerInput;
-pub use worker::{WorkerConfig, WorkerSections};
-// template:end worker:worker-config

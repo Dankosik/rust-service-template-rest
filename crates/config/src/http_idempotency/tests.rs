@@ -100,7 +100,7 @@ fn the_retention_key_is_not_treated_as_secret() {
 fn http_idempotency_environment_sets_the_retention() {
     let cfg = load_env(&[("APP__HTTP_IDEMPOTENCY__RETENTION", "2h")]);
     assert_eq!(
-        cfg.http_idempotency.retention,
+        cfg.http_idempotency().retention,
         Some(Duration::from_hours(2))
     );
 }

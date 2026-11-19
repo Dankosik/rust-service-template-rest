@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+use crate::de::{BlankAsNone, Keep, Mode, ModeMarker, StrictBool, StrictString, When};
 use crate::validate::{ValidationError, Violations, non_blank};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,31 +51,27 @@ pub(crate) fn local_development_only(
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-struct StrictStringInput(#[serde_as(as = "crate::de::StrictString")] String);
-
-#[serde_with::serde_as]
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-struct BlankAsNoneString(#[serde_as(as = "crate::de::BlankAsNone")] Option<String>);
-
-#[serde_with::serde_as]
 #[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default(bound(Version: Default, Commit: Default, InstanceId: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct AppFields<Version, Commit, InstanceId> {
-    #[serde_as(as = "crate::de::StrictString")]
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct AppFields<Meta: Mode = Keep, Instance: Mode = Keep> {
+    #[serde_as(as = "StrictString")]
     #[educe(Default(expression = "unspecified".to_owned()))]
     pub(crate) env: String,
-    #[serde_as(as = "crate::de::StrictBool")]
+    #[serde_as(as = "StrictBool")]
     pub(crate) allow_insecure_development: bool,
-    version: Version,
-    commit: Commit,
-    instance_id: InstanceId,
+    #[serde_as(as = "When<Meta, StrictString>")]
+    version: String,
+    #[serde_as(as = "When<Meta, StrictString>")]
+    commit: String,
+    #[serde(default)]
+    #[serde_as(as = "When<Instance, BlankAsNone>")]
+    instance_id: Option<String>,
+    #[serde(skip)]
+    _mode: ModeMarker<(Meta, Instance)>,
 }
 
-type AppInput = AppFields<StrictStringInput, StrictStringInput, BlankAsNoneString>;
+type AppInput = AppFields;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(from = "AppInput")]
@@ -93,14 +90,14 @@ pub struct AppConfig {
     pub instance_id: Option<String>,
 }
 
-impl From<AppInput> for AppConfig {
-    fn from(input: AppInput) -> Self {
+impl<Instance: Mode> From<AppFields<Keep, Instance>> for AppConfig {
+    fn from(input: AppFields<Keep, Instance>) -> Self {
         Self {
             env: input.env,
             allow_insecure_development: input.allow_insecure_development,
-            version: input.version.0,
-            commit: input.commit.0,
-            instance_id: input.instance_id.0,
+            version: input.version,
+            commit: input.commit,
+            instance_id: input.instance_id,
         }
     }
 }
@@ -116,16 +113,7 @@ pub(crate) fn deserialize_migration_app<'de, D>(deserializer: D) -> Result<AppCo
 where
     D: serde::Deserializer<'de>,
 {
-    type MigrationAppInput = AppFields<StrictStringInput, StrictStringInput, serde::de::IgnoredAny>;
-
-    let input = MigrationAppInput::deserialize(deserializer)?;
-    Ok(AppConfig {
-        env: input.env,
-        allow_insecure_development: input.allow_insecure_development,
-        version: input.version.0,
-        commit: input.commit.0,
-        instance_id: None,
-    })
+    AppFields::<Keep, crate::de::Skip>::deserialize(deserializer).map(AppConfig::from)
 }
 // template:end postgres:migration-app-input
 

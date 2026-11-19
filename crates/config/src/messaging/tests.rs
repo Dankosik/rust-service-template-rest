@@ -5,7 +5,7 @@ use secrecy::ExposeSecret as _;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from, load_worker_from};
+use crate::load::{ErrorKind, load_from, load_worker_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
 use crate::validate::{ValidationErrors, admit_with};
 
@@ -40,7 +40,7 @@ fn defaults_are_inactive_and_within_the_delivery_budget() {
 #[test]
 fn default_delivery_fits_a_broker_with_the_default_payload_limit() {
     const BROKER_DEFAULT_MAX_PAYLOAD: u64 = 1024 * 1024;
-    let config = MessagingConfig::default();
+    let config = admit(MessagingInput::default(), false).unwrap();
     assert!(
         config.max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES <= BROKER_DEFAULT_MAX_PAYLOAD
     );
@@ -88,7 +88,8 @@ fn producer_requires_admitted_connection_credentials_and_source() {
     assert_eq!(config.producer_source_stream().unwrap(), "events");
     assert!(!format!("{config:?}").contains("fixture-credentials"));
     assert_eq!(
-        MessagingConfig::default()
+        admit(MessagingInput::default(), false)
+            .unwrap()
             .producer_source_stream()
             .unwrap_err()
             .key,
@@ -98,12 +99,15 @@ fn producer_requires_admitted_connection_credentials_and_source() {
 
 #[test]
 fn consumer_requires_its_distinct_operator_owned_names() {
-    let mut config = MessagingConfig {
-        urls: vec!["tls://nats.example:4222".to_owned()],
-        credentials: Some(MessagingCredentials::Inline(fixture_credentials())),
-        source_stream: Some("events".to_owned()),
-        ..MessagingConfig::default()
-    };
+    let mut config = admit(
+        MessagingInput {
+            source_stream: Some("events".to_owned()),
+            ..tls_input()
+        },
+        false,
+    )
+    .unwrap();
+    config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
     assert_eq!(
         config.consumer_keys().unwrap_err().key,
         "messaging.consumer_durable"
@@ -180,7 +184,13 @@ fn plaintext_and_unauthenticated_exceptions_require_insecure_development() {
     ];
     let options = LoadOptions::default();
     let error = load_worker_from(&options, BUILD, env(&local)).unwrap_err();
-    assert_matches!(&error, Error::Validate(errors) if errors.names("messaging.allow_plaintext") && errors.names("messaging.allow_unauthenticated"));
+    assert!(
+        error
+            .validation_errors()
+            .is_some_and(|errors| errors.names("messaging.allow_plaintext")
+                && errors.names("messaging.allow_unauthenticated")),
+        "{error}"
+    );
     let config = load_worker_from(
         &options,
         BUILD,
@@ -191,7 +201,12 @@ fn plaintext_and_unauthenticated_exceptions_require_insecure_development() {
         .concat()),
     )
     .unwrap();
-    config.messaging.producer_source_stream().unwrap();
+    assert!(config.messaging().plaintext_admitted);
+    assert_matches!(
+        config.messaging().credentials,
+        Some(MessagingCredentials::Unauthenticated)
+    );
+    config.messaging().producer_source_stream().unwrap();
 }
 
 #[test]
@@ -209,7 +224,7 @@ fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
     );
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
     config.producer_source_stream().unwrap();
-    assert!(config.plaintext_admitted());
+    assert!(config.plaintext_admitted);
 
     let unauthenticated = MessagingInput {
         urls: vec!["nats://nats.internal:4222".to_owned()],
@@ -303,24 +318,27 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
         ("APP__MESSAGING__CONSUMER_CONCURRENCY", "2"),
     ]);
     assert_eq!(
-        cfg.messaging.urls,
+        cfg.messaging().urls,
         vec![
             "tls://nats-a.example:4222".to_owned(),
             "tls://nats-b.example:4222".to_owned(),
         ]
     );
     assert_matches!(
-        &cfg.messaging.credentials,
+        &cfg.messaging().credentials,
         Some(MessagingCredentials::Inline(secret)) if secret.expose_secret() == "fixture-credentials"
     );
     assert_eq!(
-        cfg.messaging.root_ca_path.as_deref(),
+        cfg.messaging().root_ca_path.as_deref(),
         Some(Path::new("/etc/nats/root-ca.pem"))
     );
-    assert_eq!(cfg.messaging.max_payload_bytes, bytesize::ByteSize::mib(2));
-    assert_eq!(cfg.messaging.consumer_concurrency.get(), 2);
-    assert!(!cfg.messaging.trusted_network);
-    assert!(cfg.messaging.tls_first);
+    assert_eq!(
+        cfg.messaging().max_payload_bytes,
+        bytesize::ByteSize::mib(2)
+    );
+    assert_eq!(cfg.messaging().consumer_concurrency.get(), 2);
+    assert!(!cfg.messaging().plaintext_admitted);
+    assert!(cfg.messaging().tls_first);
     let rendered = format!("{cfg:?}");
     assert!(!rendered.contains("fixture-credentials"));
     assert!(!rendered.contains("nats-a.example"));
@@ -335,9 +353,8 @@ fn messaging_trusted_network_admits_plaintext_in_production() {
         ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
         ("APP__MESSAGING__SOURCE_STREAM", "events"),
     ]);
-    assert!(cfg.messaging.trusted_network);
-    assert!(cfg.messaging.plaintext_admitted());
-    cfg.messaging.producer_source_stream().unwrap();
+    assert!(cfg.messaging().plaintext_admitted);
+    cfg.messaging().producer_source_stream().unwrap();
 }
 
 #[test]
@@ -354,7 +371,7 @@ fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
     };
     let cfg = load_worker_from(&options, BUILD, env(&[])).unwrap();
     assert_matches!(
-        &cfg.messaging.credentials,
+        &cfg.messaging().credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/from-file.creds")
     );
 
@@ -368,7 +385,7 @@ fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
     )
     .unwrap();
     assert_matches!(
-        &cfg.messaging.credentials,
+        &cfg.messaging().credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/nats.creds")
     );
 
@@ -378,7 +395,7 @@ fn messaging_credentials_file_is_a_path_a_file_or_the_environment_may_set() {
         env(&[("APP__MESSAGING__CREDENTIALS_FILE", " ")]),
     )
     .unwrap();
-    assert_matches!(cfg.messaging.credentials, None);
+    assert_matches!(cfg.messaging().credentials, None);
 }
 
 #[test]
@@ -398,7 +415,7 @@ fn messaging_empty_root_ca_path_unsets_the_file_value() {
         env(&[("APP__MESSAGING__ROOT_CA_PATH", "")]),
     )
     .unwrap();
-    assert_eq!(cfg.messaging.root_ca_path, None);
+    assert_eq!(cfg.messaging().root_ca_path, None);
 }
 
 #[test]
@@ -418,7 +435,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         env(&[]),
     )
     .unwrap();
-    assert_eq!(cfg.messaging.urls.len(), 2);
+    assert_eq!(cfg.messaging().urls.len(), 2);
 
     let overridden = load_worker_from(
         &LoadOptions {
@@ -429,7 +446,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         env(&[("APP__MESSAGING__URLS", "tls://nats-c.example:4222")]),
     )
     .unwrap();
-    assert_eq!(overridden.messaging.urls, ["tls://nats-c.example:4222"]);
+    assert_eq!(overridden.messaging().urls, ["tls://nats-c.example:4222"]);
 
     let number = write(&dir, "number.toml", "[messaging]\nurls = 4222\n");
     let err = load_worker_from(
@@ -455,7 +472,11 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
         let environment = [("APP__MESSAGING__URLS", blank)];
         load_from(&options, BUILD, env(&environment)).unwrap();
         let err = load_worker_from(&options, BUILD, env(&environment)).unwrap_err();
-        assert_matches!(&err, Error::Validate(error) if error.names(key), "{err}");
+        assert!(
+            err.validation_errors()
+                .is_some_and(|error| error.names(key)),
+            "{err}"
+        );
     }
 }
 
@@ -466,9 +487,9 @@ fn messaging_credentials_preserve_scalar_looking_strings() {
             ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
             ("APP__MESSAGING__CREDENTIALS", secret),
         ]);
-        assert_eq!(cfg.messaging.urls, ["tls://nats.example:4222"]);
+        assert_eq!(cfg.messaging().urls, ["tls://nats.example:4222"]);
         assert_matches!(
-            &cfg.messaging.credentials,
+            &cfg.messaging().credentials,
             Some(MessagingCredentials::Inline(inline)) if inline.expose_secret() == secret
         );
     }
@@ -501,7 +522,7 @@ fn only_the_worker_decodes_messaging_settings() {
         let environment = [(name, value)];
         load_from(&options, BUILD, env(&environment)).unwrap();
         let err = load_worker_from(&options, BUILD, env(&environment)).unwrap_err();
-        assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
+        assert_matches!(err.0, ErrorKind::Deserialize(_), "{name}: {err}");
         assert!(err.to_string().contains(expected), "{name}: {err}");
     }
 }

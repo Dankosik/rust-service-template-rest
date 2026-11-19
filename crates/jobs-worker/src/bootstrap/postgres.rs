@@ -25,12 +25,9 @@ pub(super) fn required_pool_config(
     if !has_ordinary_jobs && !has_publisher {
         return Ok(None);
     }
-    let postgres = config
-        .postgres
-        .as_ref()
-        .ok_or(WorkerError::PostgresDisabled)?;
+    let postgres = config.postgres().ok_or(WorkerError::PostgresDisabled)?;
     super::jobs::validate_pool_capacity(
-        has_ordinary_jobs.then_some(config.jobs.max_workers),
+        has_ordinary_jobs.then_some(config.jobs().max_workers),
         has_publisher,
         postgres.max_connections,
     )?;
@@ -45,7 +42,7 @@ pub(super) async fn admit_pool(
 ) -> Result<(), WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
-    let local_development = config.app.is_local_development();
+    let local_development = config.app().is_local_development();
     let pool = open_pool(config, postgres, background, resources, move || {
         Dsn::admit_for_environment(
             dsn.expose_secret(),
@@ -67,7 +64,7 @@ async fn open_pool(
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
-    let application_name = application_name(&config.observability.otel.service_name);
+    let application_name = application_name(&config.observability().otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
         postgres.max_connections,
@@ -185,7 +182,7 @@ mod tests {
     #[test]
     fn stopped_or_expired_preparation_cannot_admit_a_late_pool() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
+        let postgres = config.postgres().unwrap();
         for (expired, result_ready) in [(false, false), (true, false), (true, true)] {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -243,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn failed_preparation_task_withholds_its_panic_payload() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
+        let postgres = config.postgres().unwrap();
         let mut resources = Resources::default();
         let background = Background::new();
         let error = open_pool(&config, postgres, &background, &mut resources, || {

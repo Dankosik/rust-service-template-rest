@@ -13,8 +13,7 @@ pub(crate) struct JobsOperatorInput {
     postgres: OperatorPostgresInput,
 }
 
-type OperatorAppInput =
-    crate::app::AppFields<serde::de::IgnoredAny, serde::de::IgnoredAny, serde::de::IgnoredAny>;
+type OperatorAppInput = crate::app::AppFields<crate::de::Skip, crate::de::Skip>;
 
 #[derive(Clone, Debug)]
 pub struct JobsOperatorConfig {

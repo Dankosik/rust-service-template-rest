@@ -6,7 +6,8 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{
-    BlankAsNone, BlankSecretAsNone, ListenAddr, StrictBool, StrictCount, StrictDuration, StrictEnum,
+    BlankAsNone, BlankAsNoneVerbatim, ListenAddr, StrictBool, StrictCount, StrictDuration,
+    StrictEnum,
 };
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
@@ -16,7 +17,7 @@ use crate::validate::{Rejected, Violations, required};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum GrpcSecurity {
+enum GrpcSecurity {
     /// The operator supplies the enclosing network trust boundary.
     Plaintext,
     Tls,
@@ -43,7 +44,7 @@ pub(crate) struct GrpcInput {
     #[serde_as(as = "BlankAsNone")]
     certificate: Option<String>,
     #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
     #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
@@ -154,16 +155,6 @@ pub enum GrpcListenerSecurity {
     Plaintext,
     #[debug("tls")]
     Tls(GrpcTlsMaterial),
-}
-
-impl GrpcListenerSecurity {
-    #[must_use]
-    pub const fn mode(&self) -> &'static str {
-        match self {
-            Self::Plaintext => "plaintext",
-            Self::Tls(_) => "tls",
-        }
-    }
 }
 
 #[derive(Clone, derive_more::Debug)]

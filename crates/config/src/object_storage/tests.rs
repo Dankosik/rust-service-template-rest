@@ -1,6 +1,6 @@
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
+use crate::load::{Error, ErrorKind, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
@@ -120,7 +120,7 @@ fn blank_optional_regions_are_absent() {
         ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
     ]);
     assert_matches!(
-        cfg.object_storage.as_ref().unwrap().provider,
+        cfg.object_storage().unwrap().provider,
         ObjectStorageProvider::Railway { region: None, .. }
     );
 }
@@ -189,7 +189,7 @@ fn cloudflare_r2_trims_blank_and_auto_regions() {
             ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
         ]);
         assert_matches!(
-            cfg.object_storage.as_ref().unwrap().provider,
+            cfg.object_storage().unwrap().provider,
             ObjectStorageProvider::CloudflareR2 { .. }
         );
     }
@@ -334,7 +334,7 @@ fn object_storage_environment_maps_railway_bucket_variables() {
         ("APP__OBJECT_STORAGE__MAX_CONCURRENCY", "32"),
         ("APP__OBJECT_STORAGE__OPERATION_TIMEOUT", "10s"),
     ]);
-    let storage = cfg.object_storage.as_ref().unwrap();
+    let storage = cfg.object_storage().unwrap();
     assert_eq!(
         storage.provider,
         crate::ObjectStorageProvider::Railway {
@@ -368,7 +368,7 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__CREDENTIALS", "workload_identity"),
     ]);
     assert_matches!(
-        amazon.object_storage.as_ref().unwrap().credentials,
+        amazon.object_storage().unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 
@@ -384,7 +384,7 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
     ]);
     assert_eq!(
-        generic.object_storage.as_ref().unwrap().provider,
+        generic.object_storage().unwrap().provider,
         crate::ObjectStorageProvider::S3Compatible {
             endpoint: "https://ceph.internal.example:8443".to_owned(),
             region: None,
@@ -419,7 +419,7 @@ fn object_storage_credentials_selector_in_a_file_is_public() {
     )
     .unwrap();
     assert_matches!(
-        cfg.object_storage.as_ref().unwrap().credentials,
+        cfg.object_storage().unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 }
@@ -432,6 +432,6 @@ fn object_storage_unknown_provider_fails_loading() {
             BUILD,
             env(&[("APP__OBJECT_STORAGE__PROVIDER", "minio")]),
         ),
-        Err(Error::Deserialize(_))
+        Err(Error(ErrorKind::Deserialize(_)))
     );
 }

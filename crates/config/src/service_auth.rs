@@ -1,7 +1,7 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::de::{BlankAsNone, BlankSecretAsNone, StrictEnum, StrictString};
+use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictEnum, StrictString};
 use crate::validate::{Rejected, ValidationError, Violations, optional_pair, required_non_blank};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub(crate) struct ServiceAuthInput {
     /// Environment-only PKCS#8 PEM of this service's EC P-256 signing
     /// key. Without it the service verifies callers but calls no one.
     #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
 }
 
