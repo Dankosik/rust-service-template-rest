@@ -31,7 +31,7 @@ pub(super) fn with_publisher(
 }
 
 impl RetainedMessages {
-    pub(super) fn activate_postgres_messages(
+    pub(super) fn register_postgres_messages(
         &mut self,
         resources: &Resources,
     ) -> Result<(), WorkerError> {
@@ -105,7 +105,7 @@ mod tests {
             postgres_messages: registration.postgres_messages,
         };
         std::assert_matches!(
-            messages.activate_postgres_messages(&resources),
+            messages.register_postgres_messages(&resources),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
@@ -116,6 +116,6 @@ mod tests {
             received.is_closed(),
             "factory uses the retained native pool"
         );
-        messages.activate_postgres_messages(&resources).unwrap();
+        messages.register_postgres_messages(&resources).unwrap();
     }
 }

@@ -26,6 +26,7 @@ const FORCED_LISTENER_JOIN: Duration = Duration::from_millis(500);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
+const LOGGER_FLUSH_RESERVE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(BACKGROUND_JOIN)
     .saturating_add(DEPENDENCY_CLOSE)
@@ -53,6 +54,18 @@ impl Outcome {
     }
 }
 
+#[derive(Clone, Copy)]
+struct DrainDeadlines {
+    graceful: Instant,
+    confirmation: Instant,
+}
+
+impl DrainDeadlines {
+    fn remaining(self) -> Duration {
+        self.graceful.saturating_duration_since(Instant::now())
+    }
+}
+
 struct Budget {
     async_deadline: Instant,
 }
@@ -64,7 +77,7 @@ impl Budget {
         }
     }
 
-    fn remaining(&self, want: Duration) -> Duration {
+    fn stage_budget(&self, want: Duration) -> Duration {
         want.min(
             self.async_deadline
                 .saturating_duration_since(Instant::now()),
@@ -73,6 +86,21 @@ impl Budget {
 
     fn stage_deadline(&self, want: Duration) -> Instant {
         self.async_deadline.min(Instant::now() + want)
+    }
+
+    fn drain_deadlines(
+        &self,
+        requested_drain: Duration,
+        overall_drain_deadline: Instant,
+    ) -> DrainDeadlines {
+        let graceful = self
+            .stage_deadline(requested_drain)
+            .min(overall_drain_deadline);
+        let confirmation = self.async_deadline.min(graceful + FORCED_LISTENER_JOIN);
+        DrainDeadlines {
+            graceful,
+            confirmation,
+        }
     }
 }
 
@@ -90,11 +118,11 @@ pub(crate) struct Dependencies {
 }
 
 impl Dependencies {
-    fn close(
+    async fn close(
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
         deadline: Instant,
-    ) -> impl std::future::Future<Output = Outcome> {
+    ) -> Outcome {
         let Self {
             // template:begin postgres:shutdown-dependencies-postgres-destructure
             postgres,
@@ -109,49 +137,47 @@ impl Dependencies {
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
         // template:end object-storage:service-shutdown-dependencies-object-storage-close
-        async move {
-            let cache_close = async {
-                // template:begin cache:service-shutdown-dependencies-cache-close
-                if let Some(cache) = cache {
-                    return match cache.close(deadline).await {
-                        infra_cache::CloseOutcome::Complete => {
-                            tracing::info!("cache_closed");
-                            Outcome::Graceful
-                        }
-                        infra_cache::CloseOutcome::TimedOut => {
-                            tracing::warn!("cache outlived its close budget");
-                            Outcome::Degraded
-                        }
-                    };
-                }
-                // template:end cache:service-shutdown-dependencies-cache-close
-                Outcome::Graceful
-            };
-            let postgres_close = async {
-                // template:begin postgres:shutdown-dependencies-postgres-close
-                if let Some(pool) = postgres {
-                    return match infra_postgres::close(
-                        &pool,
-                        deadline.saturating_duration_since(Instant::now()),
-                    )
-                    .await
-                    {
-                        CloseOutcome::Complete => {
-                            tracing::info!("postgres_pool_closed");
-                            Outcome::Graceful
-                        }
-                        CloseOutcome::TimedOut => {
-                            tracing::warn!("postgres pool outlived its close budget");
-                            Outcome::Degraded
-                        }
-                    };
-                }
-                // template:end postgres:shutdown-dependencies-postgres-close
-                Outcome::Graceful
-            };
-            let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
-            cache_outcome.combine(postgres_outcome)
-        }
+        let cache_close = async {
+            // template:begin cache:service-shutdown-dependencies-cache-close
+            if let Some(cache) = cache {
+                return match cache.close(deadline).await {
+                    infra_cache::CloseOutcome::Complete => {
+                        tracing::info!("cache_closed");
+                        Outcome::Graceful
+                    }
+                    infra_cache::CloseOutcome::TimedOut => {
+                        tracing::warn!("cache outlived its close budget");
+                        Outcome::Degraded
+                    }
+                };
+            }
+            // template:end cache:service-shutdown-dependencies-cache-close
+            Outcome::Graceful
+        };
+        let postgres_close = async {
+            // template:begin postgres:shutdown-dependencies-postgres-close
+            if let Some(pool) = postgres {
+                return match infra_postgres::close(
+                    &pool,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await
+                {
+                    CloseOutcome::Complete => {
+                        tracing::info!("postgres_pool_closed");
+                        Outcome::Graceful
+                    }
+                    CloseOutcome::TimedOut => {
+                        tracing::warn!("postgres pool outlived its close budget");
+                        Outcome::Degraded
+                    }
+                };
+            }
+            // template:end postgres:shutdown-dependencies-postgres-close
+            Outcome::Graceful
+        };
+        let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
+        cache_outcome.combine(postgres_outcome)
     }
 }
 
@@ -276,7 +302,7 @@ async fn finish_telemetry(
         budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK));
     let log_reserve = if let Some(logger) = &logger {
         logger.begin_shutdown();
-        Duration::from_secs(1).min(telemetry_deadline.saturating_duration_since(Instant::now()))
+        LOGGER_FLUSH_RESERVE.min(telemetry_deadline.saturating_duration_since(Instant::now()))
     } else {
         Duration::ZERO
     };
@@ -286,7 +312,7 @@ async fn finish_telemetry(
         outcome = outcome.combine(trace_outcome);
     }
     if let Err(error) = signals.take_pending() {
-        outcome = signal_owner_failed(error);
+        outcome = outcome.combine(signal_owner_failed(error));
     }
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = logger {
@@ -327,7 +353,10 @@ fn signal_owner_failed(error: super::signals::SignalError) -> Outcome {
 }
 
 async fn stop_diagnostics(server: Server, budget: &Budget) -> Outcome {
-    match server.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
+    match server
+        .drain(budget.stage_budget(DIAGNOSTICS_SHUTDOWN))
+        .await
+    {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
         Ok(Drained::TimedOut { .. }) => tracing::warn!(
             reason = "scrape_outlived_shutdown_budget",
@@ -369,44 +398,26 @@ async fn stop_serving(
         tracing::info!("readiness_disabled");
     }
     let overall_drain_deadline = budget.stage_deadline(http_config.drain_timeout);
-    let propagation_outcome = if serving.admitted {
-        wait_readiness_propagation(
-            budget.remaining(http_config.readiness_propagation_delay),
-            signals,
+    let (propagation_outcome, requested_drain) = if serving.admitted {
+        (
+            wait_readiness_propagation(
+                budget.stage_budget(http_config.readiness_propagation_delay),
+                signals,
+            )
+            .await,
+            http_config.effective_drain_budget(),
         )
-        .await
     } else {
-        Outcome::Graceful
+        (Outcome::Graceful, http_config.drain_timeout)
     };
-    let requested_drain = if serving.admitted {
-        http_config.effective_drain_budget()
-    } else {
-        http_config.drain_timeout
-    };
-    let graceful_deadline = budget
-        .stage_deadline(requested_drain)
-        .min(overall_drain_deadline);
-    let confirmation_deadline = budget
-        .async_deadline
-        .min(graceful_deadline + FORCED_LISTENER_JOIN);
-    let drain_budget = graceful_deadline.saturating_duration_since(Instant::now());
-    tracing::info!(budget = ?drain_budget, "drain_started");
-    let drain = drain_server(
-        serving.http_server.take(),
-        graceful_deadline,
-        confirmation_deadline,
-        &DrainEvents::HTTP,
-    );
+    let deadlines = budget.drain_deadlines(requested_drain, overall_drain_deadline);
+    tracing::info!(budget = ?deadlines.remaining(), "drain_started");
+    let drain = drain_server(serving.http_server.take(), deadlines, &DrainEvents::HTTP);
     // template:begin grpc:shutdown-concurrent-grpc-drain
     let drain = async {
         let (http_outcome, grpc_outcome) = tokio::join!(
             drain,
-            drain_server(
-                serving.grpc_server.take(),
-                graceful_deadline,
-                confirmation_deadline,
-                &DrainEvents::GRPC
-            )
+            drain_server(serving.grpc_server.take(), deadlines, &DrainEvents::GRPC)
         );
         http_outcome.combine(grpc_outcome)
     };
@@ -437,15 +448,14 @@ impl DrainEvents {
 
 async fn drain_server(
     server: Option<Server>,
-    graceful_deadline: Instant,
-    confirmation_deadline: Instant,
+    deadlines: DrainDeadlines,
     events: &DrainEvents,
 ) -> Outcome {
     let Some(server) = server else {
         return Outcome::Graceful;
     };
     let (drained, residue) = server
-        .drain_until(graceful_deadline, confirmation_deadline)
+        .drain_until(deadlines.graceful, deadlines.confirmation)
         .await;
     match drained {
         Ok(Drained::Complete) => {
@@ -504,16 +514,16 @@ mod tests {
     async fn stages_reserve_runtime_and_never_renew_the_deadline() {
         let budget = Budget::until(Instant::now() + Duration::from_secs(10));
         assert_eq!(
-            budget.remaining(Duration::from_secs(20)),
+            budget.stage_budget(Duration::from_secs(20)),
             Duration::from_secs(9)
         );
         tokio::time::advance(Duration::from_secs(8)).await;
         assert_eq!(
-            budget.remaining(Duration::from_secs(4)),
+            budget.stage_budget(Duration::from_secs(4)),
             Duration::from_secs(1)
         );
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);
+        assert_eq!(budget.stage_budget(Duration::from_secs(4)), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]

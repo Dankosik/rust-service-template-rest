@@ -176,7 +176,7 @@ where
     clippy::disallowed_methods,
     reason = "terminal diagnostic before tracing is available"
 )]
-fn process_failure(message: impl std::fmt::Display) -> ExitCode {
+fn fail_to_stderr(message: impl std::fmt::Display) -> ExitCode {
     let _ = writeln!(std::io::stderr().lock(), "{message}");
     ExitCode::FAILURE
 }
@@ -200,7 +200,7 @@ where
     };
     let config = match service_config::load(&options, BUILD_INFO, shutdown::TAIL) {
         Ok(config) => config,
-        Err(err) => return process_failure(&err),
+        Err(err) => return fail_to_stderr(&err),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime.effective_worker_threads())
@@ -208,7 +208,7 @@ where
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => return process_failure(format!("build tokio runtime: {err}")),
+        Err(err) => return fail_to_stderr(format!("build tokio runtime: {err}")),
     };
 
     let mut exit = RuntimeExit::default();
@@ -229,7 +229,7 @@ where
             if exit.logger_installed {
                 ExitCode::FAILURE
             } else {
-                process_failure(&err)
+                fail_to_stderr(&err)
             }
         }
     }
@@ -269,29 +269,30 @@ async fn serve(
     let mut telemetry = TelemetryHandles::default();
 
     let failure = AssertUnwindSafe(async {
+        let startup = async {
+            let metrics = install_telemetry(
+                &config,
+                &mut background,
+                &mut telemetry,
+                &mut exit.logger_installed,
+            )
+            .await?;
+            raise_open_file_limit(&config);
+            start(
+                &config,
+                registration,
+                &metrics,
+                &mut background,
+                &mut dependencies,
+                &mut serving,
+            )
+            .await
+        };
         let startup_result = tokio::select! {
             biased;
             stopped = signals.wait() => stopped.map(|()| None).map_err(BootstrapError::from),
             failed = wait_for_failure(&mut background_failures) => Err(failed.into()),
-            started = async {
-                let metrics = install_telemetry(
-                    &config,
-                    &mut background,
-                    &mut telemetry,
-                    &mut exit.logger_installed,
-                )
-                .await?;
-                raise_open_file_limit(&config);
-                start(
-                    &config,
-                    registration,
-                    &metrics,
-                    &mut background,
-                    &mut dependencies,
-                    &mut serving,
-                )
-                .await
-            } => started.map(Some),
+            started = startup => started.map(Some),
         };
         drop(config);
         finish_startup(startup_result, signals, &mut background, &mut serving)?;
@@ -309,9 +310,9 @@ async fn serve(
     .unwrap_or(Err(BootstrapError::Panicked))
     .err()
     .or_else(|| pending_failure(&background, &serving));
-    let deadline = *exit.deadline.get_or_insert_with(|| {
-        signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period
-    });
+    let deadline = *exit
+        .deadline
+        .insert(signals.first_stop().unwrap_or_else(Instant::now) + http_config.grace_period);
     if let Some(error) = &failure
         && telemetry.logger.is_some()
     {
@@ -486,10 +487,10 @@ async fn start(
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     );
-    let control = serving.readiness.insert(readiness.control());
+    let readiness_control = serving.readiness.insert(readiness.control());
 
     let state = crate::AppState {
-        readiness: control.reader(),
+        readiness: readiness_control.reader(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
@@ -504,9 +505,9 @@ async fn start(
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if let Some(listener) = &config.grpc {
+    let grpc_prepared = if let Some(grpc_config) = &config.grpc {
         Some(grpc::prepare(
-            listener,
+            grpc_config,
             registration.grpc,
             &state,
             // template:end grpc:bootstrap-grpc-prepare-start
@@ -545,25 +546,43 @@ async fn start(
         }
         None => app,
     };
-    let http = config.http.listener();
-    let http_listener = BoundListener::bind(http.addr)?;
-    let diagnostics_listener = config
-        .observability
-        .metrics
-        .addr
-        .map(BoundListener::bind)
-        .transpose()?;
-    // template:begin grpc:bootstrap-grpc-bind-before-ready
-    let grpc_bound = grpc_prepared
-        .map(|grpc| BoundListener::bind(grpc.addr).map(|listener| (listener, grpc)))
-        .transpose()?;
-    // template:end grpc:bootstrap-grpc-bind-before-ready
-    let mut prepared = readiness
+    let listeners = BoundListeners::bind(
+        config,
+        // template:begin grpc:bootstrap-grpc-bind-argument
+        grpc_prepared,
+        // template:end grpc:bootstrap-grpc-bind-argument
+    )?;
+    let mut prepared_readiness = readiness
         .prepare()
         .await
         .map_err(BootstrapError::Admission)?;
 
-    let server_options = Http1Options {
+    listeners.serve(
+        app,
+        metrics,
+        readiness_control.reader(),
+        background,
+        serving,
+    )?;
+
+    prepared_readiness
+        .ensure_fresh()
+        .await
+        .map_err(BootstrapError::Admission)?;
+    Ok(prepared_readiness)
+}
+
+struct BoundListeners {
+    http: BoundListener,
+    http_options: Http1Options,
+    diagnostics: Option<BoundListener>,
+    // template:begin grpc:bootstrap-grpc-bound-field
+    grpc: Option<(BoundListener, grpc::Prepared)>,
+    // template:end grpc:bootstrap-grpc-bound-field
+}
+
+fn http1_options(http: &service_config::HttpListenerConfig) -> Http1Options {
+    Http1Options {
         header_read_timeout: http.header_read_timeout,
         max_read_buffer_bytes: usize::try_from(http.max_header_bytes.as_u64())
             .unwrap_or(usize::MAX),
@@ -571,45 +590,85 @@ async fn start(
             max_connections: http.max_connections,
             max_connection_age: http.max_connection_age,
         },
-    };
-    #[cfg(feature = "hotpath")]
-    hotpath::tokio_runtime!();
-    let http_server = serving
-        .http_server
-        .insert(app.serve(http_listener, server_options));
-    background.watch_server(HTTP_ACCEPT_TASK, http_server);
-    tracing::info!(addr = %http_server.local_addr(), "http listener bound");
+    }
+}
 
-    if let Some(listener) = diagnostics_listener {
-        let reader = control.reader();
-        let diagnostics = diagnostics_router(metrics.clone(), move || reader.is_ready())
-            .merge(infra_http::liveness_router());
-        let diagnostics_server = serving
-            .diagnostics_server
-            .insert(listener.serve(diagnostics, server_options));
-        background.watch_server(DIAGNOSTICS_ACCEPT_TASK, diagnostics_server);
-        tracing::info!(
-            addr = %diagnostics_server.local_addr(),
-            "diagnostics listener bound"
-        );
+impl BoundListeners {
+    fn bind(
+        config: &Config,
+        // template:begin grpc:bootstrap-grpc-bind-input
+        grpc_prepared: Option<grpc::Prepared>,
+        // template:end grpc:bootstrap-grpc-bind-input
+    ) -> Result<Self, BootstrapError> {
+        let http = config.http.listener();
+        let http_listener = BoundListener::bind(http.addr)?;
+        let diagnostics = config
+            .observability
+            .metrics
+            .addr
+            .map(BoundListener::bind)
+            .transpose()?;
+        // template:begin grpc:bootstrap-grpc-bind-before-ready
+        let grpc = grpc_prepared
+            .map(|grpc| BoundListener::bind(grpc.addr).map(|listener| (listener, grpc)))
+            .transpose()?;
+        // template:end grpc:bootstrap-grpc-bind-before-ready
+        Ok(Self {
+            http: http_listener,
+            http_options: http1_options(http),
+            diagnostics,
+            // template:begin grpc:bootstrap-grpc-bound-value
+            grpc,
+            // template:end grpc:bootstrap-grpc-bound-value
+        })
     }
 
-    // template:begin grpc:bootstrap-grpc-bind
-    if let Some((listener, grpc)) = grpc_bound {
-        let grpc_server =
-            serving
-                .grpc_server
-                .insert(grpc.app.serve(listener, grpc.options, grpc.tls)?);
-        background.watch_server(GRPC_ACCEPT_TASK, grpc_server);
-        tracing::info!(addr = %grpc_server.local_addr(), "grpc listener bound");
-    }
-    // template:end grpc:bootstrap-grpc-bind
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "only the gRPC profile can fail when starting a bound listener"
+    )]
+    fn serve(
+        self,
+        app: infra_http::Application,
+        metrics: &Metrics,
+        readiness: health::ReadinessReader,
+        background: &mut Background,
+        serving: &mut Serving,
+    ) -> Result<(), BootstrapError> {
+        #[cfg(feature = "hotpath")]
+        hotpath::tokio_runtime!();
+        let http_server = serving
+            .http_server
+            .insert(app.serve(self.http, self.http_options));
+        background.watch_server(HTTP_ACCEPT_TASK, http_server);
+        tracing::info!(addr = %http_server.local_addr(), "http listener bound");
 
-    prepared
-        .ensure_fresh()
-        .await
-        .map_err(BootstrapError::Admission)?;
-    Ok(prepared)
+        if let Some(listener) = self.diagnostics {
+            let diagnostics = diagnostics_router(metrics.clone(), move || readiness.is_ready())
+                .merge(infra_http::liveness_router());
+            let diagnostics_server = serving
+                .diagnostics_server
+                .insert(listener.serve(diagnostics, self.http_options));
+            background.watch_server(DIAGNOSTICS_ACCEPT_TASK, diagnostics_server);
+            tracing::info!(
+                addr = %diagnostics_server.local_addr(),
+                "diagnostics listener bound"
+            );
+        }
+
+        // template:begin grpc:bootstrap-grpc-bind
+        if let Some((listener, grpc)) = self.grpc {
+            let grpc_server =
+                serving
+                    .grpc_server
+                    .insert(grpc.app.serve(listener, grpc.options, grpc.tls)?);
+            background.watch_server(GRPC_ACCEPT_TASK, grpc_server);
+            tracing::info!(addr = %grpc_server.local_addr(), "grpc listener bound");
+        }
+        // template:end grpc:bootstrap-grpc-bind
+
+        Ok(())
+    }
 }
 
 #[allow(
@@ -637,10 +696,15 @@ async fn http_application(
         draining: Some(state.readiness.clone()),
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
-    if let Some(mounted) = idempotency::prepare(contract.idempotent_operations(), config, pool)? {
-        let app =
-            contract.build_with_idempotency_store(state, auth, &options, mounted.store.clone())?;
-        mounted.activate(background).await?;
+    if let Some(idempotency) = idempotency::prepare(contract.idempotent_operations(), config, pool)?
+    {
+        let app = contract.build_with_idempotency_store(
+            state,
+            auth,
+            &options,
+            idempotency.store.clone(),
+        )?;
+        idempotency.activate(background).await?;
         return Ok(app);
     }
     // template:end http-idempotency:bootstrap-http-idempotency-activation

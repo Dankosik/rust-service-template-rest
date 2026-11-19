@@ -3,10 +3,9 @@ use std::num::NonZeroU32;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::{ValidationError, WorkerConfig};
 
-use super::{Ended, WorkerError, check_pending_end};
+use super::WorkerError;
 use crate::background::Background;
 use crate::resources::Resources;
-use crate::signals::Signals;
 
 pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError> {
     match kinds.validate() {
@@ -73,19 +72,9 @@ pub(super) async fn build_engine(
     Ok(engine)
 }
 
-pub(super) fn start_engine(
-    engine: Option<Engine>,
-    resources: &mut Resources,
-    background: &Background,
-    signals: &mut Signals,
-) -> Result<(), Ended> {
-    let Some(engine) = engine else {
-        return Ok(());
-    };
-    check_pending_end(resources, background, signals)?;
+pub(super) fn start_engine(engine: Engine, resources: &mut Resources, background: &Background) {
     resources.started_engine = Some(engine.start(&background.tracker, &background.cancel));
     tracing::info!("jobs_claiming_started");
-    Ok(())
 }
 
 pub(super) async fn engine_failure(resources: &Resources) -> WorkerError {

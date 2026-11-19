@@ -9,10 +9,9 @@ use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{Ended, WorkerError, check_pending_end, worker_identity};
+use super::{WorkerError, worker_identity};
 use crate::background::Background;
 use crate::resources::{BrokerResource, Resources};
-use crate::signals::Signals;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -29,7 +28,7 @@ pub(super) struct MessagingPlan {
 }
 
 impl MessagingPlan {
-    pub(super) fn consumer(
+    pub(super) fn if_consuming(
         config: &WorkerConfig,
         messages: RetainedMessages,
     ) -> Result<Option<Self>, WorkerError> {
@@ -59,7 +58,7 @@ impl MessagingPlan {
     }
 
     // template:begin outbox:worker-bootstrap-outbox-messaging
-    pub(super) fn producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
+    pub(super) fn for_producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
         let source_stream = config.messaging.producer_source_stream()?;
         Ok(Self {
             options: messaging_options(config, source_stream, None)?,
@@ -81,7 +80,7 @@ pub(super) async fn connect_messaging(
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
     let mut retained_messages = retained_messages;
     if let Some(messages) = &mut retained_messages {
-        messages.activate_postgres_messages(resources)?;
+        messages.register_postgres_messages(resources)?;
         messages
             .registry
             .check_publication_limit(options.max_payload_bytes)?;
@@ -96,10 +95,7 @@ pub(super) async fn connect_messaging(
         return Err(MessagingError::Connection.into());
     };
     let messaging = startup.admit().await?;
-    resources.broker = Some(BrokerResource::Admitted(messaging));
-    let messaging = resources
-        .admitted_messaging()
-        .ok_or(MessagingError::Connection)?;
+    resources.broker = Some(BrokerResource::Admitted(messaging.clone()));
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
@@ -147,18 +143,12 @@ pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
 }
 
 pub(super) fn start_consumer(
-    consumer: Option<Consumer>,
+    consumer: Consumer,
     resources: &mut Resources,
     background: &Background,
-    signals: &mut Signals,
-) -> Result<(), Ended> {
-    let Some(consumer) = consumer else {
-        return Ok(());
-    };
-    check_pending_end(resources, background, signals)?;
+) {
     resources.consumer = Some(consumer.start(&background.cancel));
     tracing::info!("messaging_consuming_started");
-    Ok(())
 }
 
 pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {

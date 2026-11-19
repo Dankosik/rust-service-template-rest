@@ -47,7 +47,7 @@ pub(super) async fn prepare(
                 background.child_token(),
             )
             .await
-            .map_err(|source| authentication_preparation_error(mode, jwks_uri.is_some(), source))?;
+            .map_err(|source| jwt_preparation_error(mode, jwks_uri.is_some(), source))?;
             background.spawn("jwt_refresh", refresh);
             Ok(Some(verifier))
         }
@@ -115,7 +115,7 @@ fn issuer_url(
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
 const JWKS_URI_KEY: &str = "authn.jwks_uri";
 
-fn authentication_preparation_error(
+fn jwt_preparation_error(
     mode: &'static str,
     explicit_jwks_uri: bool,
     source: infra_bearerauthn::PreparationError,

@@ -218,22 +218,27 @@ async fn start_worker(
     resources: &mut Resources,
 ) -> Result<(), Ended> {
     let prepared = {
-        let admission = prepare(config, register, background, resources);
-        tokio::pin!(admission);
+        let preparation = prepare(config, register, background, resources);
+        tokio::pin!(preparation);
         tokio::select! {
             biased;
-            result = signals.wait() => Err(signal_ended(result, background)),
+            result = signals.wait() => Err(signal_ended(result)),
             task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
-            result = &mut admission => result.map_err(Ended::Failure),
+            result = &mut preparation => result.map_err(Ended::Failure),
         }
     }
     .map_err(|ended| pending_failure(resources, background).map_or(ended, Ended::Failure))?;
     check_pending_end(resources, background, signals)?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
-    jobs::start_engine(prepared.engine, resources, background, signals)?;
+    if let Some(engine) = prepared.engine {
+        jobs::start_engine(engine, resources, background);
+    }
     // template:end jobs:worker-bootstrap-start-admitted-jobs
     // template:begin messaging:worker-bootstrap-start-admitted-consumer
-    messaging::start_consumer(prepared.consumer, resources, background, signals)?;
+    if let Some(consumer) = prepared.consumer {
+        check_pending_end(resources, background, signals)?;
+        messaging::start_consumer(consumer, resources, background);
+    }
     // template:end messaging:worker-bootstrap-start-admitted-consumer
     activate_readiness(prepared.readiness, resources, background, signals).await?;
     tracing::info!("jobs_worker_ready");
@@ -246,13 +251,13 @@ async fn activate_readiness(
     background: &Background,
     signals: &mut Signals,
 ) -> Result<(), Ended> {
-    let fresh = tokio::select! {
+    let freshness = tokio::select! {
         biased;
         ended = wait_for_stop(resources, background, signals) => return Err(ended),
         result = readiness.ensure_fresh() => result,
     };
     check_pending_end(resources, background, signals)?;
-    let refresher = fresh
+    let refresher = freshness
         .and_then(|()| readiness.activate())
         .map_err(|error| Ended::Failure(WorkerError::Admission(error)))?;
     background.spawn("readiness_refresher", |cancel| {
@@ -261,10 +266,7 @@ async fn activate_readiness(
     Ok(())
 }
 
-fn signal_ended(result: Result<(), SignalError>, background: &Background) -> Ended {
-    if let Some(task) = background.failure() {
-        return Ended::Failure(WorkerError::BackgroundStopped(task));
-    }
+fn signal_ended(result: Result<(), SignalError>) -> Ended {
     match result {
         Ok(()) => Ended::Signal,
         Err(error) => Ended::Failure(error.into()),
@@ -346,11 +348,11 @@ async fn prepare(
     );
     telemetry::spawn_metrics_tasks(&metrics, background);
     // template:begin jobs:worker-bootstrap-pool-config
-    let postgres = postgres::validate_pool_config(config, capabilities.jobs.is_some())?;
+    let postgres = postgres::required_pool_config(config, capabilities.jobs.is_some())?;
     // template:end jobs:worker-bootstrap-pool-config
     // template:begin outbox:worker-bootstrap-outbox-pool-inputs
-    if capabilities.messages.is_none() {
-        capabilities.messages = Some(messaging::MessagingPlan::producer(config)?);
+    if capabilities.messaging.is_none() {
+        capabilities.messaging = Some(messaging::MessagingPlan::for_producer(config)?);
     }
     // template:end outbox:worker-bootstrap-outbox-pool-inputs
     // template:begin jobs:worker-bootstrap-admit-pool-call
@@ -359,10 +361,10 @@ async fn prepare(
     }
     // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin messaging:worker-bootstrap-messaging-connect
-    let consumer = match capabilities.messages.take() {
-        Some(messages) => {
+    let consumer = match capabilities.messaging.take() {
+        Some(plan) => {
             Box::pin(messaging::connect_messaging(
-                messages,
+                plan,
                 &background.cancel,
                 resources,
             ))
@@ -424,7 +426,7 @@ struct RetainedCapabilities {
     jobs: Option<infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-registrations-jobs
     // template:begin messaging:worker-bootstrap-registrations-messaging
-    messages: Option<messaging::MessagingPlan>,
+    messaging: Option<messaging::MessagingPlan>,
     // template:end messaging:worker-bootstrap-registrations-messaging
 }
 
@@ -454,7 +456,7 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-retain-messaging
-    let messages = messaging::RetainedMessages {
+    let retained_messages = messaging::RetainedMessages {
         registry: registration.messages,
         // template:end messaging:worker-bootstrap-retain-messaging
         // template:begin outbox:worker-bootstrap-postgres-messages-value
@@ -462,8 +464,8 @@ fn register_capabilities(
         // template:end outbox:worker-bootstrap-postgres-messages-value
         // template:begin messaging:worker-bootstrap-plan-messaging
     };
-    let messages = messaging::MessagingPlan::consumer(config, messages)?;
-    let has_messages = messages.is_some();
+    let messaging = messaging::MessagingPlan::if_consuming(config, retained_messages)?;
+    let has_messages = messaging.is_some();
     // template:end messaging:worker-bootstrap-plan-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
     let has_jobs = true;
@@ -476,7 +478,7 @@ fn register_capabilities(
         jobs,
         // template:end jobs:worker-bootstrap-registrations-jobs-value
         // template:begin messaging:worker-bootstrap-registrations-messaging-value
-        messages,
+        messaging,
         // template:end messaging:worker-bootstrap-registrations-messaging-value
     })
 }
@@ -490,7 +492,7 @@ async fn wait_for_stop(
         biased;
         result = signals.wait() => {
             pending_failure(resources, background)
-                .map_or_else(|| signal_ended(result, background), Ended::Failure)
+                .map_or_else(|| signal_ended(result), Ended::Failure)
         },
         task = background.wait_for_failure() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
