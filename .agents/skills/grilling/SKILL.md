@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: "Stress-test a plan or design across its decision tree in frontier rounds and summarize the decisions, assumptions, and remaining risks."
+description: "Interview the requester relentlessly in frontier rounds until every branch of a plan, design, spec, or idea is resolved."
 metadata:
   invocation: user
   kind: workflow
@@ -9,10 +9,6 @@ disable-model-invocation: true
 
 # Grill
 
-Identify the decisions that could change the proposal using repository evidence
-and the requester's prior choices. Use the [grilling interview
-method](../../../docs/spec-first-workflow/shared/grilling.md) across the
-independent decision frontier. Continue independent authorized work while
-waiting for decisions that block the rest.
+Apply [Grilling](../../../docs/spec-first-workflow/shared/grilling.md) standalone to stress-test the proposal, plan, specification, design, or idea in front of you. Continue independent authorized work while waiting for decisions that block the rest.
 
-Grilling completes when every material branch (any branch able to change the plan, implementation, authority, failure behavior, or proof) is answered, repository-resolved, assigned to an owner, or explicitly deferred with its consequence. Summarize decisions, assumptions, and residual risks once all branches are terminal, and wait for explicit confirmation before acting unless an explicit grill-only or phase-only request already sets the boundary.
+Once the **frontier** is empty, summarize the settled decisions (including rejected alternatives and why), labeled assumptions with `Reopen if` triggers, and residual risks, then wait for explicit confirmation before acting or launching any workflow phase—unless the user explicitly scoped this run as grill-only. If the user confirms and wants to enter structured planning, carry the settled branches straight into [Intake](../../../docs/spec-first-workflow/phases/intake.md) without re-asking them.

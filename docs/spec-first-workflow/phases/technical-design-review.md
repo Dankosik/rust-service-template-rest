@@ -70,12 +70,13 @@ malformed sections while still reporting upstream gaps found in the same pass.*
 
 2. **Obligation trace, spec fidelity & scope.** Verify `spec.md` is `status:
    ready` (or a valid skipped-Definition fixed external contract), then
-   independently map `spec.md` (all `R<n>`, `Open to Technical Design:`, `G<n>`,
-   `Terminology`, `Non-goals`, `Assumptions/Reopen if`, `Downstream handoff`,
-   `Durable contract update`, `Carried concerns`) + `api/` `->`
-   decision/mechanism `->` owner `->` proving surface. `FAIL` on any
-   unsupported obligation, tripped `spec.md` `Reopen if`, altered behavior,
-   terminology collision, or leaked `Non-goal`.
+   independently map `intent.md` (`I<n>`) + `spec.md` (all `R<n>`, `Open to
+   Technical Design:`, `G<n>`, `Terminology`, `Non-goals`,
+   `Assumptions/Reopen if`, `Downstream handoff`, `Durable contract update`,
+   `Carried concerns`) + `api/` `->` decision/mechanism `->` owner `->`
+   proving surface. `FAIL` on any unsupported obligation, tripped `spec.md`
+   `Reopen if`, resurrected `intent.md` `Rejected` option without reopening
+   Intake, altered behavior, terminology collision, or leaked `Non-goal`.
 3. **Simplicity, deletion test, steelman `D<n>` & durable docs** *(split by
    subject across axes; both consult `docs/decisions/` and
    `docs/backend-library-selection.md` for their subject and `FAIL` on a

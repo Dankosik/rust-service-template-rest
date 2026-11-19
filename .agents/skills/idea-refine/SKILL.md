@@ -24,9 +24,10 @@ success determines MVP correctness.
   functionality, audiences, integrations, and guarantees under `Not Doing`.
 - Write each key assumption as a falsifiable `"we believe..."` bet paired with an
   observable kill, shrink, or pivot trigger (marking anecdote as weak
-  evidence); cover ordinary missing detail with labeled safe assumptions and ask
-  only direction-changing or high-impact questions (policy, money, identity,
-  privacy, safety, or destructive action).
+  evidence); cover ordinary missing detail with labeled safe assumptions and
+  resolve direction-changing or high-impact questions (policy, money, identity,
+  privacy, safety, or destructive action) using
+  [Grilling](../../../docs/spec-first-workflow/shared/grilling.md).
 
 Disposition alternatives as selected, eliminated with evidence, or blocked by
 one named open decision. Hand off the converged problem-and-MVP direction to

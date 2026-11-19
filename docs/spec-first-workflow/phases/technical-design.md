@@ -27,7 +27,9 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      Paths](technical-design/non-standard-paths.md); otherwise exit via
      [Blocked Exit](technical-design/non-standard-paths.md#blocked-exit) with
      `reopen_owner: Specification`).
-   - Read `specs/<task>/intent.md`, `specs/<task>/spec.md` (all obligations:
+   - Read `specs/<task>/intent.md` (settled decisions `I<n>`, `Rejected`
+     options, `Why`, and `Priority / tie-breakers`), `specs/<task>/spec.md`
+     (all obligations:
      `R<n>` including every `Open to Technical Design:` marker, `G<n>`,
      `Terminology`, `Non-goals`, `Downstream handoff`, `Durable contract
      update`, `Assumptions/Reopen if`, and `Carried concerns`), prior
@@ -87,8 +89,10 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      simpler substitute (`extend owner / collapse shallow chain -> std ->
      locked Cargo.lock crate -> maintained OSS -> custom`) and name the exact
      `R<n>`, `G<n>`, invariant, or bound it breaks. Honor rejected choices in
-     `docs/decisions/` and `docs/backend-library-selection.md` unless their
-     reopen condition is met or the user explicitly requests it.
+     `intent.md` (`I<n>`), `docs/decisions/`, and
+     `docs/backend-library-selection.md` unless their reopen condition is met or
+     the user explicitly requests it, and apply `intent.md`'s `Priority /
+     tie-breakers` on surviving trade-offs.
    - **Design It Twice:** load [Design It
      Twice](technical-design/design-it-twice.md) for any **one-way door** open
      fork unless existing repository conventions (`docs/decisions/`, sibling

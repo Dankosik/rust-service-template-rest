@@ -60,11 +60,15 @@ checks only)**:
 
 ### Phase B — Grounding, Fidelity & Codebase Reality
 
-2. **Intent fidelity, authority & decision discipline.** Independently map
-   material `intent.md` items (`Success signal`, delegated limits, `Open
-   questions`) and `research/*.md` unknowns/conflicts/refresh triggers to
-   `spec.md`. `FAIL` on:
-   - dropped item, weakened constraint, unauthorized breaking change, or
+2. **Intent fidelity, authority & decision discipline.** Confirm `intent.md` is
+   at `status: ready` and independently map material `intent.md` items (settled
+   interview decisions `I<n>` including `Rejected` exclusions and `Why`, hard
+   constraints and `Must not`, `Suggested mechanisms`, `Priority / tie-breakers`,
+   assumptions `A<n>`, `Success signal`, delegated limits, `Open questions`) and
+   `research/*.md` unknowns/conflicts/refresh triggers to `spec.md`. `FAIL` on:
+   - unconfirmed `draft` `intent.md`, dropped `I<n>` or requirement, resurrected
+     `Rejected` option, weakened constraint, `Suggested mechanism` enforced
+     without hard-constraint authority, unauthorized breaking change, or
      decision smuggled into `Non-goals`/`Falsifier`;
    - `Delegated decision` exceeding limits or lacking a steelman alternative,
      reason, or objective `Reopen if`;

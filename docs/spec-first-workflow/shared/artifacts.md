@@ -11,7 +11,7 @@ Task-local artifacts live under `specs/<task>/`:
 
 | Trigger | Artifact | Owns |
 | --- | --- | --- |
-| New structured work completes requester interview | [`intent.md`](../interfaces/intent.md) | Requester meaning synthesized after interview |
+| New structured work starts or completes requester grilling | [`intent.md`](../interfaces/intent.md) | Requester meaning, settled interview decisions (`I<n>`), boundaries, and assumptions (`draft` until user confirms, then `ready`) |
 | Behavioral contract must survive | [`spec.md`](../interfaces/spec-v1.md) | Observable behavior delta, preserved guarantees, falsifiers, assumptions, downstream handoffs, durable contract updates, carried concerns, blocked decisions |
 | A later phase needs a decision about a system mechanism, Rust ownership, or cross-boundary seam | [`design/design.md`](../interfaces/design-v1.md) (`design/`) | Selected decisions, flows, seams, semantic owners, grounding/planning handoff, assumptions, carried concerns, blocked decisions |
 | Several units/dependencies or durable execution state exist | `tasks.md`, `tasks/<ID>-<slug>.md` | Index order/status/results and each task's outcome/boundary/acceptance |

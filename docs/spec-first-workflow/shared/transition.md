@@ -33,9 +33,10 @@ or dependency admission through its owner and review.
 
 ## Cross-Phase Continuation
 
-After Intake, the root coordinator dispatches one applicable preparation phase
-at a time in a [fresh phase session](../../agent-harness.md#context-and-lifetime)
-through the selected adapter. Include the intent path in the phase brief.
+After Intake confirms `specs/<task>/intent.md` at `status: ready`, the root
+coordinator dispatches one applicable preparation phase at a time in a [fresh
+phase session](../../agent-harness.md#context-and-lifetime) through the selected
+adapter. Include the intent path in the phase brief.
 Wait for its reviewed Transition Result,
 re-read the authoritative artifacts, and continue through Planning or the
 user's earlier stopping point. Return a change in requester meaning to Intake
