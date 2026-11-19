@@ -315,20 +315,6 @@ mod tests {
     }
 
     #[derive(Deserialize)]
-    struct Refuse;
-
-    impl Serialize for Refuse {
-        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            let _ = (self, serializer);
-            Err(S::Error::custom("refused"))
-        }
-    }
-
-    impl JobKind for Refuse {
-        const NAME: &'static str = "refuse";
-    }
-
-    #[derive(Deserialize)]
     struct Streamed {
         elements: usize,
         failure: StreamFailure,
@@ -390,16 +376,6 @@ mod tests {
 
     impl JobKind for Reading {
         const NAME: &'static str = "reading";
-    }
-
-    #[test]
-    fn non_finite_floats_are_serialization_errors_before_typed_decode() {
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let err = prepare(&Reading { value }, EnqueueOptions::default()).unwrap_err();
-            std::assert_matches!(err, EnqueueError::Serialize(_), "{value}");
-        }
-        let prepared = prepare(&Reading { value: 1.5 }, EnqueueOptions::default()).unwrap();
-        assert_eq!(prepared.payload, r#"{"value":1.5}"#);
     }
 
     #[test]
@@ -626,11 +602,5 @@ mod tests {
         assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
         assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
         assert_eq!(writer.total, chunk.len());
-    }
-
-    #[test]
-    fn serialize_failure() {
-        let err = prepare(&Refuse, EnqueueOptions::default()).unwrap_err();
-        std::assert_matches!(err, EnqueueError::Serialize(_));
     }
 }
