@@ -194,12 +194,15 @@ async fn absent_scope_is_omitted_from_the_client_credentials_form() {
 #[tokio::test]
 async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_jti() {
     let fixture = Fixture::new().await;
+    let mut signing_windows = Vec::new();
     for _ in 0..2 {
+        let before = jsonwebtoken::get_current_timestamp();
         fixture
             .service_client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap();
+        signing_windows.push(before..=jsonwebtoken::get_current_timestamp());
     }
     let requests = fixture.token_requests();
     assert_eq!(requests.len(), 2);
@@ -207,7 +210,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         .iter()
         .map(|request| decode_assertion(&fixture, request))
         .collect::<Vec<_>>();
-    for (header, claims) in &decoded {
+    for ((header, claims), signing_window) in decoded.iter().zip(signing_windows) {
         assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
         assert_eq!(header.kid.as_deref(), Some("key-1"));
         assert_eq!(header.typ.as_deref(), Some("client-authentication+jwt"));
@@ -216,8 +219,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         assert_eq!(claims.aud, ASSERTION_AUDIENCE);
         assert_eq!(claims.exp - claims.iat, 60);
         assert_eq!(claims.iat, claims.nbf);
-        let now = jsonwebtoken::get_current_timestamp();
-        assert!((10..=15).contains(&(now - claims.iat)));
+        assert!(signing_window.contains(&(claims.iat + 10)));
         assert_ne!(claims.jti, "");
     }
     assert_ne!(decoded[0].1.jti, decoded[1].1.jti);
