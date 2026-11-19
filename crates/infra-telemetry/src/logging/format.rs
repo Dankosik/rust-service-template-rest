@@ -92,7 +92,9 @@ fn enter_format() -> Result<impl Drop, DropReason> {
         let _ = FORMATTING.try_with(|active| active.set(false));
     });
     let permit = Permit::take(&ACTIVE_CALLBACKS, MAX_ACTIVE_CALLBACKS).ok_or(DropReason::Busy)?;
-    Ok((formatting, permit))
+    Ok(std::mem::DropGuard::new(permit, move |_permit| {
+        drop(formatting);
+    }))
 }
 
 struct Bytes<const INLINE: usize = 0> {
