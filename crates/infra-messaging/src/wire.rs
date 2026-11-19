@@ -216,6 +216,11 @@ pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeErro
 pub(crate) const IDENTITY_SCHEMA_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
 
 pub(crate) const fn valid_identity(value: &str) -> bool {
+    const ASCII_C0_END: u8 = 0x20;
+    const ASCII_DEL: u8 = 0x7f;
+    const UTF8_C1_LEAD: u8 = 0xc2;
+    const UTF8_C1_CONTINUATION_END: u8 = 0xa0;
+
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > IDENTITY_MAX_BYTES {
         return false;
@@ -223,7 +228,10 @@ pub(crate) const fn valid_identity(value: &str) -> bool {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if byte < 0x20 || byte == 0x7f || (byte == 0xc2 && bytes[index + 1] < 0xa0) {
+        if byte < ASCII_C0_END
+            || byte == ASCII_DEL
+            || (byte == UTF8_C1_LEAD && bytes[index + 1] < UTF8_C1_CONTINUATION_END)
+        {
             return false;
         }
         index += 1;
