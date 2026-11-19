@@ -52,7 +52,7 @@ for scenario, final, diagnostics in (
         group = "final" if shape in final else "diagnostic"
         CELLS[f"{scenario}-{shape}"] = Cell(scenario, shape, group=group)
 
-CELLS["http-buffered-ipv6"] = Cell("http-buffered", "canonical", group="diagnostic", bind="::1")
+CELLS["http-buffered-ipv6"] = Cell("http-buffered", "one", group="diagnostic", bind="::1")
 
 CELLS.update({
     f"{scenario}-{shape}-{telemetry}": Cell(scenario, shape, telemetry=telemetry)
