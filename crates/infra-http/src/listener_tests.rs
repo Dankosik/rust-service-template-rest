@@ -87,10 +87,11 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
         .await
         .unwrap();
     let drained = server.drain(Duration::from_millis(50)).await.unwrap();
-    assert_eq!(
+    std::assert_matches!(
         drained,
         Drained::TimedOut {
-            remaining_connections: 1
+            remaining_at_deadline: 1,
+            ..
         }
     );
     let mut body = Vec::new();

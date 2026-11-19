@@ -22,6 +22,7 @@ use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
 use infra_http::authn::ProtectedOperationProblemResponses;
+use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
     CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalProblem, Tx,
 };
@@ -197,15 +198,15 @@ impl CreateWidgets for SqlWidgets {
     responses((status = 201, description = "created", body = Widget), ProtectedOperationProblemResponses)
 )]
 async fn create_widget(
-    request: CommandInput,
+    State(state): State<WidgetState>,
     principal: Principal,
     delegation: Option<DelegationCredential>,
-    state: WidgetState,
-) -> Result<CreateWidget, Box<Problem>> {
+    Json(mut input): Json<NewWidget>,
+    request: CommandInput,
+) -> Result<CreateWidget, Problem> {
     assert!(delegation.is_none());
-    let mut input: NewWidget = request.json()?;
     if !may_create(&principal) {
-        return Err(Box::new(forbidden()));
+        return Err(forbidden());
     }
     if let Some(name) = request.headers().get("x-widget-name") {
         let name = name.to_str().map_err(|_| Problem::new(Code::BadRequest))?;
@@ -237,16 +238,15 @@ async fn create_widget(
     responses(ProtectedOperationProblemResponses)
 )]
 async fn replace_widget(
-    mut request: CommandInput,
+    State(state): State<WidgetState>,
     principal: Principal,
     delegation: Option<DelegationCredential>,
-    state: WidgetState,
-) -> Result<CreateWidget, Box<Problem>> {
+    Path(_id): Path<i64>,
+    Json(input): Json<NewWidget>,
+) -> Result<CreateWidget, Problem> {
     assert!(delegation.is_some());
-    let _id: i64 = request.path().await?;
-    let input = request.json()?;
     if !may_create(&principal) {
-        return Err(Box::new(forbidden()));
+        return Err(forbidden());
     }
     Ok(CreateWidget {
         widgets: state.widgets,

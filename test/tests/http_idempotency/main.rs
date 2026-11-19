@@ -33,6 +33,7 @@ use futures_util::future::join_all;
 use infra_idempotency_store::{
     AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
     CallerKind, CleanupError, Record, RequestFingerprint, ScopeKey, StartupError, Store,
+    SuccessRecord, TerminalRefusal, WriteOutcome,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
 use integration_tests::{close_pools, dsn_for, poll_until};
@@ -144,7 +145,7 @@ async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
     assert_eq!(i64::try_from(seeded.rows_affected()), Ok(records));
 }
 
-fn success(body: &str) -> Record {
+fn success(body: &str) -> SuccessRecord {
     let mut headers = HeaderMap::new();
     for (name, value) in [
         (CONTENT_TYPE, "application/json"),
@@ -160,7 +161,7 @@ fn success(body: &str) -> Record {
         ETAG,
         HeaderValue::from_bytes(b"\"\x80\"").expect("valid opaque bytes"),
     );
-    Record::capture(
+    SuccessRecord::capture(
         StatusCode::CREATED,
         &headers,
         Bytes::copy_from_slice(body.as_bytes()),
@@ -258,13 +259,13 @@ async fn execute(
     store: &Store,
     scope: &ScopeKey,
     fingerprint: RequestFingerprint,
-    record: &Record,
+    record: &SuccessRecord,
     work: &Work,
 ) -> Outcome<Refusal> {
     store
         .attempt(scope, &fingerprint, async |tx: &mut Tx<'_>| {
             work.run(tx).await;
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await
 }
@@ -272,7 +273,7 @@ async fn execute(
 async fn once_free(
     store: &Store,
     scope: &ScopeKey,
-    record: &Record,
+    record: &SuccessRecord,
     work: &Work,
 ) -> Outcome<Refusal> {
     bounded(
@@ -334,12 +335,12 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
         assert_eq!(work.runs(), 1, "no duplicate ran its work");
         work.hold.release();
     },);
-    assert_eq!(committed(held), record);
+    assert_eq!(committed(held), Record::from(record.clone()));
 
     let concurrent = [&replica_1, &replica_2, &replica_1, &replica_2]
         .map(|replica| execute(replica, &scope, INPUT, &record, &work));
     for retry in join_all(concurrent).await {
-        assert_eq!(live(retry), Some(record.clone()));
+        assert_eq!(live(retry), Some(Record::from(record.clone())));
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -363,7 +364,7 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
                 .execute(&pool)
                 .await
                 .expect("another writer commits a live record");
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
     std::assert_matches!(refused, Err(AttemptError::Internal), "{refused:?}");
@@ -388,16 +389,20 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let other_key = ScopeKey::new(caller(SUBJECT), OTHER_KEY);
     let outcome: Outcome<Refusal> = replica_1
-        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
-            work.run(tx).await;
-            Err(Refusal::NotSuccess)
-        })
+        .attempt(
+            &scope,
+            &INPUT,
+            async |tx: &mut Tx<'_>| -> Result<WriteOutcome, Refusal> {
+                work.run(tx).await;
+                Err(Refusal::NotSuccess)
+            },
+        )
         .await;
     std::assert_matches!(outcome, Ok(Attempted::RolledBack(Refusal::NotSuccess)));
     let panicked = AssertUnwindSafe(replica_1.attempt(
         &other_key,
         &INPUT,
-        async |tx: &mut Tx<'_>| -> Result<Record, Refusal> {
+        async |tx: &mut Tx<'_>| -> Result<WriteOutcome, Refusal> {
             work.run(tx).await;
             panic!("the work panics after writing its effect");
         },
@@ -411,7 +416,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     for scope in [&scope, &other_key] {
         assert_eq!(records(&pool, scope).await, 0);
         let retry = once_free(&replica_2, scope, &record, &work).await;
-        assert_eq!(committed(retry), record);
+        assert_eq!(committed(retry), Record::from(record.clone()));
     }
     assert_eq!(work.runs(), 4);
     assert_eq!(count(&pool, EFFECTS).await, 2);
@@ -421,11 +426,9 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(pool.clone(), RETENTION)
-        .unwrap()
-        .with_terminal_refusals(true);
+    let store = Store::new(pool.clone(), RETENTION).unwrap();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
-    let refusal = Record::capture_terminal_refusal(
+    let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
         &HeaderMap::new(),
         Bytes::from_static(b"refused"),
@@ -440,10 +443,13 @@ async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
             if tx.begin_command_savepoint().await.is_ok() {
                 tx.rollback_command_savepoint().await.unwrap();
             }
-            Ok(refusal.clone())
+            Ok::<_, Refusal>(WriteOutcome::TerminalRefusal(refusal.clone()))
         })
         .await;
-    assert_eq!(committed(result), refusal);
+    std::assert_matches!(
+        result,
+        Ok(Attempted::TerminalRefusal(actual)) if actual == Record::from(refusal)
+    );
     assert_eq!(records(&pool, &scope).await, 1);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 }
@@ -456,24 +462,28 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
         .unwrap();
     listener.listen(CHANNEL).await.unwrap();
     let producer = template_pool(&dsn_for(&pool).await, 1).await;
-    let store = Store::new(producer.clone(), RETENTION)
-        .unwrap()
-        .with_terminal_refusals(true);
-    let refusal = Record::capture_terminal_refusal(
+    let store = Store::new(producer.clone(), RETENTION).unwrap();
+    let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
         &HeaderMap::new(),
         Bytes::from_static(b"declined"),
     )
     .unwrap();
-    for (payload, record) in [("rolled_back", refusal), ("committed", success("created"))] {
+    for (payload, outcome) in [
+        ("rolled_back", WriteOutcome::TerminalRefusal(refusal)),
+        ("committed", WriteOutcome::Success(success("created"))),
+    ] {
         let scope = ScopeKey::new(caller(SUBJECT), payload.as_bytes());
         let result = store
             .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
                 tx.notify_after_commit(CHANNEL, payload, Duration::ZERO);
-                Ok::<_, Refusal>(record)
+                Ok::<_, Refusal>(outcome)
             })
             .await;
-        committed(result);
+        std::assert_matches!(
+            result,
+            Ok(Attempted::Committed(_) | Attempted::TerminalRefusal(_))
+        );
     }
     let notification = bounded("committed command wakes the listener", listener.recv())
         .await
@@ -485,28 +495,28 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
     create_effects(&pool).await;
-    let reader = Store::new(pool.clone(), RETENTION).unwrap();
-    let writer = reader.clone().with_terminal_refusals(true);
+    let store = Store::new(pool.clone(), RETENTION).unwrap();
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
-    let refusal = Record::capture_terminal_refusal(
+    let refusal = TerminalRefusal::capture(
         StatusCode::UNPROCESSABLE_ENTITY,
         &HeaderMap::new(),
         Bytes::from_static(b"reserved"),
     )
     .unwrap();
-    let undeclared = execute(&reader, &scope, INPUT, &refusal, &work).await;
-    std::assert_matches!(undeclared, Err(AttemptError::Internal));
-    assert_eq!(records(&pool, &scope).await, 0);
-    assert_eq!(count(&pool, EFFECTS).await, 0);
-
-    assert_eq!(
-        committed(once_free(&writer, &scope, &refusal, &work).await),
-        refusal
+    let written = store
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            work.run(tx).await;
+            Ok::<_, Refusal>(WriteOutcome::TerminalRefusal(refusal.clone()))
+        })
+        .await;
+    std::assert_matches!(
+        written,
+        Ok(Attempted::TerminalRefusal(actual)) if actual == Record::from(refusal.clone())
     );
-    let retry = execute(&reader, &scope, INPUT, &success("would execute"), &work).await;
-    assert_eq!(live(retry), Some(refusal));
-    assert_eq!(work.runs(), 2);
+    let retry = execute(&store, &scope, INPUT, &success("would execute"), &work).await;
+    assert_eq!(live(retry), Some(Record::from(refusal)));
+    assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 }
 
@@ -521,10 +531,10 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
-    assert_eq!(committed(first), record);
+    assert_eq!(committed(first), Record::from(record.clone()));
 
     let replayed = execute(&replica_2, &scope, INPUT, &other, &work).await;
-    assert_eq!(live(replayed), Some(record.clone()));
+    assert_eq!(live(replayed), Some(Record::from(record)));
     let mismatched = execute(&replica_2, &scope, OTHER_INPUT, &other, &work).await;
     assert_eq!(live(mismatched), None);
     assert_eq!(work.runs(), 1);
@@ -548,7 +558,7 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
         ),
     ] {
         let independent = execute(&replica_2, &independent_scope, INPUT, &other, &work).await;
-        assert_eq!(committed(independent), other);
+        assert_eq!(committed(independent), Record::from(other.clone()));
     }
     assert_eq!(work.runs(), 5);
     assert_eq!(count(&pool, EFFECTS).await, 5);
@@ -614,9 +624,13 @@ async fn p3_an_existing_format_row_replays_without_running_work(pool: PgPool) {
             assert_eq!(changed.rows_affected(), 1);
         }
         let replay: Outcome<()> = store
-            .attempt(&scope, &fingerprint, async |_: &mut Tx<'_>| {
-                panic!("an existing row must replay without running work")
-            })
+            .attempt(
+                &scope,
+                &fingerprint,
+                async |_: &mut Tx<'_>| -> Result<WriteOutcome, ()> {
+                    panic!("an existing row must replay without running work")
+                },
+            )
             .await;
         let Ok(Attempted::Replay(record)) = replay else {
             panic!("expected a replay of the existing record, got {replay:?}");
@@ -649,7 +663,7 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     assert_eq!(
         committed(execute(&store, &scope, INPUT, &record, &work).await),
-        record
+        Record::from(record.clone())
     );
 
     sqlx::query("ALTER TABLE http_idempotency_records ALTER COLUMN body DROP NOT NULL")
@@ -719,11 +733,11 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
                 .execute(&mut *tx)
                 .await
                 .expect("the committed effect");
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
     match first {
-        Ok(Attempted::Committed(actual)) => assert_eq!(actual, record),
+        Ok(Attempted::Committed(actual)) => assert_eq!(actual, Record::from(record.clone())),
         unexpected => panic!("expected a committed long-caller record, got {unexpected:?}"),
     }
 
@@ -733,11 +747,11 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
                 .execute(&mut *tx)
                 .await
                 .expect("a replay must not run this effect");
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
     match replayed {
-        Ok(Attempted::Replay(actual)) => assert_eq!(actual, record),
+        Ok(Attempted::Replay(actual)) => assert_eq!(actual, Record::from(record)),
         unexpected => panic!("expected a matching long-caller replay, got {unexpected:?}"),
     }
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -763,11 +777,11 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
-    assert_eq!(committed(first), record);
+    assert_eq!(committed(first), Record::from(record.clone()));
     expire(&pool, &scope).await;
 
     let afresh = execute(&replica_2, &scope, OTHER_INPUT, &replacement, &work).await;
-    assert_eq!(committed(afresh), replacement);
+    assert_eq!(committed(afresh), Record::from(replacement));
     let decided = execute(&replica_1, &scope, INPUT, &record, &work).await;
     assert_eq!(live(decided), None);
     assert_eq!(records(&pool, &scope).await, 1);
@@ -846,7 +860,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
             })
         })
         .await;
-        assert_eq!(committed(written), response);
+        assert_eq!(committed(written), Record::from(response.clone()));
 
         let retry_response = success(r#"{"id":3}"#);
         let retry = bounded(
@@ -854,7 +868,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
             execute(&store, &scope, INPUT, &retry_response, &work),
         )
         .await;
-        assert_eq!(live(retry), Some(response));
+        assert_eq!(live(retry), Some(Record::from(response)));
         assert_eq!(work.runs(), 1);
         let full_retention: bool = sqlx::query_scalar(
             "SELECT expires_at >= $2::text::timestamptz + $3::interval \
@@ -886,7 +900,7 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
 
     let seeded = execute(&writer, &scope, INPUT, &original, &work).await;
-    assert_eq!(committed(seeded), original);
+    assert_eq!(committed(seeded), Record::from(original.clone()));
     proxy.arm_ready_hold(ReadyBoundary::ExecuteSync);
     let (replay, afresh) = bounded("replay across expiry", async {
         tokio::join!(
@@ -902,10 +916,10 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
     })
     .await;
 
-    assert_eq!(live(replay), Some(original));
-    assert_eq!(committed(afresh), replacement);
+    assert_eq!(live(replay), Some(Record::from(original)));
+    assert_eq!(committed(afresh), Record::from(replacement.clone()));
     let retry = execute(&writer, &scope, OTHER_INPUT, &replacement, &work).await;
-    assert_eq!(live(retry), Some(replacement));
+    assert_eq!(live(retry), Some(Record::from(replacement)));
     assert_eq!(count(&pool, EFFECTS).await, 2);
     close_pools(&[&replay_pool, &writer_pool]).await;
     proxy.shutdown().await;
@@ -920,7 +934,7 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     let record = success(r#"{"id":1}"#);
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let written = execute(&store, &scope, INPUT, &record, &Work::default()).await;
-    assert_eq!(committed(written), record);
+    assert_eq!(committed(written), Record::from(record));
     let on_time: bool = sqlx::query_scalar(
         "SELECT expires_at BETWEEN now() + interval '3599 seconds' \
          AND now() + interval '3601 seconds' \
@@ -946,7 +960,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let first = execute(&replica_1, &scope, INPUT, &record, &work).await;
-    assert_eq!(committed(first), record);
+    assert_eq!(committed(first), Record::from(record.clone()));
     expire(&pool, &scope).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
     seed(&pool, SEED_LIVE, LIVE).await;
@@ -985,7 +999,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
         !scrape.contains(CLEANUP_RUNS_METRIC),
         "direct calls are not scheduler runs"
     );
-    assert_eq!(committed(executed), record);
+    assert_eq!(committed(executed), Record::from(record));
     assert_eq!(count(&pool, EXPIRED).await, 1);
     assert_eq!(count(&pool, LIVE_RECORDS).await, LIVE + 1);
 
@@ -1242,7 +1256,7 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let other_caller = ScopeKey::new(caller(OTHER_SUBJECT), KEY);
     let first = execute(&writer, &scope, INPUT, &record, &work).await;
-    assert_eq!(committed(first), record);
+    assert_eq!(committed(first), Record::from(record.clone()));
 
     sqlx::query("UPDATE http_idempotency_records SET headers = ARRAY[ROW('set-cookie', ''::bytea)::http_idempotency_header_pair] WHERE scope_key = $1")
         .bind(scope.digest())
@@ -1278,7 +1292,7 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
                 sqlx::query("SELECT 1 / 0").execute(&mut *tx).await.is_err(),
                 "the first statement aborts the transaction"
             );
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
     std::assert_matches!(aborted, Err(AttemptError::Internal), "{aborted:?}");
@@ -1286,7 +1300,7 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
     assert_eq!(records(&pool, &scope).await, 0);
 
     let retry = execute(&store, &scope, INPUT, &record, &Work::default()).await;
-    assert_eq!(committed(retry), record);
+    assert_eq!(committed(retry), Record::from(record));
     assert_eq!(count(&pool, EFFECTS).await, 1);
     close_pools(&[&store_pool]).await;
 }
@@ -1311,7 +1325,7 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
     let retry = once_free(&replica_2, &scope, &record, &work).await;
-    assert_eq!(committed(retry), record);
+    assert_eq!(committed(retry), Record::from(record));
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 1);
     assert_eq!(records(&pool, &scope).await, 1);

@@ -453,19 +453,20 @@ async fn drain_server(
     let Some(server) = server else {
         return Outcome::Graceful;
     };
-    let (drained, residue) = server
+    match server
         .drain_until(deadlines.graceful, deadlines.confirmation)
-        .await;
-    match drained {
+        .await
+    {
         Ok(Drained::Complete) => {
             tracing::info!("{}", events.completed);
             Outcome::Graceful
         }
         Ok(Drained::TimedOut {
-            remaining_connections,
+            remaining_at_deadline,
+            residue,
         }) => {
             tracing::warn!(
-                remaining = remaining_connections,
+                remaining = remaining_at_deadline,
                 accept_unconfirmed = residue.accept_unconfirmed,
                 remaining_connections = residue.remaining_connections,
                 remaining_delegated_tasks = residue.remaining_delegated_tasks,
@@ -476,6 +477,7 @@ async fn drain_server(
             Outcome::Degraded
         }
         Err(error) => {
+            let residue = error.residue();
             tracing::error!(
                 %error,
                 accept_unconfirmed = residue.accept_unconfirmed,
