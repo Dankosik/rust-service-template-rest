@@ -353,7 +353,10 @@ impl Services {
         if self.caller_rules.contains_key(path) {
             return Err(Error::DuplicateCallerRule(path.to_owned()));
         }
-        let mut names = foldhash::HashSet::with_capacity(callers.len());
+        let mut names = foldhash::HashSet::with_capacity_and_hasher(
+            callers.len(),
+            foldhash::fast::RandomState::default(),
+        );
         for caller in callers {
             let name = infra_serviceauth::ServiceName::parse(caller).map_err(|source| {
                 Error::InvalidCallerRule {

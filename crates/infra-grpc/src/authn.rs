@@ -137,11 +137,12 @@ pub(crate) async fn authenticate(
         return Err(response);
     }
     check_open(context)?;
+    let delegation = requirement
+        .delegate
+        .then(|| token.into_delegation_credential());
     request.headers_mut().remove(AUTHORIZATION);
-    if requirement.delegate {
-        request
-            .extensions_mut()
-            .insert(token.into_delegation_credential());
+    if let Some(credential) = delegation {
+        request.extensions_mut().insert(credential);
     }
     request
         .extensions_mut()
