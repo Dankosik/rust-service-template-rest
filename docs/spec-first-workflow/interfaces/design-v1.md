@@ -8,7 +8,7 @@ while leaving internals behind a single module's seam to Implementation.
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
-Basis: intent.md, spec.md | <cited external contract>[, research/<topic>.md ...]
+Basis: [intent.md, ]spec.md | <cited external contract>[, research/<topic>.md ...]
 Carried concerns: <risk, downstream owner, closing action — from unresolved spec.md Carried concerns (in draft) or review CONCERNS (before ready); omit when none>
 
 ## Obligation trace
@@ -19,7 +19,7 @@ Carried concerns: <risk, downstream owner, closing action — from unresolved sp
 
 ## Key decisions
 
-<Omit only when `design.md` is persisted with zero open forks (e.g. a non-trivial `rollout.md`); when zero open forks and no `rollout.md` apply, take [No-Open-Decisions Exit](../phases/technical-design/non-standard-paths.md#no-open-decisions-exit).>
+<Omit only when `design.md` is persisted with zero open forks (e.g. alongside a non-trivial `rollout.md`); otherwise see [No-Open-Decisions Exit](../phases/technical-design/non-standard-paths.md#no-open-decisions-exit).>
 
 ### D1 — <short decision name>
 
@@ -72,11 +72,11 @@ Carried concerns: <risk, downstream owner, closing action — from unresolved sp
 
 ## Grounding and planning handoff
 
-- **Verified anchors:** <source-verified `path::Symbol`, `crate@version::item`, schema/config anchors; carry uncached crates or unproved bounds in `Assumptions` (`Reopen if`)>
+- **Verified anchors:** <source-verified `path::Symbol`, `crate@version::item`, schema/config anchors; carry uncached crates or unproved bounds in `Assumptions and reopen triggers`>
 - **Pinned shared identifiers:** <exact new/changed config keys, error codes, metric/span names, wire/event/job/table/column names, or cross-unit symbols closing every unfixed `Open to Technical Design:` identifier while preserving fixed `spec.md` contracts; omit when none>
-- **Shared mutated surfaces:** <narrowest canonical repo-relative shared files or ordered directories actually mutated matching [Task Packet V1](task-packet-v1.md#field-rules) — manifests/policy, ordered/generated surfaces, shared wiring including parent `lib.rs`/`mod.rs`, concrete shared docs such as `docs/decisions/<topic>.md`, plus high-fan-out exhaustive public types — or `none`>
+- **Shared mutated surfaces:** <narrowest canonical repo-relative paths mutated across [Task Packet V1](task-packet-v1.md#field-rules)'s four `Exclusive locks` categories plus high-fan-out exhaustive public types, or `none`>
 - **Superseded paths and generated contracts:** <code, config, contracts, or tests to delete; generated artifacts to regenerate (`api/`, `.sqlx/`, etc.); omit when none>
-- **Durable doc updates:** <`docs/decisions/...`, `docs/backend-library-selection.md`, `docs/repo-architecture.md` (incl. `Domain Vocabulary`), or `docs/production-contract.md` updates citing `D<n>` or `spec.md`; omit when none>
+- **Durable doc updates:** <updates per `Durable record gate` below citing `D<n>` or `spec.md`; omit when none>
 - **Planning hooks:** <`prefactor`, `shared-contract` (≥2 lock-disjoint parallel consumers only), `integration-first`, or `expand -> migrate -> contract (same-release | multi-release)`; omit when none>
 
 ## Assumptions and reopen triggers

@@ -6,10 +6,10 @@ Load from [Technical Design](../technical-design.md) only when triggered.
 
 Inspect only what changed across `intent.md`, `spec.md`, existing
 `specs/<task>/design/design.md`, and `specs/<task>/rollout.md` under
-[Artifacts](../../shared/artifacts.md). Preserve surviving `D<n>`/`S<n>` IDs per
-[Design V1](../../interfaces/design-v1.md#field-rules), re-verify prior `Carried
-concerns`, flip any retained `blocked` `rollout.md` back to `draft` before
-review, and mark superseded siblings for deletion in step 3 (or
+[Artifacts](../../shared/artifacts.md). Preserve surviving `D<n>`/`S<n>` IDs
+and keep any retained `rollout.md` status in lockstep (`draft` before review)
+per [Design V1](../../interfaces/design-v1.md#field-rules), re-verify prior
+`Carried concerns`, and mark superseded siblings for deletion in step 3 (or
 [No-Open-Decisions Exit](#no-open-decisions-exit)). Continue [Technical
 Design](../technical-design.md) from step 1.
 
@@ -36,15 +36,17 @@ non-trivial `rollout.md` apply:
    Review](../technical-design-review.md#no-open-decisions-result) under
    [Review](../../shared/review.md): `Obligation -> forced owner -> primary
    locator -> proving surface` table plus `Verified anchors` (for inspected
-   non-obvious locked crates), `Assumptions (Reopen if)` (for genuinely
+   non-obvious locked crates), `Assumptions and reopen triggers` (for genuinely
    uncached crates), `Shared mutated surfaces`, `Superseded paths and generated
-   contracts`, and `Durable doc updates` when applicable.
+   contracts`, `Durable doc updates`, `Planning hooks`, and unresolved `spec.md`
+   `Carried concerns` when applicable.
 2. On `PASS` or `CONCERNS`: delete stale `specs/<task>/design/*.md` or
    `rollout.md`, emit [Transition Result
    V1](../../shared/transition.md#transition-result-v1) (`status: ready`,
    `owner: Technical Design`, `result: <reviewed forced-owner evidence +
-   carried CONCERNS>`, `review: <locator or inline result>`, `next_owner:
-   Planning`), and stop.
+   carried concerns>`, `review: <locator or inline result>`, `movement_evidence:
+   <zero open forks verified>`, `reopen_owner: none`, `next_owner: Planning`),
+   and stop.
 3. On `FAIL`: handle findings under [Review
    Lifecycle](../../shared/review.md#lifecycle); use a bounded delta recheck
    when only handoff metadata was incomplete; on confirmed `PHASE_DEFECT`
@@ -62,8 +64,8 @@ trade-off. Collect all independent blockers in one pass—formatting `B<n>` per
 [Design V1](../../interfaces/design-v1.md)—then emit [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
 `owner: Technical Design`, `review: <locator or inline result, or none when
-unreviewed>`, `reopen_owner: Specification | Intake | <external authority>`,
-`next_owner: none`):
+unreviewed>`, `movement_evidence: none`, `reopen_owner: Specification | Intake
+| <external authority>`, `next_owner: none`):
 
 - **Existing or worthwhile `design/design.md`:** save `design/design.md` at
   `status: blocked` with `Blocked decisions`, flip any persisted `rollout.md`

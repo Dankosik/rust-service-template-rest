@@ -6,24 +6,23 @@ Read-only review adapter for one fixed Technical Design candidate
 Run statically (skip builds, tests, and live services). Falsify prose and
 `Verified anchors` against **primary sources**, record every inspected primary
 file, symbol, and `Cargo.lock` source in `evidence_boundary` on every active
-axis, and return [Review Result V1](../interfaces/review-result-v1.md) with
-classification (`PHASE_DEFECT`, `UPSTREAM_GAP`, or `CONCERN`) and smallest
-owner (`Technical Design`, `Specification`, `Intake`, or external authority)
-without rewriting `design/` or inventing decisions.
+axis, and return [Review Result V1](../interfaces/review-result-v1.md) per
+[Verdict](#verdict) without rewriting `design/` or inventing decisions.
 
 For inline forced-owner evidence, jump to [No-Open-Decisions
 Result](#no-open-decisions-result).
 
 ## Review Topology
 
-Run only assigned checks, respecting the cold-start boundary (**never open
-uncited codebase files before completing Phase A**):
+Run only assigned checks; whenever Phase A (check **1**) is assigned, respect
+the cold-start boundary (**never open uncited files before completing Phase
+A**):
 
 - **Single-reviewer (default, 1 fresh `reviewer-agent`):** Phase A (`1`, cold)
-  → Phase B (`2`, `3a` + `3b`, `4`) → Phase C (`5`, `6`).
-- **Two-axis parallel (2 fresh `reviewer-agent` lanes, never forking parent
-  history):** run strictly the assigned non-overlapping lens; review clears
-  only when **both** axes return `PASS` or `CONCERNS` on the same candidate:
+  → Phase B (`2`, applicable `3a` / `3b`, `4`) → Phase C (applicable `5`, `6`).
+- **Two-axis parallel (2 fresh `reviewer-agent` lanes):** run strictly the
+  assigned non-overlapping lens; review clears only when **both** axes return
+  `PASS` or `CONCERNS` on the same candidate:
   - **Axis 1 — Spec Fidelity, System Mechanics, System Deletion & Rollout:**
     checks **2**, **3a**, **5**, and **6**.
   - **Axis 2 — Cold-Start Handoff, Rust Architecture & Source/Compile Truth:**
@@ -71,9 +70,9 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    present) and `spec.md` (or a valid skipped-Definition fixed external
    contract) are `status: ready`, then independently map `intent.md` (`I<n>`
    including `Binding` strength) + `spec.md` (all `R<n>`, `Open to
-   Technical Design:`, `G<n>`, `Terminology`, `Non-goals`,
-   `Assumptions/Reopen if`, `Downstream handoff`, `Durable contract update`,
-   `Carried concerns`) + `api/` `->` decision/mechanism `->` owner `->`
+   Technical Design:`, `G<n>`, `Terminology`, `Non-goals`, `Decisions,
+   assumptions, and reopen triggers`, `Downstream handoff`, `Durable contract
+   update`, `Carried concerns`) + `api/` `->` decision/mechanism `->` owner `->`
    proving surface. `FAIL` on any unsupported obligation, tripped `spec.md`
    `Reopen if`, resurrected `intent.md` `Rejected` option without reopening
    Intake, altered behavior, terminology collision, or leaked `Non-goal`.
@@ -98,12 +97,12 @@ malformed sections while still reporting upstream gaps found in the same pass.*
 4. **Primary-source truth, workspace rules, handoff completeness & compile
    reality.** Inspect real code, exhaustive public workspace type fan-out,
    non-obvious `Cargo.lock` crate sources (`Cargo.lock` or `cargo metadata
-   --locked --format-version 1`, checking signatures and semantics),
+   --locked --offline --format-version 1`, checking signatures and semantics),
    [`quality/architecture.json`](../../../quality/architecture.json)
    (`allow_dependents`), `template/profiles.json`, `Cargo.toml`
    `[workspace.lints]`, `clippy.toml`, and `vendor/` forks. `FAIL` on:
    - any contradicted or uninspected anchor (genuinely uncached crates carried
-     in `Assumptions (Reopen if)` are `CONCERNS`);
+     in `Assumptions and reopen triggers` are `CONCERNS`);
    - any `quality/architecture.json`, [Repository
      Architecture](../../repo-architecture.md#global-invariants), profile, or
      unaddressed exhaustive-type fan-out violation;
@@ -134,17 +133,14 @@ malformed sections while still reporting upstream gaps found in the same pass.*
 
 ## No-Open-Decisions Result
 
-Always 1 fresh `reviewer-agent`. Verify preconditions (`intent.md` when present
-and `spec.md` are `status: ready`, or a valid skipped-Definition fixed external
-contract with `intent.md` at `status: ready` and zero behavioral forks, zero
-tripped `spec.md` `Reopen if`, and no non-trivial `rollout.md` required). Inspect primary code, `quality/architecture.json`, and
-non-obvious `Cargo.lock` sources for every obligation (`R<n>`, `Open to
-Technical Design:`, `G<n>`, `Technical Design` `Downstream handoff`, `Durable
-contract update`, `Carried concerns`). Try to construct **one realistic
-two-engineer divergence** (mechanism, unpinned identifier, error/retryability,
-config rule, rollout path, owner, or seam) or **one primary-source
-contradiction**, verify the forced-owner handoff package required by
-[No-Open-Decisions
+Always 1 fresh `reviewer-agent`. Verify check **2**'s input preconditions
+(plus zero tripped `spec.md` `Reopen if` and no non-trivial `rollout.md`
+required). Inspect primary code, `quality/architecture.json`, and non-obvious
+`Cargo.lock` sources for every obligation in check **2**'s scope. Try to
+construct **one realistic two-engineer divergence** (mechanism, unpinned
+identifier, error/retryability, config rule, rollout path, owner, or seam) or
+**one primary-source contradiction**, verify the forced-owner handoff package
+required by [No-Open-Decisions
 Exit](technical-design/non-standard-paths.md#no-open-decisions-exit), and apply
 [Verdict](#verdict).
 

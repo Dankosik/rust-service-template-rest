@@ -37,8 +37,8 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      (all obligations:
      `R<n>` including every `Open to Technical Design:` marker, `G<n>`,
      `Terminology`, `Non-goals`, `Downstream handoff`, `Durable contract
-     update`, `Assumptions/Reopen if`, and `Carried concerns`), prior
-     `research/*.md`, and `workflow-plan.md` when present.
+     update`, `Decisions, assumptions, and reopen triggers`, and `Carried
+     concerns`), prior `research/*.md`, and `workflow-plan.md` when present.
    - Verify baseline claims against **primary sources** in three groups
      (offload wide scans to a fresh `evidence-agent` under [Read-Only
      Delegation](../shared/read-only-delegation.md), verifying decision-critical
@@ -56,7 +56,7 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      - **Contracts & locked crates:** `api/`, migrations, `Cargo.toml`
        `[workspace.lints]`, `clippy.toml`, `vendor/*/PATCHES.md`, and cached
        sources of non-obvious `Cargo.lock` crate APIs (`Cargo.lock` or
-       `cargo metadata --locked --format-version 1`).
+       `cargo metadata --locked --offline --format-version 1`).
    - **Map the Decision Frontier** before proposing solutions: classify each
      obligation into (a) **forced** (zero realistic two-engineer divergence and
      zero unpinned `Open to Technical Design:` identifiers), (b) **open forks**
@@ -70,7 +70,7 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      | Runtime crossings, data/schema, truth, trust, failure/concurrency, budgets, config, signals, or rollout | [System Design](technical-design/system-design.md) |
      | Rust modules, seams, error/invariant ownership, workspace graph, or generated/profile containment not forced by code and `quality/architecture.json` | [Rust Architecture](technical-design/rust-architecture.md) |
      | Deployable, worker, wire contract, migration, runtime config/trust material, or managed dependency change | [Release Closure](../rubrics/release-closure.md) |
-     | Decision-changing evidence gap (code, external contract, or authorized read-only empirical probe without mutating repo source) | Supporting [Research](research.md) **inside this phase** (inline, or `specs/<task>/research/<topic>.md` when reused downstream) |
+     | Decision-changing static or external evidence gap (code or external contract) | Supporting [Research](research.md) **inside this phase** (inline, or `specs/<task>/research/<topic>.md` when reused downstream) |
 
    - **Early exits:** route blockers/falsifications to [Blocked
      Exit](technical-design/non-standard-paths.md#blocked-exit); route zero
@@ -108,7 +108,7 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      | Uncertainty | Action |
      | --- | --- |
      | Statically checkable in code, `Cargo.lock`, or primary docs | Settle now from primary sources. |
-     | Non-obvious locked crate source genuinely uncached locally | Record in `Assumptions` (`Reopen if`), not `Verified anchors`. |
+     | Non-obvious locked crate source genuinely uncached locally | Record in `Assumptions and reopen triggers`, not `Verified anchors`. |
      | Decision-changing runtime behavior, hard budget, or statically unproved Rust bound | Run an authorized read-only [Research](research.md) probe without mutating repo source, or flag `Planning hooks: integration-first` + concrete `Reopen if`. |
      | Non-decisive detail behind one seam | Leave open to Implementation. |
 
@@ -119,13 +119,12 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      `Reopen if`, and every relied-on symbol/bound is verified or flagged for
      `Reopen if` / `integration-first`.
 
-3. **Persist draft artifact(s).** Write `specs/<task>/design/design.md` at
-   `status: draft` (carrying any still-unresolved `spec.md` `Carried concerns`
-   and removing resolved `Blocked decisions`) per [Design
-   V1](../interfaces/design-v1.md) via [Artifacts](../shared/artifacts.md), and
-   `specs/<task>/rollout.md` at `status: draft` when [Release
-   Closure](../rubrics/release-closure.md) needs a non-trivial sequence. Delete
-   superseded `design/*.md` or `rollout.md`.
+3. **Persist draft artifact(s).** Write `specs/<task>/design/design.md` (and
+   `specs/<task>/rollout.md` when [Release
+   Closure](../rubrics/release-closure.md) needs a non-trivial sequence) at
+   `status: draft` per [Design V1](../interfaces/design-v1.md) via
+   [Artifacts](../shared/artifacts.md), deleting superseded `design/*.md` or
+   `rollout.md`.
    - *Done when:* draft artifact(s) are on disk, concretely bound per `Design
      V1`, with zero residual `Blocked decisions`.
 
@@ -133,10 +132,10 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
    - **Trace & handoff:** every `spec.md` obligation sits in `Obligation trace`
      with owner and proving surface; zero `Non-goals` leaked; `Grounding and
      planning handoff` is complete for cold-start Planning.
-   - **Walkthrough & witness:** walk every `S<n>` caller sketch line-by-line
-     against primary signatures and compile reality; when System Design
-     triggered, walk one worst-case failure or interleaving witness using only
-     the written `design.md` and `spec.md`.
+   - **Walkthrough & witness:** when Rust Architecture triggered, walk every
+     `S<n>` caller sketch line-by-line against primary signatures and compile
+     reality; when System Design triggered, walk one worst-case failure or
+     interleaving witness using only the written `design.md` and `spec.md`.
    - **Deletion & seam purity:** every added mechanism or structure traces to
      `spec.md` or a steelman `D<n>`; remove internals behind one module's seam,
      task slicing, or test/command prescriptions.
@@ -149,13 +148,14 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
    - **Brief hygiene:** on initial or fresh reviews, pass strictly the
      candidate paths (`specs/<task>/design/design.md`, linked `design/*.md`,
      `rollout.md`), input paths (`intent.md`, `spec.md` or cited external
-     contract, plus `research/*.md` cited in `Basis` or `design/`—pass uncited
-     `research/*.md` only to Axis 1 or after Phase A so cold-start blindness
-     holds), assigned axis/checks, and method path
-     (`technical-design-review.md`)—omit author rationale or "already verified"
-     claims that break cold-start blindness or anchor the reviewer. Bounded
-     delta rechecks add only anchored findings and the repair delta or refuting
-     primary locators.
+     contract, plus `research/*.md` cited in `Basis` or `design/`—omit uncited
+     `research/*.md` from Phase A / Axis 2 briefs so cold-start blindness holds;
+     pass them to Axis 1 in two-axis mode, or let a single reviewer inspect
+     `specs/<task>/research/` in Phase B), assigned axis/checks, and method path
+     (`technical-design-review.md`)—omitting author rationale or "already
+     verified" claims per [Review Lifecycle](../shared/review.md#lifecycle).
+     Bounded delta rechecks add only anchored findings and the repair delta or
+     refuting primary locators.
    - **Two-axis parallel (2 reviewers):** **both** System Design and Rust
      Architecture triggered **and** at least one applies: multiple crates or
      crossings, a **one-way door** fork, or a non-trivial rollout. Dispatch
@@ -166,10 +166,12 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
    - **On `FAIL`:** handle findings under [Review
      Lifecycle](../shared/review.md#lifecycle):
      - *Confirmed `PHASE_DEFECT`:* repair in place, rerun affected step 4
-       checks, and re-run every failed or invalidated axis (an Axis 1 repair
-       altering seams, types, or handoff surfaces invalidates Axis 2; an Axis 2
-       repair altering system mechanisms, failure semantics, or scope
-       invalidates Axis 1).
+       checks, and re-run every failed or invalidated axis under [Review
+       Lifecycle](../shared/review.md#lifecycle) (an Axis 1 repair altering
+       seams, types, or handoff surfaces invalidates Axis 2; an Axis 2 repair
+       altering system mechanisms, failure semantics, or scope invalidates Axis
+       1; use a fresh review on any invalidated axis or when repair alters
+       interfaces, boundaries, or risk surface).
      - *Confirmed `UPSTREAM_GAP`:* preserve clean independent local repairs
        without another review, then take [Blocked
        Exit](technical-design/non-standard-paths.md#blocked-exit).
@@ -178,9 +180,10 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      `adjudicator-agent`), or [Blocked
      Exit](technical-design/non-standard-paths.md#blocked-exit) returns.
 
-6. **Finalize and hand off.** Append any bounded `CONCERNS` returned by review
-   to `Carried concerns` in `design.md`, flip `status: ready` in
-   `design/design.md` (and `rollout.md` when present), emit [Transition Result
+6. **Finalize and hand off.** Record any bounded review `CONCERNS` in `Carried
+   concerns` and flip `status: ready` per [Design
+   V1](../interfaces/design-v1.md#field-rules), emit [Transition Result
    V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
    Technical Design`, `result: specs/<task>/design/design.md`, `review:
-   <locator or inline result>`, `next_owner: Planning`), and stop.
+   <locator or inline result>`, `movement_evidence: <review verdict and active
+   carried concerns>`, `reopen_owner: none`, `next_owner: Planning`), and stop.
