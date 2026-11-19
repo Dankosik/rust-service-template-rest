@@ -10,25 +10,30 @@ V1](task-packet-v1.md).
 ```markdown
 # Goal
 status: draft | ready | blocked | done
-Completion: <falsifiable observable condition for the entire request>
-Global constraints: <active execution instructions or carried review CONCERNS; omit when none>
+Completion: <falsifiable observable condition for the entire assembled request, plus any explicitly requested external outcome>
+Global constraints: <active execution instructions, shared non-obvious invariants, or carried review CONCERNS; omit when none>
 
 ## Tasks
 
-- [ ] T<ID>: <one-line outcome>
+- [ ] T<ID>: <one-line observable outcome>
   - Depends on: <T<ID> [stage], <gate> [effect:<action>], or none>
   - Provides: <short handle consumed downstream or by Completion>
   - Packet: tasks/<ID>-<slug>.md
 ```
 
+- Order tasks **topologically** (initial Ready Frontier first, every blocker
+  before its dependents).
 - Start at `status: draft`; flip to `status: ready` only after readiness review
   permits handoff.
-- **Dependency stage syntax:** unannotated (`T1`) gates coding on integrated
-  `Implemented` code or an agreed contract; `[acceptance]` gates only final
-  validation; `[effect:<action>]` gates only a named external action (e.g.
-  deploy, release). Keep IDs and tags identical in each packet's `Depends on`.
+- **Dependency stage syntax:** unannotated (`T1`) gates coding on `T1`'s
+  integrated `Implemented` code (omit the edge when a contract is already
+  settled in Design and needs no code from `T1`); `[acceptance]` gates only
+  final validation; `[effect:<action>]` gates only a named external action
+  (e.g. deploy, release). Keep IDs and tags identical in each packet's `Depends
+  on`.
 - `Global constraints` links accepted owners instead of copying specs and is
   updated in place when guidance changes.
+- Planning stops here; Runtime State below is Orchestrator-owned.
 
 ## Runtime State (Orchestrator-owned)
 

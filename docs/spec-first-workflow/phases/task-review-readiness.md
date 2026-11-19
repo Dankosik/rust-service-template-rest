@@ -2,70 +2,102 @@
 
 Use when [Review](../shared/review.md) routes a fixed Planning result (a draft
 ledger or no-implementation disposition) or on an explicit standalone readiness
-review. Run statically over repository and locked-dependency sources—no builds,
-tests, or services. Stay read-only: report anchored findings and their smallest
-owner without reslicing, rewriting packets, or inventing missing decisions.
+review. Run statically over repository code, `Cargo.lock` crate sources, and
+accepted artifacts—without builds, tests, or services. Stay read-only: return
+anchored findings and their smallest owner in [Review Result
+V1](../interfaces/review-result-v1.md) without reslicing, rewriting packets, or
+inventing decisions.
 
 For a no-implementation result, jump directly to [Verdict](#verdict).
 
+Treat upstream prose and packet `Sources` annotations as claims to verify
+against primary code and `Cargo.lock` sources, never as evidence. Record the
+concrete symbols, caller searches, and locked crate sources actually inspected
+(plus any uncached crates) in `evidence_boundary`.
+
 ## Adversarial Falsifiers
 
-Run every falsifier below against the draft ledger and its packets. Stop any
-broken path at its earliest missing choice or source contradiction while
-continuing independent paths so one review pass surfaces all material defects.
+Run Tier 1 before Tier 2. Stop any broken path at its earliest defect while
+continuing independent paths so one pass surfaces all material findings. Give
+scenario findings a concrete witness (task/edge, failure scenario, exact
+anchor).
 
-1. **Coverage & deletion.** Construct a scenario where every task meets its
-   `Outcome` and `Observable claim` yet an accepted obligation in `intent.md`,
-   `spec.md`, `design/`, or `rollout.md` (or a preserved consumer guarantee)
-   still fails. Conversely, test whether deleting or merging any task leaves all
-   obligations and prerequisites satisfied.
-2. **Slicing & granularity.** Verify each packet fits one valid shape (vertical
-   slice / tracer bullet, authorized prefactoring / shared seam, integration-first
-   slice, or expand–migrate–contract) and one fresh Lead session. `FAIL` if a
-   packet mixes independent outcomes or cuts a single feature into a horizontal
-   layer that cannot be consumed alone. If slicing fails, skip detailed dry-runs
-   of malformed packets, but still report upstream gaps or source contradictions
-   found in the same pass.
-3. **Base-commit falsifiability (anti-vacuity).** Check each `Outcome` and
-   `Observable claim` against current code. `FAIL` if it already holds on the
-   base commit, cannot distinguish accepted behavior from a plausible incomplete
-   change, requires another task's unlanded code to become meaningful, or
-   restates the prompt without a concrete observable delta (or removal/prefactor
-   invariant per [Task Packet V1](../interfaces/task-packet-v1.md#field-rules)).
-4. **Cold-start execution & source truth.** Walk every task from `tasks.md`, its
-   packet, cited `Sources`, and current code alone—zero chat history. Confirm
-   every cited anchor exists, every consumed symbol, config key, and
-   `Cargo.lock`-locked crate API matches actual source (reusing shared checks),
-   and a fresh Lead needs no guesswork on behavior, mechanism, or placement.
-   Check canonical handoff parity: `tasks.md` and packets match on IDs, `Depends
-   on` stage tags, and `Provides`; no orphan packets exist; active instructions
-   from `workflow-plan.md` (when present) appear in `Global constraints`.
-5. **DAG, blast radius & lock collisions.** Verify an acyclic path where all
-   tasks reach `Implemented` before final validation and every dependency uses
-   its earliest consuming stage. Falsify each changed contract against its
-   **blast radius** (callers, consumers, generated schemas, migrations, removed
-   paths): every companion sits inside the unit, behind a valid intermediate
-   dependency, or is proved unchanged. Independently reconstruct the Ready
-   Frontier (including tasks sharing a free lock) and all concurrently eligible
-   task pairs; `FAIL` on frontier mismatch or undeclared collisions across
-   `Mutable owners` or shared `Exclusive locks`.
-6. **Boundary & proof discipline.** Confirm no packet invents behavior or
-   architecture, prescribes test cases, fixtures, proving layers, or commands,
-   or adds `Additional proof` without an accepted source anchor.
+### Tier 1 — Graph, Slicing & Concurrency
+
+1. **Coverage, scope creep & deletion.** Independently check accepted inputs
+   (`intent.md`, `spec.md`, `design/`, `rollout.md`). Construct a scenario
+   where every task meets its `Outcome` and `Observable claim` yet an accepted
+   `R<n>`, `G<n>`, rollout gate, `Carried concerns`, or required durable doc
+   update still fails. Trace every task's `Outcome` and `Boundary -> In scope`
+   back to an accepted obligation (`FAIL` on scope creep or invented behavior
+   or architecture). Test whether deleting or merging any task preserves all
+   obligations and prerequisites.
+2. **Slicing, shape & granularity.** Check each task against [Task Shapes And
+   Granularity](planning.md#task-shapes-and-granularity). `FAIL` on mixed
+   independent outcomes, a horizontal layer split (including a "shared seam"
+   with only one downstream slice), or false parallelism (tasks split solely
+   for concurrency that serialize on a shared lock). *If slicing fails, skip
+   Tier 2 cold-start dry runs on malformed packets while still reporting
+   upstream gaps or source contradictions found in the same pass.*
+3. **DAG, stage timing & concurrent collisions.** Confirm an acyclic DAG where
+   all code tasks reach `Implemented` before final validation, every edge uses
+   its earliest consuming stage (omitting coding edges where Design already
+   settled a contract needing no upstream code), and the initial Ready Frontier
+   is non-empty. Independently reconstruct the Ready Frontier (including tasks
+   sharing a free lock) and every concurrently eligible task pair; `FAIL` on
+   frontier mismatch, undeclared collisions across `Mutable owners`, `Exclusive
+   locks`, or shared registration files, inconsistent lock paths, or unpinned
+   shared identifiers (config keys, error codes, flags, wire names) that
+   parallel Leads could invent divergently.
+
+### Tier 2 — Primary-Source Truth, Cold-Start & Proof Discipline
+
+4. **Source truth & blast radius.** Independently inspect current code and
+   `Cargo.lock` crate sources for every distinct consumed symbol, config key,
+   CLI/Make contract, and crate API—verifying **signatures and semantics**, not
+   mere existence. Falsify each changed contract against its **blast radius**
+   (callers, generated contracts, migrations, manifests, removed/superseded
+   paths): every companion sits inside its unit, behind a valid compiling
+   dependency, or is proved unchanged. `FAIL` on missing anchors or source
+   contradictions (an uncached crate flagged concretely in `Reopen if` is
+   `CONCERNS`).
+5. **Cold-start self-sufficiency & index/packet parity.** Walk every task from
+   `tasks.md`, its packet, cited `Sources`, and code alone—zero chat history.
+   Apply the **two-Leads divergence probe**: `FAIL` if two competent fresh
+   Leads could build incompatible interfaces, names, placements, or edge-case
+   behavior, or if a producer's `Provides` omits what a dependent assumes.
+   Verify exact ID, stage-tag, and `Provides` parity between `tasks.md` and
+   packets, zero orphan packet files under `specs/<task>/tasks/`, and migration
+   of active `workflow-plan.md` instructions and unresolved `Carried concerns`
+   into `Global constraints` or affected packets' `Reopen if`.
+6. **Base-commit falsifiability & proof boundary.** Check each `Outcome` and
+   `Observable claim` against current code. `FAIL` if a claim already holds on
+   the base commit (except non-regression `G<n>` invariants paired with a
+   base-commit-failing delta, or removal/prefactor/expand invariants per [Task
+   Packet V1](../interfaces/task-packet-v1.md#field-rules)), cannot distinguish
+   accepted behavior from a plausible incomplete change, requires a downstream
+   or sibling task's unlanded code, omits its public seam/entry point,
+   prescribes test cases, fixtures, proving layers, or commands, or adds
+   `Additional proof` without an accepted source anchor.
 
 ## Verdict
 
 - **Draft ledger:**
-  - `PASS`: all six falsifiers clear, at least one task is on the Ready
-    Frontier, the plan's frontier matches the tasks the reviewer can start
-    individually from source-verified inputs without chat history, and shared
-    locks are declared accurately. Absent test cases/commands or optional
-    integration infrastructure never block readiness.
-  - `CONCERNS`: only a bounded later risk consistent with readiness (including
-    an uncached crate check noted in `Reopen if`); name the risk, task, and
-    where Planning must carry it before setting `status: ready`.
-  - `FAIL`: any surviving falsifier; anchor each finding and name the smallest
-    repair or upstream reopen owner.
-- **No-implementation result:** `PASS` requires current evidence that every
-  obligation is already met or an authorized scope exit, with owners named for
-  any outstanding proof or external effects; otherwise `FAIL`.
+  - `PASS`: all six falsifiers clear with primary-source inspection recorded in
+    `evidence_boundary`, at least one task sits on the Ready Frontier, the
+    plan's frontier matches the tasks the reviewer can start individually from
+    source-verified inputs without chat history, and concurrent scopes and
+    locks are declared accurately. Never block `PASS` on absent test
+    cases/commands, optional integration infrastructure, routine coding choices
+    owned by Implementation, or equivalent valid decompositions.
+  - `CONCERNS`: only a bounded later risk consistent with readiness (such as an
+    uncached crate noted in `Reopen if`); name the risk, affected task, and
+    where Planning must carry it (`Global constraints` or `Reopen if`—never
+    `Final validation`) before setting `status: ready`.
+  - `FAIL`: any surviving falsifier; anchor each finding to its task,
+    obligation (`R<n>`/`G<n>`), or primary source and name the smallest repair
+    or reopen owner (`Planning`, `Technical Design`, `Specification`, `Intake`,
+    or external authority).
+- **No-implementation result:** `PASS` requires primary-source evidence proving
+  every obligation is already met or an authorized scope exit, with owners and
+  stages named for any outstanding proof or external effects; otherwise `FAIL`.
