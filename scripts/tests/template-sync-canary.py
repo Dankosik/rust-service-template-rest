@@ -252,7 +252,7 @@ def prepare_service_extensions(target: Path, *, custom_ci: bool) -> dict[str, st
         ".railway/canary.toml": 'profile = "canary"\n',
         "scripts/service/canary.sh": "#!/bin/sh\nexit 0\n",
         ".agents/skills/canary-local/.service-owned": "",
-        ".agents/skills/canary-local/SKILL.md": "---\nname: canary-local\ndescription: Local sync canary skill.\n---\n",
+        ".agents/skills/canary-local/SKILL.md": "---\nname: canary-local\ndescription: Use when testing local service-owned skills.\n---\n",
     }
     if custom_ci:
         extensions[".github/workflows/canary-local.yml"] = (
