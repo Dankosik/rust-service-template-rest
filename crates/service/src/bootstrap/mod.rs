@@ -769,9 +769,17 @@ mod tests {
             let body = std::str::from_utf8(&body).unwrap();
             assert_eq!(
                 body.lines()
-                    .filter(|line| line.starts_with("readiness_ready "))
+                    .filter(|line| {
+                        line.starts_with("# HELP readiness_ready ")
+                            || line.starts_with("# TYPE readiness_ready ")
+                            || line.starts_with("readiness_ready ")
+                    })
                     .collect::<Vec<_>>(),
-                [sample]
+                [
+                    "# HELP readiness_ready 1 if ready at scrape time, 0 otherwise.",
+                    "# TYPE readiness_ready gauge",
+                    sample,
+                ]
             );
         };
 

@@ -251,7 +251,7 @@ impl WriteBuffer {
         // Drop excess capacity.
         self.buf
             .truncate(cmp::max(self.bytes_written, DEFAULT_BUF_SIZE));
-        self.buf.shrink_to_fit();
+        self.buf.shrink_to(DEFAULT_BUF_SIZE);
     }
 
     fn consume(&mut self, amt: usize) {

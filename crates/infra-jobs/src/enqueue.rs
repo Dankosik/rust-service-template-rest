@@ -96,7 +96,7 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    let inserted = observed(
+    let inserted = observed!(
         "enqueue job",
         sqlx::query!(
             "INSERT INTO background_jobs (id, kind, payload_text, unique_key, not_before, trace_context, trace_state) \
@@ -144,7 +144,7 @@ pub async fn compare_live_payload<K: JobKind>(
             unique_key: Some(unique_key),
         },
     )?;
-    let stored = observed(
+    let stored = observed!(
         "compare job payload",
         sqlx::query!(
             "SELECT payload_text, CASE WHEN payload_text IS NULL THEN payload::text END AS legacy_payload \

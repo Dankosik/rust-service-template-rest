@@ -1,11 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
-/// A permit that frees only after `patience` ran out is refused, so the
-/// caller's remaining budget still covers sending the refusal.
 pub async fn acquire_within<G>(
     permits: &Arc<Semaphore>,
     patience: Duration,
@@ -14,12 +12,30 @@ pub async fn acquire_within<G>(
     if let Ok(permit) = Arc::clone(permits).try_acquire_owned() {
         return Ok((permit, None));
     }
+    wait_within(patience, on_wait, || Arc::clone(permits).acquire_owned()).await
+}
+
+pub async fn acquire_borrowed_within(
+    permits: &Semaphore,
+    patience: Duration,
+) -> Result<(SemaphorePermit<'_>, Option<Duration>), Duration> {
+    if let Ok(permit) = permits.try_acquire() {
+        return Ok((permit, None));
+    }
+    wait_within(patience, || (), || permits.acquire()).await
+}
+
+async fn wait_within<P, G, F: Future<Output = Result<P, AcquireError>>>(
+    patience: Duration,
+    on_wait: impl FnOnce() -> G,
+    acquire: impl FnOnce() -> F,
+) -> Result<(P, Option<Duration>), Duration> {
     if patience.is_zero() {
         return Err(Duration::ZERO);
     }
     let waiting = on_wait();
     let started = Instant::now();
-    let acquire_result = tokio::time::timeout(patience, Arc::clone(permits).acquire_owned()).await;
+    let acquire_result = tokio::time::timeout(patience, acquire()).await;
     let waited = started.elapsed();
     drop(waiting);
     match acquire_result {

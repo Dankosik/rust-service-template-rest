@@ -1,113 +1,144 @@
 # Final Validation
 
-Use as Delivery Owner once every planned unit is `Implemented`, the candidate
-is assembled, and all writers have joined. Prove the fixed assembled candidate
-against the accepted outcome and report one [Completion
-Result](../../interfaces/acceptance-result-v1.md#completion-result) — or a
-[Repair Request](../../interfaces/acceptance-result-v1.md#repair-request) when
-an in-scope defect requires repair.
+Use as Delivery Owner once every planned unit is `Implemented` and assembled.
+Prove the fixed candidate against the accepted outcome and return one
+[Completion Result](../../interfaces/acceptance-result-v1.md#completion-result)
+— or one batched [Repair
+Request](../../interfaces/acceptance-result-v1.md#repair-request) for in-scope
+defects.
+
+**Read-only in a ledger:** keep candidate files untouched during ledger Final
+Validation; inspect code/diffs, run checks, and dispatch review, routing all
+code, test, or generated-file edits through `NeedsRepair` (only a root-local
+inline Lead edits directly).
 
 ## Steps
 
-### 1. Pin Candidate And Trace Obligations Bidirectionally
+### 1. Pin Candidate And Run Fast Mechanical Baseline
 
-- Pin the exact assembled candidate (`<Base>..HEAD` from `tasks.md` plus
-  `git status`), confirming zero active writers and no stray untracked
-  artifacts.
-- Read **primary sources**, not only Lead summaries: `tasks.md` (`Completion`,
-  `Global constraints`, every task's `decisions` and `unverified`), every
-  packet's `Final validation` section, and `spec.md`, `design/`, and
-  `rollout.md` when present. (A root-local Lead reads the same fields from its
-  inline unit.)
-- **Forward trace:** trace every accepted obligation, `Observable claim`,
-  preserved guarantee, and `unverified` entry to a concrete observable result
-  on the affected paths. For a removal, verify the old behavior is unreachable
-  on withdrawn paths; for a rename alone, verify its promised behavior still
-  holds. Inspect every cross-unit `Provides -> Depends on` seam and compare
-  task `decisions` entries for silent cross-unit mismatches.
-- **Backward trace:** inspect the actual `<Base>..HEAD` diff and trace every
-  material behavior change back to an accepted obligation (catching scope
-  creep, leftover superseded code, or accidental side effects).
+- Pin the assembled candidate (`<Base>..HEAD`, or `git diff <Base>` in
+  `no-commit` mode, plus `git status`), confirming zero active writers and no
+  stray untracked files.
+- Read `tasks.md` (`Completion`, `Global constraints`, task `decisions` and
+  `unverified`), each packet's `Final validation`, and `git diff --stat`.
+- Select one non-overlapping verification plan from [Validation
+  budget](../../../../AGENTS.md#validation-budget), reconciling any packet
+  `Additional proof` with its authoritative source (load [Validation
+  Routing](../../../validation-routing.md) for mixed/specialized surfaces and
+  [Evidence Contract](../../shared/evidence-contract.md) for reuse, scope, or
+  unavailable infrastructure).
+- Run fast mechanical checks (`fmt-check`, `lint`, `build`, relevant tests,
+  generated-contract checks, required variants). **Proof bar:** count only
+  executed checks with **non-zero** test counts observing the claimed boundary;
+  never reuse pre-assembly Lead results across seams touched by another unit;
+  record unavailable *optional* infrastructure as a limitation rather than
+  fabricating green or building ad-hoc stacks.
 
-Complete this step only when every accepted obligation, cross-unit seam,
-`unverified` entry, and material diff hunk maps to a valid existing check, a
-planned check, a named gap, or a defect.
+If build or lint fails such that tests cannot run, go straight to Step 4;
+otherwise finish test execution and continue to Step 2 so check failures and
+trace gaps batch into one `Repair Request`.
 
-### 2. Run Non-Overlapping Local Checks
+### 2. Trace Obligations Bidirectionally
 
-- Select one non-overlapping verification plan for the changed surface from
-  [Validation budget](../../../../AGENTS.md#validation-budget) and reconcile
-  any packet `Additional proof` with its authoritative source. Load
-  [Validation Routing](../../../validation-routing.md) for mixed or specialized
-  surfaces and [Evidence Contract](../../shared/evidence-contract.md) for
-  reuse, claim scope, additional proof, or unavailable infrastructure.
-- Run fast mechanical checks first (`fmt-check`, `lint`, `build`, relevant
-  tests, generated-contract checks). Include variants, generated clients, or
-  intermediate versions when selected checks or accepted scope require them.
-- **Proof bar:** count only executed checks with **non-zero** test counts that
-  observe the claimed boundary; never reuse a pre-assembly Lead result across a
-  seam or dependency touched by another unit; record unavailable optional
-  infrastructure as a named limitation rather than fabricating green or
-  building ad-hoc stacks.
+- Read **primary sources**, not only Lead summaries: `intent.md`, `spec.md`,
+  `design/`, `rollout.md` (when present), packets, and the candidate diff.
+- **Forward trace:** map every accepted obligation, active `Observable claim`
+  (treating `superseded at assembly by T<contract>` as closed by `T<contract>`
+  and `Completion`), preserved `G<n>`, and `unverified` entry to a current
+  passing check on affected paths (running any locally runnable `unverified`
+  test now). Verify removals make old behavior unreachable and renames preserve
+  behavior. Inspect every cross-unit `Provides -> Depends on` seam and compare
+  task `decisions` for silent mismatches.
+- **Backward trace:** map every material behavior change in the diff back to an
+  accepted obligation (catching scope creep, leftover superseded code, or
+  unintended side effects).
 
-If any required local check fails, go directly to Step 4 — never dispatch an
-independent review on a failing build or test candidate.
+Complete this step only when every obligation, seam, `unverified` entry, and
+material diff hunk maps to a passing check, an unavailable *optional* gap, or a
+concrete defect. If any required check failed or any defect or missing required
+coverage survived Steps 1–2, go to Step 4 — never dispatch review on a failing
+candidate.
 
 ### 3. Evaluate Review Trigger And Freeze Candidate
 
-- Apply [Review Trigger](../../shared/review.md#trigger) to the fixed, locally
-  passing candidate: **Full final review**, **Structure-only review**, or
-  **Direct completion**.
-- Keep the candidate frozen while `reviewer-agent` runs, selecting capability
-  tier per the active harness adapter for high-risk or structure-only reviews.
-  Pass sparse **primary-source** pointers: pinned `<Base>..HEAD` candidate
-  identity, authoritative accepted sources (`spec.md`, `design/`, `tasks.md`,
-  packets), and current check receipts.
-- On `FAIL` or `NEEDS_PARENT`, go to Step 4. On `PASS` (or Direct completion),
-  go to Step 5.
+Evaluate [Review Trigger](../../shared/review.md#trigger) against concrete diff
+signals (`Cargo.toml`, new traits/modules/config keys/fallbacks, protected
+domains, and task count):
 
-### 4. Classify Failures And Route Repairs
+- Select **2-lens [Complementary
+  Panel](../implementation-review.md#complementary-panel)** for multi-task
+  ledgers (≥2 planned code tasks) or high-risk changes adding structure; one
+  fresh 4-axis `reviewer-agent` for other Full reviews; **Structure-only** when
+  only structural additions fire (naming every triggering addition in the
+  brief); or **Direct completion** for single-task/inline candidates matching
+  no trigger (recording `review: not_required (<checked signals: none matched>)`
+  and jumping to Step 5).
+- Keep the candidate frozen while `reviewer-agent` runs (tier per harness
+  adapter). **Reviewer brief:**
+  - mode (`Full — 4 axes`, `Full — Lens A (Axes 1+4)` / `Lens B (Axes 2+3)`,
+    `Structure-Only` + triggering additions, or `Delta Recheck` + anchored
+    findings and repair range)
+  - pinned diff command (`git diff <Base>..HEAD` or `git diff <Base>`) and
+    commit list
+  - accepted sources present (`intent.md`, `spec.md`, `design/`, `rollout.md`,
+    `tasks.md`, packets) and current check receipts
+- On 2-lens return, keep both reports verbatim by axis without reranking or
+  masking either lens's `FAIL` (use `adjudicator-agent` only for an
+  evidence-backed conflict between lenses). On `FAIL` or `NEEDS_PARENT`, go to
+  Step 4; on `PASS`, go to Step 5.
 
-Classify every check or review failure before acting:
+### 4. Verify Findings, Classify, And Route Repairs
+
+**Verify before routing:** check every review finding against its cited code
+anchor and trace before acting; dismiss unanchored or factually refuted claims
+with their refuting anchor (or escalate contested claims via
+`adjudicator-agent`).
+
+Batch surviving failures and verified findings:
 
 | Classification | Action |
 | --- | --- |
-| `product`, `test_oracle`, `integration_defect`, or `structure_defect` | Ensure no active reader runs and release validation locks (retaining the reviewer identity when a bounded delta recheck may follow). In a ledger, return a [Repair Request](../../interfaces/acceptance-result-v1.md#repair-request) (`verdict: NeedsRepair`) naming the pinned `candidate`, anchored falsified claim/finding, classification, evidence, smallest owning task(s) (both seam tasks for `INTEGRATION_DEFECT`), and `retained_evidence` unaffected by the repair. A root-local Lead repairs directly under [Repair Assignment](unit.md#repair-assignment). |
+| `TASK_DEFECT` or `INTEGRATION_DEFECT` | Stop active readers and release validation locks (retaining reviewer identity when the adapter permits delta-recheck continuation). In a ledger, return **one batched** [Repair Request](../../interfaces/acceptance-result-v1.md#repair-request) (`verdict: NeedsRepair`) naming all surviving findings, owning tasks (both seam tasks for `INTEGRATION_DEFECT`), and `retained_evidence`. Root-local Leads repair under [Repair Assignment](repair.md). |
 | `environment` (optional) | Record the material gap in `evidence` without holding acceptance. |
-| `environment` (required), `UPSTREAM_GAP`, or `NEEDS_PARENT` | Close a missing check directly if inside Delivery Owner authority; otherwise apply [Evidence Contract](../../shared/evidence-contract.md#required-and-optional-proof) and return `Blocked` naming the unverified claim and owner. |
+| `environment` (required), `UPSTREAM_GAP`, or `NEEDS_PARENT` | Run a missing local check directly if inside authority (keeping candidate read-only); otherwise apply [Evidence Contract](../../shared/evidence-contract.md#required-and-optional-proof) and return `Blocked` naming claim and owner. |
 
-**On resume after a repair integrates:** re-pin the updated candidate, run only
-failed, invalidated, and not-yet-run required checks, and request a bounded
-**delta recheck** from the reviewer (or fresh review if the repair widened
-interfaces or risk under [Review](../../shared/review.md#lifecycle)). Apply
-[Parent-Owned Recovery](../../shared/transition.md#parent-owned-recovery) when
-repeated attempts add no discriminating evidence.
+**Repair-round cap:** allow at most **2 repair rounds** per anchored defect
+class (per [Review](../../shared/review.md#lifecycle)); if unresolved or
+refuted, escalate via [Parent-Owned
+Recovery](../../shared/transition.md#parent-owned-recovery).
+
+**On resume after repair:** re-pin the candidate, inspect the repair range
+(`<old-HEAD>..<new-HEAD>`) and repair `decisions`, and rerun only failed,
+invalidated, and not-yet-run required checks. If review has not run yet, go to
+Step 3; otherwise request a bounded **delta recheck** passing repair range,
+closed findings, repair `decisions`, and fresh receipts (or fresh review /
+delta-scoped fresh reviewer under [Review](../../shared/review.md#lifecycle)).
 
 ### 5. Emit Completion Result
 
 Return [Completion
 Result](../../interfaces/acceptance-result-v1.md#completion-result) only when
-every gate holds, carrying forward local validation evidence:
+every gate holds:
 
-- [ ] Every `Observable claim`, `Completion` criterion, and `unverified` entry
-  has current proof at its required boundary, or a named gap.
-- [ ] Every material behavior change in `<Base>..HEAD` serves an accepted
+- [ ] Every active `Observable claim` (with `superseded at assembly by
+  T<contract>` closed via `T<contract>`), `Completion` criterion, and locally
+  runnable `unverified` entry has passing proof at its required boundary (only
+  unavailable *optional* proof may remain a named gap; missing *required* proof
+  blocks `Accepted`).
+- [ ] Every material behavior change in the candidate diff serves an accepted
   obligation.
-- [ ] All blocking check and review findings are closed and any selected review
-  returned `PASS` (or `not_required` recorded).
+- [ ] All blocking check and verified review findings are closed and any
+  selected review returned `PASS` (or `not_required` recorded with checked
+  signals).
 - [ ] Any explicitly requested external outcome (CI, deployment, runtime
-  observation) is directly observed (or local results are retained in
-  `evidence` while keeping Completion open / returning `Blocked` if unreachable).
+  observation) is directly observed (otherwise retain local evidence while
+  keeping Completion open or returning `Blocked` if unreachable).
 
 ## Conditional Branches
 
 - **Runtime or fixture scenarios:** when explicitly required, run the smallest
   end-to-end scenario covering setup, behavior, observation, and bounded
   cleanup first, reusing valid prepared environments.
-- **Isolated or remote execution:** resolve candidate or image digests,
-  checksums, and host paths from task state or its manifest before consuming
-  results, updating replacement locators and invalidating only affected proof
-  after repair.
-- **Long checks and resource waits:** record an observation checkpoint in
-  existing execution state and inspect logs, processes, or lock owners via
-  background execution so concrete delay causes are visible in place.
+- **Long checks and resource waits:** record a checkpoint in execution state
+  and inspect logs, processes, or lock owners in the background so delay causes
+  stay visible.

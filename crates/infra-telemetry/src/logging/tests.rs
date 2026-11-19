@@ -50,9 +50,16 @@ impl io::Write for Buffer {
 }
 
 impl Buffer {
-    fn layer(&self, format: LoggingFormat) -> (format::FormatLayer, LoggerGuard) {
+    fn layer(
+        &self,
+        format: LoggingFormat,
+        trace_context: bool,
+    ) -> (format::FormatLayer, LoggerGuard) {
         let (output, guard) = output::start(self.clone()).expect("start the test writer");
-        (format::FormatLayer::new(output, format), guard)
+        (
+            format::FormatLayer::new(output, format, trace_context),
+            guard,
+        )
     }
 }
 
@@ -62,9 +69,9 @@ pub(crate) fn capture(
     provider: Option<&TracerProviderHandle>,
 ) -> (tracing::Dispatch, LoggerGuard, Buffer) {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(format);
     let filter = admission_filter(level).expect("valid capture filter");
     let otel = provider.map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
+    let (layer, guard) = buffer.layer(format, otel.is_some());
     let registry = Registry::default().with(filter);
     (
         tracing::Dispatch::new(registry.with(otel).with(layer)),
@@ -97,7 +104,7 @@ fn emit_correlated_event(
     event_parent: EventParent,
 ) -> (String, String, String, bool) {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
+    let (layer, guard) = buffer.layer(LoggingFormat::Json, true);
     let provider = SdkTracerProvider::builder()
         .with_sampler(match sampling {
             Sampling::Sampled => Sampler::AlwaysOn,
@@ -134,7 +141,7 @@ fn emit_correlated_event(
 
 fn emit_event_without_otel_context(with_span: bool) -> String {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
+    let (layer, guard) = buffer.layer(LoggingFormat::Json, false);
     let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
 
     tracing::dispatcher::with_default(&dispatch, || {
@@ -197,7 +204,7 @@ fn json_logs_omit_otel_correlation_without_a_span_or_provider() {
 #[test]
 fn json_line_sorts_event_fields_then_merged_span_fields() {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
+    let (layer, guard) = buffer.layer(LoggingFormat::Json, false);
     let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
     tracing::dispatcher::with_default(&dispatch, || {
         let outer = tracing::info_span!(
@@ -251,7 +258,7 @@ fn json_line_sorts_event_fields_then_merged_span_fields() {
 #[test]
 fn json_line_writes_each_key_once() {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
+    let (layer, guard) = buffer.layer(LoggingFormat::Json, false);
     let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
     tracing::dispatcher::with_default(&dispatch, || {
         let span = tracing::info_span!(
@@ -289,7 +296,7 @@ fn json_line_writes_each_key_once() {
 #[test]
 fn json_line_names_the_real_target_of_a_log_crate_record() {
     let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
+    let (layer, guard) = buffer.layer(LoggingFormat::Json, false);
     let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
     tracing::dispatcher::with_default(&dispatch, || {
         tracing_log::format_trace(
@@ -320,7 +327,7 @@ fn json_line_names_the_real_target_of_a_log_crate_record() {
 fn info_spans_survive_a_quieter_directive() {
     for directive in ["warn", "off", "warn,[never]=trace"] {
         let buffer = Buffer::default();
-        let (layer, guard) = buffer.layer(LoggingFormat::Json);
+        let (layer, guard) = buffer.layer(LoggingFormat::Json, false);
         let filter = admission_filter(directive).expect("valid directive");
         let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
@@ -546,7 +553,7 @@ fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
 fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
     let emit = |level: &str| {
         let buffer = Buffer::default();
-        let (layer, guard) = buffer.layer(LoggingFormat::Text);
+        let (layer, guard) = buffer.layer(LoggingFormat::Text, false);
         let filter = EnvFilter::try_new(level).expect("valid directive");
         let dispatch = tracing::Dispatch::new(
             Registry::default()

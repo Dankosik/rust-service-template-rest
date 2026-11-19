@@ -43,6 +43,6 @@ background agents; foreground nested results return inline (report an exact gap
 if no continuation exists rather than inventing a resume field).
 
 At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md);
-start background review alongside final validation only where async execution
-is permitted.
+[Implementation Review](../spec-first-workflow/phases/implementation-review.md)
+once local checks pass under [Final
+Validation](../spec-first-workflow/phases/implementation/final-validation.md).

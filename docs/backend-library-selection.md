@@ -36,6 +36,18 @@ Measured on a dedicated 4-vCPU Xeon 8280 DigitalOcean c-4 (`linux/amd64`, Debian
 - Closed-set counters/gauges (`RwLock<HashMap>` → `enum-map`): `28.0 ns` → `2.04 ns`; inline `≤ 24` B strings (`compact_str`): `7.35–72.1 ns` → `2.20–30.2 ns`; stack scratch slices (`smallvec`): `51.2–79.6 ns` → `35.4–37.4 ns`; non-poisoning Linux `futex` locks (`parking_lot`): `14.2 ns` → `12.5 ns`.
 - End-to-end core-pinned Axum HTTP (`2 vCPU` server / `2 vCPU` client, 50% `200` JSON + 50% `400 Problem`): `97,630` → `119,030 req/s` (`+21.9%`), `20.11` → `16.72 µs` CPU/req (`−16.9%`), `p99` `664` → `424 µs` (`−36.1%`) at `21.2 MB` RSS.
 
+### Hardened HTTP/1 request and connection path
+
+Baseline `5a30a78a` and the hot-path changes ran on one DigitalOcean c-4 (Xeon 8280, Debian 13, Rust 1.100.0). The release fixture used the application listener, JSON access logging, unsampled tracing and Prometheus. The server and loopback client each had two dedicated vCPUs. Each workload used 64 connections and seven alternating baseline/candidate pairs, with a 3 s warm-up and 15 s measurement per run. Values are medians across runs for each build.
+
+| Workload | Responses/s, before → after | Server CPU µs/response | p99, ms |
+| --- | ---: | ---: | ---: |
+| Keep-alive, alternating JSON 200 and malformed JSON 400 | 36,165 → 38,314 | 55.28 → 52.17 | 2.931 → 2.770 |
+| Same requests with a new TCP connection for each response | 22,591 → 23,890 | 87.49 → 82.89 | 4.279 → 4.036 |
+| Admission pressure, 8 permits, 10 ms handler and 1 ms patience | 19,390 → 19,717 | 50.01 → 47.63 | 12.558 → 12.433 |
+
+Under admission pressure, successful responses rose from 670.5 to 673.8/s and the 503 share moved from 96.54% to 96.58%. Median keep-alive RSS rose from 24,088 to 24,760 KiB. These measurements cover the combined changes on plaintext HTTP/1.
+
 <!-- template:begin oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 ### Verified bearer JWT memo
 

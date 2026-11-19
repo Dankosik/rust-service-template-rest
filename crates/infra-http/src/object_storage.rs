@@ -76,7 +76,7 @@ pub fn mutation_problem(
 }
 
 pub(super) fn unconfirmed_write(problem: Problem) -> Problem {
-    problem.detail("the storage provider could not confirm whether the write took effect")
+    problem.detail_static("the storage provider could not confirm whether the write took effect")
 }
 
 #[cfg(test)]

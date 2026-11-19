@@ -20,7 +20,8 @@ expensive-to-reverse decision has a real open fork, use [Generative Candidate
 Lanes](#generative-candidate-lanes).
 
 Evidence lanes return [Lane Result V1](#lane-result-v1), domain
-decisions [Decision Result V1](#decision-result-v1), and
+decisions [Decision Result V1](#decision-result-v1), generative candidate
+lanes [Candidate Proposal V1](#candidate-proposal-v1), and
 independent reviews [Review Result V1](../interfaces/review-result-v1.md). Evidence
 may expose a new owner decision, but a lane does not expand scope or become the
 authority it inspected. The root consumes gaps through [Parent-Owned
@@ -76,3 +77,19 @@ reopen_owner_or_condition: <owner or observable condition>
 
 Naming the strongest rejected alternative distinguishes a chosen mechanism from
 an asserted one. Keep the record inside the selected domain.
+
+## Candidate Proposal V1
+
+Return one contrasting design candidate from a generative candidate lane without
+picking a winner or comparing against sibling lanes:
+
+```text
+pressure: <assigned optimization axis>
+proposal: <flow or Rust interface: types, methods, invariants, ordering, error modes, lifetimes>
+caller_sketch: <3-8 line realistic call-site usage against existing workspace types, or entry->finality trace>
+hidden_complexity: <what stays inside the module or mechanism behind the seam>
+dependencies_and_cost: <dependency category/adapters, failure/cancellation/concurrency profile, budgets & unit cost>
+thin_leverage_and_risks: <where this candidate bends, breaks, or pays extra cost>
+blocker_or_gap: <hard constraint conflict, infeasible pressure, missing spec rule, or none>
+anchors: <source-verified repo and Cargo.lock locators used, or uncached gaps>
+```

@@ -44,6 +44,7 @@ fn requests_must_name_the_configured_origin() {
         "https://provider.fixture.test/items",
         "https://provider.fixture.test:/items",
         "https://provider.fixture.test:443/items?q=1",
+        "https://provider.fixture.test:000443/items",
         "https://PROVIDER.fixture.test/items",
     ] {
         assert!(
@@ -55,6 +56,7 @@ fn requests_must_name_the_configured_origin() {
         "https://other.fixture.test/items",
         "https://provider.fixture.test:8443/items",
         "https://provider.fixture.test:65536/items",
+        "https://provider.fixture.test:+443/items",
         "http://provider.fixture.test/items",
         "https://user@provider.fixture.test/items",
         "/items",

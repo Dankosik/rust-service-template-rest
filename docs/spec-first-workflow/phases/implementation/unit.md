@@ -1,131 +1,106 @@
 # Unit Implementation
 
-Use as Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) for one assigned unit. The
-Lead turns one task packet into code and tests meeting the [Implemented
-bar](../../interfaces/acceptance-result-v1.md#implementation-result). The
-Orchestrator owns sibling scheduling and ledger writes; [Final
+Use as Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) for one assigned unit.
+Turn one task packet into code and tests meeting Step 3's `Implemented` bar.
+Orchestrator owns sibling scheduling and `tasks.md`; [Final
 Validation](final-validation.md) owns proof of the assembled candidate.
 
-If dispatched on a Final Validation [Repair
+For a Final Validation [Repair
 Request](../../interfaces/acceptance-result-v1.md#repair-request), follow
-[Repair Assignment](#repair-assignment) instead of Steps 1–3.
+[Repair Assignment](repair.md) instead.
 
 ## Steps
 
 ### 1. Ground In Primary Sources
 
-- Read the **entire** task packet (`Outcome`, `Depends on`, `Sources`,
-  `Boundary`, `Mutable owners`, `Exclusive locks`, `Final validation`,
-  `Reopen if`) and `tasks.md`'s **`Global constraints`**, plus any landed
-  dependency commits and `decisions` in your brief.
-- Confirm your checkout contains integrated `Depends on` outputs. In an
-  isolated worktree, confirm `HEAD` matches the integration tip in your brief
-  and reset or rebase onto it if the harness branched from a stale ref.
-- Read the affected production code, entry points, downstream callers, and
-  cited `Sources` (**primary source**) before reading tests. Verify every
-  `Reopen if` condition against live code or locked `Cargo.lock` crate source
-  before editing.
-- For Rust changes, load `rust-coder` and only the `.agents/skills/rust-*`
-  methods whose trigger matches an open decision in this packet
-  ([Rust Change Surface](../../../../AGENTS.md#rust-change-surface)).
+- Read the **entire** task packet, `tasks.md`'s **`Global constraints`**, and
+  landed `Depends on` commits and `decisions` from your brief.
+- Confirm your checkout holds integrated `Depends on` outputs; in an isolated
+  worktree, reset or rebase onto the brief's integration tip if `HEAD` is
+  stale.
+- Read affected production code, entry points, callers, landed `Depends on`
+  diffs, one existing sibling in the same crate or subsystem (error mapping,
+  telemetry, test helpers), and cited `Sources` (**primary source**) before
+  reading tests. Verify every `Reopen if` condition against live code or locked
+  `Cargo.lock` source before editing.
+- For Rust changes, load `rust-coder`, load [Rust
+  Testing](../../../../.agents/skills/rust-testing/SKILL.md) when authoring or
+  changing tests, and load only the other `.agents/skills/rust-*` methods whose
+  trigger matches an open decision in this packet ([Rust Change
+  Surface](../../../../AGENTS.md#rust-change-surface)).
 
-Complete this step only when you can name the exact public **seam** (entry
-point or caller observing the change), confirm current code lacks or fails
-`Outcome`, and verify no `Reopen if` or upstream contradiction blocks coding.
+Complete this step only when you can name the exact public **seam**, confirm
+current code lacks or fails `Outcome`, align with local crate conventions, and
+confirm no `Reopen if` or upstream contradiction blocks coding.
 
 ### 2. Build In Tight Vertical Slices
 
-- **Pin the seam first:** when adding or changing a shared Rust **seam**
-  (public types, traits, signatures, or schema), land the boundary declarations
-  first and verify with `cargo check` so code and tests compile against checked
-  types.
-- **Work red → green in vertical slices:** build one behavior or invariant at a
-  time through the real **seam** instead of writing all production code first
-  and backfilling tests afterward. Consult [Rust
-  Testing](../../../../.agents/skills/rust-testing/SKILL.md) to select the
-  smallest proving layer and minimal fixtures (reusing an existing minimal
-  fixture or constructing only the state the assertion needs in test code, and
-  removing unused setup you touch).
-- **Independent oracle, never tautologies:** derive expected values from the
-  accepted spec, protocol, or known literals — never by recomputing the
-  implementation's formula or mocking away the boundary under claim. For bug
-  fixes and new observable behavior, write a failing **red** test at the seam
-  first, watch it fail for the targeted break, then write the minimal clean
-  Rust code to turn it **green**. Where wiring must exist before a test
-  compiles, verify the new or consolidated guard actually fails when the
-  guarded behavior is broken. Preserve independent safety and integration
-  guards when consolidating overlapping cases.
-- **Tight feedback loop:** type-check and lint as you edit (`cargo check -p
-  <crate> --all-targets --locked` or `make lint-changed PKGS="<crates>"` per
-  [Validation budget](../../../../AGENTS.md#validation-budget)) and run focused
-  single-test selectors (`cargo test -p <crate> --locked <selector>`),
-  confirming **non-zero** executed tests (`0 passed` is never a pass). Add one
-  cheap local boundary probe when an unverified assumption could cause
-  substantial rework, and retain passing results for reuse under the [Evidence
-  Contract](../../shared/evidence-contract.md#execution-evidence). Leave full
-  workspace and heavy suites to Final Validation.
+- **Pin the seam first:** land new or changed public Rust **seams** (types,
+  traits, signatures, or schema, with minimal failing stubs for new entry
+  points) and verify with `cargo check -p <crate> --all-targets --locked` so
+  tests compile against real types.
+- **Red -> green vertical slices (tracer bullets):** build one behavior,
+  preserved guarantee (`G<n>`), or failure/rejection path at a time through the
+  public **seam**. Derive expected values from the spec, protocol, or known
+  literals — never by recomputing the implementation's formula or mocking away
+  the boundary under claim. **`red` in Rust means a compiled test failing an
+  assertion or hitting a stub at the seam — never a compile error.** Watch it
+  fail for the targeted break, write the minimal clean code to turn it `green`,
+  then repeat.
+- **Tight feedback loop:** iterate with `cargo check -p <crate> --all-targets
+  --locked` and focused test selectors (`cargo test -p <crate> --locked
+  <selector>`), confirming **non-zero** executed tests (`0 passed` is never a
+  pass; in a worktree, verify tests needing untracked or gitignored fixtures
+  did not silently skip). Retain valid results under [Evidence
+  Contract](../../shared/evidence-contract.md#execution-evidence); leave
+  full-workspace and heavy suites to Final Validation.
 - **Generated contracts and sub-lanes:** regenerate (never hand-edit) generated
   contracts (`api/`, proto, `.sqlx/`). Implement directly by default; load
-  [Sub-Lanes](sub-lanes.md) only when one unit clearly splits into parallel
-  disjoint subtasks whose concurrency outweighs handoff cost.
+  [Sub-Lanes](sub-lanes.md) only when parallel disjoint subtasks clearly
+  outweigh handoff cost.
 
-### 3. When The Packet Does Not Fit
+Complete this step only when every `Outcome` obligation, failure/rejection
+path, and preserved `G<n>` invariant passed a seam-level `red -> green` cycle
+and changed crates compile cleanly.
+
+### 3. Pre-Return Self-Audit And Return
+
+Verify every gate before emitting [Implementation
+Result](../../interfaces/acceptance-result-v1.md#implementation-result):
+
+- [ ] `Outcome`, active `Observable claim` (or `Outcome` alone when `Observable
+  claim` is `superseded at assembly by T<contract>`), preserved `G<n>`
+  invariants, and failure/rejection paths are wired end-to-end; generated
+  contracts are regenerated; superseded code/tests in `Boundary -> In scope`
+  are removed; zero placeholders (`todo!()`, `unimplemented!()`).
+- [ ] Own `git diff` inspected: every edited path lies inside granted `Mutable
+  owners` / `Exclusive locks`; zero stray files, debug logs, explanatory
+  comments, or non-test `unwrap`/`expect`/`panic!`.
+- [ ] **Deletion test:** every added type, trait, helper, config key, or
+  fallback enforces a present packet constraint and has no matching `std` or
+  `Cargo.lock` owner ([Engineering](../../../../AGENTS.md#engineering)).
+- [ ] Changed crates (and in-scope callers) pass `make lint-changed
+  PKGS="<crates>"` (clippy) and `rustfmt` check on touched files.
+- [ ] Every added or modified test ran with a **non-zero** pass count via a
+  focused selector (or is named in `unverified` with its exact reason if it
+  needs heavy/unavailable infrastructure or untracked local fixtures).
+- [ ] Sub-lanes joined or stopped. In an isolated worktree, merge the
+  integration branch tip if it advanced, re-run focused checks after merge,
+  commit cleanly, and set `candidate` to that commit/branch. (In a shared
+  checkout with active siblings, leave commits and workspace-wide formatting to
+  serial integration.)
+- [ ] `decisions` lists every choice a sibling, downstream unit, or Delivery
+  Owner may depend on (error variant/code, precedence/default, new shared test
+  helper/fixture, packet deviation, narrowed assumption); `unverified` lists
+  every unchecked assumption or unrun test.
+
+Return `Implementation Result` immediately. A root-local inline Lead proceeds
+directly to [Final Validation](final-validation.md).
+
+## Escalation
 
 | Situation | Action |
 | --- | --- |
-| A local test, oracle, caller, error path, cleanup, locator, fixture, or runner needs repair | Repair it inside the unit. |
-| The change needs a path outside granted `Mutable owners` or `Exclusive locks` | Send the scope delta to the Orchestrator **before** editing there (a root-local Lead decides directly). Continue once disjoint scope and updated locks are granted; Planning stays closed. |
-| Live code or a `Reopen if` check exposes invalid accepted behavior or architecture | Finish unaffected in-scope work, then return `Blocked` naming the exact decision and smallest owner instead of redesigning silently. A root-local Lead reopens under [Transition](../../shared/transition.md). |
-
-### 4. Pre-Return Self-Audit And Return
-
-Verify every item before emitting [Implementation
-Result](../../interfaces/acceptance-result-v1.md#implementation-result):
-
-- [ ] `Outcome` and `Final validation -> Observable claim` are wired end-to-end
-  through entry points and callers, with generated sources updated, superseded
-  code/tests in `Boundary -> In scope` removed, and zero placeholders
-  (`todo!()`).
-- [ ] Own diff inspected (`git diff` scoped to own paths): every edited file
-  lies inside granted `Mutable owners` / `Exclusive locks`; zero stray files,
-  debug logs, explanatory comments, or non-test `unwrap`/`expect`/`panic!`. In
-  a shared checkout with active siblings, leave commits and workspace-wide
-  formatting to serial integration.
-- [ ] Changed crates pass targeted lint and formatting (`make lint-changed
-  PKGS="<crates>"` or `cargo check -p <crate> --all-targets --locked` plus
-  `rustfmt` check on touched files).
-- [ ] Every added or modified test executed with a **non-zero** pass count via
-  a focused selector (or is named in `unverified` with its exact reason if it
-  needs heavy or unavailable infrastructure).
-- [ ] Any spawned sub-lanes have joined or stopped. In an isolated worktree,
-  changes are cleanly committed on the worktree branch (with the integration
-  tip merged if advanced) and `candidate` names that commit/branch.
-- [ ] `decisions` records every non-obvious local choice, trade-off, or packet
-  deviation the Delivery Owner cannot read from the diff; `unverified` records
-  every unchecked assumption or unrun test.
-
-Return `Implementation Result` immediately so the Orchestrator can integrate
-and unlock downstream work. A root-local inline Lead proceeds directly to
-[Final Validation](final-validation.md).
-
-## Repair Assignment
-
-Use when dispatched fresh from Final Validation on a [Repair
-Request](../../interfaces/acceptance-result-v1.md#repair-request) against the
-assembled candidate:
-
-1. **Ground and reproduce (`red`).** Read the Repair Request (falsified claim,
-   classification, anchored evidence), the affected packet(s), and prior
-   `decisions`. For product, test, or seam defects, reproduce the exact failing
-   check or failure path on the assembled candidate before editing.
-2. **Diagnose root cause.** Treat any remedy suggested by a review finding as
-   evidence, not a mandate. Weigh what a fix adds or trades away: repair at the
-   shared root without weakening guards, adding unjustified waivers, or
-   introducing new crates, layers, config keys, or fallbacks
-   ([Engineering](../../../../AGENTS.md#engineering)). For
-   `INTEGRATION_DEFECT`, reconcile both sides inside the Orchestrator-granted
-   combined writable scope.
-3. **Verify (`green`) and audit.** Confirm the reproduced check passes with
-   non-zero executed tests, complete the Step 4 Pre-Return Self-Audit, and
-   record in `decisions` both the root cause and the exact invalidated surface
-   so Final Validation reruns only affected checks.
+| Local test, oracle, caller, error path, cleanup, locator, fixture, or runner needs repair | Repair inside the unit. |
+| Change needs a path outside granted `Mutable owners` or `Exclusive locks` | Request the scope delta from Orchestrator **before** editing (root-local Lead decides directly); continue once granted (Planning stays closed). |
+| Live code or `Reopen if` exposes invalid accepted behavior or architecture | Finish unaffected in-scope work, then return `Blocked` naming the exact decision and smallest owner (root-local Lead reopens under [Transition](../../shared/transition.md)). |

@@ -15,7 +15,11 @@ candidates concurrently, dropping losers once the first socket connects while
 preserving `InvalidInput` on empty resolution and Tokio's resolver-order last
 error when all candidates fail.
 
+`src/net/socket/buffered.rs` retains the initial write-buffer capacity on
+pool return so a short COMMIT frame does not force the next borrower to grow
+the buffer again. Oversized buffers still shrink.
+
 Retire this vendor directory, root Cargo patch/exclusion, and `postgres`
 profile, Docker, and classifier carriers together when a published SQLx release
-provides equivalent bounded pool return and TCP candidate fallback and passes
+provides equivalent bounded pool return, write-buffer reuse and TCP candidate fallback and passes
 `make native-transport-regressions` and `ALLOW_HEAVY=1 make test-integration-db`.

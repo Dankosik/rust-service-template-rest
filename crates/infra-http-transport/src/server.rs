@@ -107,14 +107,19 @@ struct ConnectionShutdown {
 #[derive(Clone, Debug)]
 pub struct ConnectionInfo {
     scheme: &'static str,
-    forced: Arc<AtomicBool>,
+    state: Arc<ConnectionState>,
+}
+
+#[derive(Debug)]
+struct ConnectionState {
+    forced: AtomicBool,
     drain: CancellationToken,
 }
 
 impl ConnectionInfo {
     #[must_use]
     pub fn child_drain_token(&self) -> CancellationToken {
-        self.drain.child_token()
+        self.state.drain.child_token()
     }
 
     #[must_use]
@@ -124,7 +129,7 @@ impl ConnectionInfo {
 
     #[must_use]
     pub fn was_forced(&self) -> bool {
-        self.forced.load(Ordering::Relaxed)
+        self.state.forced.load(Ordering::Relaxed)
     }
 }
 
@@ -372,12 +377,12 @@ impl Drop for Server {
 #[derive(Clone, Debug, Default)]
 struct ListenerExecutor {
     tasks: TaskTracker,
-    force: CancellationToken,
+    force: Arc<CancellationToken>,
 }
 
 impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
     fn execute(&self, future: F) {
-        let force = self.force.clone();
+        let force = Arc::clone(&self.force);
         let task = self.tasks.track_future(async move {
             force.run_until_cancelled(future).await;
         });
@@ -385,7 +390,6 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
     }
 }
 
-#[derive(Clone)]
 struct ConnectionDriver {
     builder: auto::Builder<ListenerExecutor>,
     // template:begin grpc:http2-driver-preface-budget
@@ -496,6 +500,9 @@ where
     let mut notify = Some(notify);
     let mut remaining_bytes = HTTP2_CLIENT_PREFACE_BYTES;
     let io = tokio_util::io::InspectReader::new(io, move |bytes| {
+        if remaining_bytes == 0 {
+            return;
+        }
         remaining_bytes = remaining_bytes.saturating_sub(bytes.len());
         if remaining_bytes == 0
             && let Some(notify) = notify.take()
@@ -510,14 +517,12 @@ where
 }
 // template:end grpc:http2-driver
 
-#[derive(Clone)]
-struct ConnectionContext<F> {
+struct ConnectionContext {
     app: Router,
     driver: ConnectionDriver,
     max_connection_age: Option<Duration>,
     shutdown: ConnectionShutdown,
     scheme: &'static str,
-    prepare_io: F,
 }
 
 fn serve_listener<F, Fut, IO>(
@@ -562,15 +567,20 @@ where
             accept_failure_tx.send_replace(Some(observed));
         },
     );
-    let context = ConnectionContext {
+    let context = Arc::new(ConnectionContext {
         app,
         driver,
         max_connection_age: limits.max_connection_age,
         shutdown: connection_shutdown.clone(),
         scheme,
+    });
+    let accept = accept_loop(
+        bound,
+        limits.max_connections,
+        connections.clone(),
+        context,
         prepare_io,
-    };
-    let accept = accept_loop(bound, limits.max_connections, connections.clone(), context);
+    );
     let accept_loop = AbortOnDropHandle::new(tokio::spawn(async move {
         let _accept_failure_guard = accept_failure_guard;
         accept.await;
@@ -592,18 +602,20 @@ async fn accept_loop<F, Fut, IO>(
     }: BoundListener,
     max_connections: Option<NonZeroU32>,
     connections: TaskTracker,
-    context: ConnectionContext<F>,
+    context: Arc<ConnectionContext>,
+    prepare_io: F,
 ) where
     F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let drain = &context.shutdown.drain;
+    let draining = context.shutdown.drain.cancelled();
+    tokio::pin!(draining);
     let permits = max_connections.map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
     loop {
         let accepted = tokio::select! {
-            () = drain.cancelled() => break,
+            () = draining.as_mut() => break,
             accepted = listener.accept() => accepted,
         };
         let (stream, peer) = match accepted {
@@ -614,7 +626,7 @@ async fn accept_loop<F, Fut, IO>(
                 };
                 tracing::warn!(error = %err, "http_accept_failed");
                 tokio::select! {
-                    () = drain.cancelled() => break,
+                    () = draining.as_mut() => break,
                     () = tokio::time::sleep(delay) => {}
                 }
                 continue;
@@ -631,7 +643,13 @@ async fn accept_loop<F, Fut, IO>(
             continue;
         };
         configure_accepted(&stream);
-        connections.spawn(serve_connection(stream, peer, permit, context.clone()));
+        connections.spawn(serve_connection(
+            stream,
+            peer,
+            permit,
+            Arc::clone(&context),
+            prepare_io.clone(),
+        ));
     }
     drop(listener);
 }
@@ -671,7 +689,8 @@ fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
     permit: Option<OwnedSemaphorePermit>,
-    context: ConnectionContext<F>,
+    context: Arc<ConnectionContext>,
+    prepare_io: F,
 ) -> impl Future<Output = ()>
 where
     F: Fn(TcpStream, SocketAddr) -> Fut,
@@ -683,14 +702,19 @@ where
         .map(|age| deadline_after(jitter_age(age)));
     async move {
         let _permit = permit;
-        let force = context.shutdown.force.clone();
-        let forced = Arc::new(AtomicBool::new(false));
-        let serve = drive_connection(stream, peer, context, age_deadline, Arc::clone(&forced));
+        let info = ConnectionInfo {
+            scheme: context.scheme,
+            state: Arc::new(ConnectionState {
+                forced: AtomicBool::new(false),
+                drain: context.shutdown.drain.clone(),
+            }),
+        };
+        let serve = drive_connection(stream, peer, &context, age_deadline, &info, prepare_io);
         tokio::select! {
             biased;
             () = async {
-                force.cancelled().await;
-                forced.store(true, Ordering::Relaxed);
+                context.shutdown.force.cancelled().await;
+                info.state.forced.store(true, Ordering::Relaxed);
             } => {},
             ended = serve => {
                 if let Err(err) = ended {
@@ -704,24 +728,17 @@ where
 async fn drive_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
-    context: ConnectionContext<F>,
+    context: &ConnectionContext,
     age_deadline: Option<Instant>,
-    forced: Arc<AtomicBool>,
+    info: &ConnectionInfo,
+    prepare_io: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Fn(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnectionContext {
-        app,
-        driver,
-        shutdown,
-        scheme,
-        prepare_io,
-        ..
-    } = context;
-    let closing = wait_for_close(&shutdown.drain, age_deadline);
+    let closing = wait_for_close(&context.shutdown.drain, age_deadline);
     tokio::pin!(closing);
     let io = tokio::select! {
         biased;
@@ -732,16 +749,13 @@ where
         return Ok(());
     };
     // template:begin grpc:http2-observe-initial-read
-    let (io, preface) = observe_http2_preface(io, driver.protocol.preface_timeout());
+    let (io, preface) = observe_http2_preface(io, context.driver.protocol.preface_timeout());
     // template:end grpc:http2-observe-initial-read
     let service = ServiceBuilder::new()
-        .layer(Extension(ConnectionInfo {
-            scheme,
-            forced,
-            drain: shutdown.drain.clone(),
-        }))
-        .service(app);
-    let connection = driver
+        .layer(Extension(info.clone()))
+        .service(context.app.clone());
+    let connection = context
+        .driver
         .builder
         .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
     tokio::pin!(connection);

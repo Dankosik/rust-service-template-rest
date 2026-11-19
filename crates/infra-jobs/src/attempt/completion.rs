@@ -275,7 +275,7 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
                     .map_ok(CompletionWrite::Multiple),
                 ),
             };
-            observed("complete jobs", statement).await
+            observed!("complete jobs", statement).await
         }),
     )
     .await;

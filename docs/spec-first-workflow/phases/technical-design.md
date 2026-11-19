@@ -2,158 +2,167 @@
 
 Use when structured work has open technical choices—where two competent Rust
 engineers reading `spec.md` and current code could build incompatible
-mechanisms, contracts, failure semantics, rollout paths, or crate/module seams.
-Own technical architecture autonomously under [Decision
-Ownership](../../../AGENTS.md#decision-ownership). Preserve `spec.md`'s
-observable behavior; leave task slicing and write locks to Planning, and
-function bodies, private file layout, and test implementation to
-Implementation.
+mechanisms, contracts, failure or trust semantics, rollout paths, or
+crate/module seams. Own technical architecture autonomously under [Decision
+Ownership](../../../AGENTS.md#decision-ownership) while preserving `spec.md`'s
+observable behavior.
+
+**Boundary rule:** Fix every choice where two valid implementations would
+collide across parallel units, alter a caller, wire, schema, config, or
+operator contract, break an invariant or resource bound, or require a later
+migration. Leave open everything behind one module's seam that one unit can
+change without affecting callers, contracts, schemas, bounds, or signals.
 
 ## Steps
 
-1. **Reconcile obligations and ground in source truth.** Read
-   `specs/<task>/intent.md`, `specs/<task>/spec.md` (every `R<n>`, `G<n>`,
-   `Terminology`, and `Carried concerns`), any `research/*.md`, and
-   `workflow-plan.md` when present. Inspect **primary repository sources**
-   before proposing any mechanism or seam: affected crates and callers,
-   [Repository Architecture](../../repo-architecture.md) (including `Domain
-   Vocabulary`), [`quality/architecture.json`](../../../quality/architecture.json),
-   relevant `docs/decisions/*.md`, [Backend Library
-   Selection](../../backend-library-selection.md), and [Production
-   Contract](../../production-contract.md) when capacity, consistency, trust,
-   or recovery applies.
-   - Map every `R<n>`, `G<n>`, and carried concern to the branch(es) it opens:
-     - runtime boundary, source of truth, material flow, failure/cancellation/race
-       behavior, unit cost, operator signal, or rollout -> [System
+1. **Ground in primary sources and reconcile obligations (static — no builds,
+   tests, or services).** Read `specs/<task>/intent.md`,
+   `specs/<task>/spec.md` (every `R<n>`, `G<n>`, `Terminology`, `Non-goals`,
+   `Decisions, assumptions, and reopen triggers`, and `Carried concerns`), any
+   `research/*.md`, and `workflow-plan.md` when present. Treat `spec.md`'s
+   `Current baseline` and prior prose as claims to verify against primary
+   sources, never as proof. Inspect affected crates and callers, [Repository
+   Architecture](../../repo-architecture.md),
+   [`quality/architecture.json`](../../../quality/architecture.json), relevant
+   `docs/decisions/*.md`, [Backend Library
+   Selection](../../backend-library-selection.md), only the affected profile
+   sections of [Production Contract](../../production-contract.md) when
+   capacity, consistency, trust, or recovery applies, and the source of any
+   non-obvious `Cargo.lock` crate API (resolving cached paths via `Cargo.lock`
+   or read-only `cargo metadata --locked --format-version 1`). Delegate
+   read-heavy multi-crate or `Cargo.lock` lookups to `evidence-agent` under
+   [Read-Only Delegation](../shared/read-only-delegation.md), verifying
+   decision-critical facts directly.
+   - Route each open `R<n>`, `G<n>`, `Technical Design` `Downstream handoff`,
+     `Durable contract update`, and carried concern to its branch(es):
+     - runtime crossings, data/schema, truth, trust, failure/concurrency,
+       budgets, signals, or rollout -> [System
        Design](technical-design/system-design.md);
-     - Rust placement, deep-module seams, invariant ownership, caller
-       obligations, dependency direction (even with fixed files), or
-       generated/manual containment not mechanically forced by current code and
+     - Rust modules, seams, invariant ownership, dependency edges, or
+       generated/profile containment not forced by code and
        `quality/architecture.json` -> [Rust
        Architecture](technical-design/rust-architecture.md);
-     - deployable, worker/job, shared wire contract, schema/migration, runtime
-       config/trust material, or managed dependency impact -> [Release
+     - deployable, worker, wire contract, migration, runtime config/trust
+       material, or managed dependency change -> [Release
        Closure](../rubrics/release-closure.md);
      - missing current or external evidence that can change a technical choice
-       -> run supporting [Research](research.md) **inside this phase** (inline
-       for a bounded lookup, or via `evidence-agent` for read-heavy discovery;
-       persist `specs/<task>/research/<topic>.md` when the evidence must
-       survive for review or refresh).
+       -> supporting [Research](research.md) **inside this phase** (inline or
+       via `evidence-agent`; persist `specs/<task>/research/<topic>.md` when
+       review or later phases consume it).
    - **Early exits:**
-     - Missing or contradictory product behavior, or a technical trade-off
-       whose only differentiator is a user-owned choice (cost, external SLA,
-       unauthorized breaking change, legal/irreversible external effect):
-       collect all independent upstream blockers in one pass, save resolved
-       independent design work in `specs/<task>/design/design.md` at `status:
-       blocked` when useful, and return [Transition Result
+     - *Upstream blocker or spec falsification:* missing/contradictory product
+       behavior, a tripped `spec.md` `Reopen if` trigger, a baseline or
+       requirement falsified by code/`Cargo.lock`/external constraints, or a
+       trade-off differing strictly on a user-owned choice. Collect all
+       independent blockers in one pass, save useful resolved work in
+       `specs/<task>/design/design.md` at `status: blocked` when worthwhile,
+       and return [Transition Result
        V1](../shared/transition.md#transition-result-v1) (`status: blocked`,
-       `reopen_owner: Specification` or `Intake`—never ask the user to choose a
-       technical mechanism).
-     - Every obligation is mechanically forced by current code,
-       `quality/architecture.json`, and `spec.md` (zero open technical
-       choices): skip drafting `design.md` and submit the grounded evidence
-       naming each existing owner directly to step 5.
-   - *Complete this step only when* every `R<n>`, `G<n>`, and carried concern
-     maps to a triggered branch or forced owner, current code and prior
-     decisions (`docs/decisions/`, `docs/backend-library-selection.md`) are
-     verified against primary sources, and no decision-changing evidence gap
-     remains open.
+       `reopen_owner: Specification` or `Intake`—never ask the user to choose
+       an internal mechanism).
+     - *Mechanically forced (zero open choices):* current code,
+       `quality/architecture.json`, and `spec.md` (including any `Technical
+       Design` `Downstream handoff`) leave zero architectural ambiguity. Skip
+       drafting `design.md` and submit the source-verified forced-owner
+       evidence directly to step 5.
+   - *Complete step 1 only when* every `R<n>`, `G<n>`, `Technical Design`
+     `Downstream handoff`, `Durable contract update`, carried concern, and
+     `spec.md` assumption/non-goal is reconciled against primary code and
+     `Cargo.lock` sources, every open choice maps to a branch, and zero
+     decision-changing evidence gaps remain.
 
-2. **Execute triggered branches and challenge every choice.** Load only the
-   branches triggered in step 1 and only the domain skills whose pressure
-   affects an open decision:
-   - REST/OpenAPI wiring -> `rust-api-contract`, `rust-axum`;
-   - PostgreSQL pools, transactions, or migrations -> `rust-sqlx`;
-   - failure mapping, `ServiceFailure`, or degradation -> `rust-errors`;
-   - trust, secrets, authorization, signing, or exact bytes -> `rust-security`;
-   - config keys, defaults, precedence, or validation -> `rust-config`;
-   - deadlines, retries, overload, readiness, or drain -> `rust-reliability`;
-   - operator signals, redaction, or metrics/spans/probes -> `rust-observability`;
-   - task lifetimes, cancellation, locks, or channels -> `rust-tokio`;
-   - numeric scale, latency, memory, or unit-cost bounds -> `rust-performance`;
-   - new crate, feature, or custom mechanism vs library -> `rust-dependencies`;
-   - structural ownership, deletion test, or polymorphism -> `rust-structural-quality`;
-   - CI gates, tool pins, container image, or publication -> `rust-delivery-platform`.
+2. **Close open decisions across triggered branches.** Load only the branches
+   routed in step 1 and only the `.agents/skills/rust-*` domain methods whose
+   trigger matches an open decision (including `rust-idiomatic` and
+   `rust-structural-quality` for Rust seams; leave `rust-testing` to
+   Implementation).
+   - **Reuse-first & steelman challenge:** before adopting any new mechanism,
+     crate, module, trait, dependency, queue, fallback, or config key, steelman
+     the strongest simpler substitute (`existing repo owner -> std -> locked
+     workspace crate -> approved/maintained OSS -> custom mechanism`) and name
+     the exact `R<n>`, `G<n>`, invariant, or bound it breaks. Honor every
+     rejected choice in `docs/decisions/` and
+     `docs/backend-library-selection.md` unless its stated reopen condition is
+     met.
+   - **Design It Twice:** load [Design It
+     Twice](technical-design/design-it-twice.md) when an open fork meets its
+     hard-to-reverse triggers.
+   - **Uncertainty disposition:** (a) settle statically checkable facts now
+     from code, `Cargo.lock`, or primary docs; (b) if a locked crate source is
+     genuinely uncached locally, record it as an unverified assumption with a
+     concrete `Reopen if` in `Verified anchors` / `Assumptions`; (c) when a
+     decision-changing runtime/integration behavior or hard budget can only be
+     settled by execution, run an authorized [Research](research.md) empirical
+     probe if available, or flag an `integration-first` entry in `Planning
+     hooks` with a concrete `Reopen if`; (d) leave non-decisive local details
+     behind a seam to Implementation.
+   - *Complete step 2 only when* every triggered branch is closed, every genuine
+     fork names a steelman rejected alternative, decisive constraint, accepted
+     cost, and objective `Reopen if`, and every relied-on symbol and crate API
+     is source-verified or carried as an uncached `Reopen if`.
 
-   - **Simpler-alternative challenge:** before adopting any new mechanism,
-     crate, module, trait, layer, dependency, queue, or config key, construct
-     the strongest simpler alternative (extending an existing owner, `std`, or a
-     locked crate) and prove which concrete obligation, invariant, or bound it
-     violates. Apply the **deletion test** and honor every rejected choice in
-     `docs/decisions/` and `docs/backend-library-selection.md` unless its
-     stated reopen condition is met.
-   - **Hard-to-reverse open fork:** when an expensive-to-reverse mechanism or
-     cross-boundary seam has genuinely competing architectures, load [Design It
-     Twice](technical-design/design-it-twice.md) to explore contrasting designs
-     in parallel fresh contexts before converging autonomously.
-   - **Dependency source truth:** verify every non-obvious consumed symbol and
-     external crate API against current code and the source of the version
-     locked in `Cargo.lock` (or official primary source when admitting a new
-     dependency). If a locked crate source is uncached locally, record the
-     unverified assumption with a concrete `Reopen if` instead of relying on
-     memory.
-   - *Complete this step only when* every triggered branch is closed, every
-     non-trivial choice names its decisive constraint, strongest rejected
-     alternative, accepted cost, and reopen trigger, and every relied-on
-     repo/crate API is source-verified.
+3. **Persist draft artifact(s).** Write `specs/<task>/design/design.md` at
+   `status: draft` using [Design V1](../interfaces/design-v1.md) through
+   [Artifacts](../shared/artifacts.md), and `specs/<task>/rollout.md` at
+   `status: draft` when [Release Closure](../rubrics/release-closure.md)
+   requires a non-trivial rollout sequence.
+   - *Complete step 3 only when* the draft artifact(s) exist on disk with every
+     applicable `Design V1` section concretely bound.
 
-3. **Persist draft design artifact(s).** Write `specs/<task>/design/design.md`
-   at `status: draft` using [Design V1](../interfaces/design-v1.md) through
-   [Artifacts](../shared/artifacts.md) (splitting a large inventory into a
-   linked sibling file under `design/` only when it clarifies review). When
-   [Release Closure](../rubrics/release-closure.md) finds a non-trivial rollout
-   sequence, also write `specs/<task>/rollout.md` at `status: draft`. Preserve
-   canonical vocabulary from `spec.md` and `docs/repo-architecture.md`, and
-   link unchanged code, schemas, and `research/*.md` instead of copying them.
+4. **Run the Checkable Pre-Review Audit (static).** Attack only what is written
+   on disk (never unwritten chat context) and close every gap in place:
+   - **Trace & identifier parity:** every `R<n>`, `G<n>`, `Technical Design`
+     `Downstream handoff`, `Durable contract update`, and `spec.md` carried
+     concern sits in `Obligation trace` with owner and proving surface; zero
+     `Non-goals` leaked in; every shared identifier across units is pinned.
+   - **Deletion & steelman check:** every added structure, dependency, queue,
+     config key, or fallback either traces directly to an explicit `spec.md`
+     obligation or has a `D<n>` entry naming the invariant its deletion breaks
+     and a serious simplest rejected alternative.
+   - **Compile & caller walkthrough:** every anchor and proposed Rust signature
+     matches inspected code, `Cargo.lock`, `quality/architecture.json`, and
+     static compile reality; walk one realistic call site per new/changed seam.
+   - **Failure, trust & handoff witness:** walk one worst-case
+     failure/cancellation/race/attacker-path witness against the written design
+     (when System Design triggered), and confirm `Shared mutated surfaces`
+     uses canonical repo-relative paths matching [Task Packet
+     V1](../interfaces/task-packet-v1.md).
+   - *Complete step 4 only when* all four checks clear on the on-disk `draft`.
 
-4. **Run the Technical Design Dry Run (static — run no builds, tests, or
-   services).** Attack the complete `draft` against all four checks and close
-   surviving gaps in place before review:
-   - **Obligation coverage & spec fidelity:** try to implement the entire
-     design faithfully while breaking any `R<n>`, `G<n>`, or `Carried concerns`
-     item in `spec.md`, or silently adding unrequested behavior; close every
-     loophole.
-   - **Deletion & simplicity test:** challenge every added component, crate,
-     module, trait, dependency, queue, config key, and fallback; delete or
-     collapse anything whose removal breaks no accepted invariant, boundary, or
-     bound.
-   - **Source, architecture & compile reality:** confirm zero contradictions
-     with current code, `Cargo.lock` crate sources, `quality/architecture.json`
-     role/dependency rules, optional template profile isolation,
-     `docs/decisions/`, `docs/backend-library-selection.md`, and Rust's static
-     type/lifetime/object-safety rules.
-   - **Planning cold-start:** walk `intent.md`, `spec.md`, `design/design.md`
-     (and `rollout.md`), and cited code with zero chat history. Confirm a fresh
-     Planning session can slice vertical tasks, spot prerequisite shared seams,
-     integration risk, or wide blast radius, and assign disjoint `Mutable
-     owners` and `Exclusive locks` without inventing architecture or guessing
-     private file trees.
+5. **Submit for independent review.** Dispatch fresh `reviewer-agent`(s)
+   running [Technical Design Review](technical-design-review.md) under shared
+   [Review](../shared/review.md):
+   - Use **1 fresh `reviewer-agent`** by default (single triggered branch,
+     small local design, or no-open-decisions result).
+   - Use **2 parallel fresh `reviewer-agent` lanes** (never forking parent
+     history) only when *both* System Design and Rust Architecture triggered
+     and the design spans several crates or runtime crossings, or involves a
+     hard-to-reverse fork or rollout—assigning `Axis 1` and `Axis 2` under
+     [Technical Design Review Axes](technical-design-review.md#axes). Keep both
+     reports distinct without masking findings across axes; recheck only failed
+     or invalidated axes under shared [Review](../shared/review.md), and route
+     one surviving evidence-backed conflict between axes to `adjudicator-agent`
+     ([Review](../shared/review.md#route)).
+   - Repair design-local `FAIL` findings in place and rerun affected step 4
+     checks. For upstream gaps, spec falsification, or missing external
+     authority, flip persisted `design/design.md` (and `rollout.md` when
+     present) to `status: blocked` and return [Transition Result
+     V1](../shared/transition.md#transition-result-v1) (`status: blocked`,
+     `reopen_owner: ...`).
+   - *Complete step 5 only when* review clears (`PASS` or `CONCERNS`) on the
+     current candidate across all active axes.
 
-5. **Submit for independent review.** Select the review topology under
-   [Review Topology](technical-design-review.md#review-topology)—1 fresh
-   `reviewer-agent` by default, or 2 parallel fresh `reviewer-agent` lanes
-   (System/Flows/Ops + Rust Architecture/Codebase Truth) when both branches are
-   material, several crates or runtime boundaries change, or a hard-to-reverse
-   restructure is in play—and route the fixed `draft` candidate (or
-   no-open-decisions evidence) through shared [Review](../shared/review.md).
-   Repair design-local `FAIL` findings in place and rerun affected step 4
-   checks; return `status: blocked` with `reopen_owner` in [Transition Result
-   V1](../shared/transition.md#transition-result-v1) for upstream product gaps
-   or missing external authority.
-
-6. **Finalize and hand off.** After review returns `PASS` or `CONCERNS`:
-   - for a reviewed no-open-decisions result, return [Transition Result
-     V1](../shared/transition.md#transition-result-v1) (`status: ready`,
-     `owner: Technical Design`, `result: <verified forced-owner evidence>`,
-     `review: <locator or inline result>`, `next_owner: Planning`) without
-     creating an empty `design.md`;
-   - otherwise record any bounded `CONCERNS` obligation from review (risk,
-     owner, and consuming action) plus any still-unresolved `Carried concerns`
-     from `spec.md` in `Carried concerns` inside
-     `specs/<task>/design/design.md` so the fresh Planning session receives
-     them, set `status: ready` in `design/design.md` (and mark `rollout.md`
-     ready when present), and return [Transition Result
-     V1](../shared/transition.md#transition-result-v1) (`status: ready`,
-     `owner: Technical Design`, `result: specs/<task>/design/design.md`,
-     `review: <locator or inline result>`, `next_owner: Planning`). Stop here;
-     leave task slicing to Planning's fresh session.
+6. **Finalize and hand off.** Emit [Transition Result
+   V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
+   Technical Design`, `review: <locator or inline result>`, `next_owner:
+   Planning`) and stop:
+   - *No-open-decisions result:* set `result` to the verified forced-owner
+     evidence plus any carried review `CONCERNS`, without creating an empty
+     `design.md`.
+   - *Draft design:* record any bounded review `CONCERNS` (risk, owner,
+     consuming action) and unresolved `spec.md` `Carried concerns` in
+     `design.md`, flip `status: ready` in `design/design.md` (and `rollout.md`
+     when present), and set `result: specs/<task>/design/design.md`.
+   - *Complete step 6 only when* persisted statuses match the reviewed
+     candidate, carried `CONCERNS` are preserved for Planning, and the receipt
+     is emitted.

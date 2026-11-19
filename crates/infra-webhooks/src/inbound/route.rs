@@ -13,7 +13,7 @@ use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{OpenApi, ToResponse};
 
-use super::{PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveError, Receiver};
+use super::{PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveError, Receiver, Verifier};
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
@@ -55,7 +55,12 @@ struct ReceiverState {
 
 struct ActiveReceiver {
     receiver: Receiver,
-    endpoints: HashMap<Arc<str>, EndpointMetrics>,
+    endpoints: HashMap<Arc<str>, ConfiguredEndpoint>,
+}
+
+struct ConfiguredEndpoint {
+    verifier: Arc<dyn Verifier>,
+    metrics: EndpointMetrics,
 }
 
 impl ReceiverState {
@@ -68,11 +73,16 @@ impl ReceiverState {
 
     fn active(receiver: Receiver) -> Self {
         let endpoints = receiver
-            .endpoint_ids()
-            .map(|endpoint_id| {
-                let id: Arc<str> = Arc::from(endpoint_id);
+            .endpoints
+            .iter()
+            .map(|(endpoint_id, verifier)| {
+                let id: Arc<str> = Arc::from(endpoint_id.as_str());
                 let metrics = EndpointMetrics::new(SharedString::from(Arc::clone(&id)));
-                (id, metrics)
+                let endpoint = ConfiguredEndpoint {
+                    verifier: Arc::clone(verifier),
+                    metrics,
+                };
+                (id, endpoint)
             })
             .collect();
         Self {
@@ -84,10 +94,10 @@ impl ReceiverState {
         }
     }
 
-    fn endpoint(&self, endpoint_id: &str) -> Option<(&Receiver, &EndpointMetrics)> {
+    fn endpoint(&self, endpoint_id: &str) -> Option<(&Receiver, &ConfiguredEndpoint)> {
         let active = self.active.as_ref()?;
-        let metrics = active.endpoints.get(endpoint_id)?;
-        Some((&active.receiver, metrics))
+        let endpoint = active.endpoints.get(endpoint_id)?;
+        Some((&active.receiver, endpoint))
     }
 
     fn reject_unknown_endpoint(&self) -> Response {
@@ -177,7 +187,8 @@ async fn receive(
     request: Request,
 ) -> Response {
     let state = state.state.as_ref();
-    let Some((receiver, metrics)) = state.endpoint(&endpoint_id) else {
+    let Some((receiver, ConfiguredEndpoint { verifier, metrics })) = state.endpoint(&endpoint_id)
+    else {
         return state.reject_unknown_endpoint();
     };
     let (parts, body) = request.into_parts();
@@ -206,8 +217,9 @@ async fn receive(
     let Some(attempt_end) = deadline.attempt_end() else {
         return receipt_deadline_exceeded(metrics);
     };
-    let receipt = receiver.receive_bytes(
+    let receipt = receiver.receive_configured_bytes(
         &endpoint_id,
+        verifier.as_ref(),
         &parts.headers,
         body,
         SystemTime::now(),
@@ -357,7 +369,6 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::inbound::Verifier;
     use crate::protocol::KeyRing;
 
     fn inert_app() -> infra_http::Application {
@@ -407,11 +418,11 @@ mod tests {
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
             let (_, partner) = state.state.endpoint("partner").expect("partner endpoint");
-            partner.record(OutcomeSlot::Accepted);
+            partner.metrics.record(OutcomeSlot::Accepted);
             let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
-            cloned_partner.record(OutcomeSlot::Accepted);
-            partner.record_rejection("invalid_signature");
-            partner.record_rejection("invalid_token");
+            cloned_partner.metrics.record(OutcomeSlot::Accepted);
+            partner.metrics.record_rejection("invalid_signature");
+            partner.metrics.record_rejection("invalid_token");
             let _ = state.state.reject_unknown_endpoint();
             let _ = cloned.state.reject_unknown_endpoint();
         });

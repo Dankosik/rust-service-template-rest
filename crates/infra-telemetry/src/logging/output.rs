@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::metrics::static_counter_key;
+
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
 const DEEP_QUEUE_RECORDS: usize = QUEUE_RECORDS / 4;
@@ -40,14 +42,14 @@ pub enum DropReason {
 }
 
 impl DropReason {
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::QueueFull => "queue_full",
-            Self::Oversize => "oversize",
-            Self::SpanCapacity => "span_capacity",
-            Self::Busy => "busy",
-            Self::Reentrant => "reentrant",
-            Self::Closed => "closed",
+            Self::QueueFull => static_counter_key!(DROPPED_METRIC, "reason" => "queue_full"),
+            Self::Oversize => static_counter_key!(DROPPED_METRIC, "reason" => "oversize"),
+            Self::SpanCapacity => static_counter_key!(DROPPED_METRIC, "reason" => "span_capacity"),
+            Self::Busy => static_counter_key!(DROPPED_METRIC, "reason" => "busy"),
+            Self::Reentrant => static_counter_key!(DROPPED_METRIC, "reason" => "reentrant"),
+            Self::Closed => static_counter_key!(DROPPED_METRIC, "reason" => "closed"),
         }
     }
 }
@@ -60,11 +62,11 @@ pub enum SinkOperation {
 }
 
 impl SinkOperation {
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::Write => "write",
-            Self::Flush => "flush",
-            Self::Worker => "worker",
+            Self::Write => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "write"),
+            Self::Flush => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "flush"),
+            Self::Worker => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "worker"),
         }
     }
 }
@@ -528,12 +530,21 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
+    static METADATA: metrics::Metadata<'static> =
+        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        metrics::counter!(DROPPED_METRIC, "reason" => reason.label()).absolute(dropped);
+        metrics::with_recorder(|recorder| {
+            recorder.register_counter(reason.metric_key(), &METADATA)
+        })
+        .absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label()).absolute(errors);
+        metrics::with_recorder(|recorder| {
+            recorder.register_counter(operation.metric_key(), &METADATA)
+        })
+        .absolute(errors);
     }
 }
 

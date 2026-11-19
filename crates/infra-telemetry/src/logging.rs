@@ -67,7 +67,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
             .with_tracked_inactivity(false)
     });
     let (output, guard) = output::start(std::io::stdout()).map_err(LoggingError::WorkerStart)?;
-    let format = format::FormatLayer::new(output, options.format);
+    let format = format::FormatLayer::new(output, options.format, otel.is_some());
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -12,6 +12,18 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
+
+macro_rules! static_counter_key {
+    ($name:expr, $($label:literal => $value:literal),+ $(,)?) => {{
+        static LABELS: &[::metrics::Label] = &[
+            $(::metrics::Label::from_static_parts($label, $value)),+
+        ];
+        static KEY: ::metrics::Key = ::metrics::Key::from_static_parts($name, LABELS);
+        &KEY
+    }};
+}
+
+pub(crate) use static_counter_key;
 
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -183,10 +195,12 @@ impl Metrics {
 
     pub async fn runtime_progress(self, cancel: CancellationToken) {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
+        let cancelled = cancel.cancelled();
+        tokio::pin!(cancelled);
         loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => return,
+                () = &mut cancelled => return,
                 () = tokio::time::sleep_until(expected) => {}
             }
             let observed = Instant::now();
@@ -231,19 +245,25 @@ pub fn diagnostics_router(
     is_ready: impl Fn() -> bool + Clone + Send + Sync + 'static,
 ) -> Router {
     const READY: &str = "readiness_ready";
+    static READY_PREFIX: LazyLock<String> = LazyLock::new(|| {
+        let mut prefix = String::new();
+        formatting::write_help_line(
+            &mut prefix,
+            READY,
+            None,
+            None,
+            "1 if ready at scrape time, 0 otherwise.",
+        );
+        formatting::write_type_line(&mut prefix, READY, None, None, "gauge");
+        prefix
+    });
+    let ready_prefix = READY_PREFIX.as_str();
     let labels = LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY), &[].into());
     Router::new().route(
         "/metrics",
         get(async move || {
             let mut body = metrics.render();
-            formatting::write_help_line(
-                &mut body,
-                READY,
-                None,
-                None,
-                "1 if ready at scrape time, 0 otherwise.",
-            );
-            formatting::write_type_line(&mut body, READY, None, None, "gauge");
+            body.push_str(ready_prefix);
             formatting::write_metric_line(
                 &mut body,
                 READY,

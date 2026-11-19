@@ -19,8 +19,7 @@
       "permission": {
         "skill": {
           "grilling": "deny",
-          "idea-refine": "deny",
-          "spec-first-brainstorming": "deny"
+          "idea-refine": "deny"
         }
       }
     },
@@ -28,8 +27,7 @@
       "permission": {
         "skill": {
           "grilling": "deny",
-          "idea-refine": "deny",
-          "spec-first-brainstorming": "deny"
+          "idea-refine": "deny"
         }
       }
     }

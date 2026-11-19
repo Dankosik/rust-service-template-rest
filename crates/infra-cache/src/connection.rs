@@ -411,7 +411,7 @@ impl Link {
             () = budget.wait_stopped() => {
                 return Err(CommandError::NotApplied(budget.classify_stop()));
             }
-            () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
+            () = async { generation.retired.cancelled().await } => return Err(ErrorType::Io.into()),
         };
         budget.check_before_dispatch(&generation)?;
         Ok((generation, reservation))
