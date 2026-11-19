@@ -629,7 +629,12 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
 }
 
 pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
-    if group.failing[operation].swap(false, Ordering::SeqCst) {
+    let failing = &group.failing[operation];
+    if failing.load(Ordering::SeqCst)
+        && failing
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }
