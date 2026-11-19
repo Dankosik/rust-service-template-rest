@@ -189,11 +189,14 @@ mod tests {
 
         for prefix in ["", "\\", "\\\\"] {
             let literal = Intent(format!(r"{prefix}\u0000"));
-            std::assert_matches!(prepare_intent(&literal, None), Ok(PreparedIntent::Ready(_)));
+            assert!(matches!(
+                prepare_intent(&literal, None),
+                Ok(PreparedIntent::Ready(_))
+            ));
             let nul = Intent(format!("\\u0000{prefix}\0"));
             std::assert_matches!(
-                prepare_intent(&nul, None),
-                Err(EnqueueError::PayloadContainsNul)
+                prepare_intent(&nul, None).err(),
+                Some(EnqueueError::PayloadContainsNul)
             );
         }
     }
