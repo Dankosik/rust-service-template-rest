@@ -28,21 +28,25 @@ current evidence changes coordination, ownership, reversibility, or proof.
 
 ## Macro Phases
 
+For a new change that needs planning, the root session conducts
+[Intake](spec-first-workflow/phases/intake.md) with the user and writes
+`specs/<task>/intent.md`, reusing a complete, current Intent when available.
+The root retains the conversation and handles any later clarification of
+requester meaning. Once Intent is ready, the root coordinates the following
+phases under [Transition](spec-first-workflow/shared/transition.md#cross-phase-continuation).
+
 | Macro phase | Possible owners |
 | --- | --- |
-| Definition | Intake, supporting or standalone Research, Specification, required review of the fixed macro result |
+| Definition | Specification, supporting Research, required review of the fixed macro result |
 | Technical Design | supporting Research, System / Integration Design, Rust Code / Ownership Design, required Technical Design Review |
 | Planning | Planning and required Task Review / Readiness |
 | Implementation | Parallel implementation, then final validation and any required delivery review |
 
 Treat Research as a standalone macro phase only when the accepted boundary is
-`research only`; otherwise run it inside the active phase alongside review,
-repair, and the smallest upstream reopen. Assign at most one macro phase per
-phase actor. When a request spans phases, the root session acts solely as
-continuation coordinator—routing results under
-[Transition](spec-first-workflow/shared/transition.md) and delegating each
-selected macro phase to a fresh actor through the authorized harness—stopping at
-any explicit phase-only or research-only boundary.
+`research only`; otherwise run it inside the active phase. During preparation,
+give each applicable macro phase from Definition through Planning its own fresh
+session. The phase owner handles its research, review, and repairs. A reviewed
+plan ends preparation at the [implementation handoff](spec-first-workflow/shared/transition.md#implementation-handoff).
 
 Traverse applicable macro phases in table order, skipping a phase only when
 Phase Selection evidence shows its decision is already closed or untriggered
@@ -59,8 +63,8 @@ Evaluate these triggers before loading a phase owner:
 | Structured work lacks a ready behavior delta | [Specification](spec-first-workflow/phases/specification.md) |
 | Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery behavior, or rollout mechanism | [System / Integration Design](spec-first-workflow/phases/system-integration-design.md) |
 | Package/file ownership is not mechanically forced by current code and accepted design | [Rust Code / Ownership Design](spec-first-workflow/phases/rust-code-ownership-design.md) |
-| Structured work lacks one ready fixed unit or the smallest dependency-ordered ledger | [Planning](spec-first-workflow/phases/planning.md) |
-| One accepted implementation unit is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
+| Preparation needs a ready ledger for handoff, or other structured work lacks a ready unit or ledger | [Planning](spec-first-workflow/phases/planning.md) |
+| The user starts a ready plan in a new session, or an accepted inline unit or active implementation task is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 
 Intake is required for new structured work unless a complete Intent already
 exists; Specification and Planning are required unless ready equivalent

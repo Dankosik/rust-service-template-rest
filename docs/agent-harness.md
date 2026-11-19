@@ -52,11 +52,17 @@ leaf lanes via `evidence-agent`, `specialist-agent`, `worker-agent`,
 | Execution lane | One bounded brief and its corrections, including smaller models. |
 | Evidence lane | One bounded evidence brief and related follow-ups below. |
 
-Start execution/evidence lanes (including descendants) with fresh history
-excluding parent conversation while keeping instructions, tools, permissions,
-and repo files; supply accepted behavior, decisions, locators, writable scope,
-and expected outcome. Reviewer freshness follows
-[Review](spec-first-workflow/shared/review.md).
+A fresh phase session starts with the adapter's normal project instructions
+and a brief naming the phase, accepted input files, writable scope, and expected
+result. Exclude the coordinator's and earlier phases' chat turns, tool outputs,
+and conversation summaries. Give the actor access to the checkout containing
+those inputs, including uncommitted artifacts. A new worktree or session ID
+alone does not establish fresh history.
+
+Keep steps and repairs of the same macro phase with its owner. Independent
+review gets its own actor under [Review](spec-first-workflow/shared/review.md).
+Start execution and evidence lanes, including descendants, with the same
+history boundary and the tools and permissions appropriate to their brief.
 
 Reuse a worker only for corrections—or a parent-granted disjoint writable-scope
 expansion—inside its unchanged outcome, capability tier, and proof boundary; end
@@ -94,6 +100,11 @@ results serially, and join/stop descendants before returning, freezing, or
 releasing scope.
 
 ## Select One Adapter
+
+If a required project role is missing from a source checkout, check the
+[template's harness setup](../README.md#how-agents-work-here) before treating
+the native control as unavailable. A source-only instruction check can pass
+before the selected adapter files have been generated.
 
 | Current harness | Adapter |
 | --- | --- |

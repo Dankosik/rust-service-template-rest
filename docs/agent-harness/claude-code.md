@@ -5,6 +5,9 @@ schemas outrank prose.
 
 ## Native Map
 
+- For each preparation phase, call `Agent` with `subagent_type: "general-purpose"`
+  and the phase brief. This writable, [non-fork subagent](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
+  starts with its own history. Use its returned ID for same-phase follow-ups.
 - `/orchestrator` binds the session as Ledger Orchestrator. Dispatch ready
   units via `Agent` (`subagent_type: "acceptance-unit-lead"`) within capacity;
   the `.claude/agents/` carrier loads the role skill and returns

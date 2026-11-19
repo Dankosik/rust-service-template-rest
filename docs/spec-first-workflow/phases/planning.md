@@ -21,8 +21,11 @@ unit boundaries in the same plan before detailing their packets; this adds no
 intermediate artifact or review gate. The completed plan still receives the
 independent review below.
 
-Return one fixed inline unit when no durable boundary exists. Otherwise persist
-[Task Ledger V1](../interfaces/task-ledger-v1.md), keep dependency, status, and
+For the [implementation handoff](../shared/transition.md#implementation-handoff),
+persist [Task Ledger V1](../interfaces/task-ledger-v1.md) even for one executable
+unit. If there is no executable unit, record that disposition in the phase
+result. A fixed unit may stay inline only when no durable boundary exists.
+For a ledger, keep dependency, status, and
 results in `tasks.md`, and put each task packet in `tasks/<ID>-<slug>.md` using
 [Task Packet V1](../interfaces/task-packet-v1.md). Packets contain code and test-writing work.
 Test execution and reviews belong

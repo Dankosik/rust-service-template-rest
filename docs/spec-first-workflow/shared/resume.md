@@ -15,9 +15,10 @@ completed phases.
 1. Inspect the current workspace, Git status/diff, and live native agent/task
    state; for Direct Work (no `specs/<task>/` artifacts), verify in-progress
    edits and checks directly from those sources before acting.
-2. For structured work, read `tasks.md` first when implementation or validation
-   is active (for a split ledger, the index and current ready-frontier packets
-   only); otherwise read `workflow-plan.md` when present.
+2. For structured work, read `tasks.md` first once Planning has persisted it.
+   During preparation resume Planning review or its [handoff](transition.md#implementation-handoff).
+   During implementation or validation read the index and current ready-frontier
+   packets. Before a ledger exists, read `workflow-plan.md` when present.
 3. Read only the decision, design, research, or rollout inputs needed by the
    next action.
 4. Resolve conflict by reopening the narrowest authoritative owner; never merge
