@@ -28,7 +28,7 @@ Implementation finding classification is closed:
 
 | Kind | Meaning | Routing |
 | --- | --- | --- |
-| `TASK_DEFECT` | The candidate falsifies the current task packet or [Engineering](../../../AGENTS.md#engineering). | `FAIL`; repair the owning task. |
+| `TASK_DEFECT` | The candidate falsifies the current task packet, [Engineering](../../../AGENTS.md#engineering), or [Rust Change Surface](../../../AGENTS.md#rust-change-surface). | `FAIL`; repair the owning task. |
 | `UPSTREAM_GAP` | An accepted input or dependency output is missing or invalid. | `NEEDS_PARENT`; reopen the smallest upstream owner. |
 | `INTEGRATION_DEFECT` | A seam or assembly between implemented outputs fails. | `FAIL`; route repair under [Final Validation](../phases/implementation/final-validation.md#4-verify-findings-classify-and-route-repairs) to one fresh Lead (with combined seam writable scope), preserving unaffected implementation and valid final evidence. Reopen Planning only when accepted behavior or ledger scope must change. |
 | `FOLLOW_UP` | An improvement is outside the current packet and does not falsify it. | Never blocks `PASS`; route separately through Planning if accepted. |

@@ -17,11 +17,15 @@ availability alone does not authorize use.
   apply [Authority](../../AGENTS.md#authority) and target it in
   commands/navigation; brief paths or command `cwd` do not reload that project's
   config, roles, or tools.
-- For each ready ledger unit, spawn a general-purpose subagent with
-  [Unit Implementation](../spec-first-workflow/phases/implementation/unit.md) as Method
-  and that packet as boundary (it is Acceptance-Unit Lead; `worker-agent` and
-  read-only roles lack acceptance authority). A root-local Lead handles
-  a single fixed inline unit.
+- For each ready ledger unit, Final Validation repair, or Delivery Owner pass,
+  spawn a general-purpose subagent with [Unit
+  Implementation](../spec-first-workflow/phases/implementation/unit.md),
+  [Repair Assignment](../spec-first-workflow/phases/implementation/repair.md),
+  or [Final
+  Validation](../spec-first-workflow/phases/implementation/final-validation.md)
+  as Method and that packet, repair brief, or ledger scope as boundary (it is
+  Acceptance-Unit Lead; `worker-agent` and read-only roles lack acceptance
+  authority). A root-local Lead handles a single fixed inline unit.
 - When [Agent Harness](../agent-harness.md) selects isolation, assign a
   repo-native Git worktree's absolute root; share checkouts only with disjoint
   writable owners and locks. Report missing tools, config, or write access as

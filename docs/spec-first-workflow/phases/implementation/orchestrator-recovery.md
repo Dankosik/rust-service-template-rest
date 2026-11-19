@@ -19,9 +19,8 @@ or unlock dependents.
 
 Serial integration executes four checkpoints in order:
 
-1. Verify scope/locks and land the candidate onto the integration branch as a
-   clean local commit (or confirm the shared-checkout diff in `no-commit`
-   mode).
+1. Verify scope/locks and land the candidate onto the integration branch per
+   [Acceptance Transition](../implementation.md#3-acceptance-transition).
 2. Mark `[x]` and record the `Implemented` receipt (`decisions`, `unverified`)
    in `tasks.md`.
 3. Release locks, clear `Execution`, and retire the Lead and its worktree.

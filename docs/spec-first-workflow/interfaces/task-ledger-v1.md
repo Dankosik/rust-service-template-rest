@@ -49,7 +49,8 @@ Planning omits these fields.
 
 - `Base: <commit SHA>` (header, pinned before the first dispatch so worktrees,
   Final Validation, and Review share one exact diff baseline; add `Commit mode:
-  no-commit` only when the user explicitly forbade local commits).
+  no-commit` only when the user explicitly forbade local commits under
+  [Implementation](../phases/implementation.md#1-verify-controls-and-pin-baseline)).
 - Routing fields per task (not acceptance evidence): `Execution: <native task or
   agent locator>` (set on dispatch, clear when writers stop) and `Resume:
   <remaining action and indispensable verified context>` (only when native state
