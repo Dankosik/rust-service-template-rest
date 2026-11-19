@@ -29,6 +29,7 @@ MIG = _load("scripts/migration-check.py", "_test_mig")
 DETECT = _load(".github/actions/detect-changes/detect.py", "_test_detect")
 PUB = _load(".github/actions/publish-image/publish.py", "_test_pub")
 INIT = _load("template/init.py", "_test_init")
+HARNESS = _load("scripts/harness-sync.py", "_test_harness")
 
 
 class ArchitectureTests(unittest.TestCase):
@@ -167,6 +168,42 @@ class TemplateInitValidationTests(unittest.TestCase):
         self.assertEqual(resolved.outbound_http, "bounded")
 
 
+class HarnessWorkspaceCratesTests(unittest.TestCase):
+    def test_workspace_crates_reference_matches_cargo_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            ref = repo / ".agents/skills/rust-dependencies/references/workspace-crates.md"
+            ref.parent.mkdir(parents=True)
+            (repo / "Cargo.toml").write_text(
+                '[workspace.dependencies]\nmediatype = { version = "0.23.0", default-features = false }\n',
+                encoding="utf-8",
+            )
+            ref.write_text(
+                "# Workspace utility crates\n\n"
+                "- **MIME parsing** — `mediatype`: guard empty unquoted parameters.\n"
+                "- **RAII cleanup** — `std::mem::DropGuard`: Rust 1.100 std.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(HARNESS._check_workspace_crates_reference(repo, source_template=True), [])
+
+            ref.write_text(
+                "# Workspace utility crates\n\n"
+                "- **Retired crate** — `mime`: removed from workspace.\n",
+                encoding="utf-8",
+            )
+            stale = HARNESS._check_workspace_crates_reference(repo, source_template=True)
+            self.assertTrue(any("crate `mime` is not declared" in item for item in stale), stale)
+            self.assertEqual(HARNESS._check_workspace_crates_reference(repo, source_template=False), [])
+
+            ref.write_text("# Workspace utility crates\n\nNo bullets here.\n", encoding="utf-8")
+            empty = HARNESS._check_workspace_crates_reference(repo, source_template=True)
+            self.assertTrue(any("contains no crate entries" in item for item in empty), empty)
+
+            ref.write_text("# Workspace utility crates\n\n- malformed bullet\n", encoding="utf-8")
+            malformed = HARNESS._check_workspace_crates_reference(repo, source_template=False)
+            self.assertTrue(any("bullet must match" in item for item in malformed), malformed)
+
+
 class WorktreeSyncTests(unittest.TestCase):
     SCRIPT = ROOT / "scripts/worktree-sync.py"
 
@@ -279,13 +316,13 @@ class WorktreeSyncTests(unittest.TestCase):
             self.assertIn("status: direct-overlap", overlap.stdout)
             self.assertIn("crates/foo/old.rs", overlap.stdout)
 
-            # Diverged local main should not recommend wt sync-main
+            # Diverged local main should not recommend sync-main
             (primary / "diverge.txt").write_text("local\n", encoding="utf-8")
             self._run(["git", "add", "diverge.txt"], primary)
             self._run(["git", "commit", "-qm", "diverge local main"], primary)
             diverged = self._run([sys.executable, str(self.SCRIPT), "drift", "--no-fetch"], wt)
             self.assertIn("local_main: diverged from origin/main", diverged.stdout)
-            self.assertNotIn("run `wt sync-main`", diverged.stdout)
+            self.assertNotIn("sync-main", diverged.stdout)
 
 
 if __name__ == "__main__":
