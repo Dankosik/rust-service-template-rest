@@ -26,9 +26,7 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      skipped-Definition fixed external contract in [Non-Standard
      Paths](technical-design/non-standard-paths.md); otherwise exit via
      [Blocked Exit](technical-design/non-standard-paths.md#blocked-exit) with
-     `reopen_owner: Specification`). Also load [Non-Standard
-     Paths](technical-design/non-standard-paths.md) for reopen/resume or
-     `Behavior delta: None`.
+     `reopen_owner: Specification`).
    - Read `specs/<task>/intent.md`, `specs/<task>/spec.md` (all obligations:
      `R<n>` including every `Open to Technical Design:` marker, `G<n>`,
      `Terminology`, `Non-goals`, `Downstream handoff`, `Durable contract
@@ -90,7 +88,7 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      locked Cargo.lock crate -> maintained OSS -> custom`) and name the exact
      `R<n>`, `G<n>`, invariant, or bound it breaks. Honor rejected choices in
      `docs/decisions/` and `docs/backend-library-selection.md` unless their
-     reopen condition is met.
+     reopen condition is met or the user explicitly requests it.
    - **Design It Twice:** load [Design It
      Twice](technical-design/design-it-twice.md) for any **one-way door** open
      fork unless existing repository conventions (`docs/decisions/`, sibling
@@ -141,18 +139,20 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
    - **Brief hygiene:** on initial or fresh reviews, pass strictly the
      candidate paths (`specs/<task>/design/design.md`, linked `design/*.md`,
      `rollout.md`), input paths (`intent.md`, `spec.md` or cited external
-     contract, `research/*.md`), assigned axis/checks, and method path
-     (`technical-design-review.md`)—omit author rationale or "already verified" claims that break cold-start
-     blindness or anchor the reviewer. Bounded delta rechecks add only anchored
-     findings and the repair delta or refuting primary locators.
+     contract, plus `research/*.md` cited in `Basis` or `design/`—pass uncited
+     `research/*.md` only to Axis 1 or after Phase A so cold-start blindness
+     holds), assigned axis/checks, and method path
+     (`technical-design-review.md`)—omit author rationale or "already verified"
+     claims that break cold-start blindness or anchor the reviewer. Bounded
+     delta rechecks add only anchored findings and the repair delta or refuting
+     primary locators.
    - **Two-axis parallel (2 reviewers):** **both** System Design and Rust
      Architecture triggered **and** at least one applies: multiple crates or
      crossings, a **one-way door** fork, or a non-trivial rollout. Dispatch
      **Axis 1** and **Axis 2** under [Review
-     Topology](technical-design-review.md#review-topology); require both axes
-     to clear on the same candidate.
-   - **Default (1 reviewer):** all other designs (none of the two-axis triggers
-     above; all applicable checks).
+     Topology](technical-design-review.md#review-topology).
+   - **Default (1 reviewer):** all other designs (all applicable checks under
+     [Review Topology](technical-design-review.md#review-topology)).
    - **On `FAIL`:** verify citations/witnesses and handle refuted findings
      under [Review Lifecycle](../shared/review.md#lifecycle):
      - *Confirmed `PHASE_DEFECT`:* repair in place, rerun affected step 4

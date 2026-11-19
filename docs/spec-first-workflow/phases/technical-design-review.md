@@ -78,24 +78,22 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    terminology collision, or leaked `Non-goal`.
 3. **Simplicity, deletion test, steelman `D<n>` & durable docs** *(split by
    subject across axes; both consult `docs/decisions/` and
-   `docs/backend-library-selection.md` for their subject)*:
+   `docs/backend-library-selection.md` for their subject and `FAIL` on a
+   strawman `D<n>`, missing decisive constraint or objective `Reopen if`, or
+   reversing a rejected choice without meeting its reopen condition or an
+   explicit user request)*:
    - **3a — System mechanisms & contract docs:** try to delete or collapse
      every added system mechanism, queue, cache, worker, fallback, or config
      key onto an existing owner unless forced by `spec.md`. `FAIL` on
-     speculative system machinery, strawman system `D<n>` or missing decisive
-     constraint / objective `Reopen if`, reversing a rejected system/runtime
-     decision without meeting its reopen condition, or omitting required
-     `docs/decisions/` or `docs/production-contract.md` `Durable doc updates`.
+     speculative system machinery or omitting required `docs/decisions/` or
+     `docs/production-contract.md` `Durable doc updates`.
    - **3b — Rust structure, dependencies & architecture docs:** try to delete
      or collapse every added crate, module, seam, trait, wrapper, dependency,
      or custom helper onto an existing owner, `std`, or a `Cargo.lock` crate.
      `FAIL` on shallow pass-through chains, single-adapter mock-only traits,
-     `Clock`/`Rng` traits replaceable by plain parameters, strawman Rust/crate
-     `D<n>` or missing decisive constraint / objective `Reopen if`, reversing a
-     rejected crate/trait/library decision without meeting its reopen
-     condition, or omitting required `docs/decisions/`,
-     `docs/backend-library-selection.md`, or `docs/repo-architecture.md`
-     `Durable doc updates`.
+     `Clock`/`Rng` traits replaceable by plain parameters, or omitting required
+     `docs/decisions/`, `docs/backend-library-selection.md`, or
+     `docs/repo-architecture.md` `Durable doc updates`.
 4. **Primary-source truth, workspace rules, handoff completeness & compile
    reality.** Inspect real code, exhaustive public workspace type fan-out,
    non-obvious `Cargo.lock` crate sources (`Cargo.lock` or `cargo metadata
@@ -146,9 +144,9 @@ Technical Design:`, `G<n>`, `Technical Design` `Downstream handoff`, `Durable
 contract update`, `Carried concerns`). Try to construct **one realistic
 two-engineer divergence** (mechanism, unpinned identifier, error/retryability,
 config rule, rollout path, owner, or seam) or **one primary-source
-contradiction**, and verify handoff completeness (`Verified anchors`,
-`Assumptions (Reopen if)` for uncached crates, `Shared mutated surfaces`,
-`Superseded paths and generated contracts`, `Durable doc updates`), then apply
+contradiction**, verify the forced-owner handoff package required by
+[No-Open-Decisions
+Exit](technical-design/non-standard-paths.md#no-open-decisions-exit), and apply
 [Verdict](#verdict).
 
 ## Verdict

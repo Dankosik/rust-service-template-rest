@@ -4,7 +4,7 @@
 structured task—closing every **two-engineer divergence** and **one-way door**
 while leaving internals behind a single module's seam to Implementation.
 
-```markdown
+````markdown
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
@@ -19,7 +19,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 ## Key decisions
 
-<Omit when every obligation is forced by existing owners.>
+<Omit only when `design.md` is persisted with zero open forks (e.g. a non-trivial `rollout.md`); when zero open forks and no `rollout.md` apply, take [No-Open-Decisions Exit](../phases/technical-design/non-standard-paths.md#no-open-decisions-exit).>
 
 ### D1 — <short decision name>
 
@@ -47,7 +47,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 ### Rollout and mixed-version compatibility
 
-<`none`, `standard single-step deploy`, or `rollout.md`; lock-safe DDL + serialized payload compatibility; for `expand -> migrate -> contract`, state `same-release` vs `multi-release`.>
+<`no deployment impact`, `standard single-step deploy`, or `rollout.md`; lock-safe DDL + serialized payload compatibility; for `expand -> migrate -> contract`, state `same-release` vs `multi-release`.>
 
 ## Rust architecture, seams, and ownership
 
@@ -88,7 +88,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 <Include only while `status: blocked`; remove once resolved.>
 
 - **B1 — <upstream question or falsified rule; for `Intake`, phrase in requester language so `"yes"` accepts recommendation when supported>:** <primary evidence> | **Options & consequences:** <A vs B> | **Recommendation:** <choice and reason, or `none` when balanced>
-```
+````
 
 ## Field Rules
 
@@ -131,8 +131,9 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
     raw `PgPool` or internal state.
 - **Durable record gate:** preserve every `Durable contract update` from
   `spec.md`, and add a durable update to `docs/decisions/`, [Backend Library
-  Selection](../../backend-library-selection.md), or [Repository
-  Architecture](../../repo-architecture.md) only when all three hold—(1)
+  Selection](../../backend-library-selection.md), [Repository
+  Architecture](../../repo-architecture.md), or [Production
+  Contract](../../production-contract.md) only when all three hold—(1)
   **one-way door**, (2) surprising without context, and (3) real trade-off with
   a rejected alternative—or when reopening a rejected choice or resolving a
   cross-task `Domain Vocabulary` collision. Implementation lands the doc update
