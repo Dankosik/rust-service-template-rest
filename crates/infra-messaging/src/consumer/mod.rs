@@ -350,21 +350,7 @@ impl Consumer {
             if drain.is_cancelled() {
                 break 'pulls;
             }
-            let budget = match mode {
-                PullMode::Normal => {
-                    let messages = (self.concurrency.get() - deliveries.len()).min(limits.messages);
-                    PullLimits {
-                        messages,
-                        bytes: messages * self.pull_delivery_bytes,
-                        ..limits
-                    }
-                }
-                PullMode::SingleRetainedMessage => PullLimits {
-                    messages: 1,
-                    bytes: self.retained_pull_bytes.min(limits.bytes),
-                    ..limits
-                },
-            };
+            let budget = self.pull_budget(mode, deliveries.len(), limits);
             let opened = self.open_batch(&budget, deliveries, drain).await?;
             let messages = match opened {
                 BatchOpen::Ready(messages) => *messages,
@@ -517,6 +503,26 @@ impl Consumer {
         self.durable_ready
             .store(matches!(status, DurableStatus::Ready(_)), Ordering::Release);
         status
+    }
+
+    fn pull_budget(
+        &self,
+        mode: PullMode,
+        active_deliveries: usize,
+        limits: PullLimits,
+    ) -> PullLimits {
+        let (messages, bytes) = match mode {
+            PullMode::SingleRetainedMessage => (1, self.retained_pull_bytes.min(limits.bytes)),
+            PullMode::Normal => {
+                let messages = (self.concurrency.get() - active_deliveries).min(limits.messages);
+                (messages, messages * self.pull_delivery_bytes)
+            }
+        };
+        PullLimits {
+            messages,
+            bytes,
+            ..limits
+        }
     }
 
     async fn dispatch_batch(
