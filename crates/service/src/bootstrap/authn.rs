@@ -30,8 +30,8 @@ pub(super) async fn prepare(
             jwks_max_age,
         } => {
             let issuer = issuer_url(mode, issuer)?;
-            let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
-                infra_bearerauthn::JwtOptions {
+            let (verifier, driver) =
+                infra_bearerauthn::prepare_jwt(infra_bearerauthn::JwtOptions {
                     issuer,
                     audiences: audience.as_slice().to_vec(),
                     token_profile: match token_profile {
@@ -43,12 +43,10 @@ pub(super) async fn prepare(
                     algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
                     jwks_uri: jwks_endpoint(mode, jwks_uri.as_deref())?,
                     jwks_max_age: *jwks_max_age,
-                },
-                background.child_token(),
-            )
-            .await
-            .map_err(|source| jwt_preparation_error(mode, jwks_uri.is_some(), source))?;
-            background.spawn("jwt_refresh", refresh);
+                })
+                .await
+                .map_err(|source| jwt_preparation_error(mode, jwks_uri.is_some(), source))?;
+            background.spawn_with_token("jwt_refresh", |stop| driver.run(stop.cancelled_owned()));
             Ok(Some(verifier))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
@@ -99,11 +97,15 @@ pub(super) async fn prepare(
     }
 }
 
-fn preparation_error(
+fn preparation_error<E: Into<infra_bearerauthn::PreparationError>>(
     mode: &'static str,
     key: &'static str,
-) -> impl FnOnce(infra_bearerauthn::PreparationError) -> BootstrapError {
-    move |source| BootstrapError::AuthenticationPreparation { mode, key, source }
+) -> impl FnOnce(E) -> BootstrapError {
+    move |source| BootstrapError::AuthenticationPreparation {
+        mode,
+        key,
+        source: source.into(),
+    }
 }
 
 fn issuer_url(

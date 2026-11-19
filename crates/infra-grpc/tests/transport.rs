@@ -37,7 +37,7 @@ use infra_bearerauthn::{
 // template:end oidc-introspection:grpc-transport-test-auth-imports
 // template:begin authn:grpc-transport-test-verifier-import
 use infra_bearerauthn::Verifier;
-use infra_grpc::{DelegationCredential, VerifiedPrincipal};
+use infra_grpc::{DelegationCredential, Principal, require_principal};
 // template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
     ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
@@ -183,15 +183,15 @@ impl Hold {
 type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
 
 // template:begin authn:grpc-transport-test-admitted-identity
-type AdmittedIdentity = (infra_grpc::VerifiedPrincipal, Option<DelegationCredential>);
+type AdmittedIdentity = (Principal, Option<DelegationCredential>);
 
 #[derive(Clone, Default)]
 struct Orders(Arc<AtomicUsize>);
 
 impl Orders {
-    fn read_order(&self, subject: Option<&str>, order: &str) -> Option<&'static str> {
+    fn read_order(&self, principal: &Principal, order: &str) -> Option<&'static str> {
         self.0.fetch_add(1, Ordering::Relaxed);
-        (subject == Some("subject") && order == "order-42").then_some("order-42")
+        (principal.subject() == Some("subject") && order == "order-42").then_some("order-42")
     }
 
     fn reads(&self) -> usize {
@@ -238,18 +238,10 @@ impl Echo {
             .expect("response work has its own lifetime carrier");
         assert!(!response.operation().cancellation().is_cancelled());
         // template:begin authn:grpc-transport-test-seen-principal
-        let verified =
-            infra_grpc::VerifiedPrincipal::from_extensions(request.extensions()).cloned();
+        let verified = request.extensions().get::<Principal>().cloned();
         assert_eq!(
-            infra_grpc::VerifiedPrincipal::from_request(request)
-                .map(infra_grpc::VerifiedPrincipal::issuer),
-            verified.as_ref().map(infra_grpc::VerifiedPrincipal::issuer),
-        );
-        assert!(
-            request
-                .extensions()
-                .get::<infra_bearerauthn::Principal>()
-                .is_none()
+            require_principal(request).ok().map(Principal::issuer),
+            verified.as_ref().map(Principal::issuer),
         );
         let had_identity = verified.is_some();
         if let Some(principal) = verified {
@@ -294,10 +286,10 @@ impl EchoService for Echo {
         match request.get_ref().message.as_str() {
             // template:begin authn:grpc-scope-trace-test-handlers
             order if order.starts_with("order-") => {
-                let principal = VerifiedPrincipal::require_from_request(&request)?;
+                let principal = require_principal(&request)?;
                 let message = self
                     .orders
-                    .read_order(principal.subject(), order)
+                    .read_order(principal, order)
                     .ok_or_else(|| Failure::new(FailureCode::Forbidden))?;
                 Ok(Response::new(UnaryResponse {
                     message: message.to_owned(),
@@ -1106,13 +1098,13 @@ async fn verify_grpc_order_reads(fixture: &Fixture) {
 async fn read_http_order(
     State(orders): State<Orders>,
     Path(id): Path<String>,
-    principal: infra_http::VerifiedPrincipal,
+    infra_http::VerifiedPrincipal(principal): infra_http::VerifiedPrincipal,
     headers: http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
     assert!(!headers.contains_key(AUTHORIZATION));
-    match orders.read_order(principal.subject(), &id) {
+    match orders.read_order(&principal, &id) {
         Some(order) => order.into_response(),
         None => Problem::new(FailureCode::Forbidden).into_response(),
     }
@@ -1247,7 +1239,7 @@ async fn order_reads_distinguish_scope_refusals_from_handler_refusals_in_both_tr
 
 #[test]
 fn a_handler_requiring_a_principal_reports_a_missing_identity_as_internal() {
-    let status = VerifiedPrincipal::require_from_request(&Request::new(())).unwrap_err();
+    let status = require_principal(&Request::new(())).unwrap_err();
     assert_eq!(status.code(), Code::Internal);
     assert_eq!(reason(&status), "INTERNAL_ERROR");
 }
@@ -2038,7 +2030,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
         .identities
         .lock()
         .pop()
-        .expect("handler observed VerifiedPrincipal");
+        .expect("handler observed Principal");
     assert!(credential.is_none());
     assert_eq!(captured.issuer(), "https://issuer.example");
     assert_eq!(captured.subject(), Some("subject"));

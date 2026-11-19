@@ -3,11 +3,9 @@ use axum::response::Response;
 use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_bearerauthn::{
-    Actor, ClaimAccessError, DelegationCredential, Failure as AuthFailure, Principal, Transport,
-    Verifier,
+    DelegationCredential, Failure as AuthFailure, Principal, Transport, Verifier,
 };
 use operation_context::OperationContext;
-use serde::Deserialize;
 
 use crate::Failure;
 use crate::call::check_open;
@@ -26,51 +24,14 @@ pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:end service-auth:grpc-verifier-setting-service-tokens
 ];
 
-#[derive(Clone, Debug)]
-pub struct VerifiedPrincipal(Principal);
-
-impl VerifiedPrincipal {
-    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
-        Self::from_request(request).ok_or_else(internal_status)
-    }
-
-    #[must_use]
-    pub fn from_request<T>(request: &tonic::Request<T>) -> Option<&Self> {
-        Self::from_extensions(request.extensions())
-    }
-
-    #[must_use]
-    pub fn from_extensions(extensions: &http::Extensions) -> Option<&Self> {
-        extensions.get::<Self>()
-    }
-
-    delegate::delegate! {
-        to self.0 {
-            pub fn claims<'a, T: Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError>;
-
-            #[must_use]
-            pub fn actor(&self) -> Option<&Actor>;
-
-            #[must_use]
-            pub const fn expires_at(&self) -> u64;
-
-            #[must_use]
-            pub fn scopes(&self) -> &[String];
-
-            #[must_use]
-            pub fn client_id(&self) -> Option<&str>;
-
-            #[must_use]
-            pub fn subject(&self) -> Option<&str>;
-
-            #[must_use]
-            pub fn issuer(&self) -> &str;
-        }
-    }
+pub fn require_principal<T>(request: &tonic::Request<T>) -> Result<&Principal, tonic::Status> {
+    request
+        .extensions()
+        .get::<Principal>()
+        .ok_or_else(internal_status)
 }
 
 pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
-    extensions.remove::<VerifiedPrincipal>();
     extensions.remove::<Principal>();
     extensions.remove::<DelegationCredential>();
 }
@@ -117,7 +78,7 @@ pub(crate) async fn authenticate(
     let Some(requirement) = scopes.get(request.uri().path()) else {
         return Err(reject_with_budget(context, request, tonic::Status::unimplemented("")).await);
     };
-    if !principal.has_scopes(&requirement.scopes) {
+    if !principal.has_scopes(requirement.scopes.iter()) {
         let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
@@ -134,9 +95,7 @@ pub(crate) async fn authenticate(
     if let Some(credential) = delegation {
         request.extensions_mut().insert(credential);
     }
-    request
-        .extensions_mut()
-        .insert(VerifiedPrincipal(principal));
+    request.extensions_mut().insert(principal);
     Ok(request)
 }
 

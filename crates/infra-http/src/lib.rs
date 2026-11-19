@@ -30,7 +30,9 @@ use harden::harden;
 pub use observe::HISTOGRAMS;
 // template:begin authn:infra-http-authn-exports
 pub use authn::VerifiedPrincipal;
-pub use infra_bearerauthn::DelegationCredential;
+pub use infra_bearerauthn::{
+    Actor, ClaimAccessError, DelegationCredential, Principal, PrincipalIdentity,
+};
 // template:end authn:infra-http-authn-exports
 // template:begin request-budget:infra-http-request-deadline-export
 pub use context::RequestDeadline;

@@ -5,11 +5,13 @@ mod verify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::{borrow::Borrow, sync::Arc};
+use std::{borrow::Borrow, str::FromStr, sync::Arc};
 
 use shared_rules::rfc7515;
 
-pub use source::{ReceiverTokens, SigningError, SigningOptions, TokenSource};
+pub use source::{
+    InvalidSigningKey, NoSigningKey, ReceiverTokens, SigningOptions, TokenIssueError, TokenSource,
+};
 pub use trust::{TrustError, TrustRegistry};
 pub use verify::{Caller, Failure, Verifier};
 
@@ -63,6 +65,20 @@ impl Borrow<str> for ServiceName {
     }
 }
 
+impl AsRef<str> for ServiceName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for ServiceName {
+    type Err = InvalidServiceName;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
 impl From<ServiceName> for Arc<str> {
     fn from(name: ServiceName) -> Self {
         name.0
@@ -70,8 +86,9 @@ impl From<ServiceName> for Arc<str> {
 }
 
 /// RFC 8725 §3.11, RFC 7515 §4.1.9
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
+#[display("{_0}")]
 pub struct JwtType(Arc<str>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -97,7 +114,7 @@ impl JwtType {
     }
 
     #[must_use]
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -106,8 +123,23 @@ impl JwtType {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+impl AsRef<str> for JwtType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for JwtType {
+    type Err = InvalidJwtType;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
+#[display("{_0}")]
 pub struct KeyId(Arc<str>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -128,8 +160,22 @@ impl KeyId {
     }
 
     #[must_use]
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl AsRef<str> for KeyId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for KeyId {
+    type Err = InvalidKeyId;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 
@@ -140,7 +186,10 @@ mod tests {
     #[test]
     fn caller_names_are_rfc1123_labels() {
         for name in ["a", "orders", "inventory", "a1-b2", &"x".repeat(63)] {
-            assert_eq!(ServiceName::parse(name).unwrap().as_str(), name);
+            let parsed: ServiceName = name.parse().unwrap();
+            assert_eq!(parsed.as_str(), name);
+            assert_eq!(parsed.as_ref(), name);
+            assert_eq!(ServiceName::parse(name).unwrap(), parsed);
         }
         for name in [
             "",
@@ -164,7 +213,11 @@ mod tests {
     #[test]
     fn key_ids_are_visible_ascii() {
         for kid in ["k", "orders/production/2026-10", &"x".repeat(256)] {
-            assert_eq!(KeyId::parse(kid).unwrap().as_str(), kid);
+            let parsed: KeyId = kid.parse().unwrap();
+            assert_eq!(parsed.as_str(), kid);
+            assert_eq!(parsed.as_ref(), kid);
+            assert_eq!(parsed.to_string(), kid);
+            assert_eq!(KeyId::parse(kid).unwrap(), parsed);
         }
         for kid in [
             "",
@@ -180,8 +233,10 @@ mod tests {
 
     #[test]
     fn token_types_compare_as_media_types() {
-        let typ = JwtType::parse("Example-SVC+JWT").unwrap();
+        let typ: JwtType = "Example-SVC+JWT".parse().unwrap();
         assert_eq!(typ.as_str(), "example-svc+jwt");
+        assert_eq!(typ.as_ref(), "example-svc+jwt");
+        assert_eq!(typ.to_string(), "example-svc+jwt");
         assert_eq!(JwtType::parse("application/example-svc+jwt").unwrap(), typ);
         for presented in [
             "example-svc+jwt",

@@ -408,11 +408,15 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     let source = TokenSource::try_new(keys.orders.signing_options("orders", TYPE)).unwrap();
     let origin: http::Uri = format!("https://{address}").parse().unwrap();
     let resource = resource_with_limit(address, Some(NonZeroUsize::MIN));
-    let bound = |source: &TokenSource, receiver| {
-        let tokens = source.receiver(receiver, origin.clone()).unwrap();
+    let bound = |source: &TokenSource, receiver: &str| {
+        let tokens = source
+            .receiver(receiver.parse().unwrap(), origin.clone())
+            .unwrap();
         EchoServiceClient::new(resource.with_service_tokens(tokens).unwrap())
     };
-    let catalog_tokens = source.receiver("catalog", origin.clone()).unwrap();
+    let catalog_tokens = source
+        .receiver("catalog".parse().unwrap(), origin.clone())
+        .unwrap();
     let mut catalog = EchoServiceClient::new(
         resource
             .with_service_tokens(catalog_tokens.clone())

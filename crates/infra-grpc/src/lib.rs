@@ -17,8 +17,10 @@ mod status;
 mod tls;
 
 // template:begin authn:grpc-authn-exports
-pub use authn::VerifiedPrincipal;
-pub use infra_bearerauthn::DelegationCredential;
+pub use authn::require_principal;
+pub use infra_bearerauthn::{
+    Actor, ClaimAccessError, DelegationCredential, Principal, PrincipalIdentity,
+};
 // template:end authn:grpc-authn-exports
 pub use error::{Error, TlsMaterialError};
 pub use observe::HISTOGRAMS;
