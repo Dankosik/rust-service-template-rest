@@ -21,8 +21,7 @@ use crate::state::FailureReason;
 use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{
-    HandlerOutcome, Transition, Unacknowledged, WritePlan, Written, map_outcome, send_outcome,
-    write_of,
+    HandlerOutcome, Transition, WritePlan, Written, map_outcome, send_outcome, write_of,
 };
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
@@ -397,15 +396,14 @@ impl AttemptRun<'_> {
                     }
                 }
             };
-            match within(
+            if let Ok(written) = within(
                 &self.group.lifecycle.cleanup,
                 self.supervisor_deadline,
                 attempt,
             )
             .await?
             {
-                Ok(written) => return Some(written),
-                Err(Unacknowledged) => {}
+                return Some(written);
             }
             let until = clamped_deadline(
                 Instant::now(),
