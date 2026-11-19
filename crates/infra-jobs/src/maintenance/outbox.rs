@@ -1,5 +1,5 @@
 use super::{
-    Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, Shared, in_maintenance_tx,
+    Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, WorkerGroup, in_maintenance_tx,
     observe_failure, observe_recovery, observed,
 };
 use crate::outbox::KIND;
@@ -45,18 +45,18 @@ pub(super) fn reset_metrics() {
     metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(0.0);
 }
 
-pub(super) async fn sample(shared: &Shared) {
-    match read(shared).await {
+pub(super) async fn sample(primary_group: &WorkerGroup) {
+    match read(primary_group).await {
         Ok(sample) => {
             metrics::gauge!(OLDEST_UNCONFIRMED).set(sample.oldest_unconfirmed_age);
             metrics::gauge!(OLDEST_BLOCKED).set(sample.oldest_blocked_age);
             metrics::gauge!(OBSERVED_AT).set(sample.observed_at);
             metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(1.0);
-            observe_recovery(shared, Operation::SampleOutbox);
+            observe_recovery(primary_group, Operation::SampleOutbox);
         }
         Err(error) => {
             metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(0.0);
-            observe_failure(shared, Operation::SampleOutbox, &error);
+            observe_failure(primary_group, Operation::SampleOutbox, &error);
         }
     }
 }
@@ -67,8 +67,8 @@ struct OutboxSample {
     observed_at: f64,
 }
 
-async fn read(shared: &Shared) -> Result<OutboxSample, OperationError> {
-    in_maintenance_tx(shared, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
+async fn read(primary_group: &WorkerGroup) -> Result<OutboxSample, OperationError> {
+    in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
         Ok(observed(
             "sample outbox",
             sqlx::query_as!(

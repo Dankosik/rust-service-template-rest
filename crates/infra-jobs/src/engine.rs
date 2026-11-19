@@ -25,8 +25,8 @@ pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 pub struct Engine {
-    primary_group: Arc<Shared>,
-    additional_groups: Vec<Arc<Shared>>,
+    primary_group: Arc<WorkerGroup>,
+    additional_groups: Vec<Arc<WorkerGroup>>,
 }
 
 pub struct Started {
@@ -81,7 +81,7 @@ impl Engine {
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self {
-            primary_group: Arc::new(Shared::new(
+            primary_group: Arc::new(WorkerGroup::new(
                 pool,
                 registry,
                 max_workers,
@@ -99,7 +99,7 @@ impl Engine {
         {
             return Err(KindError::Duplicate(duplicate));
         }
-        self.additional_groups.push(Arc::new(Shared::new(
+        self.additional_groups.push(Arc::new(WorkerGroup::new(
             self.primary_group.pool.clone(),
             registry,
             max_workers,
@@ -109,11 +109,11 @@ impl Engine {
         Ok(())
     }
 
-    pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<Shared>> {
+    pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<WorkerGroup>> {
         std::iter::once(&self.primary_group).chain(&self.additional_groups)
     }
 
-    pub(crate) fn group_for_kind(&self, name: &str) -> Option<&Shared> {
+    pub(crate) fn group_for_kind(&self, name: &str) -> Option<&WorkerGroup> {
         self.groups()
             .find(|group| group.registry.get(name).is_some())
             .map(Arc::as_ref)
@@ -289,7 +289,7 @@ impl Run {
 
 fn spawn_guarded(
     tracker: &TaskTracker,
-    shared: Arc<Shared>,
+    group: Arc<WorkerGroup>,
     run: Run,
     token: CancellationToken,
     failure: CancellationToken,
@@ -298,10 +298,10 @@ fn spawn_guarded(
     tracker.spawn(async move {
         let _guard = guard;
         match run {
-            _claim @ Run::Claim { .. } => claim::run_claim_loop(shared, token, failure).await,
-            Run::Retention => maintenance::run_retention(&shared, token).await,
-            Run::Listener(engine) => listener::run_listener(&shared, &engine, token).await,
-            Run::Sampling(kinds) => maintenance::run_sampling(&shared, &kinds, token).await,
+            _claim @ Run::Claim { .. } => claim::run_claim_loop(group, token, failure).await,
+            Run::Retention => maintenance::run_retention(&group, token).await,
+            Run::Listener(engine) => listener::run_listener(&group, &engine, token).await,
+            Run::Sampling(kinds) => maintenance::run_sampling(&group, &kinds, token).await,
         }
     });
 }
@@ -448,7 +448,7 @@ fn task_guard(
 
 const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
 
-pub(crate) struct Shared {
+pub(crate) struct WorkerGroup {
     pub(crate) worker_id: uuid::Uuid,
     pub(crate) pool: PgPool,
     pub(crate) registry: Kinds,
@@ -462,7 +462,7 @@ pub(crate) struct Shared {
     pub(crate) claim_wake: Arc<Notify>,
 }
 
-impl Shared {
+impl WorkerGroup {
     pub(crate) async fn acquire(
         &self,
         operation: &'static str,
@@ -589,9 +589,9 @@ impl Operation {
     }
 }
 
-pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &OperationError) {
+pub(crate) fn observe_failure(group: &WorkerGroup, operation: Operation, error: &OperationError) {
     metrics::counter!(OPERATION_FAILURES_METRIC, "operation" => operation.as_str()).increment(1);
-    if !shared.failing[operation].swap(true, Ordering::SeqCst) {
+    if !group.failing[operation].swap(true, Ordering::SeqCst) {
         log_operation_failure(operation, error);
     }
 }
@@ -620,8 +620,8 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
     );
 }
 
-pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
-    if shared.failing[operation].swap(false, Ordering::SeqCst) {
+pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
+    if group.failing[operation].swap(false, Ordering::SeqCst) {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }

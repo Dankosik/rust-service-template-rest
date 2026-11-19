@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::engine::{
-    ForcedCleanup, Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop,
+    ForcedCleanup, Operation, OperationError, RECORD_RETRY_INTERVAL, WorkerGroup, backstop,
     observe_recovery,
 };
 use crate::kind::{Attempt, Completion, HandlerFuture, JobError, JobId, Registered};
@@ -233,7 +233,7 @@ fn error_field(summary: &str) -> Option<&str> {
 }
 
 pub(crate) fn supervise(
-    shared: Arc<Shared>,
+    group: Arc<WorkerGroup>,
     claimed: crate::claim::Claimed,
     supervisor_deadline: Instant,
     mut guard: crate::engine::SupervisorGuard,
@@ -249,13 +249,13 @@ pub(crate) fn supervise(
     crate::trace_context::link(&span, &trace);
     drop(trace);
     let slots = Arc::new(AttemptSlots {
-        _membership: shared.owned_attempts.join(),
+        _membership: group.owned_attempts.join(),
         _group: claimed.slot,
         _kind: claimed.kind_slot,
     });
     async move {
         AttemptRun {
-            shared: &shared,
+            group: &group,
             registered: &registered,
             attempt,
             fence,
@@ -270,7 +270,7 @@ pub(crate) fn supervise(
 }
 
 struct AttemptRun<'a> {
-    shared: &'a Shared,
+    group: &'a WorkerGroup,
     registered: &'a Registered,
     attempt: AttemptId,
     fence: ClaimFence,
@@ -338,7 +338,7 @@ impl AttemptRun<'_> {
         payload: Result<Vec<u8>, JobError>,
     ) -> Option<(HandlerOutcome, Option<Duration>)> {
         if deadline_reached_or_cleanup_ended(
-            &self.shared.lifecycle.cleanup,
+            &self.group.lifecycle.cleanup,
             self.supervisor_deadline,
         ) {
             return None;
@@ -358,7 +358,7 @@ impl AttemptRun<'_> {
                     attempt_deadline,
                     cancellation: cancel.clone(),
                 },
-                self.shared.pool.clone(),
+                self.group.pool.clone(),
                 &bytes,
             )
         });
@@ -367,7 +367,7 @@ impl AttemptRun<'_> {
             Ok(future) => {
                 let started = Instant::now();
                 let handler_outcome = drive(
-                    &self.shared.lifecycle.cleanup,
+                    &self.group.lifecycle.cleanup,
                     future,
                     cancel,
                     attempt_deadline,
@@ -381,38 +381,31 @@ impl AttemptRun<'_> {
 
     async fn persist(&self, plan: WritePlan<'_>) -> Option<Written> {
         loop {
-            if deadline_reached_or_cleanup_ended(
-                &self.shared.lifecycle.cleanup,
-                self.supervisor_deadline,
-            ) {
-                return None;
-            }
-            let sent = within(
-                &self.shared.lifecycle.cleanup,
-                self.supervisor_deadline,
-                async {
-                    match plan {
-                        WritePlan::CompleteBatched => {
-                            complete_batched(
-                                self.shared,
-                                self.fence,
-                                self.supervisor_deadline,
-                                &self.slots,
-                            )
-                            .await
-                        }
-                        WritePlan::Single(write) => {
-                            send_outcome(self.shared, self.fence, write, self.supervisor_deadline)
-                                .await
-                        }
+            let attempt = async {
+                match plan {
+                    WritePlan::CompleteBatched => {
+                        complete_batched(
+                            self.group,
+                            self.fence,
+                            self.supervisor_deadline,
+                            &self.slots,
+                        )
+                        .await
                     }
-                },
+                    WritePlan::Single(write) => {
+                        send_outcome(self.group, self.fence, write, self.supervisor_deadline).await
+                    }
+                }
+            };
+            match within(
+                &self.group.lifecycle.cleanup,
+                self.supervisor_deadline,
+                attempt,
             )
-            .await;
-            match sent {
-                None => return None,
-                Some(Ok(written)) => return Some(written),
-                Some(Err(Unacknowledged)) => {}
+            .await?
+            {
+                Ok(written) => return Some(written),
+                Err(Unacknowledged) => {}
             }
             let until = clamped_deadline(
                 Instant::now(),
@@ -420,7 +413,7 @@ impl AttemptRun<'_> {
                 self.supervisor_deadline,
             );
             within(
-                &self.shared.lifecycle.cleanup,
+                &self.group.lifecycle.cleanup,
                 self.supervisor_deadline,
                 tokio::time::sleep_until(until),
             )
@@ -435,13 +428,13 @@ impl AttemptRun<'_> {
         handler_duration: Option<Duration>,
     ) {
         if matches!(transition, Transition::Release) {
-            self.shared
+            self.group
                 .lifecycle
                 .counters
                 .cancelled
                 .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.shared
+            self.group
                 .lifecycle
                 .counters
                 .known_results
@@ -455,7 +448,7 @@ impl AttemptRun<'_> {
     }
 
     fn observe_acknowledged(&self, handles: &KindMetrics, operation: Operation, written: Written) {
-        observe_recovery(self.shared, operation);
+        observe_recovery(self.group, operation);
         let persistence = Persistence::Acknowledged(written);
         match written {
             Written::Applied => handles.applied.increment(1),
@@ -469,7 +462,7 @@ impl AttemptRun<'_> {
             "job_persistence_finished"
         );
         if written == Written::Applied && operation == Operation::Release {
-            self.shared
+            self.group
                 .lifecycle
                 .counters
                 .released
@@ -478,7 +471,7 @@ impl AttemptRun<'_> {
     }
 
     fn observe_uncertain(&self) {
-        self.shared
+        self.group
             .lifecycle
             .counters
             .uncertain
@@ -529,7 +522,7 @@ async fn within<T>(
 }
 
 pub(super) async fn execute_before_deadline<T, F>(
-    shared: &Shared,
+    group: &WorkerGroup,
     acquire_operation: &'static str,
     deadline: Instant,
     query: F,
@@ -538,8 +531,8 @@ where
     F: AsyncFnOnce(&mut sqlx::postgres::PgConnection) -> Result<T, sqlx::Error>,
 {
     backstop(Box::pin(async {
-        let mut connection = shared.acquire(acquire_operation).await?;
-        if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
+        let mut connection = group.acquire(acquire_operation).await?;
+        if deadline_reached_or_cleanup_ended(&group.lifecycle.cleanup, deadline) {
             return Err(OperationError::TimedOut);
         }
         query(&mut connection).await.map_err(OperationError::from)

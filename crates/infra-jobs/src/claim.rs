@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::attempt::{self, AttemptId, ClaimFence};
 use crate::engine::{
-    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
+    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, WorkerGroup, backstop,
     observe_failure, observe_recovery,
 };
 use crate::kind::{JobId, Registered, saturating_micros};
@@ -86,13 +86,13 @@ pub(crate) fn describe_metrics() {
 }
 
 pub(crate) async fn run_claim_loop(
-    shared: Arc<Shared>,
+    group: Arc<WorkerGroup>,
     stop: CancellationToken,
     failure: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let policy = PolicyBinds::new(&shared.registry);
+    let policy = PolicyBinds::new(&group.registry);
     let mut wait = ClaimWait::WakeOrTick;
     let mut last_claim = Instant::now();
     loop {
@@ -104,12 +104,12 @@ pub(crate) async fn run_claim_loop(
                         tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN).await;
                     }
                     ClaimWait::WakeOrTick => {
-                        wait_for_wake_or_tick(&shared, &mut ticker).await;
+                        wait_for_wake_or_tick(&group, &mut ticker).await;
                         tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN).await;
                     }
                 }
-                let slots = take_slots(&shared).await?;
-                let turn = shared.statement_turn.lock().await;
+                let slots = take_slots(&group).await?;
+                let turn = group.statement_turn.lock().await;
                 Some((slots, turn))
             })
             .await
@@ -124,20 +124,20 @@ pub(crate) async fn run_claim_loop(
                 return;
             }
             last_claim = Instant::now();
-            send_claim(&shared, &policy, slot_count(requested)).await
+            send_claim(&group, &policy, slot_count(requested)).await
         };
         wait = match round {
             Ok(ClaimRound {
                 claim_started_at,
                 outcomes,
             }) => {
-                observe_recovery(&shared, Operation::Claim);
+                observe_recovery(&group, Operation::Claim);
                 let next_wait = ClaimWait::after_claim(outcomes.len(), requested);
-                dispatch_outcomes(&shared, slots, outcomes, claim_started_at, &stop, &failure);
+                dispatch_outcomes(&group, slots, outcomes, claim_started_at, &stop, &failure);
                 next_wait
             }
             Err(error) => {
-                observe_failure(&shared, Operation::Claim, &error);
+                observe_failure(&group, Operation::Claim, &error);
                 ClaimWait::WakeOrTick
             }
         };
@@ -165,19 +165,19 @@ impl ClaimWait {
 
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
-async fn wait_for_wake_or_tick(shared: &Shared, ticker: &mut tokio::time::Interval) {
+async fn wait_for_wake_or_tick(group: &WorkerGroup, ticker: &mut tokio::time::Interval) {
     tokio::select! {
         biased;
-        () = shared.claim_wake.notified() => ticker.reset(),
+        () = group.claim_wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
 }
 
-async fn take_slots(shared: &Shared) -> Option<OwnedSemaphorePermit> {
-    let mut permits = Arc::clone(&shared.slots).acquire_owned().await.ok()?;
-    if let Ok(count) = u32::try_from(shared.slots.available_permits())
+async fn take_slots(group: &WorkerGroup) -> Option<OwnedSemaphorePermit> {
+    let mut permits = Arc::clone(&group.slots).acquire_owned().await.ok()?;
+    if let Ok(count) = u32::try_from(group.slots.available_permits())
         && count > 0
-        && let Ok(more) = Arc::clone(&shared.slots).try_acquire_many_owned(count)
+        && let Ok(more) = Arc::clone(&group.slots).try_acquire_many_owned(count)
     {
         permits.merge(more);
     }
@@ -190,14 +190,14 @@ struct ClaimRound {
 }
 
 async fn send_claim(
-    shared: &Shared,
+    group: &WorkerGroup,
     policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<ClaimRound, OperationError> {
     let claim_started_at = Instant::now();
     let result = backstop(async {
-        let mut connection = shared.acquire("claim jobs").await?;
-        Ok(claim(&mut connection, shared.worker_id, policy, requested).await?)
+        let mut connection = group.acquire("claim jobs").await?;
+        Ok(claim(&mut connection, group.worker_id, policy, requested).await?)
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed());
@@ -395,7 +395,7 @@ fn slot_count(count: usize) -> i64 {
 }
 
 fn dispatch_outcomes(
-    shared: &Arc<Shared>,
+    group: &Arc<WorkerGroup>,
     mut slots: OwnedSemaphorePermit,
     outcomes: Vec<ClaimOutcome>,
     claim_started_at: Instant,
@@ -415,7 +415,7 @@ fn dispatch_outcomes(
                 lease_offset,
                 queue_wait_seconds,
             } => {
-                let deadline = local_deadline(claim_started_at, lease_offset);
+                let supervisor_deadline = supervisor_deadline(claim_started_at, lease_offset);
                 let Some(slot) = slots.split(1) else {
                     tracing::error!(
                         job.id = %job.attempt.job_id,
@@ -428,13 +428,13 @@ fn dispatch_outcomes(
                     .registered
                     .running_slots
                     .as_ref()
-                    .and_then(|running_slots| KindSlot::take(running_slots, &shared.claim_wake));
+                    .and_then(|running_slots| KindSlot::take(running_slots, &group.claim_wake));
                 job.registered
                     .metrics()
                     .queue_wait
                     .record(queue_wait_seconds.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
-                    Arc::clone(&shared.lifecycle.drain),
+                    Arc::clone(&group.lifecycle.drain),
                     stop.clone(),
                     failure.clone(),
                     job.attempt.job_id,
@@ -446,9 +446,9 @@ fn dispatch_outcomes(
                     kind_slot,
                 };
                 tokio::spawn(attempt::supervise(
-                    Arc::clone(shared),
+                    Arc::clone(group),
                     claimed,
-                    deadline,
+                    supervisor_deadline,
                     guard,
                 ));
             }
@@ -456,7 +456,7 @@ fn dispatch_outcomes(
     }
 }
 
-fn local_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant {
+fn supervisor_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant {
     claim_started_at
         .checked_add(lease_offset)
         .and_then(|deadline| deadline.checked_sub(CANCEL_MARGIN))

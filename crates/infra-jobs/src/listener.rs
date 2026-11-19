@@ -4,14 +4,21 @@ use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{Engine, Operation, POLL_INTERVAL, Shared, observe_failure, observe_recovery};
+use crate::engine::{
+    Engine, Operation, POLL_INTERVAL, WorkerGroup, observe_failure, observe_recovery,
+};
 
 const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
-pub(crate) async fn run_listener(shared: &Shared, engine: &Engine, cancel: CancellationToken) {
-    let pool = listener_pool(&shared.pool);
-    let _ = Box::pin(cancel.run_until_cancelled(listen(shared, engine, &pool))).await;
-    if tokio::time::timeout(LISTENER_CLOSE_BUDGET, pool.close())
+pub(crate) async fn run_listener(
+    primary_group: &WorkerGroup,
+    engine: &Engine,
+    cancel: CancellationToken,
+) {
+    let listener_pool = listener_pool(&primary_group.pool);
+    let _ =
+        Box::pin(cancel.run_until_cancelled(listen(primary_group, engine, &listener_pool))).await;
+    if tokio::time::timeout(LISTENER_CLOSE_BUDGET, listener_pool.close())
         .await
         .is_err()
     {
@@ -31,23 +38,23 @@ fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
     listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
 
-async fn listen(shared: &Shared, engine: &Engine, pool: &PgPool) -> ! {
+async fn listen(primary_group: &WorkerGroup, engine: &Engine, listener_pool: &PgPool) -> ! {
     loop {
-        let next = Instant::now() + POLL_INTERVAL;
-        follow_connect_options(&shared.pool, pool);
-        let Err(ended) = listen_once(shared, engine, pool).await;
-        observe_failure(shared, Operation::Listen, &ended.into());
-        tokio::time::sleep_until(next).await;
+        let retry_at = Instant::now() + POLL_INTERVAL;
+        follow_connect_options(&primary_group.pool, listener_pool);
+        let Err(error) = listen_once(primary_group, engine, listener_pool).await;
+        observe_failure(primary_group, Operation::Listen, &error.into());
+        tokio::time::sleep_until(retry_at).await;
     }
 }
 
 async fn listen_once(
-    shared: &Shared,
+    primary_group: &WorkerGroup,
     engine: &Engine,
-    pool: &PgPool,
+    listener_pool: &PgPool,
 ) -> Result<std::convert::Infallible, sqlx::Error> {
-    let mut listener = subscribe(pool).await?;
-    observe_recovery(shared, Operation::Listen);
+    let mut listener = subscribe(listener_pool).await?;
+    observe_recovery(primary_group, Operation::Listen);
     for group in engine.groups() {
         group.claim_wake.notify_one();
     }
