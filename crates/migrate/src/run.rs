@@ -264,6 +264,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_peer_that_closes_on_connect_fails_in_the_connect_stage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dsn = Dsn::admit(&format!(
+            "postgres://app:fixture-secret@{address}/app?sslmode=verify-full"
+        ))
+        .unwrap();
+        let options = RunOptions::defaults(&dsn, "test", Duration::from_secs(5));
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(run(&crate::MIGRATOR, &options), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                drop(stream);
+            })
+        })
+        .await
+        .unwrap();
+        let failure = result.unwrap_err();
+        std::assert_matches!(failure.error, RunError::Connect(_));
+        assert_eq!(failure.stage(), "connect");
+        assert!(!failure.to_string().contains("fixture-secret"));
+        assert_eq!(failure.report.before, None);
+        assert!(failure.report.applied.is_empty());
+    }
+
+    #[tokio::test]
     async fn an_unrepresentable_migration_deadline_is_refused_before_connecting() {
         let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=verify-full").unwrap();
         let options = RunOptions::defaults(&dsn, "test", Duration::MAX);
