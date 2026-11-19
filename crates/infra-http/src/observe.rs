@@ -280,7 +280,7 @@ fn classify_outcome(end: RequestEnd, head: Option<&ResponseHead>) -> RequestOutc
     let status = head.map(|head| head.status);
     let error_type =
         interruption.or_else(|| status.filter(StatusCode::is_server_error).map(status_label));
-    let access_status = status.map(StatusCode::as_u16).or(fallback_log_status);
+    let access_status = status.map(|value| value.as_u16()).or(fallback_log_status);
     let termination =
         interruption.or_else(|| head.filter(|head| head.load_shed).map(|_| "load_shed"));
     let problem_code = head.and_then(|head| head.problem_code).map(Code::as_str);
@@ -614,7 +614,7 @@ mod tests {
                 series.record_duration(
                     None,
                     DurationLabels {
-                        method: "_OTHER",
+                        method: MethodSlot::Other,
                         scheme: Scheme::Https,
                         status: Some(StatusCode::from_u16(code).unwrap()),
                         error_type: None,
@@ -646,7 +646,7 @@ mod tests {
                 series.record_duration(
                     Some("/items/{id}"),
                     DurationLabels {
-                        method: "GET",
+                        method: MethodSlot::Get,
                         scheme: Scheme::Http,
                         status: Some(status),
                         error_type: None,

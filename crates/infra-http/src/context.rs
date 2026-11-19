@@ -338,7 +338,7 @@ mod tests {
             .route("/", get(handler))
             .layer(axum::middleware::from_fn_with_state(
                 Duration::from_secs(1),
-                opening,
+                enforce_request_budget,
             ))
             .layer(axum::middleware::from_fn(finish_response));
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
