@@ -1,31 +1,47 @@
 # Technical Design Review
 
-Use when shared [Review](../shared/review.md) routes one fixed completed
-technical design or the user explicitly requests that standalone review. This
-adapter owns only technical-design falsifiers and threshold.
+Once all applicable System and Rust Ownership design decisions are ready, the
+Technical Design owner fixes their combined result for independent
+[Review](../shared/review.md), even when only one branch applied. The phase
+owner hands the reviewed result to Planning under [Transition](../shared/transition.md).
+Use the same lenses and threshold for a requested standalone design review.
 
 ## Lenses
 
-Reconstruct each material trace:
+Start from the accepted Specification and affected canonical contracts.
+Independently identify material obligations added, changed, removed, or
+deliberately preserved, including those of existing consumers. For each
+obligation, reconstruct its trace through the proposed design:
 
 `behavior/drivers -> viable same-level alternatives or no-fork evidence ->
-selected mechanism -> material flow/finality -> contract/truth -> system and
-crate owner -> required input -> proving surface`.
+selected mechanism -> material flow/finality -> contract/truth -> responsible
+owners -> required input -> observable result and proving surface`.
 
-The first incompatible or unsupported edge is the finding anchor; continue all
-unaffected traces. Activate only lenses exposed by current evidence: flow and
-authority, cross-flow coherence, current contract/runtime contradiction,
+Anchor a missing trace at its source obligation and a broken trace at its first
+unsupported or incompatible edge. Continue the unaffected traces. Trace each
+included component, edge, store, or dependency back to the obligation or
+constraint that justifies it. Activate only lenses exposed by current evidence:
+flow and authority, cross-flow coherence, current contract/runtime contradiction,
 selection against common drivers, required-input availability, Rust ownership or
 panel-receipt compatibility, performance/scale including the stated unit cost
 and its bound, operator signal for each failure, degradation, or recovery path,
-proof feasibility, release closure, and necessity of each included
-component/edge/store/dependency.
+proof feasibility, and release closure.
 
-Consume current [Rust Ownership Review](rust-code-ownership-design.md#rust-ownership-review) receipts
-without repeating their lenses.
+Credit current [Rust Ownership Review](rust-code-ownership-design.md#rust-ownership-review)
+receipts for the lenses they cover on this candidate. The panel can satisfy
+the phase review under [Review](../shared/review.md#route) when its coverage
+spans the whole candidate and all triggered lenses. Otherwise review the
+remaining lenses and their fit with the panel findings.
 
-`PASS` requires every reconstructed trace and triggered lens to be supported
-without downstream invention. `CONCERNS` may carry only bounded proof/risk.
-Any missing behavior, mechanism, authority, ownership, required input, or
-coherence edge is `FAIL` and reopens the earliest Specification, System
-Design, Rust Ownership, Research, or external owner.
+`FAIL` if a material obligation lacks a supported trace, a triggered lens
+exposes a design defect, or an unresolved question could change behavior,
+mechanism, contract, ownership, or how Planning must divide the work. Reopen
+Specification for behavior, System or Rust Ownership Design for a technical
+decision, Research for evidence, or the authority that owns a required input.
+
+`PASS` requires support for every material obligation and triggered lens.
+Implementation owns routine coding choices. Permission needed only to deploy
+belongs at deployment. Use `CONCERNS` only for bounded later proof or risk
+over an otherwise closed design. Name its owner and the action that needs it.
+Both `PASS` and `CONCERNS` permit handoff when Planning has its required
+inputs and authority.
