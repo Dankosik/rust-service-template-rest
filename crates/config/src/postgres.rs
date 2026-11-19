@@ -4,13 +4,13 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde::de::IgnoredAny as IgnoredSection;
+use serde::de::IgnoredAny;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::load::{Error, MigrationLoadError};
-use crate::observability::validate_service_name;
+use crate::observability::{ObservabilityFields, OtelFields, validate_service_name};
 use crate::validate::{Rejected, Violations, duration_range, int_range, required};
-use crate::{AppConfig, LogConfig, OtelConfig};
+use crate::{AppConfig, LogConfig};
 
 /// Where a pooled session's `statement_timeout` and
 /// `idle_in_transaction_session_timeout` come from. The adapter verifies the
@@ -94,12 +94,11 @@ impl Default for Notifications {
 }
 
 pub(crate) type PostgresInput =
-    PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredSection, Notifications>;
-type MigrationPostgresInput =
-    PostgresFields<IgnoredSection, IgnoredSection, MigrationDeadline, IgnoredSection>;
+    PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredAny, Notifications>;
+type MigrationPostgresInput = PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny>;
 // template:begin jobs:postgres-operator-input
 pub(crate) type OperatorPostgresInput =
-    PostgresFields<SessionBudgetsInput, IgnoredSection, IgnoredSection, IgnoredSection>;
+    PostgresFields<SessionBudgetsInput, IgnoredAny, IgnoredAny, IgnoredAny>;
 // template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]
@@ -210,22 +209,8 @@ pub(crate) struct MigrationInput {
     postgres: MigrationPostgresInput,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct MigrationObservabilityInput {
-    metrics: IgnoredSection,
-    otel: MigrationOtelInput,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-struct MigrationOtelInput {
-    #[serde(deserialize_with = "crate::de::optional_string")]
-    service_name: Option<String>,
-    traces_sampler: IgnoredSection,
-    traces_sampler_arg: IgnoredSection,
-    exporter: IgnoredSection,
-}
+type MigrationObservabilityInput = ObservabilityFields<IgnoredAny, MigrationOtelInput>;
+type MigrationOtelInput = OtelFields<IgnoredAny, IgnoredAny, IgnoredAny>;
 
 #[derive(Clone, Debug)]
 pub struct MigrationConfig {
@@ -263,11 +248,7 @@ impl MigrationInput {
         let v = &mut violations;
         self.app.validate(v);
         self.log.validate(v);
-        let service_name = self
-            .observability
-            .otel
-            .service_name
-            .unwrap_or_else(|| OtelConfig::default().service_name);
+        let service_name = self.observability.otel.service_name;
         v.check(validate_service_name(&service_name));
         let postgres = self.postgres.admit(v);
         let Some(postgres) = violations.finish(postgres).map_err(Error::from)? else {

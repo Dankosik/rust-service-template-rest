@@ -152,10 +152,83 @@ pub struct ObjectStorageConfig {
     pub operation_timeout: Duration,
 }
 
+struct ProviderFields {
+    endpoint: String,
+    region: String,
+    expected_bucket_owner: String,
+    path_style: bool,
+}
+
+impl ProviderFields {
+    fn admit_amazon_s3(self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
+        v.check(forbidden(
+            "object_storage.endpoint",
+            &self.endpoint,
+            "must be empty when object_storage.provider = amazon_s3",
+        ));
+        let region = required_text(v, "object_storage.region", self.region);
+        let owner = required_text(
+            v,
+            "object_storage.expected_bucket_owner",
+            self.expected_bucket_owner,
+        );
+        refuse_path_style(self.path_style, v);
+        Ok(ObjectStorageProvider::AmazonS3 {
+            region: region?,
+            expected_bucket_owner: owner?,
+        })
+    }
+
+    fn admit_cloudflare_r2(self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
+        if !matches!(self.region.trim(), "" | "auto") {
+            v.reject(ValidationError::new(
+                "object_storage.region",
+                "must be empty or auto for cloudflare_r2",
+            ));
+        }
+        let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+        refuse_owner(&self.expected_bucket_owner, v);
+        refuse_path_style(self.path_style, v);
+        Ok(ObjectStorageProvider::CloudflareR2 {
+            endpoint: endpoint?,
+        })
+    }
+
+    fn admit_endpoint_provider(
+        self,
+        provider: ProviderKind,
+        v: &mut Violations,
+    ) -> Result<(String, Option<String>), Rejected> {
+        let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+        refuse_owner(&self.expected_bucket_owner, v);
+        if provider != ProviderKind::S3Compatible {
+            refuse_path_style(self.path_style, v);
+        }
+        Ok((endpoint?, optional_text(self.region)))
+    }
+}
+
+fn refuse_owner(expected_bucket_owner: &str, v: &mut Violations) {
+    v.check(forbidden(
+        "object_storage.expected_bucket_owner",
+        expected_bucket_owner,
+        "is accepted only when object_storage.provider = amazon_s3",
+    ));
+}
+
+fn refuse_path_style(path_style: bool, v: &mut Violations) {
+    if path_style {
+        v.reject(ValidationError::new(
+            "object_storage.path_style",
+            "must be false unless object_storage.provider = s3_compatible",
+        ));
+    }
+}
+
 impl ObjectStorageInput {
     pub(crate) fn admit(
         self,
-        insecure_development: bool,
+        local_development: bool,
         v: &mut Violations,
     ) -> Result<Option<ObjectStorageConfig>, Rejected> {
         v.check(int_range(
@@ -176,29 +249,34 @@ impl ObjectStorageInput {
         v.check(local_development_only(
             "object_storage.provider",
             self.provider == ProviderKind::Local,
-            insecure_development,
+            local_development,
         ));
+        let path_style = self.path_style;
+        let provider_fields = ProviderFields {
+            endpoint: self.endpoint,
+            region: self.region,
+            expected_bucket_owner: self.expected_bucket_owner,
+            path_style,
+        };
         let provider = match self.provider {
             ProviderKind::None => return Ok(None),
-            ProviderKind::AmazonS3 => self.admit_amazon_s3(v),
-            ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(v),
-            ProviderKind::Railway => self
-                .admit_endpoint_provider(v)
+            ProviderKind::AmazonS3 => provider_fields.admit_amazon_s3(v),
+            ProviderKind::CloudflareR2 => provider_fields.admit_cloudflare_r2(v),
+            ProviderKind::Railway => provider_fields
+                .admit_endpoint_provider(self.provider, v)
                 .map(|(endpoint, region)| ObjectStorageProvider::Railway { endpoint, region }),
-            ProviderKind::S3Compatible => {
-                self.admit_endpoint_provider(v).map(|(endpoint, region)| {
-                    ObjectStorageProvider::S3Compatible {
-                        endpoint,
-                        region,
-                        path_style: self.path_style,
-                    }
-                })
-            }
-            ProviderKind::Local => self
-                .admit_endpoint_provider(v)
+            ProviderKind::S3Compatible => provider_fields
+                .admit_endpoint_provider(self.provider, v)
+                .map(|(endpoint, region)| ObjectStorageProvider::S3Compatible {
+                    endpoint,
+                    region,
+                    path_style,
+                }),
+            ProviderKind::Local => provider_fields
+                .admit_endpoint_provider(self.provider, v)
                 .map(|(endpoint, region)| ObjectStorageProvider::Local { endpoint, region }),
         };
-        let bucket = v.take(non_blank("object_storage.bucket", &self.bucket));
+        v.check(non_blank("object_storage.bucket", &self.bucket));
         let credentials = Self::admit_credentials(
             self.credentials,
             self.provider,
@@ -206,7 +284,6 @@ impl ObjectStorageInput {
             self.secret_access_key,
             v,
         );
-        bucket?;
         Ok(Some(ObjectStorageConfig {
             provider: provider?,
             bucket: self.bucket,
@@ -215,81 +292,6 @@ impl ObjectStorageInput {
             max_concurrency: self.max_concurrency,
             operation_timeout: self.operation_timeout,
         }))
-    }
-
-    fn admit_amazon_s3(&self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
-        let endpoint = v.take(forbidden(
-            "object_storage.endpoint",
-            &self.endpoint,
-            "must be empty when object_storage.provider = amazon_s3",
-        ));
-        let region = required_text(v, "object_storage.region", &self.region);
-        let owner = required_text(
-            v,
-            "object_storage.expected_bucket_owner",
-            &self.expected_bucket_owner,
-        );
-        let path_style = self.refuse_path_style(v);
-        endpoint?;
-        path_style?;
-        Ok(ObjectStorageProvider::AmazonS3 {
-            region: region?,
-            expected_bucket_owner: owner?,
-        })
-    }
-
-    fn admit_cloudflare_r2(&self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
-        let region = if matches!(self.region.trim(), "" | "auto") {
-            Ok(())
-        } else {
-            Err(v.reject(ValidationError::new(
-                "object_storage.region",
-                "must be empty or auto for cloudflare_r2",
-            )))
-        };
-        let endpoint = required_text(v, "object_storage.endpoint", &self.endpoint);
-        let owner = self.refuse_owner(v);
-        let path_style = self.refuse_path_style(v);
-        region?;
-        owner?;
-        path_style?;
-        Ok(ObjectStorageProvider::CloudflareR2 {
-            endpoint: endpoint?,
-        })
-    }
-
-    fn admit_endpoint_provider(
-        &self,
-        v: &mut Violations,
-    ) -> Result<(String, Option<String>), Rejected> {
-        let endpoint = required_text(v, "object_storage.endpoint", &self.endpoint);
-        let owner = self.refuse_owner(v);
-        let path_style = if self.provider == ProviderKind::S3Compatible {
-            Ok(())
-        } else {
-            self.refuse_path_style(v)
-        };
-        owner?;
-        path_style?;
-        Ok((endpoint?, optional_text(&self.region)))
-    }
-
-    fn refuse_owner(&self, v: &mut Violations) -> Result<(), Rejected> {
-        v.take(forbidden(
-            "object_storage.expected_bucket_owner",
-            &self.expected_bucket_owner,
-            "is accepted only when object_storage.provider = amazon_s3",
-        ))
-    }
-
-    fn refuse_path_style(&self, v: &mut Violations) -> Result<(), Rejected> {
-        if self.path_style {
-            return Err(v.reject(ValidationError::new(
-                "object_storage.path_style",
-                "must be false unless object_storage.provider = s3_compatible",
-            )));
-        }
-        Ok(())
     }
 
     fn admit_credentials(
@@ -301,10 +303,7 @@ impl ObjectStorageInput {
     ) -> Result<ObjectStorageCredentials, Rejected> {
         match credentials {
             CredentialsKind::AccessKey => {
-                let access_key_id = v.take(
-                    non_blank("object_storage.access_key_id", &access_key_id)
-                        .map(|()| access_key_id),
-                );
+                let access_key_id = required_text(v, "object_storage.access_key_id", access_key_id);
                 let secret_access_key = v.take(required(
                     "object_storage.secret_access_key",
                     secret_access_key,
@@ -316,42 +315,37 @@ impl ObjectStorageInput {
                 })
             }
             CredentialsKind::WorkloadIdentity => {
-                let provider = if provider == ProviderKind::AmazonS3 {
-                    Ok(())
-                } else {
-                    Err(v.reject(ValidationError::new(
+                if provider != ProviderKind::AmazonS3 {
+                    v.reject(ValidationError::new(
                         "object_storage.credentials",
                         "workload_identity is accepted only by amazon_s3",
-                    )))
-                };
-                let access_key_id = v.take(forbidden(
-                    "object_storage.access_key_id",
-                    &access_key_id,
+                    ));
+                }
+                v.reject_present(
+                    &[
+                        (
+                            "object_storage.access_key_id",
+                            !access_key_id.trim().is_empty(),
+                        ),
+                        (
+                            "object_storage.secret_access_key",
+                            secret_access_key.is_some(),
+                        ),
+                    ],
                     "is not accepted with workload_identity",
-                ));
-                let secret_access_key = if secret_access_key.is_some() {
-                    Err(v.reject(ValidationError::new(
-                        "object_storage.secret_access_key",
-                        "is not accepted with workload_identity",
-                    )))
-                } else {
-                    Ok(())
-                };
-                provider?;
-                access_key_id?;
-                secret_access_key?;
+                );
                 Ok(ObjectStorageCredentials::WorkloadIdentity)
             }
         }
     }
 }
 
-fn required_text(v: &mut Violations, key: &str, value: &str) -> Result<String, Rejected> {
-    v.take(non_blank(key, value).map(|()| value.to_owned()))
+fn required_text(v: &mut Violations, key: &str, value: String) -> Result<String, Rejected> {
+    v.take(non_blank(key, &value).map(|()| value))
 }
 
-fn optional_text(value: &str) -> Option<String> {
-    (!value.trim().is_empty()).then(|| value.to_owned())
+fn optional_text(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 fn forbidden(key: &str, value: &str, reason: &str) -> Result<(), ValidationError> {

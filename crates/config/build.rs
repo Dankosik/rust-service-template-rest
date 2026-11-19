@@ -23,10 +23,12 @@ fn main() {
 )]
 fn checked_out_revision() -> Option<String> {
     let revision = git(&["rev-parse", "HEAD"])?;
-    let mut watched = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
-    watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
-    for name in watched {
-        if let Some(path) = git(&["rev-parse", "--git-path", &name])
+    let symbolic_ref = git(&["symbolic-ref", "-q", "HEAD"]);
+    for name in ["HEAD", "packed-refs"]
+        .into_iter()
+        .chain(symbolic_ref.as_deref())
+    {
+        if let Some(path) = git(&["rev-parse", "--git-path", name])
             && std::path::Path::new(&path).exists()
         {
             println!("cargo:rerun-if-changed={path}");

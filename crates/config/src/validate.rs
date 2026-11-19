@@ -79,16 +79,19 @@ impl Violations {
         Rejected(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "only authentication profiles reject fields by mode"
-    )]
-    pub(crate) fn reject_present(&mut self, fields: &[(&str, bool)], message: &str) {
+    #[allow(dead_code, reason = "only optional profiles reject fields by mode")]
+    pub(crate) fn reject_present(
+        &mut self,
+        fields: &[(&str, bool)],
+        message: &str,
+    ) -> Option<Rejected> {
+        let mut rejected = None;
         for &(key, present) in fields {
             if present {
-                self.reject(ValidationError::new(key, message));
+                rejected = Some(self.reject(ValidationError::new(key, message)));
             }
         }
+        rejected
     }
 
     pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
@@ -165,7 +168,7 @@ pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
     dead_code,
     reason = "removing every authentication profile leaves the rule without a caller"
 )]
-pub(crate) fn required_when(
+pub(crate) fn required_non_blank(
     key: &str,
     value: Option<String>,
     condition: &str,
@@ -185,6 +188,24 @@ pub(crate) fn required<T>(
     condition: &str,
 ) -> Result<T, ValidationError> {
     value.ok_or_else(|| missing(key, condition))
+}
+
+#[allow(
+    dead_code,
+    reason = "removing every profile with paired optional keys leaves the rule without a caller"
+)]
+pub(crate) fn optional_pair<A, B>(
+    first_key: &str,
+    first: Option<A>,
+    second_key: &str,
+    second: Option<B>,
+) -> Result<Option<(A, B)>, ValidationError> {
+    match (first, second) {
+        (Some(first), Some(second)) => Ok(Some((first, second))),
+        (Some(_), None) => Err(missing(second_key, &format!("{first_key} is set"))),
+        (None, Some(_)) => Err(missing(first_key, &format!("{second_key} is set"))),
+        (None, None) => Ok(None),
+    }
 }
 
 pub(crate) fn missing(key: &str, condition: &str) -> ValidationError {

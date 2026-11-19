@@ -43,11 +43,26 @@ pub(crate) fn is_env_addressable(name: &str) -> bool {
         && !name.ends_with('_')
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VariableSource {
+    Environment,
+    SecretsDir,
+}
+
+impl VariableSource {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Environment => "the environment",
+            Self::SecretsDir => "the secrets directory",
+        }
+    }
+}
+
 pub(super) struct Variable {
     pub(super) original_name: String,
     pub(super) key: String,
     pub(super) value: String,
-    pub(super) source: &'static str,
+    pub(super) source: VariableSource,
 }
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
@@ -57,7 +72,7 @@ fn admit(
     name: &str,
     suffix: &str,
     value: String,
-    source: &'static str,
+    source: VariableSource,
 ) -> Result<(), Error> {
     let name_key = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
@@ -118,7 +133,13 @@ fn read_environment(
                 name: name.into_owned(),
             });
         };
-        admit(&mut variables, &name, suffix, value, "the environment")?;
+        admit(
+            &mut variables,
+            &name,
+            suffix,
+            value,
+            VariableSource::Environment,
+        )?;
     }
     Ok(variables)
 }
@@ -138,21 +159,23 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
-        let variables = generation
-            .as_deref()
-            .map(|source| read_secret_files(dir, source));
-        let current = projected_generation(dir)?;
-        if let Some(variables) = variables
-            && current == generation
-        {
-            match &variables {
-                Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
-                    if error.kind() == io::ErrorKind::NotFound
-                        && attempt < SECRETS_SNAPSHOT_ATTEMPTS => {}
-                _ => return variables,
+        let next_generation = if let Some(scan_dir) = generation.as_deref() {
+            let variables = read_secret_files(dir, scan_dir);
+            let current = projected_generation(dir)?;
+            let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
+                && matches!(
+                    &variables,
+                    Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
+                        if error.kind() == io::ErrorKind::NotFound
+                );
+            if current == generation && !retry_not_found {
+                return variables;
             }
-        }
-        generation = current;
+            current
+        } else {
+            projected_generation(dir)?
+        };
+        generation = next_generation;
     }
 
     Err(Error::ReadSecretsDir {
@@ -212,32 +235,36 @@ fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission enumerates the selected secrets directory"
 )]
-fn read_secret_files(dir: &Path, source: &Path) -> Result<Variables, Error> {
+fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, Error> {
     let unreadable = |error| Error::ReadSecretsDir {
-        path: dir.to_owned(),
+        path: reported_dir.to_owned(),
         error,
     };
     let prefix = variable_prefix();
     let mut variables = Variables::new();
-    for entry in fs::read_dir(source).map_err(unreadable)? {
+    for entry in fs::read_dir(scan_dir).map_err(unreadable)? {
         let entry = entry.map_err(unreadable)?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        let file = dir.join(&file_name);
+        let reported_path = reported_dir.join(&file_name);
         if !is_key_path(suffix) {
-            return Err(Error::MalformedSecretName { path: file });
+            return Err(Error::MalformedSecretName {
+                path: reported_path,
+            });
         }
-        let value = read_secret_file(&entry.path())
-            .map_err(|error| Error::ReadSecret { path: file, error })?;
+        let value = read_secret_file(&entry.path()).map_err(|error| Error::ReadSecret {
+            path: reported_path,
+            error,
+        })?;
         admit(
             &mut variables,
             &name,
             suffix,
             value,
-            "the secrets directory",
+            VariableSource::SecretsDir,
         )?;
     }
     Ok(variables)

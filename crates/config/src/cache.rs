@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{Rejected, Violations, duration_range, int_range, missing};
+use crate::validate::{Rejected, Violations, duration_range, int_range, optional_pair};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -91,36 +91,33 @@ pub struct CacheConfig {
 impl CacheInput {
     pub(crate) fn admit(
         self,
-        insecure_development: bool,
+        local_development: bool,
         v: &mut Violations,
     ) -> Result<Option<CacheConfig>, Rejected> {
         v.check(local_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
-            insecure_development,
+            local_development,
         ));
         v.check(local_development_only(
             "cache.allow_unauthenticated",
             self.allow_unauthenticated,
-            insecure_development,
+            local_development,
         ));
-        let client_certificate = match (self.client_cert_path, self.client_key_path) {
-            (Some(cert_path), Some(key_path)) => Ok(Some(CacheClientCertificate {
-                cert_path,
-                key_path,
-            })),
-            (Some(_), None) => Err(missing(
-                "cache.client_key_path",
-                "cache.client_cert_path is set",
-            )),
-            (None, Some(_)) => Err(missing(
+        let client_certificate = v
+            .take(optional_pair(
                 "cache.client_cert_path",
-                "cache.client_key_path is set",
-            )),
-            (None, None) => Ok(None),
-        };
-        let client_certificate = v.take(client_certificate);
-        let command_timeout = v.take(duration_range(
+                self.client_cert_path,
+                "cache.client_key_path",
+                self.client_key_path,
+            ))
+            .map(|pair| {
+                pair.map(|(cert_path, key_path)| CacheClientCertificate {
+                    cert_path,
+                    key_path,
+                })
+            });
+        v.check(duration_range(
             "cache.command_timeout",
             self.command_timeout,
             Duration::from_millis(1)..=Duration::from_secs(10),
@@ -141,7 +138,6 @@ impl CacheInput {
             ));
         }
         let client_certificate = client_certificate?;
-        command_timeout?;
         Ok(self.dsn.map(|dsn| CacheConfig {
             dsn,
             password_file: self.password_file,

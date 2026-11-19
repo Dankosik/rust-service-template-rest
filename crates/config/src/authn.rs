@@ -9,7 +9,9 @@ use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 
 use crate::de::{StrictString, optional_string};
-use crate::validate::{Rejected, ValidationError, Violations, missing, required, required_when};
+use crate::validate::{
+    Rejected, ValidationError, Violations, missing, required, required_non_blank,
+};
 
 /// Exact audiences accepted by an authentication profile.
 ///
@@ -398,7 +400,7 @@ impl AuthnInput {
     fn admit_jwt(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
         self.reject_introspection_fields(v);
         let condition = "authn.mode = oidc-jwt";
-        let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+        let issuer = v.take(required_non_blank("authn.issuer", self.issuer, condition));
         let audience = admit_audience(self.audience, self.audiences, condition, v);
         let token_profile = v.take(required(
             "authn.token_profile",
@@ -440,14 +442,14 @@ impl AuthnInput {
 
         self.reject_jwt_fields(v);
         let condition = "authn.mode = oidc-introspection";
-        let issuer = v.take(required_when("authn.issuer", self.issuer, condition));
+        let issuer = v.take(required_non_blank("authn.issuer", self.issuer, condition));
         let audience = admit_audience(self.audience, self.audiences, condition, v);
-        let introspection_endpoint = v.take(required_when(
+        let introspection_endpoint = v.take(required_non_blank(
             "authn.introspection_endpoint",
             self.introspection_endpoint,
             condition,
         ));
-        let introspection_client_id = v.take(required_when(
+        let introspection_client_id = v.take(required_non_blank(
             "authn.introspection_client_id",
             self.introspection_client_id,
             condition,

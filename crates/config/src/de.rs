@@ -7,7 +7,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::de::{IntoDeserializer as _, Unexpected};
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct StrictString(#[serde(deserialize_with = "string")] pub(crate) String);
 

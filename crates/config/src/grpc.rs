@@ -9,10 +9,9 @@ use serde::Deserialize;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
-    connection_count_range, in_flight_range, validate_request_timeout,
+    DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
 };
-use crate::validate::{Rejected, ValidationError, Violations, required};
+use crate::validate::{Rejected, Violations, required};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -82,7 +81,14 @@ impl GrpcInput {
             return Ok(None);
         }
         let addr = violations.take(required("grpc.addr", self.addr, ENABLED));
-        self.check_limits(drain_budget, violations);
+        let limits = RawListenerLimits {
+            request_timeout: self.request_timeout,
+            max_in_flight: self.max_in_flight,
+            admission_wait: self.admission_wait,
+            max_connections: self.max_connections,
+            max_connection_age: self.max_connection_age,
+        }
+        .admit("grpc", drain_budget, "calls", violations);
         let security = Self::admit_security(
             self.security,
             self.certificate,
@@ -94,35 +100,12 @@ impl GrpcInput {
             trust_trace_context: self.trust_trace_context,
             addr: addr?,
             security: security?,
-            request_timeout: self.request_timeout,
-            max_in_flight: NonZeroU32::new(self.max_in_flight),
-            admission_wait: admission_wait_cap(self.admission_wait, self.request_timeout),
-            max_connections: NonZeroU32::new(self.max_connections),
-            max_connection_age: (!self.max_connection_age.is_zero())
-                .then_some(self.max_connection_age),
+            request_timeout: limits.request_timeout,
+            max_in_flight: limits.max_in_flight,
+            admission_wait: limits.admission_wait,
+            max_connections: limits.max_connections,
+            max_connection_age: limits.max_connection_age,
         }))
-    }
-
-    fn check_limits(&self, drain_budget: Option<Duration>, violations: &mut Violations) {
-        violations.check(validate_request_timeout(
-            "grpc.request_timeout",
-            self.request_timeout,
-            drain_budget,
-            "calls",
-        ));
-        violations.check(admission_wait_range(
-            "grpc.admission_wait",
-            self.admission_wait,
-        ));
-        violations.check(in_flight_range("grpc.max_in_flight", self.max_in_flight));
-        violations.check(connection_count_range(
-            "grpc.max_connections",
-            self.max_connections,
-        ));
-        violations.check(connection_age_range(
-            "grpc.max_connection_age",
-            self.max_connection_age,
-        ));
     }
 
     fn admit_security(
@@ -133,28 +116,20 @@ impl GrpcInput {
         violations: &mut Violations,
     ) -> Result<GrpcListenerSecurity, Rejected> {
         match violations.take(required("grpc.security", security, ENABLED))? {
-            GrpcSecurity::Plaintext => {
-                let mut refused = None;
-                for (key, present) in [
+            GrpcSecurity::Plaintext => match violations.reject_present(
+                &[
                     ("grpc.certificate", certificate.is_some()),
                     ("grpc.private_key", private_key.is_some()),
                     ("grpc.client_ca", client_ca.is_some()),
-                ] {
-                    if present {
-                        refused = Some(violations.reject(ValidationError::new(
-                            key,
-                            "is only valid when grpc.security is tls",
-                        )));
-                    }
-                }
-                refused.map_or(Ok(GrpcListenerSecurity::Plaintext), Err)
-            }
+                ],
+                "is only valid when grpc.security is tls",
+            ) {
+                Some(rejected) => Err(rejected),
+                None => Ok(GrpcListenerSecurity::Plaintext),
+            },
             GrpcSecurity::Tls => {
-                let certificate = violations.take(required(
-                    "grpc.certificate",
-                    certificate.filter(|certificate| !certificate.is_empty()),
-                    TLS_SELECTED,
-                ));
+                let certificate =
+                    violations.take(required("grpc.certificate", certificate, TLS_SELECTED));
                 let private_key =
                     violations.take(required("grpc.private_key", private_key, TLS_SELECTED));
                 Ok(GrpcListenerSecurity::Tls(GrpcTlsMaterial {

@@ -8,8 +8,7 @@ use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, admission_wait_cap, admission_wait_range, connection_age_range,
-    connection_count_range, in_flight_range, validate_request_timeout,
+    DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
@@ -164,23 +163,6 @@ impl HttpConfig {
     }
 }
 
-fn check_grace_budget_pair(
-    grace_period: Duration,
-    drain_timeout: Duration,
-    tail: ShutdownTail,
-) -> Result<(), ValidationError> {
-    if grace_period < drain_timeout.saturating_add(tail.duration) {
-        return Err(ValidationError::new(
-            "http.grace_period",
-            format!(
-                "({grace_period:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {:?} {}",
-                tail.duration, tail.description
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_grace_and_drain(
     grace_period: Duration,
     drain_timeout: Duration,
@@ -188,11 +170,11 @@ fn validate_grace_and_drain(
     v: &mut Violations,
 ) -> bool {
     let range = Duration::from_secs(1)..=Duration::from_mins(10);
-    let grace_ok = duration_range("http.grace_period", grace_period, range.clone());
-    let drain_ok = duration_range("http.drain_timeout", drain_timeout, range);
-    let ranges_ok = grace_ok.is_ok() && drain_ok.is_ok();
-    v.check(grace_ok);
-    v.check(drain_ok);
+    let grace_range = duration_range("http.grace_period", grace_period, range.clone());
+    let drain_range = duration_range("http.drain_timeout", drain_timeout, range);
+    let ranges_ok = grace_range.is_ok() && drain_range.is_ok();
+    v.check(grace_range);
+    v.check(drain_range);
     if !ranges_ok {
         return false;
     }
@@ -207,8 +189,16 @@ fn validate_grace_and_drain(
         ));
         return false;
     }
-    if let Some(tail) = tail {
-        v.check(check_grace_budget_pair(grace_period, drain_timeout, tail));
+    if let Some(tail) = tail
+        && grace_period < drain_timeout.saturating_add(tail.duration)
+    {
+        v.reject(ValidationError::new(
+            "http.grace_period",
+            format!(
+                "({grace_period:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {:?} {}",
+                tail.duration, tail.description
+            ),
+        ));
     }
     true
 }
@@ -224,12 +214,6 @@ impl<Propagation> HttpFields<Propagation> {
             self.header_read_timeout,
             Duration::from_millis(100)..=Duration::from_mins(15),
         ));
-        v.check(validate_request_timeout(
-            "http.request_timeout",
-            self.request_timeout,
-            drain_budget,
-            "requests",
-        ));
         v.check(int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
@@ -240,30 +224,24 @@ impl<Propagation> HttpFields<Propagation> {
             self.max_body_bytes.as_u64(),
             1..=ByteSize::gib(1).as_u64(),
         ));
-        v.check(in_flight_range("http.max_in_flight", self.max_in_flight));
-        v.check(admission_wait_range(
-            "http.admission_wait",
-            self.admission_wait,
-        ));
-        v.check(connection_count_range(
-            "http.max_connections",
-            self.max_connections,
-        ));
-        v.check(connection_age_range(
-            "http.max_connection_age",
-            self.max_connection_age,
-        ));
+        let limits = RawListenerLimits {
+            request_timeout: self.request_timeout,
+            max_in_flight: self.max_in_flight,
+            admission_wait: self.admission_wait,
+            max_connections: self.max_connections,
+            max_connection_age: self.max_connection_age,
+        }
+        .admit("http", drain_budget, "requests", v);
         HttpListenerConfig {
             addr: self.addr,
             header_read_timeout: self.header_read_timeout,
-            request_timeout: self.request_timeout,
+            request_timeout: limits.request_timeout,
             max_header_bytes: self.max_header_bytes,
             max_body_bytes: self.max_body_bytes,
-            max_in_flight: NonZeroU32::new(self.max_in_flight),
-            admission_wait: admission_wait_cap(self.admission_wait, self.request_timeout),
-            max_connections: NonZeroU32::new(self.max_connections),
-            max_connection_age: (!self.max_connection_age.is_zero())
-                .then_some(self.max_connection_age),
+            max_in_flight: limits.max_in_flight,
+            admission_wait: limits.admission_wait,
+            max_connections: limits.max_connections,
+            max_connection_age: limits.max_connection_age,
             access_log_health_probes: self.access_log_health_probes,
             trust_trace_context: self.trust_trace_context,
         }
