@@ -75,7 +75,7 @@ Preserve actual safety and authority requirements.
 
 ## Design Proof
 
-Specification closes behavior and its nearest feasible falsifier; Technical
+Specification closes behavior and its highest-boundary falsifier; Technical
 Design supports the mechanism, invariants, and feasible proof. A proposed live
 falsifier is not automatically a mandatory live acceptance scenario.
 Evidence needed to resolve an actual mechanism choice remains with Technical

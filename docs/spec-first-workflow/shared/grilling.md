@@ -1,14 +1,20 @@
 # Grilling
 
-Ask one clarifying question per turn. Choose the question whose answer would
-most change your understanding of what the requester wants. When the goal is
-unclear, invite them to describe a concrete situation and the result they hoped
-for, in their own words. When two plausible readings lead to different
-outcomes, describe the difference and leave room for another reading. Offer a
-recommendation and its tradeoff when the requester has a choice to make and
-the evidence supports one.
+Work unresolved decisions as a **design tree** in **frontier rounds**.
 
-Wait for the answer. When it changes your understanding, briefly reflect what
-changed so the requester can correct your reading. Choose the next question
-from what the answer reveals or leaves open. Resolve technical questions from
-accessible evidence or their responsible owner.
+- **Ask the independent frontier in one round:** every unresolved decision whose
+  prerequisites are settled; hold back questions depending on an open answer.
+  When the goal is foggy, start with one open question inviting a concrete
+  situation and desired outcome in the requester's words.
+- **Number questions for fast replies:** state the distinct outcomes and
+  tradeoffs; when evidence supports a direction, offer a recommendation worded
+  so `"yes"` accepts it (`1 yes, 2 B, 3 yes`).
+- **Finding facts and resolving technical choices is the agent's job:** look up
+  accessible codebase, contract, or config facts directly (or via a fresh
+  `evidence-agent`) and resolve technical questions via their responsible owner
+  under [Decision Ownership](../../../AGENTS.md#decision-ownership) instead of
+  asking the requester; don't block independent frontier questions on an
+  unrelated lookup.
+
+Wait for the reply. Briefly reflect what changed when an answer shifts
+understanding, recompute the frontier, and repeat until empty.
