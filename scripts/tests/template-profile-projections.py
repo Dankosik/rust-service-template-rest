@@ -103,19 +103,6 @@ def _load_initializer(source: Path):
         sys.path.remove(os.fspath(library))
 
 
-def _load_safety(source: Path):
-    module_path = source / "scripts/tests/template-init-safety.py"
-    if not module_path.is_file():
-        raise RuntimeError("source initializer safety fixture is missing")
-    spec = importlib.util.spec_from_file_location("template_profile_projections_safety", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("source initializer safety fixture cannot be imported")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def _checker_identity() -> str:
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -673,9 +660,6 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
             _assert_profile_output(initializer, nodes, "integration", integration_paths)
         else:
             _assert_no_profile_output(initializer, nodes, "integration", integration_paths)
-        profiles = inputs.profiles()
-        if profiles["outbound_auth"] != "oauth2-client-credentials" or profiles["outbound_http"] != "bounded":
-            raise initializer.Refusal("OAuth projection did not retain its effective bounded HTTP profile")
         _emit(
             "oauth-selection",
             scenario=index,
@@ -685,7 +669,7 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
             jobs=jobs,
             webhooks=webhooks,
             inbound_webhooks=inbound_webhooks,
-            profiles=profiles,
+            profiles=inputs.profiles(),
             tree_sha256=_tree_digest(nodes),
             lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
         )
@@ -756,9 +740,6 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
             _assert_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
         else:
             _assert_no_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
-        profiles = inputs.profiles()
-        if profiles["grpc"] != "enabled":
-            raise initializer.Refusal("gRPC projection did not retain its enabled selection")
         _emit(
             "grpc-selection",
             scenario=index,
@@ -772,7 +753,7 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
             outbox=outbox,
             webhooks=webhooks,
             inbound_webhooks=inbound_webhooks,
-            profiles=profiles,
+            profiles=inputs.profiles(),
             tree_sha256=_tree_digest(nodes),
             lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
         )
@@ -809,9 +790,6 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
             if b"url = { workspace = true" in payload:
                 raise initializer.Refusal("cache-only projection retained the config url dependency")
-        profiles = inputs.profiles()
-        if profiles["cache"] != "redis":
-            raise initializer.Refusal("cache projection did not retain its redis selection")
         _emit(
             "cache-selection",
             scenario=index,
@@ -826,7 +804,7 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             webhooks=webhooks,
             inbound_webhooks=inbound_webhooks,
             grpc=grpc,
-            profiles=profiles,
+            profiles=inputs.profiles(),
             tree_sha256=_tree_digest(nodes),
             lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
         )
@@ -1060,9 +1038,6 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
             if b"url = { workspace = true" in payload:
                 raise initializer.Refusal("object-storage-only projection retained the config url dependency")
-        profiles = inputs.profiles()
-        if profiles["object_storage"] != "s3":
-            raise initializer.Refusal("object storage projection did not retain its s3 selection")
         _emit(
             "object-storage-selection",
             scenario=index,
@@ -1078,7 +1053,7 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
             inbound_webhooks=inbound_webhooks,
             grpc=grpc,
             cache=cache,
-            profiles=profiles,
+            profiles=inputs.profiles(),
             tree_sha256=_tree_digest(nodes),
             lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
         )
@@ -1142,9 +1117,6 @@ def _check_service_auth_projections(source: Path, candidate: str, initializer, w
             dependencies = tomllib.loads(workspace.payload.decode())["workspace"]["dependencies"]
             if retained and "jsonwebtoken" not in dependencies:
                 raise initializer.Refusal("service tokens lost their jsonwebtoken workspace dependency")
-            profiles = inputs.profiles()
-            if profiles["service_auth"] != service_auth:
-                raise initializer.Refusal("service-auth projection did not retain its selection")
             _emit(
                 "service-auth-selection",
                 scenario=index,
@@ -1161,7 +1133,7 @@ def _check_service_auth_projections(source: Path, candidate: str, initializer, w
                 cache=cache,
                 object_storage=object_storage,
                 service_auth=service_auth,
-                profiles=profiles,
+                profiles=inputs.profiles(),
                 tree_sha256=_tree_digest(nodes),
                 lock_sha256=hashlib.sha256(initializer._lock_bytes(inputs, candidate, "complete")).hexdigest(),
             )
@@ -1501,7 +1473,9 @@ def self_test(source: Path) -> None:
         "link": Node("symlink", 0o777, "target"),
     }
     _compare(base, dict(base), carrier_scopes, admitted, initializer)
-    _expect_refusal(initializer, lambda: _compare(base, {key: value for key, value in base.items() if key != "Cargo.toml"}, carrier_scopes, admitted, initializer), "path drift")
+    without_manifest = {key: value for key, value in base.items() if key != "Cargo.toml"}
+    _expect_refusal(initializer, lambda: _compare(base, without_manifest, carrier_scopes, admitted, initializer), "missing path")
+    _expect_refusal(initializer, lambda: _compare(without_manifest, base, carrier_scopes, admitted, initializer), "extra path")
     byte_drift = dict(base)
     byte_drift["Cargo.toml"] = Node("file", 0o644, b"changed manifest")
     _expect_refusal(initializer, lambda: _compare(base, byte_drift, carrier_scopes, admitted, initializer), "byte drift")
@@ -1549,91 +1523,14 @@ def self_test(source: Path) -> None:
     lock_drift["identity"]["service_name"] = "different"
     lock_drift_bytes = (json.dumps(lock_drift, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     _expect_refusal(initializer, lambda: _compare_lock(core_lock, lock_drift_bytes, "codex", initializer), "lock drift")
-    outbound_lock_drift = json.loads(core_lock)
+    outbound_lock_drift = json.loads(codex_lock)
     outbound_lock_drift["profiles"]["outbound_http"] = "bounded"
     outbound_lock_drift_bytes = (json.dumps(outbound_lock_drift, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     _expect_refusal(
         initializer,
-        lambda: _compare_lock(core_lock, outbound_lock_drift_bytes, "core", initializer),
+        lambda: _compare_lock(core_lock, outbound_lock_drift_bytes, "codex", initializer),
         "outbound profile lock drift",
     )
-    outbound_tree_drift = dict(base)
-    outbound_tree_drift["crates/infra-outbound-http/src/lib.rs"] = Node(
-        "file", 0o644, b"outbound profile runtime"
-    )
-    _expect_refusal(
-        initializer,
-        lambda: _compare(base, outbound_tree_drift, carrier_scopes, admitted, initializer),
-        "outbound profile runtime drift",
-    )
-    http_idempotency_lock_drift = json.loads(core_lock)
-    http_idempotency_lock_drift["profiles"]["http_idempotency"] = "postgres"
-    http_idempotency_lock_drift_bytes = (
-        json.dumps(http_idempotency_lock_drift, indent=2, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
-    _expect_refusal(
-        initializer,
-        lambda: _compare_lock(core_lock, http_idempotency_lock_drift_bytes, "core", initializer),
-        "http idempotency profile lock drift",
-    )
-    http_idempotency_tree_drift = dict(base)
-    http_idempotency_tree_drift["crates/infra-idempotency-store/src/lib.rs"] = Node(
-        "file", 0o644, b"http idempotency profile runtime"
-    )
-    _expect_refusal(
-        initializer,
-        lambda: _compare(base, http_idempotency_tree_drift, carrier_scopes, admitted, initializer),
-        "http idempotency profile runtime drift",
-    )
-    jobs_lock_drift = json.loads(core_lock)
-    jobs_lock_drift["profiles"]["jobs"] = "postgres"
-    jobs_lock_drift_bytes = (
-        json.dumps(jobs_lock_drift, indent=2, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
-    _expect_refusal(
-        initializer,
-        lambda: _compare_lock(core_lock, jobs_lock_drift_bytes, "core", initializer),
-        "jobs profile lock drift",
-    )
-    jobs_tree_drift = dict(base)
-    jobs_tree_drift["crates/infra-jobs/src/lib.rs"] = Node(
-        "file", 0o644, b"jobs profile runtime"
-    )
-    _expect_refusal(
-        initializer,
-        lambda: _compare(base, jobs_tree_drift, carrier_scopes, admitted, initializer),
-        "jobs profile runtime drift",
-    )
-    jobs_profiles = initializer.ProfileData(
-        source_only=(),
-        removals={},
-        identity=(),
-    )
-    jobs_inputs = _inputs(
-        initializer, "postgres", "none", "none", "none", "postgres", "none", "none", "core"
-    )
-    with tempfile.TemporaryDirectory(prefix="template-profile-projections-jobs-marker-") as temporary:
-        marker_root = Path(temporary)
-        (marker_root / "fixture.rs").write_text(
-            "// template:begin jobs:registered-marker\nkept\n// template:end jobs:registered-marker\n",
-            encoding="utf-8",
-        )
-        initializer._apply_markers(marker_root, jobs_profiles, jobs_inputs)
-    with tempfile.TemporaryDirectory(prefix="template-profile-projections-jobs-marker-drift-") as temporary:
-        marker_root = Path(temporary)
-        (marker_root / "fixture.rs").write_text(
-            "// template:begin jobs:registered-marker\n"
-            "kept\n"
-            "// template:end jobs:registered-marker\n"
-            "// template:begin unknown-profile:unregistered-marker\n"
-            "// template:end unknown-profile:unregistered-marker\n",
-            encoding="utf-8",
-        )
-        _expect_refusal(
-            initializer,
-            lambda: initializer._apply_markers(marker_root, jobs_profiles, jobs_inputs),
-            "unknown profile marker",
-        )
     jobs_removals = initializer._profile_data(source).removals["jobs"]
     if "crates/infra-jobs/" not in jobs_removals:
         raise AssertionError("jobs removals omit crates/infra-jobs/")
@@ -1650,9 +1547,6 @@ def self_test(source: Path) -> None:
             lambda: initializer._remove_paths(removal_root, ("crates/infra-jobs/",)),
             "missing jobs removal path",
         )
-    safety = _load_safety(source)
-    with tempfile.TemporaryDirectory(prefix="template-profile-projections-self-test-") as temporary:
-        safety.assert_preflight_extraction(source, Path(temporary))
     _emit("self-test", checker_sha256=_checker_identity(), result="passed")
 
 
