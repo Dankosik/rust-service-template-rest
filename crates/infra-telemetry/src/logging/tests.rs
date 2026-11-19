@@ -354,28 +354,6 @@ fn a_verbose_directive_still_enables_verbose_spans() {
 }
 
 #[test]
-fn json_line_keeps_the_last_of_many_span_records() {
-    let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
-    let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
-    tracing::dispatcher::with_default(&dispatch, || {
-        let span = tracing::info_span!("job", attempt = 0_u64, kind = "email");
-        for attempt in 1..=1000_u64 {
-            span.record("attempt", attempt);
-        }
-        span.in_scope(|| tracing::info!("retrying"));
-    });
-    drain(guard);
-    let record = buffer.records();
-    assert!(
-        record
-            .trim_end()
-            .ends_with(r#""message":"retrying","attempt":1000,"kind":"email","name":"job"}"#),
-        "{record}"
-    );
-}
-
-#[test]
 fn only_directives_without_span_filters_or_empty_parts_become_targets() {
     for directive in [
         "info",

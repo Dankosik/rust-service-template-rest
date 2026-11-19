@@ -151,14 +151,16 @@ fn debug_and_display_stop_serializing_at_the_owned_byte_limit() {
 #[test]
 fn repeated_span_updates_compact_and_overflow_permanently_withholds_context() {
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
-        let exact = "a".repeat(4090);
+        let exact = "a".repeat(4083);
+        let previous = "b".repeat(4083);
         let (records, snapshot) = capture(format, || {
-            let span = tracing::info_span!("ok", value = "initial");
+            let span = tracing::info_span!("ok", value = "initial", kind = "email");
             for _ in 0..100 {
-                span.record("value", exact.as_str());
+                span.record("value", previous.as_str());
             }
+            span.record("value", exact.as_str());
             tracing::info!(parent: &span, "at_limit");
-            span.record("value", "b".repeat(4091).as_str());
+            span.record("value", "b".repeat(4084).as_str());
             span.record("value", "small again");
             tracing::info!(parent: &span, "must_stay_unavailable");
             span.in_scope(|| tracing::info!("current_parent_unavailable"));
@@ -170,13 +172,17 @@ fn repeated_span_updates_compact_and_overflow_permanently_withholds_context() {
         let (unavailable, whole): (Vec<_>, Vec<_>) = records
             .lines()
             .partition(|line| line.contains("unavailable"));
+        let at_limit = whole.iter().find(|line| line.contains("at_limit")).unwrap();
+        assert!(at_limit.contains(&exact));
+        assert!(!at_limit.contains(&previous));
+        assert!(at_limit.contains("email"));
         assert_eq!(unavailable.len(), 3);
         assert!(
             unavailable.iter().all(|line| is_marked(line, format)),
             "the events of a span without a cache are written without its fields"
         );
         assert!(whole.iter().all(|line| !line.contains("truncated")));
-        assert!(records.contains("at_limit") && records.contains("survivor"));
+        assert!(records.contains("survivor"));
         assert_eq!(
             snapshot.dropped(DropReason::SpanCapacity),
             2,
