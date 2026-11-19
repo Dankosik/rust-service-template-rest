@@ -147,14 +147,16 @@ enum Selection {
 #[derive(Debug)]
 enum Filter {
     Failed,
-    Unhandled(BTreeSet<String>),
+    Unhandled { handled_kinds: BTreeSet<String> },
 }
 
 impl Filter {
     fn admits(&self, item: &JobSnapshot) -> bool {
         match self {
             Self::Failed => item.state == JobState::Failed,
-            Self::Unhandled(kinds) => item.state.is_live() && !kinds.contains(&item.kind),
+            Self::Unhandled { handled_kinds } => {
+                item.state.is_live() && !handled_kinds.contains(&item.kind)
+            }
         }
     }
 }
@@ -173,8 +175,8 @@ impl Inspection {
         after: Option<&str>,
         limit: u16,
     ) -> Result<Self, InputError> {
-        let kinds = parse_handled_kinds(handled_kinds)?;
-        Self::page(after, limit, Filter::Unhandled(kinds))
+        let handled_kinds = parse_handled_kinds(handled_kinds)?;
+        Self::page(after, limit, Filter::Unhandled { handled_kinds })
     }
 
     #[must_use]
@@ -183,7 +185,7 @@ impl Inspection {
             Selection::One(_) => InspectionMode::One,
             Selection::Page { filter, .. } => match filter {
                 Filter::Failed => InspectionMode::Failed,
-                Filter::Unhandled(_) => InspectionMode::Unhandled,
+                Filter::Unhandled { .. } => InspectionMode::Unhandled,
             },
         }
     }
@@ -200,9 +202,9 @@ impl Inspection {
     pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
         match &self.0 {
             Selection::Page {
-                filter: Filter::Unhandled(kinds),
+                filter: Filter::Unhandled { handled_kinds },
                 ..
-            } => Some(kinds),
+            } => Some(handled_kinds),
             Selection::One(_)
             | Selection::Page {
                 filter: Filter::Failed,
@@ -470,7 +472,8 @@ async fn lock_failed_target(
     )
     .await?
     .ok_or(OperatorError::Missing)?;
-    if row.state != "failed" || (&row.kind, row.claim_generation) != (&target.kind, target.version)
+    if row.state != JobState::Failed.as_str()
+        || (&row.kind, row.claim_generation) != (&target.kind, target.version)
     {
         return Err(OperatorError::Stale);
     }

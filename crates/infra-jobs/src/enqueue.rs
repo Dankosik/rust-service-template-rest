@@ -38,7 +38,7 @@ pub enum LivePayloadComparison {
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
     // template:begin outbox:jobs-outbox-enqueue-error
-    #[error("publish_domain_event requires the dedicated outbox enqueue operation")]
+    #[error("{} requires the dedicated outbox enqueue operation", outbox::KIND)]
     OutboxKind,
     #[error("payload contains a decoded NUL character")]
     PayloadContainsNul,

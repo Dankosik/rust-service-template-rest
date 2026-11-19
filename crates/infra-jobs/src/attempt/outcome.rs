@@ -2,8 +2,8 @@ use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 
-use super::{AttemptId, ClaimFence, deadline_reached_or_cleanup_ended};
-use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
+use super::{AttemptId, ClaimFence, execute_before_deadline};
+use crate::engine::{Operation, Shared, observe_failure};
 use crate::kind::{
     Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
     saturating_micros,
@@ -79,6 +79,22 @@ impl Write<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum WritePlan<'a> {
+    AlreadyCommitted,
+    CompleteBatched,
+    Single(Write<'a>),
+}
+
+impl WritePlan<'_> {
+    pub(super) const fn operation(self) -> Operation {
+        match self {
+            Self::AlreadyCommitted | Self::CompleteBatched => Operation::Record,
+            Self::Single(write) => write.operation(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Written {
     Applied,
@@ -98,9 +114,10 @@ impl Written {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Unacknowledged;
 
-pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
-    Some(match transition {
-        Transition::Complete(_) => return None,
+pub(super) fn write_of(transition: &Transition) -> WritePlan<'_> {
+    match transition {
+        Transition::Complete(Completion::Committed) => WritePlan::AlreadyCommitted,
+        Transition::Complete(Completion::Pending) => WritePlan::CompleteBatched,
         Transition::Retry {
             summary,
             base_micros,
@@ -111,21 +128,21 @@ pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
             let jitter_micros = (base_micros / 5)
                 .max(floor / 10)
                 .min(saturating_micros(MAX_DELAY) - minimum_micros);
-            Write::Retry {
+            WritePlan::Single(Write::Retry {
                 summary,
                 minimum_micros,
                 jitter_micros,
-            }
+            })
         }
-        Transition::Snooze { delay_micros, .. } => Write::Snooze {
+        Transition::Snooze { delay_micros, .. } => WritePlan::Single(Write::Snooze {
             delay_micros: *delay_micros,
-        },
-        Transition::Fail { reason, summary } => Write::Fail {
+        }),
+        Transition::Fail { reason, summary } => WritePlan::Single(Write::Fail {
             reason: *reason,
             summary,
-        },
-        Transition::Release => Write::Release,
-    })
+        }),
+        Transition::Release => WritePlan::Single(Write::Release),
+    }
 }
 
 pub(super) async fn send_outcome(
@@ -134,16 +151,11 @@ pub(super) async fn send_outcome(
     write: Write<'_>,
     deadline: Instant,
 ) -> Result<Written, Unacknowledged> {
-    let result = backstop(Box::pin(async {
-        let mut connection = shared.acquire("record job outcome").await?;
-        if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
-            return Err(OperationError::TimedOut);
-        }
-        execute(&mut connection, fence, write)
-            .await
-            .map_err(OperationError::from)
-    }))
-    .await;
+    let result =
+        execute_before_deadline(shared, "record job outcome", deadline, async |connection| {
+            execute(connection, fence, write).await
+        })
+        .await;
     result.map(Written::from_rows).map_err(|error| {
         observe_failure(shared, write.operation(), &error);
         Unacknowledged
@@ -492,9 +504,19 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_attempt_selects_no_single_row_write() {
-        assert!(write_of(&Transition::Complete(Completion::Pending)).is_none());
-        std::assert_matches!(write_of(&Transition::Release), Some(Write::Release));
+    fn a_completed_attempt_selects_the_completion_write_plan() {
+        std::assert_matches!(
+            write_of(&Transition::Complete(Completion::Pending)),
+            WritePlan::CompleteBatched
+        );
+        std::assert_matches!(
+            write_of(&Transition::Complete(Completion::Committed)),
+            WritePlan::AlreadyCommitted
+        );
+        std::assert_matches!(
+            write_of(&Transition::Release),
+            WritePlan::Single(Write::Release)
+        );
     }
 
     #[test]
@@ -507,7 +529,7 @@ mod tests {
         };
         std::assert_matches!(
             write_of(&retry),
-            Some(Write::Retry {
+            WritePlan::Single(Write::Retry {
                 summary,
                 minimum_micros: 72_900_000,
                 jitter_micros: 16_200_000,
@@ -517,14 +539,17 @@ mod tests {
             delay_micros: 7,
             summary: String::new(),
         };
-        std::assert_matches!(write_of(&snooze), Some(Write::Snooze { delay_micros: 7 }));
+        std::assert_matches!(
+            write_of(&snooze),
+            WritePlan::Single(Write::Snooze { delay_micros: 7 })
+        );
         let fail = Transition::Fail {
             reason: FailureReason::Exhausted,
             summary: "done".to_owned(),
         };
         std::assert_matches!(
             write_of(&fail),
-            Some(Write::Fail {
+            WritePlan::Single(Write::Fail {
                 reason: FailureReason::Exhausted,
                 summary,
             }) if summary == "done"
@@ -541,7 +566,7 @@ mod tests {
             let transition = outcome(Ended::Error(error), 1);
             std::assert_matches!(
                 write_of(&transition),
-                Some(Write::Retry { minimum_micros, jitter_micros, .. })
+                WritePlan::Single(Write::Retry { minimum_micros, jitter_micros, .. })
                     if minimum_micros == floor && jitter_micros == width
             );
         }

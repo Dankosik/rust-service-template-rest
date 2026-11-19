@@ -10,9 +10,9 @@ use tokio::time::Instant;
 use super::outcome::{Unacknowledged, Written};
 use super::{
     AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MembershipGauge, MetricMembership,
-    deadline_reached_or_cleanup_ended, within,
+    deadline_reached_or_cleanup_ended, execute_before_deadline, within,
 };
-use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
+use crate::engine::{Operation, Shared, observe_failure};
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
@@ -58,7 +58,7 @@ struct QueuedCompletion {
     fence: ClaimFence,
     membership: MetricMembership,
     slots: Arc<AttemptSlots>,
-    reply: oneshot::Sender<CompletionReply>,
+    reply_tx: oneshot::Sender<CompletionReply>,
 }
 
 impl QueuedCompletion {
@@ -66,12 +66,12 @@ impl QueuedCompletion {
         let Self {
             membership,
             slots,
-            reply,
+            reply_tx,
             ..
         } = self;
         drop(membership);
         drop(slots);
-        reply
+        reply_tx
     }
 }
 
@@ -82,7 +82,7 @@ impl CompletionGroup {
         slots: &Arc<AttemptSlots>,
         memberships: &MembershipGauge,
     ) -> (impl Drop + use<'a>, oneshot::Receiver<CompletionReply>) {
-        let (reply, response) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
         let registration = std::mem::DropGuard::new(fence, |fence| {
             let retired = {
                 let mut queued = self.queued.lock();
@@ -97,22 +97,22 @@ impl CompletionGroup {
             fence,
             membership: memberships.join(),
             slots: Arc::clone(slots),
-            reply,
+            reply_tx,
         };
         self.queued.lock().push(queued);
-        (registration, response)
+        (registration, reply_rx)
     }
 
     async fn writer_or_reply(
         &self,
-        response: &mut oneshot::Receiver<CompletionReply>,
+        reply_rx: &mut oneshot::Receiver<CompletionReply>,
     ) -> WriteTurn<'_> {
         let writer = tokio::select! {
             biased;
-            reply = &mut *response => return WriteTurn::Reply(reply.unwrap_or(Err(Unacknowledged))),
+            reply = &mut *reply_rx => return WriteTurn::Reply(reply.unwrap_or(Err(Unacknowledged))),
             writer = self.writer.lock() => writer,
         };
-        match response.try_recv() {
+        match reply_rx.try_recv() {
             Ok(reply) => WriteTurn::Reply(reply),
             Err(TryRecvError::Closed) => WriteTurn::Reply(Err(Unacknowledged)),
             Err(TryRecvError::Empty) => WriteTurn::Write(writer),
@@ -122,19 +122,19 @@ impl CompletionGroup {
 
 struct CompletionBatch {
     queued: Vec<QueuedCompletion>,
-    pruned_replies: Vec<oneshot::Sender<CompletionReply>>,
+    pruned_senders: Vec<oneshot::Sender<CompletionReply>>,
 }
 
 impl CompletionBatch {
     fn new(queued: Vec<QueuedCompletion>) -> Self {
         Self {
             queued,
-            pruned_replies: Vec::new(),
+            pruned_senders: Vec::new(),
         }
     }
 
     fn prune(&mut self, stale: impl FnMut(&mut QueuedCompletion) -> bool) {
-        self.pruned_replies.extend(
+        self.pruned_senders.extend(
             self.queued
                 .extract_if(.., stale)
                 .map(QueuedCompletion::retire),
@@ -149,10 +149,10 @@ impl CompletionBatch {
     }
 
     fn finish(mut self, results: impl IntoIterator<Item = CompletionReply>) {
-        let replies = self.retire();
+        let senders = self.retire();
         drop(self);
-        for (reply, result) in replies.into_iter().zip(results) {
-            let _ = reply.send(result);
+        for (sender, result) in senders.into_iter().zip(results) {
+            let _ = sender.send(result);
         }
     }
 }
@@ -183,20 +183,20 @@ pub(super) async fn complete_batched(
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
     let group = shared.completions.group(supervisor_deadline);
-    let (_registration, mut response) =
+    let (_registration, mut reply_rx) =
         group.register(fence, slots, &shared.completions.memberships);
-    let writer = match group.writer_or_reply(&mut response).await {
+    let writer = match group.writer_or_reply(&mut reply_rx).await {
         WriteTurn::Write(writer) => writer,
         WriteTurn::Reply(reply) => return reply,
     };
     let batch = CompletionBatch::new(std::mem::take(&mut *group.queued.lock()));
     write_batch(shared, batch, supervisor_deadline).await;
     drop(writer);
-    response.await.unwrap_or(Err(Unacknowledged))
+    reply_rx.await.unwrap_or(Err(Unacknowledged))
 }
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Instant) {
-    batch.prune(|entry| entry.reply.is_closed());
+    batch.prune(|entry| entry.reply_tx.is_closed());
     if batch.queued.is_empty()
         || deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline)
     {
@@ -215,11 +215,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
         within(
             &shared.lifecycle.cleanup,
             deadline,
-            backstop(Box::pin(async {
-                let mut connection = shared.acquire("complete jobs batch").await?;
-                if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
-                    return Err(OperationError::TimedOut);
-                }
+            execute_before_deadline(shared, "complete jobs batch", deadline, async |connection| {
                 observed(
                     "complete jobs",
                     sqlx::query_scalar!(
@@ -236,8 +232,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
                     .fetch_all(&mut *connection),
                 )
                 .await
-                .map_err(OperationError::from)
-            })),
+            }),
         )
         .await
     };
@@ -284,7 +279,7 @@ mod tests {
     fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
         Arc::new(AttemptSlots {
             _membership: MembershipGauge::owned_attempts().join(),
-            _global: Arc::clone(slots).try_acquire_owned().unwrap(),
+            _group: Arc::clone(slots).try_acquire_owned().unwrap(),
             _kind: None,
         })
     }
