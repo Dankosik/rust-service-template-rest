@@ -19,10 +19,10 @@ pub async fn acquire_within<G>(
     }
     let waiting = on_wait();
     let started = Instant::now();
-    let permit = tokio::time::timeout(patience, Arc::clone(permits).acquire_owned()).await;
+    let acquire_result = tokio::time::timeout(patience, Arc::clone(permits).acquire_owned()).await;
     let waited = started.elapsed();
     drop(waiting);
-    match permit {
+    match acquire_result {
         Ok(Ok(permit)) if waited < patience => Ok((permit, Some(waited))),
         _ => Err(waited),
     }

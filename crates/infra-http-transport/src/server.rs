@@ -201,10 +201,10 @@ fn serve_tls(
         mut config,
         handshake_timeout,
     } = tls;
-    let require_h2 = driver.builder.is_http2_available();
-    let protocol: &[u8] = if require_h2 { b"h2" } else { b"http/1.1" };
-    if config.alpn_protocols.as_slice() != [protocol] {
-        Arc::make_mut(&mut config).alpn_protocols = vec![protocol.to_vec()];
+    let protocol = driver.protocol;
+    let alpn = protocol.alpn();
+    if config.alpn_protocols.as_slice() != [alpn] {
+        Arc::make_mut(&mut config).alpn_protocols = vec![alpn.to_vec()];
     }
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
     serve_listener(
@@ -214,15 +214,7 @@ fn serve_tls(
         driver,
         delegated,
         "https",
-        move |stream, peer| {
-            accept_tls(
-                acceptor.clone(),
-                stream,
-                peer,
-                handshake_timeout,
-                require_h2,
-            )
-        },
+        move |stream, peer| accept_tls(acceptor.clone(), stream, peer, handshake_timeout, protocol),
     )
 }
 
@@ -231,25 +223,24 @@ async fn accept_tls(
     stream: TcpStream,
     peer: SocketAddr,
     handshake_timeout: Duration,
-    require_h2: bool,
+    protocol: DriverProtocol,
 ) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
-    match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-        Ok(Ok(tls_stream)) => {
-            if require_h2 && tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-                tracing::debug!(%peer, "http2_alpn_missing");
-                return None;
-            }
-            Some(tls_stream)
-        }
+    let tls_stream = match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+        Ok(Ok(tls_stream)) => tls_stream,
         Ok(Err(error)) => {
             tracing::debug!(%peer, %error, "http_tls_handshake_failed");
-            None
+            return None;
         }
         Err(_) => {
             tracing::debug!(%peer, "http_tls_handshake_timed_out");
-            None
+            return None;
         }
+    };
+    if !protocol.accepts_tls_alpn(tls_stream.get_ref().1.alpn_protocol()) {
+        tracing::debug!(%peer, "http2_alpn_missing");
+        return None;
     }
+    Some(tls_stream)
 }
 // template:end grpc:http-serve-tls
 
@@ -323,19 +314,19 @@ impl Server {
             }
         };
         self.connection_shutdown.force.cancel();
-        let accept_unconfirmed = matches!(graceful_result, Err(ServerError::AcceptTimeout))
-            && self
+        let accept_confirmed = !matches!(graceful_result, Err(ServerError::AcceptTimeout))
+            || self
                 .join_accept_until(confirmation_deadline)
                 .await
-                .is_none();
-        let producers_stopped =
-            !accept_unconfirmed && close_and_wait(&self.connections, confirmation_deadline).await;
+                .is_some();
+        let connections_stopped =
+            accept_confirmed && close_and_wait(&self.connections, confirmation_deadline).await;
         self.delegated.force.cancel();
-        if producers_stopped {
+        if connections_stopped {
             close_and_wait(&self.delegated.tasks, confirmation_deadline).await;
         }
         let residue = DrainResidue {
-            accept_unconfirmed,
+            accept_unconfirmed: !accept_confirmed,
             remaining_connections: self.connections.len(),
             remaining_delegated_tasks: self.delegated.tasks.len(),
         };
@@ -388,11 +379,7 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
     fn execute(&self, future: F) {
         let force = self.force.clone();
         let task = self.tasks.track_future(async move {
-            tokio::select! {
-                biased;
-                () = force.cancelled() => {},
-                _ = future => {},
-            }
+            force.run_until_cancelled(future).await;
         });
         TokioExecutor::new().execute(task);
     }
@@ -402,7 +389,7 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
 struct ConnectionDriver {
     builder: auto::Builder<ListenerExecutor>,
     // template:begin grpc:http2-driver-preface-budget
-    preface_timeout: Option<Duration>,
+    protocol: DriverProtocol,
     // template:end grpc:http2-driver-preface-budget
 }
 
@@ -432,13 +419,42 @@ fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
     let driver = ConnectionDriver {
         builder: builder.http1_only(),
         // template:begin grpc:http1-driver-no-preface
-        preface_timeout: None,
+        protocol: DriverProtocol::Http1,
         // template:end grpc:http1-driver-no-preface
     };
     (driver, executor)
 }
 
 // template:begin grpc:http2-driver
+#[derive(Clone, Copy)]
+enum DriverProtocol {
+    Http1,
+    Http2 { preface_timeout: Duration },
+}
+
+impl DriverProtocol {
+    const fn alpn(self) -> &'static [u8] {
+        match self {
+            Self::Http1 => b"http/1.1",
+            Self::Http2 { .. } => b"h2",
+        }
+    }
+
+    fn accepts_tls_alpn(self, negotiated: Option<&[u8]>) -> bool {
+        match self {
+            Self::Http1 => true,
+            Self::Http2 { .. } => negotiated == Some(self.alpn()),
+        }
+    }
+
+    const fn preface_timeout(self) -> Option<Duration> {
+        match self {
+            Self::Http1 => None,
+            Self::Http2 { preface_timeout } => Some(preface_timeout),
+        }
+    }
+}
+
 fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
@@ -453,7 +469,9 @@ fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
     let driver = ConnectionDriver {
         builder: builder.http2_only(),
-        preface_timeout: Some(options.preface_timeout),
+        protocol: DriverProtocol::Http2 {
+            preface_timeout: options.preface_timeout,
+        },
     };
     (driver, executor)
 }
@@ -468,16 +486,18 @@ fn observe_http2_preface<IO>(
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // RFC 9113 §3.4.
+    const HTTP2_CLIENT_PREFACE_BYTES: usize = 24;
+
     let Some(timeout) = timeout else {
         return (tokio_util::either::Either::Right(io), None);
     };
     let (notify, received) = tokio::sync::oneshot::channel();
     let mut notify = Some(notify);
-    // RFC 9113 §3.4, client connection preface magic.
-    let mut remaining = 24_usize;
+    let mut remaining_bytes = HTTP2_CLIENT_PREFACE_BYTES;
     let io = tokio_util::io::InspectReader::new(io, move |bytes| {
-        remaining = remaining.saturating_sub(bytes.len());
-        if remaining == 0
+        remaining_bytes = remaining_bytes.saturating_sub(bytes.len());
+        if remaining_bytes == 0
             && let Some(notify) = notify.take()
         {
             let _ = notify.send(());
@@ -528,10 +548,10 @@ where
     if limits.max_connections.is_some() {
         metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
     }
-    let (failure, accept_failure) = watch::channel(None);
-    let guard = DropGuard::new(
-        (connection_shutdown.drain.clone(), failure),
-        |(drain, failure)| {
+    let (accept_failure_tx, accept_failure) = watch::channel(None);
+    let accept_failure_guard = DropGuard::new(
+        (connection_shutdown.drain.clone(), accept_failure_tx),
+        |(drain, accept_failure_tx)| {
             let observed = if std::thread::panicking() {
                 AcceptFailure::Panicked
             } else if !drain.is_cancelled() {
@@ -539,7 +559,7 @@ where
             } else {
                 return;
             };
-            failure.send_replace(Some(observed));
+            accept_failure_tx.send_replace(Some(observed));
         },
     );
     let context = ConnectionContext {
@@ -552,7 +572,7 @@ where
     };
     let accept = accept_loop(bound, limits.max_connections, connections.clone(), context);
     let accept_loop = AbortOnDropHandle::new(tokio::spawn(async move {
-        let _guard = guard;
+        let _accept_failure_guard = accept_failure_guard;
         accept.await;
     }));
     Server {
@@ -712,7 +732,7 @@ where
         return Ok(());
     };
     // template:begin grpc:http2-observe-initial-read
-    let (io, preface) = observe_http2_preface(io, driver.preface_timeout);
+    let (io, preface) = observe_http2_preface(io, driver.protocol.preface_timeout());
     // template:end grpc:http2-observe-initial-read
     let service = ServiceBuilder::new()
         .layer(Extension(ConnectionInfo {

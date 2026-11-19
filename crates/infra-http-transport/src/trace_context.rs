@@ -51,9 +51,10 @@ fn validate_traceparent_prefix(wire: &[u8]) -> Option<&[u8]> {
         && valid_id(parent_id)
         && prefix[52] == b'-'
         && lower_hex(flags)
-        && (wire.len() == TRACEPARENT_V0_LEN
-            || (version != b"00" && wire[TRACEPARENT_V0_LEN] == b'-')))
-        .then_some(prefix)
+        && wire
+            .get(TRACEPARENT_V0_LEN)
+            .is_none_or(|&next| version != b"00" && next == b'-'))
+    .then_some(prefix)
 }
 
 fn normalize_tracestate(headers: &mut HeaderMap) {
