@@ -766,6 +766,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "scripts/checks/test_make.py",
                 "scripts/harness/test_sync.py",
                 "scripts/image/test_publication.py",
+                "scripts/profiles/grpc_check.sh",
+                "scripts/profiles/integration.sh",
                 "scripts/tests/test_checks_and_image.py",
                 "scripts/tests/test_image_inputs.py",
                 "scripts/tests/test_image_inventory.py",

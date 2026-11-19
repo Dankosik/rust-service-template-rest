@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,13 +18,24 @@ from scripts.template.state import TEMPLATE_REPOSITORY  # noqa: E402
 class HarnessSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="harness-sync-")))
-        for subdir in ("roles", "role-classes", "adapters"):
-            src = ROOT / ".agents" / subdir
-            if src.is_dir():
-                shutil.copytree(src, self.repo / ".agents" / subdir)
-        codex_proj = ROOT / ".agents/codex-project.toml"
-        if codex_proj.is_file():
-            shutil.copy2(codex_proj, self.repo / ".agents/codex-project.toml")
+        roles = self.repo / ".agents/roles"
+        roles.mkdir(parents=True)
+        (roles / "fixture-worker.toml").write_text(
+            'name = "fixture-worker"\n'
+            'description = "Run the assigned work."\n'
+            'class = "mutable-worker"\n'
+            'claude_model = "inherit"\n'
+            'cursor_model = "inherit"\n'
+            'grok_model = "inherit"\n'
+            'grok_effort = "inherit"\n'
+            'output_schema = "delegated-result-v1"\n'
+            'instructions = "Return the result."\n',
+            encoding="utf-8",
+        )
+        classes = self.repo / ".agents/role-classes"
+        classes.mkdir()
+        (classes / "mutable-worker.md").write_text("Work within the assigned scope.\n", encoding="utf-8")
+        (classes / "mutable-worker-fallback.md").write_text("Report any blocker.\n", encoding="utf-8")
         # Build clean decision + workflow skills without .agents/skills/*/LICENSE.
         para = " ".join(["word"] * 60)
         decision = self.repo / ".agents/skills/sample-decision"
@@ -70,11 +80,19 @@ class HarnessSyncTests(unittest.TestCase):
         )
 
     def test_apply_check_and_skill_validation_without_license(self) -> None:
+        adapter = self.repo / ".agents/adapters/claude"
+        adapter.mkdir(parents=True)
+        (adapter / "CLAUDE.md").write_text("# Fixture harness\n", encoding="utf-8")
+        (adapter / "settings.json").write_text(
+            '{"env":{"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH":"1"}}\n', encoding="utf-8",
+        )
+
         check_unmaterialized = self.run_sync("--check", "--harness", "claude")
         self.assertEqual(check_unmaterialized.returncode, 0, check_unmaterialized.stderr)
 
         require_mat = self.run_sync("--check", "--harness", "claude", "--require-materialized")
         self.assertNotEqual(require_mat.returncode, 0)
+        self.assertIn(".claude/agents is missing", require_mat.stderr)
 
         applied = self.run_sync("--apply", "--harness", "claude")
         self.assertEqual(applied.returncode, 0, applied.stderr)

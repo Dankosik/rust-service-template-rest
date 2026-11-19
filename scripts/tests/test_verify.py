@@ -1481,15 +1481,20 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertFalse((verify_dir / "attempt-old-00.log").exists())
 
     def test_self_test_changes_invalidate_a_receipt_for_explicit_routing_inputs(self) -> None:
-        profile_tests = "scripts/tests/test_profile_runners.py"
+        profile_inputs = (
+            "scripts/tests/test_profile_runners.py",
+            "scripts/profiles/grpc_check.sh",
+            "scripts/profiles/integration.sh",
+        )
         with (self.fixture / "Makefile").open("a", encoding="utf-8") as makefile:
             makefile.write(
                 "validation-lock-self-test python-lint:\n\t@:\n"
-                f"verify-check: {profile_tests}\n\t@:\n"
+                f"verify-check: {' '.join(profile_inputs)}\n\t@:\n"
             )
-        profile_test_file = self.fixture / profile_tests
-        profile_test_file.parent.mkdir(parents=True)
-        profile_test_file.touch()
+        for relative in profile_inputs:
+            path = self.fixture / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
 
         test_files = [
             self.fixture / relative
@@ -1525,12 +1530,17 @@ class VerifyRunnerTests(unittest.TestCase):
                 self.assertIn("==> make verify-check\n", checked.stdout)
                 self.assertNotIn("reusing exact passing receipt:", checked.stdout)
 
-        with self.subTest("selected profile test file disappears"):
-            profile_test_file.unlink()
-            missing = self._run_verify(*args)
-            self.assertEqual(missing.returncode, 1, missing.stdout)
-            self.assertIn("command: make verify-check", missing.stderr)
-            self.assertIn(profile_tests, missing.stderr)
+        for relative in profile_inputs:
+            with self.subTest(missing=relative):
+                path = self.fixture / relative
+                path.unlink()
+                try:
+                    missing = self._run_verify(*args)
+                    self.assertEqual(missing.returncode, 1, missing.stdout)
+                    self.assertIn("command: make verify-check", missing.stderr)
+                    self.assertIn(relative, missing.stderr)
+                finally:
+                    path.touch()
 
 
 if __name__ == "__main__":
