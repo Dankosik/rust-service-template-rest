@@ -545,6 +545,7 @@ async fn maintenance_query(
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum PingOutcome {
     Ok,
     Refused(ErrorType),

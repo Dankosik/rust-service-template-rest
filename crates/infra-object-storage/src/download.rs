@@ -212,15 +212,12 @@ impl State {
                 let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
                     return self.fail_poll(LocalFailure::ContentLength.into(), Some(Ok(chunk)));
                 };
-                match NonZeroU64::new(next) {
-                    Some(remaining) => {
-                        resources.progress = BodyProgress::Reading(remaining);
-                        (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
-                    }
-                    None => {
-                        resources.progress = BodyProgress::AwaitingEof(Some(chunk));
-                        (Poll::Ready(Ok(ReadStep::Buffered)), None)
-                    }
+                if let Some(remaining) = NonZeroU64::new(next) {
+                    resources.progress = BodyProgress::Reading(remaining);
+                    (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
+                } else {
+                    resources.progress = BodyProgress::AwaitingEof(Some(chunk));
+                    (Poll::Ready(Ok(ReadStep::Buffered)), None)
                 }
             }
             Poll::Ready(Some(Err(error))) => {
