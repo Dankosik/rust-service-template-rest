@@ -44,4 +44,6 @@ scripts/tests/test_checks_and_image.py
 scripts/tests/test_quality.py
 scripts/tests/test_image_inputs.py
 scripts/tests/test_image_inventory.py
+# template:begin profile-runner-tests:manifest-module
 scripts/tests/test_profile_runners.py
+# template:end profile-runner-tests:manifest-module

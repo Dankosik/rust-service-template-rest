@@ -446,6 +446,11 @@
       "scripts/profiles/integration.sh"
     ]
   },
+  "profile-runner-tests": {
+    "remove_when_unselected": [
+      "scripts/tests/test_profile_runners.py"
+    ]
+  },
   "outbox": {
     "remove_when_unselected": [
       "migrations/20261118120011_backfill_outbox_event_receipts.sql",

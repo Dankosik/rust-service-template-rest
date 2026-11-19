@@ -187,8 +187,12 @@ native-transport-regressions: ## Run locked serial native transport regressions
 	$(VALIDATION_LOCK) env CARGO_TARGET_DIR="$${CARGO_TARGET_DIR:-$(CURDIR)/target}" python3 scripts/checks/native_transport.py
 
 INTEGRATION_SUITE ?= retained
+INTEGRATION_COMPILE = @echo "No retained integration suites to compile."
+# template:begin container-integration:make-compile-runner
+INTEGRATION_COMPILE = bash scripts/profiles/integration.sh --compile-$(INTEGRATION_SUITE)
+# template:end container-integration:make-compile-runner
 integration-compile: ## Compile retained integration suites without running them (INTEGRATION_SUITE=retained|services)
-	@if [ -f scripts/profiles/integration.sh ]; then bash scripts/profiles/integration.sh --compile-$(INTEGRATION_SUITE); fi
+	$(INTEGRATION_COMPILE)
 
 # template:begin messaging:make-messaging-profile
 INTEGRATION_LINT_FEATURES += --features infra-messaging/integration
@@ -351,10 +355,15 @@ python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
 	$(RUFF) check --no-cache .
 
-# Offline on purpose: relative paths and #fragments are this repository's
-# contract; external URLs are not, and checking them would make the gate flaky.
-docs-check: ## Image-input watch coverage and relative Markdown links/fragments
-	python3 scripts/checks/image_inputs.py
+DOCS_CHECK_PART ?= all
+docs-check: export DOCS_CHECK_PART := $(DOCS_CHECK_PART)
+docs-check: ## Image inputs and offline links (DOCS_CHECK_PART=all|links|image-inputs)
+	@case "$$DOCS_CHECK_PART" in \
+		all|image-inputs) python3 scripts/checks/image_inputs.py ;; \
+		links) ;; \
+		*) echo "$@ expects DOCS_CHECK_PART=all|links|image-inputs" >&2; exit 2 ;; \
+	esac
+ifneq ($(DOCS_CHECK_PART),image-inputs)
 	@run_lychee() { \
 		root="$$1"; shift; \
 		if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
@@ -375,6 +384,7 @@ docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 		harness_md="$$(cd "$$stage" && find CLAUDE.md QWEN.md Grok.md .claude .qwen .cursor .grok .opencode .agents/agents .agents/rules -type f -name '*.md' 2>/dev/null)" && \
 		run_lychee "$$stage" $$harness_md; \
 	fi
+endif
 
 dockerfile-check: ## Native BuildKit Dockerfile checks
 	$(VALIDATION_LOCK) bash scripts/image/build.sh --check
@@ -403,7 +413,7 @@ container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEA
 	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/image/scan.sh sbom "$(CONTAINER_IMAGE)" "$(SBOM_OUTPUT)"
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
-	python3 -m unittest scripts/tests/test_checks_and_image.py -k PublishMetadata
+	python3 -m unittest scripts.image.test_publication.PublishMetadataTests
 
 # template:begin grpc:make-grpc-targets
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@v$(BUF_VERSION)
@@ -484,9 +494,20 @@ install-hooks: ## Run `make verify` before every push from this clone; `git push
 	chmod +x "$$hook"; \
 	echo "install-hooks: $$hook runs make verify before each push"
 
+VERIFY_TEST_MODULES := scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py \
+	scripts/checks/test_make.py scripts/image/test_publication.py scripts/harness/test_sync.py \
+	scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py
+# template:begin profile-runner-tests:make-verify-tests
+VERIFY_TEST_MODULES += scripts/tests/test_profile_runners.py
+# template:end profile-runner-tests:make-verify-tests
+
 verify-check: ## Self-test of the verification router, checks, and image scripts
-	python3 -m unittest scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py $(wildcard scripts/tests/test_profile_runners.py)
-	@if test -f make/source.mk; then python3 scripts/template/matrix.py --self-test && bash scripts/template/check_init.sh --self-test; fi
+	python3 -m unittest $(VERIFY_TEST_MODULES)
+	@if test -f make/source.mk; then \
+		python3 -m unittest scripts.tests.template-init-safety.SourceMakeGateTests && \
+		python3 scripts/template/matrix.py --self-test && \
+		bash scripts/template/check_init.sh --self-test; \
+	fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	python3 -m unittest scripts/tests/test_verify.py -k Surfaces

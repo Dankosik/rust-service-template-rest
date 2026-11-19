@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import IntFlag
 import fnmatch
 from functools import cache
 import importlib.util
@@ -82,12 +83,24 @@ class UnclassifiedPathsError(ValueError):
         self.surfaces = surfaces
 
 
+class DocumentationPart(IntFlag):
+    NONE = 0
+    LINKS = 1
+    IMAGE_INPUTS = 2
+    ALL = LINKS | IMAGE_INPUTS
+
+    @property
+    def option(self) -> str:
+        return self.name.lower().replace("_", "-")
+
+
 @dataclass(frozen=True)
 class ClassificationReport:
     surfaces: dict[str, bool]
     classified: bool
     surface_count: int
     unclassified_files: tuple[str, ...]
+    documentation_part: DocumentationPart
 
 
 @cache
@@ -232,6 +245,7 @@ def all_surfaces_report(repo: Path, *, post_merge: bool = False) -> Classificati
         classified=True,
         surface_count=_count_surfaces(surfaces),
         unclassified_files=(),
+        documentation_part=DocumentationPart.ALL,
     )
 
 
@@ -253,11 +267,15 @@ def classify_report(
     p9_retained = (repo / "test/tests/http_idempotency/mounted.rs").is_file()
 
     surfaces: dict[str, bool] = dict.fromkeys(SURFACE_NAMES, False)
+    documentation_part = DocumentationPart.NONE
     clean_files = [f for raw in files if (f := raw.strip("\r\n"))]
     hook_marks = _run_service_hook(repo, clean_files)
     unclassified: list[str] = []
 
-    for idx, file in enumerate(clean_files):
+    for idx, changed_file in enumerate(clean_files):
+        file = changed_file
+        if file == "crates/infra-messaging/tests/fixtures/go-wire/go_wire_compat_bridge_test.go":
+            file = "scripts/profiles/messaging_go_compat.sh"
         matched = False
 
         def mark(*names: str) -> None:
@@ -490,7 +508,7 @@ def classify_report(
             mark("shell")
         if not _matches(file, "vendor/*") and _matches(file, "*.py", "ruff.toml"):
             mark("python")
-        if _matches(file, ".github/actions/publish-image/*", "scripts/image/publish_metadata.py", "scripts/tests/test_checks_and_image.py"):
+        if _matches(file, ".github/actions/publish-image/*", "scripts/image/publish_metadata.py", "scripts/image/test_publication.py"):
             mark("publication_metadata")
         if _matches(file, ".gitleaks.toml", ".gitleaksignore"):
             mark("secret_scanning")
@@ -507,12 +525,19 @@ def classify_report(
         ):
             mark("agent_instructions")
 
+        if _matches(file, "*.md", "docs/*", "specs/*"):
+            mark("documentation")
+            documentation_part |= DocumentationPart.LINKS
         if _matches(
             file,
-            "*.md", "docs/*", "specs/*", ".dockerignore", "build/docker/*",
-            "scripts/checks/image_inputs.py", "scripts/tests/test_image_inputs.py", ".railway/*",
+            ".dockerignore", "build/docker/*", ".railway/*", "rust-toolchain.toml",
+            "scripts/checks/image_inputs.py", "scripts/tests/test_image_inputs.py",
         ):
             mark("documentation")
+            documentation_part |= DocumentationPart.IMAGE_INPUTS
+        if file == "make/template.mk":
+            mark("documentation")
+            documentation_part = DocumentationPart.ALL
 
         if _matches(
             file,
@@ -531,6 +556,7 @@ def classify_report(
             "scripts/template/state.py", "scripts/template/sync.py", "scripts/template/init.py",
             "scripts/template/profiles.json", "scripts/profiles/integration.sh",
             "scripts/service/changed-surfaces.sh", "scripts/service/runtime-binaries.json",
+            "scripts/checks/test_make.py", "scripts/image/test_publication.py", "scripts/harness/test_sync.py",
             "scripts/tests/test_lock.py", "scripts/tests/test_verify.py",
             "scripts/tests/test_checks_and_image.py", "scripts/tests/test_image_inputs.py",
             "scripts/tests/test_image_inventory.py", "scripts/tests/test_profile_runners.py",
@@ -544,7 +570,7 @@ def classify_report(
             mark("template_engine")
 
         if source_only:
-            if _matches(file, "scripts/template/matrix.py", "scripts/template/check_init.sh"):
+            if _matches(file, "scripts/template/matrix.py", "scripts/template/check_init.sh", "scripts/tests/template-init-safety.py"):
                 mark("validation_system")
 
             if file == "scripts/template/sync.py":
@@ -620,9 +646,11 @@ def classify_report(
 
         if idx in hook_marks:
             mark(*hook_marks[idx])
+            if "documentation" in hook_marks[idx]:
+                documentation_part = DocumentationPart.ALL
 
         if not matched:
-            unclassified.append(file)
+            unclassified.append(changed_file)
 
     if source_only:
         if surfaces["initializer_runtime"]:
@@ -640,6 +668,7 @@ def classify_report(
         classified=len(unclassified) == 0,
         surface_count=_count_surfaces(surfaces),
         unclassified_files=tuple(unclassified),
+        documentation_part=documentation_part,
     )
 
 
@@ -695,15 +724,6 @@ def _paths_present_in_commit(repo: Path, commit: str, files: Sequence[str]) -> s
     return {entry.decode("utf-8") for entry in result.stdout.split(b"\0") if entry}
 
 
-def _parse_kv_surfaces(text: str) -> dict[str, bool]:
-    parsed: dict[str, bool] = {}
-    for line in text.splitlines():
-        key, sep, val = line.partition("=")
-        if sep and val in ("true", "false"):
-            parsed[key] = val == "true"
-    return parsed
-
-
 def classify_union_report(
     repo: Path,
     base_ref: str,
@@ -737,6 +757,7 @@ def classify_union_report(
     old_files = [f for f in resolved_files if f != classifier_rel and f in base_existing]
 
     current_report = classify_report(repo, current_files, post_merge=post_merge)
+    old_env = {**os.environ, "VERIFY_DOCS_DETAIL": "1"}
 
     with tempfile.TemporaryDirectory(prefix="surfaces-union-") as tmp_str:
         tmp = Path(tmp_str)
@@ -755,7 +776,7 @@ def classify_union_report(
             cmd = [sys.executable, "-B", os.fspath(script_path), "--repo", os.fspath(repo), "--files", *old_files]
             if post_merge:
                 cmd.append("--post-merge")
-            old_proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
+            old_proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False, env=old_env)
         else:
             assert base_sh is not None
             script_path = tmp / "changed-surfaces.sh"
@@ -776,16 +797,22 @@ def classify_union_report(
                 capture_output=True,
                 text=True,
                 check=False,
+                env=old_env,
             )
 
     if old_proc.returncode != 0:
         raise SurfaceConfigError(f"base classifier failed: {base_ref}", exit_code=old_proc.returncode)
-    old_surfaces = _parse_kv_surfaces(old_proc.stdout)
+    old_output = dict(line.split("=", 1) for line in old_proc.stdout.splitlines() if "=" in line)
 
     merged = {
-        name: bool(current_report.surfaces[name] or old_surfaces.get(name, False))
+        name: current_report.surfaces[name] or old_output.get(name) == "true"
         for name in SURFACE_NAMES
     }
+    documentation_part = current_report.documentation_part
+    if old_output.get("documentation") == "true":
+        old_detail = old_output.get("documentation_part", "").upper().replace("-", "_")
+        old_part = DocumentationPart.__members__.get(old_detail)
+        documentation_part |= old_part or DocumentationPart.ALL
     if post_merge and (merged["duplication"] or merged["architecture"]):
         merged["quality_tooling"] = True
     _select_profiling(merged, resolved_files)
@@ -795,14 +822,17 @@ def classify_union_report(
         classified=current_report.classified,
         surface_count=_count_surfaces(merged),
         unclassified_files=current_report.unclassified_files,
+        documentation_part=documentation_part,
     )
 
 
-def format_report(report: ClassificationReport) -> str:
+def format_report(report: ClassificationReport, *, docs_detail: bool = False) -> str:
     lines = [f"{name}={'true' if report.surfaces[name] else 'false'}" for name in SURFACE_NAMES]
     lines.append(f"classified={'true' if report.classified else 'false'}")
     lines.append(f"surface_count={report.surface_count}")
     lines.append(f"unclassified_files={','.join(report.unclassified_files)}")
+    if docs_detail:
+        lines.append(f"documentation_part={report.documentation_part.option}")
     return "\n".join(lines) + "\n"
 
 
@@ -861,7 +891,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return error.exit_code
 
-    rendered = format_report(report)
+    rendered = format_report(report, docs_detail=os.environ.get("VERIFY_DOCS_DETAIL") == "1")
     sys.stdout.write(rendered)
     if args.github_output is not None:
         args.github_output.parent.mkdir(parents=True, exist_ok=True)

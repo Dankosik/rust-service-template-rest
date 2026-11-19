@@ -94,6 +94,9 @@ outputs:
   documentation:
     description: Markdown documentation or image-input watch rules changed.
     value: ${{ steps.surfaces.outputs.documentation }}
+  documentation_part:
+    description: Portion of docs-check selected (none, links, image-inputs, or all).
+    value: ${{ steps.surfaces.outputs.documentation_part }}
   validation_system:
     description: Validation router, lock, or checker scripts changed.
     value: ${{ steps.surfaces.outputs.validation_system }}
@@ -169,6 +172,7 @@ runs:
         EVENT_NAME: ${{ github.event_name }}
         BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         PLAN_INITIALIZER: ${{ inputs.plan_initializer }}
+        VERIFY_DOCS_DETAIL: "1"
       # Tags, schedules, manual runs, and a push without a readable base
       # select every surface; a diff event is classified by both the base
       # and the head classifier. A selected initializer plans the runtime

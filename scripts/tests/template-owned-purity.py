@@ -71,6 +71,8 @@ def check(root: Path) -> None:
         raise AssertionError("sync SOURCE_HELPERS drifted from REQUIRED_SYNC_HELPERS")
     for name, removals in initializer._profile_data(root).removals.items():
         for relative in removals:
+            if name == "profile-runner-tests" and relative == "scripts/tests/test_profile_runners.py":
+                continue
             if _manifest_covers(entries, relative.rstrip("/")):
                 raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
     for broad_owner in (
@@ -133,7 +135,9 @@ def check(root: Path) -> None:
                 "profiles": profiles,
             }
             initializer.project_portable(projected, lock)
-            state.parse_manifest(projected, target_repository=lock["identity"]["repository"])
+            projected_entries = state.parse_manifest(projected, target_repository=lock["identity"]["repository"])
+            if ("scripts/tests/test_profile_runners.py" in projected_entries) != (grpc == "enabled"):
+                raise AssertionError(f"portable profile test ownership does not match grpc={grpc}")
             makefile = (projected / "make/template.mk").read_text(encoding="utf-8")
             if ("grpc-check:" in makefile) != (grpc == "enabled"):
                 raise AssertionError(f"portable Make targets do not match grpc={grpc}")
@@ -142,7 +146,7 @@ def check(root: Path) -> None:
             (projected / inventory).unlink()
             baseline = {
                 file.relative_to(projected): file.read_bytes()
-                for entry in entries for file in state._manifest_files(projected, entry)
+                for entry in projected_entries for file in state._manifest_files(projected, entry)
             }
             complete_lock = initializer._lock(
                 initializer.InitInputs(**lock["identity"], **profiles), "0" * 40, "complete",

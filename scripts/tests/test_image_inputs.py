@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for scripts/checks/image_inputs.py and docs-check ordering."""
+"""Unit tests for scripts/checks/image_inputs.py and docs-check routing."""
 
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ class Coverage(unittest.TestCase):
         (self.root / IAC).write_text(image.replace("source:", "...overrides, source:"), encoding="utf-8")
         self.run_check("unsupported computed/spread")
 
-    def test_docs_gate_propagates_image_input_and_repository_link_failures(self) -> None:
+    def test_docs_gate_routes_parts_and_propagates_failures(self) -> None:
         shutil.copytree(ROOT / "make", self.root / "make", ignore=shutil.ignore_patterns("source.mk"))
         (self.root / "tools").mkdir()
         shutil.copy2(ROOT / "tools/versions.env", self.root / "tools/versions.env")
@@ -175,31 +175,75 @@ class Coverage(unittest.TestCase):
             encoding="utf-8",
         )
         docker.chmod(0o755)
-        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        env = {key: value for key, value in os.environ.items() if key != "DOCS_CHECK_PART"}
+        env["LC_ALL"] = "C"
 
-        def check(lychee_status: int) -> subprocess.CompletedProcess[str]:
+        def check(
+            part: str | None = None, *, lychee_status: int = 0, path: str = f"{bin_dir}:{os.environ['PATH']}"
+        ) -> subprocess.CompletedProcess[str]:
+            args = ["make", "docs-check"]
+            if part is not None:
+                args.append(f"DOCS_CHECK_PART={part}")
             return subprocess.run(
-                ["make", "docs-check"],
+                args,
                 cwd=self.root,
-                env={**env, "LYCHEE_STATUS": str(lychee_status)},
+                env={**env, "PATH": path, "LYCHEE_STATUS": str(lychee_status)},
                 capture_output=True,
                 text=True,
             )
 
         self.remove_watch("migrations/**")
-        failed = check(0)
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("migrations/**: image input is uncovered", failed.stderr)
-        self.assertNotIn("repository link check", failed.stdout)
+        for part in (None, "all", "image-inputs"):
+            with self.subTest(part=part):
+                failed = check(part)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn("migrations/**: image input is uncovered", failed.stderr)
+                self.assertIn("Error 1", failed.stderr)
+                self.assertNotIn("repository link check", failed.stdout)
+
+        passed = check("links")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual(passed.stdout.splitlines().count("repository link check"), 1)
+
+        failed = check("links", lychee_status=7)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertIn("Error 7", failed.stderr)
+
+        for invalid in ("", "links image-inputs", "unknown"):
+            with self.subTest(part=invalid):
+                rejected = check(invalid)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("expects DOCS_CHECK_PART=all|links|image-inputs", rejected.stderr)
+                self.assertNotRegex(rejected.stderr, r"(?m)^image-inputs-check:")
+                self.assertNotIn("repository link check", rejected.stdout)
 
         (self.root / IAC).write_text(FIXTURE[IAC], encoding="utf-8")
-        passed = check(0)
-        self.assertEqual(passed.returncode, 0, passed.stderr)
-        self.assertIn("repository link check", passed.stdout)
+        for part in (None, "all"):
+            with self.subTest(part=part):
+                passed = check(part)
+                self.assertEqual(passed.returncode, 0, passed.stderr)
+                checks = [
+                    line for line in passed.stdout.splitlines()
+                    if line.startswith("image-inputs-check:") or line == "repository link check"
+                ]
+                self.assertEqual(checks, [
+                    f"image-inputs-check: {IAC} covers admitted image input families",
+                    "repository link check",
+                ])
 
-        failed = check(7)
-        self.assertIn("repository link check", failed.stdout)
+        isolated_bin = self.root / "image-only-bin"
+        isolated_bin.mkdir()
+        for tool in ("make", "python3", "git"):
+            (isolated_bin / tool).symlink_to(shutil.which(tool))
+        passed = check("image-inputs", path=str(isolated_bin))
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn(f"{IAC} covers", passed.stdout)
+        self.assertNotIn("repository link check", passed.stdout)
+
+        (self.root / IAC).unlink()
+        failed = check("image-inputs", path=str(isolated_bin))
         self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertIn("missing Railway IaC configuration", failed.stderr)
 
 
 if __name__ == "__main__":

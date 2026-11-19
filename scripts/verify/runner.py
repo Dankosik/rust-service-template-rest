@@ -97,12 +97,13 @@ def fingerprint_candidate(
     resolved_base_sha: str,
     merge_base_sha: str,
     include_quality_configs: bool = False,
+    additional_inputs: Sequence[str] = (),
 ) -> str:
     head = _git_output(repo, "rev-parse", "HEAD")
     if head is None:
         raise RunnerError(2, "HEAD commit is unavailable")
 
-    watched = [*files, "tools/versions.env"]
+    watched = [*files, *additional_inputs, "tools/versions.env"]
     if include_quality_configs:
         watched.extend(
             (
@@ -122,7 +123,10 @@ def fingerprint_candidate(
         )
     )
 
-    for rel in watched:
+    for rel in files:
+        digest.update(f"scope  {rel}\n".encode("utf-8"))
+
+    for rel in sorted(set(watched)):
         target = repo / rel
         try:
             st = target.lstat()
@@ -442,7 +446,21 @@ def _build_plan(
             add_command("artifacts", artifact_graphs, "selected initialized release binary sets", "docker", display=f"make template-init-artifacts ARTIFACT_GRAPHS={artifact_graphs}", heavy=True, docker=True)
 
     if is_true("documentation"):
-        add_command("make", "docs-check", "Markdown changed", "docker", docker=True, host_fallback="lychee")
+        part = report.documentation_part
+        links_selected = bool(part & _surfaces.DocumentationPart.LINKS)
+        reason = {
+            _surfaces.DocumentationPart.LINKS: "relative documentation links selected",
+            _surfaces.DocumentationPart.IMAGE_INPUTS: "image-input watch coverage selected",
+            _surfaces.DocumentationPart.ALL: "relative documentation links and image-input watch coverage selected",
+        }[part]
+        add_command(
+            "make-vars",
+            f"docs-check DOCS_CHECK_PART={part.option}",
+            reason,
+            "docker" if links_selected else "cheap",
+            docker=links_selected,
+            host_fallback="lychee" if links_selected else None,
+        )
 
     if ci_mode == "none":
         if is_true("rust_source") or is_true("cargo_dependencies") or is_true("github_workflows"):
@@ -738,6 +756,37 @@ def run(argv: Sequence[str] | None = None) -> int:
         or report.surfaces.get("quality_tooling")
     )
 
+    self_test_inputs: list[str] = []
+    make_targets = {step.argument for step in steps if step.kind == "make"}
+    if "verify-check" in make_targets:
+        self_test_inputs.extend(
+            (
+                "make/source.mk",
+                "make/template.mk",
+                "scripts/checks/test_make.py",
+                "scripts/harness/test_sync.py",
+                "scripts/image/test_publication.py",
+                "scripts/profiles/grpc_check.sh",
+                "scripts/profiles/integration.sh",
+                "scripts/tests/test_checks_and_image.py",
+                "scripts/tests/test_image_inputs.py",
+                "scripts/tests/test_image_inventory.py",
+                "scripts/tests/test_profile_runners.py",
+                "scripts/tests/test_verify.py",
+            )
+        )
+        if (repo / "make/source.mk").is_file():
+            self_test_inputs.extend(
+                (
+                    "scripts/template/check_init.sh",
+                    "scripts/template/matrix.py",
+                    "scripts/tests/template-init-safety.py",
+                )
+            )
+    elif "publish-image-metadata-check" in make_targets:
+        self_test_inputs.extend(("make/template.mk", "scripts/image/test_publication.py"))
+    input_files = sorted({*files, *self_test_inputs})
+
     try:
         lock_ctx = _lock.hold([sys.executable, os.fspath(SELF), *raw_argv], cwd=repo)
     except _lock.LockError as error:
@@ -749,6 +798,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             candidate = fingerprint_candidate(
                 repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                 merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                additional_inputs=self_test_inputs,
             )
             execution_head = _git_output(repo, "rev-parse", "HEAD")
             if execution_head is None:
@@ -794,6 +844,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                 print(f"verification attempt: {attempt_path}", flush=True)
                 scope_csv = ",".join(files)
+                inputs_csv = ",".join(input_files)
                 started = int(time.time())
 
                 for idx, step in enumerate(steps, start=1):
@@ -809,6 +860,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                         candidate_after = fingerprint_candidate(
                             repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                             merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                            additional_inputs=self_test_inputs,
                         )
                         if candidate_after != candidate:
                             with attempt_path.open("a", encoding="utf-8") as handle:
@@ -831,7 +883,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                             f"candidate: {candidate}\n"
                             f"scope: {scope_csv}\n"
                             f"command: {step.display}\n"
-                            f"inputs: {scope_csv}\n"
+                            f"inputs: {inputs_csv}\n"
                             f"environment: {environment_detail}\n"
                             f"duration: {total_duration}s\n"
                             "status: not_verified\n"
@@ -845,6 +897,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 candidate_after = fingerprint_candidate(
                     repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                     merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                    additional_inputs=self_test_inputs,
                 )
                 if candidate_after != candidate:
                     with attempt_path.open("a", encoding="utf-8") as handle:
@@ -866,7 +919,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                     f"base_ref: {base_ref}\nresolved_base_sha: {resolved_base_sha}\nmerge_base_sha: {merge_base_sha}\n",
                     f"scope: {scope_csv}\n",
                     f"command: make verify [{command_summary}]\n",
-                    f"inputs: {scope_csv}\n",
+                    f"inputs: {inputs_csv}\n",
                     f"environment: {environment_detail}\n",
                     f"duration: {total_duration}s\n",
                 ]
