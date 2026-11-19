@@ -121,11 +121,14 @@ impl Client {
 
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        Self::with_default_transport(policy::admit_origin(origin)?, limits)
+        Self::try_with_default_transport(policy::admit_origin(origin)?, limits)
     }
 
-    fn with_default_transport(origin: policy::Origin, limits: Limits) -> Result<Self, BuildError> {
-        Ok(Self::from_origin(
+    fn try_with_default_transport(
+        origin: policy::Origin,
+        limits: Limits,
+    ) -> Result<Self, BuildError> {
+        Ok(Self::with_transport(
             origin,
             limits,
             transport::tls_config()?.clone(),
@@ -133,7 +136,7 @@ impl Client {
         ))
     }
 
-    fn from_origin(
+    fn with_transport(
         origin: policy::Origin,
         limits: Limits,
         tls: rustls::ClientConfig,
@@ -157,7 +160,7 @@ impl Client {
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        Self::with_default_transport(policy::admit_test_http_origin(origin)?, limits)
+        Self::try_with_default_transport(policy::admit_test_http_origin(origin)?, limits)
     }
 
     pub async fn execute(
@@ -374,7 +377,7 @@ async fn buffer_response(
             break;
         };
         if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
-            append_within(&mut collected, &data, limit);
+            append_with_capacity_cap(&mut collected, &data, limit);
         }
     }
     let buffered = Bytes::from(collected);
@@ -391,10 +394,10 @@ impl From<Stopped> for Error {
     }
 }
 
-fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
+fn append_with_capacity_cap(collected: &mut Vec<u8>, data: &[u8], capacity_cap: usize) {
     let required = collected.len().saturating_add(data.len());
     if required > collected.capacity() {
-        let target = required.max(collected.capacity().saturating_mul(2).min(limit));
+        let target = required.max(collected.capacity().saturating_mul(2).min(capacity_cap));
         collected.reserve_exact(target - collected.len());
     }
     collected.extend_from_slice(data);

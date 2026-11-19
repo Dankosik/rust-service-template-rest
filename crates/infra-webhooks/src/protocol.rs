@@ -191,6 +191,28 @@ pub enum ProtocolError {
 }
 
 impl ProtocolError {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::BodyTooLarge,
+        Self::MissingHeader,
+        Self::ConflictingHeader,
+        Self::InvalidMessageId,
+        Self::InvalidTimestamp,
+        Self::TimestampOutOfWindow,
+        Self::InvalidSignature,
+    ];
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::BodyTooLarge => 0,
+            Self::MissingHeader => 1,
+            Self::ConflictingHeader => 2,
+            Self::InvalidMessageId => 3,
+            Self::InvalidTimestamp => 4,
+            Self::TimestampOutOfWindow => 5,
+            Self::InvalidSignature => 6,
+        }
+    }
+
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
@@ -204,6 +226,14 @@ impl ProtocolError {
         }
     }
 }
+
+const _: () = {
+    let mut index = 0;
+    while index < ProtocolError::ALL.len() {
+        assert!(ProtocolError::ALL[index].index() == index);
+        index += 1;
+    }
+};
 
 pub(crate) fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
     (body.len() <= MAX_BODY_BYTES).ok_or(ProtocolError::BodyTooLarge)
