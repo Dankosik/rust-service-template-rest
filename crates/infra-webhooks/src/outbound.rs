@@ -26,6 +26,10 @@ pub use producer::{JSON_CONTENT_TYPE, OutboundError, Producer};
 const DELIVERY_KIND: &str = "webhooks.deliver";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
+const OUTCOME_DELIVERED: &str = "delivered";
+const OUTCOME_PERMANENT: &str = "permanent";
+const OUTCOME_RETRYABLE: &str = "retryable";
+const REASON_MISSING_ENDPOINT: &str = "missing_endpoint";
 
 pub const WEBHOOK_DELIVERY_OUTCOMES_METRIC: &str = "webhook_delivery_outcomes_total";
 
@@ -141,8 +145,8 @@ impl Dispatcher {
     fn fail_missing_endpoint(&self, endpoint_id: &str) -> JobError {
         tracing::info!(
             webhook.endpoint = endpoint_id,
-            webhook.outcome = "retryable",
-            webhook.reason = "missing_endpoint",
+            webhook.outcome = OUTCOME_RETRYABLE,
+            webhook.reason = REASON_MISSING_ENDPOINT,
             http.status = Option::<u16>::None,
             "webhook_delivery_finished"
         );
@@ -150,12 +154,12 @@ impl Dispatcher {
             .get_or_init(|| {
                 metrics::counter!(
                     WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-                    "outcome" => "retryable",
-                    "reason" => "missing_endpoint"
+                    "outcome" => OUTCOME_RETRYABLE,
+                    "reason" => REASON_MISSING_ENDPOINT
                 )
             })
             .increment(1);
-        JobError::retryable("missing_endpoint")
+        JobError::retryable(REASON_MISSING_ENDPOINT)
     }
 }
 
@@ -279,7 +283,7 @@ impl EndpointOutcomes {
     fn record_delivered(&self, status: StatusCode) {
         tracing::debug!(
             webhook.endpoint = &*self.endpoint,
-            webhook.outcome = "delivered",
+            webhook.outcome = OUTCOME_DELIVERED,
             http.status = status.as_u16(),
             "webhook_delivery_finished"
         );
@@ -288,7 +292,7 @@ impl EndpointOutcomes {
                 metrics::counter!(
                     WEBHOOK_DELIVERY_OUTCOMES_METRIC,
                     "endpoint" => self.endpoint.clone(),
-                    "outcome" => "delivered"
+                    "outcome" => OUTCOME_DELIVERED
                 )
             })
             .increment(1);
@@ -342,7 +346,7 @@ enum DeliveryFailure {
 }
 
 impl DeliveryFailure {
-    const fn from_exchange(error: &HttpError) -> Self {
+    const fn from_http_error(error: &HttpError) -> Self {
         match error {
             HttpError::Timeout => Self::Timeout,
             HttpError::Cancelled => Self::Cancelled,
@@ -388,9 +392,9 @@ impl DeliveryFailure {
 
     const fn outcome(self) -> &'static str {
         if self.is_permanent() {
-            "permanent"
+            OUTCOME_PERMANENT
         } else {
-            "retryable"
+            OUTCOME_RETRYABLE
         }
     }
 
@@ -439,7 +443,7 @@ fn classify_response(
             }
         }
         Err(error) => {
-            let failure = DeliveryFailure::from_exchange(&error);
+            let failure = DeliveryFailure::from_http_error(&error);
             Err((failure, failure.into_job_error()))
         }
     }
