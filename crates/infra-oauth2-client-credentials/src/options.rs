@@ -90,20 +90,20 @@ fn scope_parameter(scopes: &[String]) -> Result<Option<String>, ConfigurationErr
     Ok((!scopes.is_empty()).then(|| scopes.join(" ")))
 }
 
-pub(crate) struct Admitted {
+pub(crate) struct ValidatedOptions {
     pub(crate) options: Options,
     pub(crate) issuer: Url,
     pub(crate) endpoint: Url,
     permits: usize,
 }
 
-impl Admitted {
+impl ValidatedOptions {
     pub(crate) fn into_parts(self) -> (Options, Url, usize) {
         (self.options, self.endpoint, self.permits)
     }
 }
 
-fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
+fn validate_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
     usize::try_from(value)
         .ok()
         .filter(|&permits| permits > 0 && permits <= Semaphore::MAX_PERMITS)
@@ -155,12 +155,12 @@ pub(crate) fn strict_provider_url(raw: &str) -> Option<Url> {
     .then_some(url)
 }
 
-pub(crate) fn admit_options(
+pub(crate) fn validate_options(
     options: Options,
     endpoint_scheme: Scheme,
     issuer_scheme: Scheme,
-) -> Result<Admitted, ConfigurationError> {
-    let permits = admitted_provider_concurrency(options.provider_concurrency)?;
+) -> Result<ValidatedOptions, ConfigurationError> {
+    let permits = validate_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
@@ -173,7 +173,7 @@ pub(crate) fn admit_options(
         return error("private_key", "must be nonempty");
     }
     let endpoint = token_endpoint(&options.token_url, endpoint_scheme, &issuer)?;
-    Ok(Admitted {
+    Ok(ValidatedOptions {
         options,
         issuer,
         endpoint,

@@ -481,7 +481,7 @@ async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges
             assert!(realm.accepts_token(intended, &service).await);
             assert!(!realm.accepts_token(other, &service).await);
         }
-        *catalog.cached() = super::Cached::default();
+        *catalog.lock_cached() = super::Cached::default();
         catalog
             .service_token(acquisition_deadline(&token_context()))
             .await

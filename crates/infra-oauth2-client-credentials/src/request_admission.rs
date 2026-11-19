@@ -10,18 +10,18 @@ pub(crate) enum AdmissionRefusal {
     Acquisition(AcquisitionError),
 }
 
-pub(crate) enum RequestSubject {
+pub(crate) enum RequestAuth {
     None,
     OnBehalfOf(OnBehalfOf),
     AuthorizationConflict,
 }
 
-pub(crate) fn take_request_subject<B>(request: &mut Request<B>) -> RequestSubject {
+pub(crate) fn take_request_auth<B>(request: &mut Request<B>) -> RequestAuth {
     if request.headers().contains_key(AUTHORIZATION) {
-        return RequestSubject::AuthorizationConflict;
+        return RequestAuth::AuthorizationConflict;
     }
     request
         .extensions_mut()
         .remove::<OnBehalfOf>()
-        .map_or(RequestSubject::None, RequestSubject::OnBehalfOf)
+        .map_or(RequestAuth::None, RequestAuth::OnBehalfOf)
 }
