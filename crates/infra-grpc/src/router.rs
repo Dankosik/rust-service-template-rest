@@ -14,7 +14,7 @@ use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
 use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
-use operation_context::{Deadline, OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
@@ -412,22 +412,18 @@ async fn business_call(
     )]
     let outcome = run_in_span(
         async {
-            let outcome = tokio::select! {
-                biased;
-                reason = lifecycle.opening_context.wait_stopped() => match reason {
-                    Stopped::Deadline => return Err(FixedFailure::Deadline.status().into_http()),
-                    Stopped::Cancelled => Err(stopped_status(reason).into_http()),
-                },
-                outcome = open_business(
+            lifecycle
+                .opening_context
+                .run(open_business(
                     &state,
                     &lifecycle.opening_context,
                     started.call_type,
                     request,
                     next,
-                ) => outcome,
-            };
-            check_open(&lifecycle.opening_context)?;
-            outcome
+                ))
+                .await
+                .map_err(|reason| stopped_status(reason).into_http())
+                .and_then(std::convert::identity)
         },
         started.call.span(),
         started.fallback.as_ref(),

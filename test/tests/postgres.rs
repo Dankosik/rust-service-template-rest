@@ -1055,8 +1055,10 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
         std::num::NonZeroU32::new(3).unwrap(),
     )
     .unwrap();
-    let readiness =
-        health::Readiness::new(vec![Box::new(PostgresProbe::new(ours.clone()))], policy);
+    let readiness = health::Readiness::new(
+        vec![health::BoxedProbe::new(PostgresProbe::new(ours.clone()))],
+        policy,
+    );
     let reader = readiness.control().reader();
     let refresher = readiness.prepare().await.unwrap().activate().unwrap();
     assert!(reader.verdict().is_ok());

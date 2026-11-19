@@ -25,8 +25,6 @@ use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_i
 
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
-pub use async_trait::async_trait;
-
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
@@ -202,7 +200,7 @@ impl Receiver {
         let admitted = admit(verifier, headers, body, now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_with_deadline(
+        Box::pin(in_tx_with_deadline(
             &self.pool,
             deadline,
             READ_COMMITTED,
@@ -226,7 +224,7 @@ impl Receiver {
                 enqueue(tx, &incoming).await?;
                 Ok(ReceiptOutcome::Accepted)
             },
-        )
+        ))
         .await
         .map_err(|error| match error {
             ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {

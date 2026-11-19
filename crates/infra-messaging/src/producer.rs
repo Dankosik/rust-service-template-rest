@@ -59,8 +59,8 @@ pub struct PublishAck {
 impl Producer {
     pub async fn publish(
         &self,
-        event: &PreparedEvent,
         context: &OperationContext,
+        event: &PreparedEvent,
     ) -> Result<PublishAck, PublishError> {
         self.publish_after_admission(
             &event.publication(),

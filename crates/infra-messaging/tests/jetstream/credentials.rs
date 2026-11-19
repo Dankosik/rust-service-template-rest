@@ -129,7 +129,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
         .expect("A work has a distinct immutable identity");
     messaging
         .producer()
-        .publish(&work_a, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &work_a)
         .await
         .expect("tuple A receives a broker publication acknowledgment");
     println!("auth_rotation phase=tuple_a_acknowledged");
@@ -179,7 +179,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
         .expect("B work has a distinct immutable identity");
     messaging
         .producer()
-        .publish(&work_b, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &work_b)
         .await
         .expect("tuple B receives a broker publication acknowledgment");
     assert_eq!(

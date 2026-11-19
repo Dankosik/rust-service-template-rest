@@ -1,4 +1,4 @@
-use health::{Probe, ReadinessReader, RefreshPolicy};
+use health::{BoxedProbe, ReadinessReader, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions, HttpContract};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options, Server};
 use infra_telemetry::{Metrics, diagnostics_router};
@@ -8,9 +8,9 @@ use super::WorkerError;
 use crate::background::Background;
 use crate::resources::{Listeners, Resources};
 
-pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
+pub(super) fn readiness_probes(resources: &Resources) -> Vec<BoxedProbe> {
     #[allow(unused_mut, reason = "retained profiles add their probes")]
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    let mut probes: Vec<BoxedProbe> = Vec::new();
     // template:begin jobs:worker-bootstrap-listener-jobs-probe
     probes.extend(super::postgres::probe(resources));
     // template:end jobs:worker-bootstrap-listener-jobs-probe

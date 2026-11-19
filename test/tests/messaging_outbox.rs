@@ -1460,11 +1460,11 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     messaging
         .producer()
         .publish(
-            &event,
             &OperationContext::new(
                 Some(Deadline::at(Instant::now() + WAIT)),
                 CancellationToken::new(),
             ),
+            &event,
         )
         .await
         .expect("first publication ACKs");
@@ -1480,11 +1480,11 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     messaging
         .producer()
         .publish(
-            &event,
             &OperationContext::new(
                 Some(Deadline::at(Instant::now() + WAIT)),
                 CancellationToken::new(),
             ),
+            &event,
         )
         .await
         .expect("same-ID publication after broker window ACKs");
@@ -1630,7 +1630,7 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let original = prepared(&fixture, "fanout-event", "original");
     let publisher = first.0.producer();
     let ack = publisher
-        .publish(&original, &OperationContext::with_timeout(WAIT))
+        .publish(&OperationContext::with_timeout(WAIT), &original)
         .await
         .unwrap();
     wait_for_both_acks(ack.sequence).await;
@@ -1655,7 +1655,7 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     })
     .unwrap();
     let replay = publisher
-        .publish(&redrive, &OperationContext::with_timeout(WAIT))
+        .publish(&OperationContext::with_timeout(WAIT), &redrive)
         .await
         .unwrap();
     assert!(replay.sequence > ack.sequence);
@@ -1724,8 +1724,8 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
     let ack = messaging
         .producer()
         .publish(
-            &event,
             &OperationContext::new(Some(Deadline::at(Instant::now() + WAIT)), cancel.clone()),
+            &event,
         )
         .await
         .unwrap();
@@ -1823,7 +1823,6 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
-#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
     async fn process(
         &self,
@@ -1860,10 +1859,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     let held = Arc::new(HeldWebhookConsumer::default());
     let mut consumers = Consumers::new();
     consumers
-        .bind(
-            WEBHOOK_ENDPOINT,
-            Arc::clone(&held) as Arc<dyn WebhookConsumer>,
-        )
+        .bind(WEBHOOK_ENDPOINT, Arc::clone(&held))
         .expect("first binding");
     let mut webhook_kinds = KindsBuilder::new();
     Processor::new(consumers).register(&mut webhook_kinds);

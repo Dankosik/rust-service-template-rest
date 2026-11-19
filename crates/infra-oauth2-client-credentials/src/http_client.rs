@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, header::AUTHORIZATION};
 use infra_outbound_http::{Client, Error as HttpError};
-use operation_context::{Deadline, OperationContext};
+use operation_context::OperationContext;
 use tokio::time::Instant;
 
 use crate::{
@@ -76,25 +76,13 @@ impl ServiceHttpClient {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Service(&self.tokens),
         )
         .await
@@ -103,9 +91,7 @@ impl ServiceHttpClient {
 
 impl ServiceRequestClient<'_> {
     pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
-        self.client
-            .execute_with_context(request, self.context)
-            .await
+        self.client.execute(self.context, request).await
     }
 }
 
@@ -123,28 +109,14 @@ impl ExchangeHttpClient {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        subject: &OnBehalfOf,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            subject,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
-        subject: &OnBehalfOf,
         context: &OperationContext,
+        request: Request<Bytes>,
+        subject: &OnBehalfOf,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Exchange(&self.tokens, subject),
         )
         .await
@@ -157,9 +129,7 @@ impl ExchangeRequestClient<'_> {
         request: Request<Bytes>,
         subject: &OnBehalfOf,
     ) -> Result<Response<Bytes>, Error> {
-        self.client
-            .execute_with_context(request, subject, self.context)
-            .await
+        self.client.execute(self.context, request, subject).await
     }
 }
 
@@ -190,13 +160,13 @@ impl Grant<'_> {
 
 async fn execute_authenticated(
     resource: &Client,
-    request: Request<Bytes>,
     context: &OperationContext,
+    request: Request<Bytes>,
     grant: Grant<'_>,
 ) -> Result<Response<Bytes>, Error> {
     let has_authorization = request.headers().contains_key(AUTHORIZATION);
     let mut prepared = resource
-        .prepare(request, context)
+        .prepare(context, request)
         .map_err(Error::at_prepare)?;
     let deadline = acquisition_deadline(prepared.context());
     grant.check_active(deadline)?;

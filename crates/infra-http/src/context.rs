@@ -333,15 +333,11 @@ pub(crate) async fn enforce_request_budget(
         context.operation.cancel();
         context.stopped_response(reason, version)
     };
-    let response = tokio::select! {
-        biased;
-        reason = context.operation.wait_stopped() => return stop(reason),
-        response = next.run(request) => response,
-    };
-    if let Some(reason) = context.operation.stopped() {
-        return stop(reason);
-    }
-    response
+    context
+        .operation
+        .run(next.run(request))
+        .await
+        .unwrap_or_else(stop)
 }
 
 fn upload_timeout_response(version: Version) -> Response {

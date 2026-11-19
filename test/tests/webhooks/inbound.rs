@@ -7,7 +7,7 @@ use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
-    Verifier, async_trait,
+    Verifier,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{dsn_for, poll_until};
@@ -528,7 +528,6 @@ struct EffectConsumer {
     release: Notify,
 }
 
-#[async_trait]
 impl Consumer for EffectConsumer {
     async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
         sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
@@ -571,7 +570,7 @@ impl RunningProcessor {
         }
     }
 
-    fn with_consumer(pool: &PgPool, consumer: Arc<dyn Consumer>) -> Self {
+    fn with_consumer(pool: &PgPool, consumer: impl Consumer) -> Self {
         let mut consumers = Consumers::new();
         consumers.bind(ENDPOINT, consumer).expect("first binding");
         Self::start(pool, consumers)
@@ -677,8 +676,7 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
         .expect("consumer effects table");
     accept_for_processing(&pool, "message-stale").await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running =
-        RunningProcessor::with_consumer(&pool, Arc::clone(&consumer) as Arc<dyn Consumer>);
+    let running = RunningProcessor::with_consumer(&pool, Arc::clone(&consumer));
     super::bounded(
         "the consumer effect is pending",
         consumer.entered.notified(),
@@ -742,8 +740,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     .expect("historical accepted job");
     let (proxy, worker) = proxied_pool(&pool).await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running =
-        RunningProcessor::with_consumer(&worker, Arc::clone(&consumer) as Arc<dyn Consumer>);
+    let running = RunningProcessor::with_consumer(&worker, Arc::clone(&consumer));
     super::bounded(
         "the consumer is ready to commit",
         consumer.entered.notified(),

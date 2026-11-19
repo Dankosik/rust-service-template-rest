@@ -76,7 +76,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
         .unwrap();
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .unwrap();
     std::assert_matches!(
@@ -461,7 +461,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         let prepared = fixture.publication.prepare(&event(id)).unwrap();
         messaging
             .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await
             .unwrap();
     }
@@ -574,7 +574,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         .unwrap();
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .unwrap();
     let consumer_probe = consumer.probe();
@@ -671,7 +671,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             let prepared = fixture.publication.prepare(&event(id)).unwrap();
             messaging
                 .producer()
-                .publish(&prepared, &context(deadline(), &cancel))
+                .publish(&context(deadline(), &cancel), &prepared)
                 .await
                 .unwrap();
         }

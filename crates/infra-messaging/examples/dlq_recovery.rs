@@ -575,8 +575,8 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         save(&state_path, &state, Persist::Replace)?;
         match producer
             .publish(
-                &prepared,
                 &OperationContext::from_deadline(Deadline::at(deadline)),
+                &prepared,
             )
             .await
         {

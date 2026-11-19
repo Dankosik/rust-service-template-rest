@@ -15,7 +15,6 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
     task::JoinHandle,
-    time::Instant,
 };
 use tokio_rustls::{
     TlsAcceptor,
@@ -205,8 +204,8 @@ pub(crate) fn url(raw: &str) -> Url {
     Url::parse(raw).expect("fixture URL")
 }
 
-pub(crate) fn deadline() -> Instant {
-    Instant::now() + Duration::from_secs(1)
+pub(crate) fn default_context() -> operation_context::OperationContext {
+    operation_context::OperationContext::with_timeout(Duration::from_secs(1))
 }
 
 pub(crate) fn request() -> Request<Bytes> {
