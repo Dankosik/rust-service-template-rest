@@ -25,6 +25,8 @@ recheck maintenance, licensing, and advisories at adoption time.
 <!-- template:end authn:docs-library-selection-authn-rejection -->
 <!-- template:begin messaging:docs-library-selection-messaging-rejection -->
 - **Messaging schemas and envelopes:** `asyncapi-rust` and `schemars` (introduce a second schema derive alongside `utoipa` without `time` parity); `cloudevents-sdk` (conflicts with the pinned `async-nats` line). Keep `ring` off so the workspace shares one Rustls provider (`aws-lc-rs`), and keep `time/large-dates` enabled so Go-accepted RFC 3339 year-9999 offsets normalize to UTC year 10000 without a custom parser.
+- **JSON depth scanning.** Keep the scalar scanner for mixed message shapes. At 2 KiB on a DigitalOcean c-4, searching for the next quote or escape with `memchr2` made escape-heavy event preparation 60% slower than the baseline. Searching backwards for the last possible opener saved work on plain strings but cost about 10% against the scalar candidate when strings contained many literal openers. Reopen with a representative payload distribution or a change that also helps these cases.
+- **Outbound RFC 3339 validation.** With `time` 0.3.55 in the release build, formatting into a sink took 12.95 ns for a typical UTC timestamp. Replacing the formatter with a UTC year check took 14.11 ns. Recheck this choice if the formatter or toolchain changes.
 <!-- template:end messaging:docs-library-selection-messaging-rejection -->
 
 ## Recorded benchmarks and runtime constraints
