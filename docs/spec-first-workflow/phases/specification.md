@@ -31,8 +31,11 @@ Outcome: Check whether all requirements could pass while the accepted
 user outcome still fails; resolve any such gap.
 
 Necessity: Trace each added requirement to accepted intent or a mandatory
-constraint. Treat research recommendations as evidence, not accepted
-requirements.
+constraint. For an inferred requirement, consider an alternative that omits
+it. Which accepted outcome, guarantee, or constraint would that alternative
+violate? If both alternatives are valid, specify what both must preserve.
+When Intent delegates the choice to Specification, make it within the stated
+limits. Research recommendations supply evidence for that judgment.
 
 Composition: Check interacting rules together through a representative
 user-visible scenario; resolve conflicts in terminology, precedence,
@@ -57,6 +60,11 @@ each materially affected consumer scenario. Identify which outcomes the current
 contract or evidence of supported use establishes as guarantees. If a guarantee
 changes or ends, state what authorizes the change and what a consumer using
 the former behavior will observe.
+
+When an actor relies on a signal to act, establish what the signal promises.
+Could the actor see success while the promised effect is absent? If the actor
+must be able to discover completion, could the effect occur while the actor
+still cannot tell?
 
 Where reasonable readings yield different observable results, state the
 invariant if the contract permits both. Otherwise resolve the choice from
