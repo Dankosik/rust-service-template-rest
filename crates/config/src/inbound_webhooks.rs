@@ -8,17 +8,34 @@ use crate::ValidationError;
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::{Violations, missing, validate_endpoint_id};
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct InboundWebhooksInput {
-    endpoints: BTreeMap<String, InboundWebhookEndpointInput>,
-    #[serde(deserialize_with = "crate::de::secret_map")]
-    secrets: BTreeMap<String, SecretString>,
+pub(crate) struct InboundWebhooksFields<Endpoint, Secrets> {
+    endpoints: BTreeMap<String, Endpoint>,
+    secrets: Secrets,
 }
+
+impl<Endpoint, Secrets: Default> Default for InboundWebhooksFields<Endpoint, Secrets> {
+    fn default() -> Self {
+        Self {
+            endpoints: BTreeMap::new(),
+            secrets: Secrets::default(),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct SecretMap(
+    #[serde(deserialize_with = "crate::de::secret_map")] BTreeMap<String, SecretString>,
+);
+
+pub(crate) type InboundWebhooksInput =
+    InboundWebhooksFields<InboundWebhookEndpointInput, SecretMap>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InboundWebhookEndpointInput {
+pub(crate) struct InboundWebhookEndpointInput {
     #[serde(deserialize_with = "crate::de::string")]
     active_key: String,
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
@@ -44,36 +61,37 @@ impl InboundWebhooksInput {
         violations: &mut Violations,
     ) -> BTreeMap<String, InboundWebhookEndpointConfig> {
         validate_endpoints(&self.endpoints, postgres_enabled, violations);
-        let keys: BTreeMap<_, _> = self
-            .secrets
-            .into_iter()
-            .map(|(reference, secret)| {
-                violations.check(validate_key_ref(
-                    &format!("inbound_webhooks.secrets.{reference}"),
-                    &reference,
-                ));
-                (
+        let mut keys = BTreeMap::new();
+        for (reference, secret) in self.secrets.0 {
+            violations.check(validate_key_ref(
+                &format!("inbound_webhooks.secrets.{reference}"),
+                &reference,
+            ));
+            if !secret.expose_secret().trim().is_empty() {
+                keys.insert(
                     reference.clone(),
                     Arc::new(InboundWebhookKey { reference, secret }),
-                )
-            })
-            .collect();
+                );
+            }
+        }
         let mut bindings = BTreeMap::new();
-        for (id, endpoint) in self.endpoints {
-            let active = resolve_key(&keys, &id, "active_key", &endpoint.active_key);
+        for (endpoint_id, endpoint) in self.endpoints {
+            let active = resolve_key(&keys, &endpoint_id, "active_key", &endpoint.active_key);
             let previous = match endpoint.previous_key {
                 Some(reference) if reference == endpoint.active_key => Err(ValidationError::new(
-                    format!("inbound_webhooks.endpoints.{id}.previous_key"),
+                    format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key"),
                     "must differ from active_key when present",
                 )),
-                Some(reference) => resolve_key(&keys, &id, "previous_key", &reference).map(Some),
+                Some(reference) => {
+                    resolve_key(&keys, &endpoint_id, "previous_key", &reference).map(Some)
+                }
                 None => Ok(None),
             };
             if let (Ok(active_key), Ok(previous_key)) =
-                (violations.take(active), violations.take(previous))
+                (violations.record(active), violations.record(previous))
             {
                 bindings.insert(
-                    id,
+                    endpoint_id,
                     InboundWebhookEndpointConfig {
                         active_key,
                         previous_key,
@@ -87,39 +105,27 @@ impl InboundWebhooksInput {
 
 fn resolve_key(
     keys: &BTreeMap<String, Arc<InboundWebhookKey>>,
-    endpoint: &str,
+    endpoint_id: &str,
     field: &str,
     reference: &str,
 ) -> Result<Arc<InboundWebhookKey>, ValidationError> {
-    let config_key = format!("inbound_webhooks.endpoints.{endpoint}.{field}");
+    let config_key = format!("inbound_webhooks.endpoints.{endpoint_id}.{field}");
     validate_key_ref(&config_key, reference)?;
-    keys.get(reference)
-        .filter(|key| !key.secret.expose_secret().trim().is_empty())
-        .cloned()
-        .ok_or_else(|| {
-            missing(
-                &format!("inbound_webhooks.secrets.{reference}"),
-                &format!("{config_key} references `{reference}`"),
-            )
-        })
+    keys.get(reference).cloned().ok_or_else(|| {
+        missing(
+            &format!("inbound_webhooks.secrets.{reference}"),
+            &format!("{config_key} references `{reference}`"),
+        )
+    })
 }
 
 // template:begin worker:worker-inbound-webhooks
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct WorkerInboundWebhooksInput {
-    #[expect(
-        clippy::zero_sized_map_values,
-        reason = "Serde validates endpoint table fields before the worker retains their names"
-    )]
-    endpoints: BTreeMap<String, WorkerEndpointInput>,
-    #[serde(rename = "secrets")]
-    _secrets: serde::de::IgnoredAny,
-}
+pub(crate) type WorkerInboundWebhooksInput =
+    InboundWebhooksFields<WorkerEndpointInput, serde::de::IgnoredAny>;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-struct WorkerEndpointInput {
+pub(crate) struct WorkerEndpointInput {
     #[serde(rename = "active_key")]
     _active_key: serde::de::IgnoredAny,
     #[serde(rename = "previous_key")]

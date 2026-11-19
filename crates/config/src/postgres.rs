@@ -28,7 +28,7 @@ pub enum PostgresSessionBudgets {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct PostgresFields<Session, Capacity, Deadline, Notifications> {
+pub(crate) struct PostgresFields<Session, MaxConnections, Deadline, Notifications> {
     #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
@@ -47,7 +47,7 @@ pub(crate) struct PostgresFields<Session, Capacity, Deadline, Notifications> {
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
-    max_connections: Capacity,
+    max_connections: MaxConnections,
     /// Enables PostgreSQL LISTEN/NOTIFY for job wakeups. Set to false on producers
     /// and workers using PgBouncer transaction pooling to use periodic polling.
     notifications: Notifications,
@@ -65,9 +65,11 @@ pub(crate) struct SessionBudgetsInput(
 
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct PoolCapacity(#[serde(deserialize_with = "crate::de::unsigned_count")] NonZeroU32);
+pub(crate) struct MaxConnectionsInput(
+    #[serde(deserialize_with = "crate::de::unsigned_count")] NonZeroU32,
+);
 
-impl Default for PoolCapacity {
+impl Default for MaxConnectionsInput {
     fn default() -> Self {
         Self(const { NonZeroU32::new(4).expect("4 is nonzero") })
     }
@@ -94,7 +96,7 @@ impl Default for Notifications {
 }
 
 pub(crate) type PostgresInput =
-    PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredAny, Notifications>;
+    PostgresFields<SessionBudgetsInput, MaxConnectionsInput, IgnoredAny, Notifications>;
 type MigrationPostgresInput = PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny>;
 // template:begin jobs:postgres-operator-input
 pub(crate) type OperatorPostgresInput =
@@ -117,7 +119,7 @@ fn admit_dsn(
 ) -> Result<Option<SecretString>, Rejected> {
     if enabled {
         violations
-            .take(required("postgres.dsn", dsn, "postgres.enabled = true"))
+            .record(required("postgres.dsn", dsn, "postgres.enabled = true"))
             .map(Some)
     } else {
         Ok(None)

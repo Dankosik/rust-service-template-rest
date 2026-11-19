@@ -70,7 +70,7 @@ impl Violations {
         dead_code,
         reason = "removing every profile with conditional input leaves the method without a caller"
     )]
-    pub(crate) fn take<T>(&mut self, result: Result<T, ValidationError>) -> Result<T, Rejected> {
+    pub(crate) fn record<T>(&mut self, result: Result<T, ValidationError>) -> Result<T, Rejected> {
         result.map_err(|error| self.reject(error))
     }
 

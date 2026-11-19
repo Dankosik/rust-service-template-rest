@@ -160,6 +160,45 @@ struct ProviderFields {
 }
 
 impl ProviderFields {
+    fn admit(
+        self,
+        provider: ProviderKind,
+        v: &mut Violations,
+    ) -> Result<Option<ObjectStorageProvider>, Rejected> {
+        match provider {
+            ProviderKind::None => Ok(None),
+            ProviderKind::AmazonS3 => self.admit_amazon_s3(v).map(Some),
+            ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(v).map(Some),
+            ProviderKind::Railway => {
+                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+                refuse_owner(&self.expected_bucket_owner, v);
+                refuse_path_style(self.path_style, v);
+                Ok(Some(ObjectStorageProvider::Railway {
+                    endpoint: endpoint?,
+                    region: optional_text(self.region),
+                }))
+            }
+            ProviderKind::S3Compatible => {
+                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+                refuse_owner(&self.expected_bucket_owner, v);
+                Ok(Some(ObjectStorageProvider::S3Compatible {
+                    endpoint: endpoint?,
+                    region: optional_text(self.region),
+                    path_style: self.path_style,
+                }))
+            }
+            ProviderKind::Local => {
+                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+                refuse_owner(&self.expected_bucket_owner, v);
+                refuse_path_style(self.path_style, v);
+                Ok(Some(ObjectStorageProvider::Local {
+                    endpoint: endpoint?,
+                    region: optional_text(self.region),
+                }))
+            }
+        }
+    }
+
     fn admit_amazon_s3(self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
         v.check(forbidden(
             "object_storage.endpoint",
@@ -192,19 +231,6 @@ impl ProviderFields {
         Ok(ObjectStorageProvider::CloudflareR2 {
             endpoint: endpoint?,
         })
-    }
-
-    fn admit_endpoint_provider(
-        self,
-        provider: ProviderKind,
-        v: &mut Violations,
-    ) -> Result<(String, Option<String>), Rejected> {
-        let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-        refuse_owner(&self.expected_bucket_owner, v);
-        if provider != ProviderKind::S3Compatible {
-            refuse_path_style(self.path_style, v);
-        }
-        Ok((endpoint?, optional_text(self.region)))
     }
 }
 
@@ -251,30 +277,15 @@ impl ObjectStorageInput {
             self.provider == ProviderKind::Local,
             local_development,
         ));
-        let path_style = self.path_style;
-        let provider_fields = ProviderFields {
+        let Some(provider) = ProviderFields {
             endpoint: self.endpoint,
             region: self.region,
             expected_bucket_owner: self.expected_bucket_owner,
-            path_style,
-        };
-        let provider = match self.provider {
-            ProviderKind::None => return Ok(None),
-            ProviderKind::AmazonS3 => provider_fields.admit_amazon_s3(v),
-            ProviderKind::CloudflareR2 => provider_fields.admit_cloudflare_r2(v),
-            ProviderKind::Railway => provider_fields
-                .admit_endpoint_provider(self.provider, v)
-                .map(|(endpoint, region)| ObjectStorageProvider::Railway { endpoint, region }),
-            ProviderKind::S3Compatible => provider_fields
-                .admit_endpoint_provider(self.provider, v)
-                .map(|(endpoint, region)| ObjectStorageProvider::S3Compatible {
-                    endpoint,
-                    region,
-                    path_style,
-                }),
-            ProviderKind::Local => provider_fields
-                .admit_endpoint_provider(self.provider, v)
-                .map(|(endpoint, region)| ObjectStorageProvider::Local { endpoint, region }),
+            path_style: self.path_style,
+        }
+        .admit(self.provider, v)
+        .transpose() else {
+            return Ok(None);
         };
         v.check(non_blank("object_storage.bucket", &self.bucket));
         let credentials = Self::admit_credentials(
@@ -304,7 +315,7 @@ impl ObjectStorageInput {
         match credentials {
             CredentialsKind::AccessKey => {
                 let access_key_id = required_text(v, "object_storage.access_key_id", access_key_id);
-                let secret_access_key = v.take(required(
+                let secret_access_key = v.record(required(
                     "object_storage.secret_access_key",
                     secret_access_key,
                     "object_storage.credentials = access_key",
@@ -341,7 +352,7 @@ impl ObjectStorageInput {
 }
 
 fn required_text(v: &mut Violations, key: &str, value: String) -> Result<String, Rejected> {
-    v.take(non_blank(key, &value).map(|()| value))
+    v.record(non_blank(key, &value).map(|()| value))
 }
 
 fn optional_text(value: String) -> Option<String> {
