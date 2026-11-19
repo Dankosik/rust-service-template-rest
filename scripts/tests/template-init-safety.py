@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,59 @@ sys.dont_write_bytecode = True
 
 def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False, env=env)
+
+
+class SourceMakeGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        source = Path(__file__).resolve().parents[2]
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="source-make-gate-test-")))
+        shutil.copytree(source / "make", self.root / "make")
+        (self.root / "tools").mkdir()
+        shutil.copy2(source / "tools/versions.env", self.root / "tools/versions.env")
+        shutil.copy2(source / "Makefile", self.root / "Makefile")
+        self.scripts = self.root / "scripts/template"
+        self.scripts.mkdir(parents=True)
+
+    def run_make(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, "LC_ALL": "C", "PATH": f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"}
+        env.pop("DATABASE", None)
+        return run(["make", *args], cwd=self.root, env=env)
+
+    def test_verify_check_propagates_initializer_matrix_failure(self) -> None:
+        python = self.root / "bin/python3"
+        python.parent.mkdir()
+        python.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  "-m unittest "*) exit 0 ;;\n'
+            '  "scripts/template/matrix.py --self-test") echo "matrix self-test"; exit "$MATRIX_STATUS" ;;\n'
+            '  *) exit 2 ;;\n'
+            'esac\n',
+            encoding="utf-8",
+        )
+        python.chmod(0o755)
+        (self.scripts / "check_init.sh").write_text('echo "recorder self-test ran"\n', encoding="utf-8")
+
+        failed = self.run_make("verify-check", "MATRIX_STATUS=7")
+        self.assertIn("matrix self-test", failed.stdout, failed.stderr)
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertNotIn("recorder self-test ran", failed.stdout)
+
+        passed = self.run_make("verify-check", "MATRIX_STATUS=0")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("recorder self-test ran", passed.stdout)
+
+    def test_source_make_captures_initializer_inputs_literally(self) -> None:
+        (self.scripts / "init.py").write_text(
+            'import json, os\n'
+            'from pathlib import Path\n'
+            'Path("inputs.json").write_text(json.dumps([os.environ["DESCRIPTION"], os.environ["DATABASE"]]))\n',
+            encoding="utf-8",
+        )
+        description = "Catalog ($5) $(SERVICE_NAME)"
+        result = self.run_make("template-init", "SERVICE_NAME=catalog-api", f"DESCRIPTION={description}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.root / "inputs.json").read_text()), [description, "none"])
 
 
 def state(root: Path) -> str:

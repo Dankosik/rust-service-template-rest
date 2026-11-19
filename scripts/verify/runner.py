@@ -752,6 +752,24 @@ def run(argv: Sequence[str] | None = None) -> int:
         or report.surfaces.get("quality_tooling")
     )
 
+    self_test_inputs: list[str] = []
+    make_targets = {step.argument for step in steps if step.kind == "make"}
+    if "verify-check" in make_targets:
+        self_test_inputs.extend(
+            (
+                "scripts/tests/test_checks_and_image.py",
+                "scripts/checks/test_make.py",
+                "scripts/image/test_publication.py",
+                "scripts/harness/test_sync.py",
+                "make/source.mk",
+            )
+        )
+        if (repo / "make/source.mk").is_file():
+            self_test_inputs.append("scripts/tests/template-init-safety.py")
+    elif "publish-image-metadata-check" in make_targets:
+        self_test_inputs.append("scripts/image/test_publication.py")
+    input_files = sorted({*files, *self_test_inputs})
+
     try:
         lock_ctx = _lock.hold([sys.executable, os.fspath(SELF), *raw_argv], cwd=repo)
     except _lock.LockError as error:
@@ -761,7 +779,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         with lock_ctx as child_env:
             candidate = fingerprint_candidate(
-                repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                 merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
             )
             execution_head = _git_output(repo, "rev-parse", "HEAD")
@@ -808,6 +826,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                 print(f"verification attempt: {attempt_path}", flush=True)
                 scope_csv = ",".join(files)
+                inputs_csv = ",".join(input_files)
                 started = int(time.time())
 
                 for idx, step in enumerate(steps, start=1):
@@ -821,7 +840,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                     if proc.returncode == 0:
                         candidate_after = fingerprint_candidate(
-                            repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                            repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                             merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
                         )
                         if candidate_after != candidate:
@@ -845,7 +864,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                             f"candidate: {candidate}\n"
                             f"scope: {scope_csv}\n"
                             f"command: {step.display}\n"
-                            f"inputs: {scope_csv}\n"
+                            f"inputs: {inputs_csv}\n"
                             f"environment: {environment_detail}\n"
                             f"duration: {total_duration}s\n"
                             "status: not_verified\n"
@@ -857,7 +876,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                 total_duration = int(time.time()) - started
                 candidate_after = fingerprint_candidate(
-                    repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                    repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                     merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
                 )
                 if candidate_after != candidate:
@@ -880,7 +899,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                     f"base_ref: {base_ref}\nresolved_base_sha: {resolved_base_sha}\nmerge_base_sha: {merge_base_sha}\n",
                     f"scope: {scope_csv}\n",
                     f"command: make verify [{command_summary}]\n",
-                    f"inputs: {scope_csv}\n",
+                    f"inputs: {inputs_csv}\n",
                     f"environment: {environment_detail}\n",
                     f"duration: {total_duration}s\n",
                 ]

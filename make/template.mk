@@ -413,7 +413,7 @@ container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEA
 	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/image/scan.sh sbom "$(CONTAINER_IMAGE)" "$(SBOM_OUTPUT)"
 
 publish-image-metadata-check: ## Self-test of the publication naming and tag promotion
-	python3 -m unittest scripts/tests/test_checks_and_image.py -k PublishMetadata
+	python3 -m unittest scripts.image.test_publication.PublishMetadataTests
 
 # template:begin grpc:make-grpc-targets
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@v$(BUF_VERSION)
@@ -494,14 +494,20 @@ install-hooks: ## Run `make verify` before every push from this clone; `git push
 	chmod +x "$$hook"; \
 	echo "install-hooks: $$hook runs make verify before each push"
 
-VERIFY_TEST_MODULES := scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py
+VERIFY_TEST_MODULES := scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py \
+	scripts/checks/test_make.py scripts/image/test_publication.py scripts/harness/test_sync.py \
+	scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py
 # template:begin profile-runner-tests:make-verify-tests
 VERIFY_TEST_MODULES += scripts/tests/test_profile_runners.py
 # template:end profile-runner-tests:make-verify-tests
 
 verify-check: ## Self-test of the verification router, checks, and image scripts
 	python3 -m unittest $(VERIFY_TEST_MODULES)
-	@if test -f make/source.mk; then python3 scripts/template/matrix.py --self-test && bash scripts/template/check_init.sh --self-test; fi
+	@if test -f make/source.mk; then \
+		python3 -m unittest scripts.tests.template-init-safety.SourceMakeGateTests && \
+		python3 scripts/template/matrix.py --self-test && \
+		bash scripts/template/check_init.sh --self-test; \
+	fi
 
 changed-surfaces-check: ## Self-test of the surface classifier
 	python3 -m unittest scripts/tests/test_verify.py -k Surfaces

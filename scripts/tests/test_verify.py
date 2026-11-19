@@ -1167,6 +1167,22 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("  make check-instructions\n", res.stdout)
 
+        for test_file, owner in (
+            ("scripts/tests/test_checks_and_image.py", "make tools-check"),
+            ("scripts/checks/test_make.py", None),
+            ("scripts/image/test_publication.py", "make publish-image-metadata-check"),
+            ("scripts/harness/test_sync.py", "make check-instructions"),
+        ):
+            with self.subTest(test_file=test_file):
+                plan = self._run_verify("--plan", "--files", test_file)
+                self.assertEqual(plan.returncode, 0, plan.stderr)
+                commands = self._plan_section(plan.stdout, "commands").splitlines()
+                self.assertIn("  make verify-check", commands)
+                if owner is not None:
+                    self.assertIn(f"  {owner}", commands)
+                if owner != "make publish-image-metadata-check":
+                    self.assertNotIn("  make publish-image-metadata-check", commands)
+
         for path, expected in (
             ("clippy.toml", True),
             ("Cargo.lock", True),
@@ -1209,6 +1225,10 @@ class VerifyRunnerTests(unittest.TestCase):
         # Ordinary .rs edit routes duplication-check + architecture-check + affected crates, NOT quality-check-self-test or template-quality-projections
         (self.fixture / "make").mkdir(exist_ok=True)
         (self.fixture / "make/source.mk").write_text("", encoding="utf-8")
+        source_plan = self._run_verify("--plan", "--files", "scripts/tests/template-init-safety.py")
+        self.assertEqual(source_plan.returncode, 0, source_plan.stderr)
+        self.assertIn("  make verify-check\n", source_plan.stdout)
+
         res = self._run_verify("--plan", "--files", "crates/leaf/src/lib.rs")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("  make duplication-check\n", res.stdout)
@@ -1459,6 +1479,37 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertEqual(len(remaining_attempts), 20)
         self.assertFalse((verify_dir / "old-00.receipt").exists())
         self.assertFalse((verify_dir / "attempt-old-00.log").exists())
+
+    def test_self_test_changes_invalidate_a_receipt_for_explicit_routing_inputs(self) -> None:
+        with (self.fixture / "Makefile").open("a", encoding="utf-8") as makefile:
+            makefile.write("validation-lock-self-test verify-check python-lint:\n\t@:\n")
+
+        test_files = [
+            self.fixture / relative
+            for relative in (
+                "scripts/checks/test_make.py",
+                "scripts/image/test_publication.py",
+                "scripts/harness/test_sync.py",
+            )
+        ]
+        for path in test_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("import unittest\n", encoding="utf-8")
+
+        args = ("--files", "scripts/tests/test_verify.py")
+        first = self._run_verify(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        reused = self._run_verify(*args)
+        self.assertEqual(reused.returncode, 0, reused.stderr)
+        self.assertIn("reusing exact passing receipt:", reused.stdout)
+
+        for path in test_files:
+            with self.subTest(path=path.relative_to(self.fixture)):
+                path.write_text("from unittest import TestCase\n", encoding="utf-8")
+                checked = self._run_verify(*args)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                self.assertIn("==> make verify-check\n", checked.stdout)
+                self.assertNotIn("reusing exact passing receipt:", checked.stdout)
 
 
 if __name__ == "__main__":

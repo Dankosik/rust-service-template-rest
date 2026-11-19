@@ -508,7 +508,7 @@ def classify_report(
             mark("shell")
         if not _matches(file, "vendor/*") and _matches(file, "*.py", "ruff.toml"):
             mark("python")
-        if _matches(file, ".github/actions/publish-image/*", "scripts/image/publish_metadata.py", "scripts/tests/test_checks_and_image.py"):
+        if _matches(file, ".github/actions/publish-image/*", "scripts/image/publish_metadata.py", "scripts/image/test_publication.py"):
             mark("publication_metadata")
         if _matches(file, ".gitleaks.toml", ".gitleaksignore"):
             mark("secret_scanning")
@@ -556,6 +556,7 @@ def classify_report(
             "scripts/template/state.py", "scripts/template/sync.py", "scripts/template/init.py",
             "scripts/template/profiles.json", "scripts/profiles/integration.sh",
             "scripts/service/changed-surfaces.sh", "scripts/service/runtime-binaries.json",
+            "scripts/checks/test_make.py", "scripts/image/test_publication.py", "scripts/harness/test_sync.py",
             "scripts/tests/test_lock.py", "scripts/tests/test_verify.py",
             "scripts/tests/test_checks_and_image.py", "scripts/tests/test_image_inputs.py",
             "scripts/tests/test_image_inventory.py", "scripts/tests/test_profile_runners.py",
@@ -569,7 +570,7 @@ def classify_report(
             mark("template_engine")
 
         if source_only:
-            if _matches(file, "scripts/template/matrix.py", "scripts/template/check_init.sh"):
+            if _matches(file, "scripts/template/matrix.py", "scripts/template/check_init.sh", "scripts/tests/template-init-safety.py"):
                 mark("validation_system")
 
             if file == "scripts/template/sync.py":
