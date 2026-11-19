@@ -18,7 +18,7 @@ recoverability. Uncommitted or untracked paths stop that removal: name them
 and leave the tree. Closeout does not invent a clean tree.
 
 Use the owning harness or worktree manager's supported retirement operation
-(see [Branches and Worktrees](../../worktrees.md#5-retire-safely-and-sweep-stale-state))
+(see [Branches and Worktrees](../../worktrees.md#5-post-merge-closeout-and-stale-sweeps))
 and verify its result rather than deleting a managed checkout as an ordinary
 directory. If ownership, inactivity, recoverability, or authority is uncertain,
 leave the affected resource and report its locator and retention reason;

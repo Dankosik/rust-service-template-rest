@@ -164,29 +164,59 @@ and host resources. Keep per-worktree state disjoint:
   `api/openapi/service.yaml`, `.sqlx/`) across active branches; regenerate once
   after integration.
 
-## 5. Retire Safely And Sweep Stale State
+## 5. Post-Merge Closeout And Stale Sweeps
 
-Follow [Cleanup](spec-first-workflow/shared/cleanup.md) before retiring any
-task worktree:
+A merged PR is not finished until local `main` is updated and the merged task
+worktree and local branch are retired. Follow
+[Cleanup](spec-first-workflow/shared/cleanup.md):
 
-1. If the branch was merged into `origin/main`, run
-   `python3 scripts/worktree-sync.py sync-main` (or `wt sync-main`) first so
-   local `main` reflects the merge.
-2. Confirm `git status --short` is empty (no uncommitted or untracked work).
-3. Confirm commits are preserved outside the checkout (`git log origin/main..HEAD`
-   is merged, pushed, or captured on a durable ref).
-4. Confirm no live session, background process, or build lock uses the checkout.
-5. Retire via the owning manager and verify completion—never `rm -rf`:
-   - Worktrunk: `wt remove --foreground <branch>` (`--foreground` blocks so you
-     can verify removal; `wt remove` refuses dirty trees without `-f` and
-     retains an unmerged branch without `-D`, though it still removes a clean
-     worktree on an unmerged branch—always verify step 3 first).
-   - Plain Git: `git worktree remove <path>` followed by `git branch -d <branch>`.
-   - Harness-managed worktree: use the harness's retirement operation.
+1. **Merge without `--delete-branch` inside a linked worktree:** run
+   `gh pr merge <PR> --squash` (this repository enables GitHub's
+   `deleteBranchOnMerge`, so GitHub deletes the remote branch without `gh`
+   switching the temporary worktree onto `main`).
+2. **Refresh local `main` from outside the task worktree:** run
+   `python3 scripts/worktree-sync.py sync-main` (or `wt sync-main`).
+3. **Confirm the checkout is clean and idle:** `git status --short` is empty,
+   and no live session, background process, or build lock uses the checkout.
+4. **Retire the merged worktree and local branch immediately—never `rm -rf`:**
+   - **Worktrunk (handles both regular and squash merges):** run from outside
+     the worktree:
+     ```bash
+     wt remove --foreground <branch>
+     ```
+     `--foreground` blocks so you can verify removal; `wt remove` refuses dirty
+     trees without `-f` and deletes the local branch when its commits or
+     squash-merged content are integrated into `main` (retaining unmerged
+     branches without `-D`, though a clean worktree on an unmerged branch is
+     still removed—verify the PR merged first).
+   - **Plain Git or squash-merged PR where `wt remove` reports
+     `retained_unmerged`** (for example, when later commits on `main` edited the
+     same lines): run from outside the worktree (`--pr <PR>` is optional for
+     ancestry merges and required for squash-merged PRs):
+     ```bash
+     python3 scripts/worktree-sync.py retire <branch> [--pr <PR>]
+     ```
+     `retire` refuses the primary worktree, default or target base branch,
+     symbolic refs, duplicate or nested checkouts, locked/dirty/in-progress
+     checkouts, and invocations from inside the target worktree; verifies merge
+     provenance via Git ancestry (`merge-base --is-ancestor`) or exact GitHub PR
+     proof (`state == "MERGED"`, matching `headRefName`, `baseRefName`,
+     `headRefOid == local SHA`, and `mergeCommit.oid` present in `origin/main`);
+     removes the worktree; deletes the verified local branch; and prunes the
+     deleted remote-tracking ref.
+   - **Harness-managed worktree:** use the harness's retirement operation.
 
-**Stale sweeps are one-way doors.** Bulk-removing old worktrees, deleting
-`[origin/...: gone]` local branches, or force-deleting unmerged branches
-requires listing the exact targets and getting explicit user authorization
-([Authority](../AGENTS.md#authority)). `git worktree prune` clears only metadata
-whose directory is already gone; run it only after confirming no live tool is
-recreating that path.
+**Periodic stale sweeps are one-way doors.** To preview older merged worktrees
+and branches across the repository (including squash-merged branches), run:
+
+```bash
+wt step prune --dry-run
+```
+
+`wt step prune` skips locked worktrees, dirty worktrees, the primary checkout,
+and candidates younger than `--min-age` (default `1d`). Present the exact list
+and obtain explicit user authorization ([Authority](../AGENTS.md#authority))
+before running `wt step prune --foreground`, bulk-deleting `[origin/...: gone]`
+local branches, or force-deleting unmerged branches. `git worktree prune` clears
+only metadata whose directory is already gone; run it only after confirming no
+live tool is recreating that path.
