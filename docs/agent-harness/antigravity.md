@@ -17,8 +17,7 @@ gap.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by
-  selecting `orchestrator` as the App's primary agent; the orchestrator skill
-  is hidden from model selection.
+  selecting `orchestrator` as the App's primary agent.
 - Dispatch ready units via `invoke_subagent` with role
   `acceptance-unit-lead` within capacity, consuming [Acceptance
   Result](../spec-first-workflow/interfaces/acceptance-result-v1.md). Never

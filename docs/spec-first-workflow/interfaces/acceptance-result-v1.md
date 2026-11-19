@@ -1,6 +1,6 @@
 # Acceptance Result V1
 
-The unit Lead reports code production. Only the delivery owner reports final
+The unit Lead reports code production. Only the Delivery Owner reports final
 acceptance; a ledger task has no acceptance verdict.
 
 ## Implementation Result
@@ -9,12 +9,23 @@ acceptance; a ledger task has no acceptance verdict.
 unit: <T<ID> or fixed implementation scope>
 verdict: Implemented | Blocked
 candidate: <bounded diff, tree, commit, patch identity, or none if blocked>
-provides: <implemented code or contract; unverified>
+provides: <implemented code or contract; no acceptance claim>
+decisions: <choices the packet left open and how each was closed, deviations from the packet, or none>
+unverified: <assumptions coded without a check, unit tests not yet run and why, or none>
 next_owner: <next implementation owner, or exact missing input and its owner>
 ```
 
-Return Implemented when in-scope code, tests, and cleanup are written and writers
-have joined. [Implementation](../phases/implementation.md#feedback-during-coding)
+Return `Implemented` when the unit meets this bar:
+
+- The packet's Outcome is coded within its Boundary, with the wiring, tests,
+  and cleanup it requires and every placeholder body replaced.
+- The changed Rust crates type-check against the current candidate.
+- Each test the unit added or changed has run once through a focused selector
+  and passes. A test that needs heavy or unavailable infrastructure is named in
+  `unverified` instead.
+- Every lane the Lead started has joined or stopped.
+
+[Checks While Coding](../phases/implementation/unit.md#checks-while-coding)
 owns permitted coding feedback. For a ledger, the Orchestrator follows the
 [Acceptance Transition](../phases/planning/ledger-contract.md#acceptance-transition)
 before unlocking tasks that require the integrated code. After reassignment or
@@ -39,7 +50,7 @@ invalidated_receipts: <evidence invalidated by repair; omit when none>
 next_owner: <exact remaining action and owner, or none>
 ```
 
-Return `Accepted` once [Final Validation](../phases/implementation.md#final-validation)
+Return `Accepted` once [Final Validation](../phases/implementation/final-validation.md)
 passes for the changed surface and explicit additions, blocking findings are
 resolved, and any selected review passes. If the request also includes an
 external outcome, such as green CI or a deployment, its stated success

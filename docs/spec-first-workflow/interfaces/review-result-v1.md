@@ -28,5 +28,5 @@ Implementation finding classification is closed:
 Non-implementation adapters use `PASS | CONCERNS | FAIL`. Implementation uses
 `PASS | FAIL | NEEDS_PARENT`; `NEEDS_PARENT` also names the unverified claim and
 unavailable proof/action owner. An unresolved final delivery boundary returns
-`REVIEW_HANDOFF_INVALID` without a verdict and names the delivery owner that
+`REVIEW_HANDOFF_INVALID` without a verdict and names the Delivery Owner that
 must repair the handoff.

@@ -10,8 +10,9 @@ callable Task fields outrank public prose.
   and use the workspace containing its input files.
   [Cursor subagents](https://cursor.com/docs/subagents#how-subagents-work)
   start without prior conversation history.
-- `/orchestrator` binds the session as Ledger Orchestrator; Cursor reads
-  `.agents/skills` directly.
+- [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
+  binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
+  directly.
 - Dispatch ready units via Task (`subagent_type: "acceptance-unit-lead"`) within
   capacity, consuming [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
   Never substitute `generalPurpose`, `explore`, `shell`, or generic workers;

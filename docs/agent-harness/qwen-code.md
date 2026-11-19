@@ -8,9 +8,10 @@ outrank prose.
 - Start a new [regular subagent](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/#fork-subagent)
   for each preparation phase. Call `agent` with the phase brief and omit
   `subagent_type` to select general-purpose. An explicit `fork` inherits history.
-- `/orchestrator` binds Ledger Orchestrator. Dispatch ready units via `agent`
+- [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
+  binds Ledger Orchestrator. Dispatch ready units via `agent`
   (`subagent_type: "acceptance-unit-lead"`, display name `Agent`, not `task`)
-  within capacity; `.qwen/agents/` loads the role skill and returns
+  within capacity; the `.qwen/agents/` carrier returns
   [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
   `todo_write` mirrors execution only; `tasks.md` owns acceptance.
 - Ordinary named agents nest via `agent` (`model.maxSubagentDepth: 5`);

@@ -8,12 +8,14 @@ Select the smallest non-direct execution path and current decision owner. If
 | Term | Meaning |
 | --- | --- |
 | `Direct Work` | Single-owner local execution under `AGENTS.md` with no workflow artifacts or ledger. |
-| `Unit` | One coherent repository deliverable and its acceptance criteria inside Planning or Implementation. |
-| `Acceptance-Unit Lead` | Session or subagent actor owning one assigned `Unit` (or final delivery validation). |
+| `Unit` | One coherent repository deliverable and its acceptance criteria inside Planning or Implementation. A ledger task is a persisted `Unit`. |
+| `Acceptance-Unit Lead` | Session or subagent actor owning one assigned `Unit`. |
+| `Delivery Owner` | The Lead assigned final validation: it proves the assembled `Candidate` and reports the Completion Result. |
+| `Candidate` | The tree state under work: assembled once every `Unit`'s `Implemented` change is integrated and its writers have joined, fixed while validation or review reads it. |
 | `Ledger Orchestrator` | Single routing owner (`LEDGER_ORCHESTRATOR`) that schedules `Unit`s and writes canonical `tasks.md` state. |
 | `Lane` | Bounded delegated worker (`worker-agent`, `specialist-agent`, `evidence-agent`) executing a strict subset for its parent. |
 | `Ready Frontier` | Set of tasks in `tasks.md` whose consumed contracts, writable scopes, and authority are ready to start immediately. |
-| `Implemented` vs `Accepted` | A Lead reports `Implemented` when its work is ready to integrate. Landing it unlocks consumers of that code. `Accepted` closes the requested scope, including final validation, any required review, and any requested external outcomes. |
+| `Implemented` vs `Accepted` | A Lead reports `Implemented` when its unit meets the [Implemented bar](spec-first-workflow/interfaces/acceptance-result-v1.md#implementation-result). Landing it unlocks consumers of that code. `Accepted` closes the requested scope, including final validation, any required review, and any requested external outcomes. |
 
 ## Path
 

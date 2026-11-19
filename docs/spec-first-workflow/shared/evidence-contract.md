@@ -87,8 +87,9 @@ Attach commit or tree identity only across a checkout or integration boundary;
 the current bounded diff is enough for local work. Retain actual commands,
 inputs, environment, result, and exercised scope, using [Evidence Result
 V1](#evidence-result-v1) for final verification claims.
-[Implementation](../phases/implementation.md#feedback-during-coding) owns coding
-feedback and the single assembled final-validation boundary.
+[Checks While Coding](../phases/implementation/unit.md#checks-while-coding) owns
+coding feedback; [Final Validation](../phases/implementation/final-validation.md)
+owns the single assembled boundary.
 
 Reuse passing scoped evidence when covered code, relevant dependencies, command,
 inputs, and environment are unchanged. A new commit, unrelated documentation
@@ -97,7 +98,7 @@ relevant delta and retain original candidate and scope; never relabel an old
 result as a new run. When relevant equivalence is uncertain, rerun that affected
 check, not unrelated proof.
 
-The delivery owner selects one non-overlapping plan for the local criterion and
+The Delivery Owner selects one non-overlapping plan for the local criterion and
 explicit additions. One result may support several claims. Neither `make plan`,
 `make verify`, nor `ALLOW_FULL=1 make check` is an automatic completion gate.
 When expanded verification is explicitly required, select its matching canonical
