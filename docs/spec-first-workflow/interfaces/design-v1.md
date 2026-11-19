@@ -8,18 +8,18 @@ while leaving internals behind a single module's seam to Implementation.
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
-Basis: [intent.md, ]spec.md | <cited external contract>[, research/<topic>.md ...]
+Basis: <accepted baseline paths, including the fixed external contract when Definition was skipped>[, research/<topic>.md ...]
 Carried concerns: <risk, downstream owner, closing action — from unresolved spec.md Carried concerns (in draft) or review CONCERNS (before ready); omit when none>
 
 ## Obligation trace
 
 | Obligation | Decision / Mechanism | Semantic owner | Proving surface |
 | --- | --- | --- | --- |
-| `spec.md#r1-...` (incl. `Open to Technical Design:`) / `G1` / handoff / durable update / concern | `D1` — <mechanism> or `forced:` <owner> | `<crate>::<module>` | <public endpoint/RPC/worker entry, `S<n>` seam, schema constraint, or durable effect; note required external input> |
+| <external contract clause> / `spec.md#r1-...` (incl. `Open to Technical Design:`) / `G1` / handoff / durable update / concern | `D1` — <mechanism> or `forced:` <owner> | `<crate>::<module>` | <public endpoint/RPC/worker entry, `S<n>` seam, schema constraint, or durable effect; note required external input> |
 
 ## Key decisions
 
-<Omit only when `design.md` is persisted with zero open forks (e.g. alongside a non-trivial `rollout.md`); otherwise see [No-Open-Decisions Exit](../phases/technical-design/non-standard-paths.md#no-open-decisions-exit).>
+<Omit when all mechanisms are forced and a non-trivial rollout requires this artifact.>
 
 ### D1 — <short decision name>
 
@@ -35,15 +35,15 @@ Carried concerns: <risk, downstream owner, closing action — from unresolved sp
 
 ### Flows and source of truth
 
-<Entry -> finality (prefer State × Event or Crossing table); canonical writer; atomic tx scope (zero network I/O in tx); `PK`/`UNIQUE`/`FK`/`CHECK`, nullability/defaults, indexes, pruning/replay, cache rules.>
+<Entry to finality per [System Design](../phases/technical-design/system-design.md), including applicable data and transaction contracts from System Probes #1.>
 
 ### Failure, concurrency, and trust contracts
 
-<Applicable [System Probes](../phases/technical-design/system-probes.md) #2–#5 outputs: error/degradation matrix, `CommitUnknown`/idempotency, cancel/drop before & after commit, serialization + 4-step interleaving witness, trust/redaction bounds.>
+<Record the applicable contracts from [System Probes](../phases/technical-design/system-probes.md) #2–#5.>
 
 ### Budgets, config, and operator signals
 
-<Applicable System Probes #6–#7 outputs: deadline/retry/drain arithmetic + single retry owner, per-unit/concurrency caps & shedding, config rules, bounded-cardinality signals, correlation, readiness/shutdown.>
+<Record the applicable contracts from System Probes #6–#7.>
 
 ## Rollout and mixed-version compatibility
 
@@ -95,8 +95,7 @@ Carried concerns: <risk, downstream owner, closing action — from unresolved sp
 ## Field Rules
 
 - **Proportionality & single home:** size `design.md` to actual open forks—one
-  local choice fits on half a page (`Obligation trace`, `D1`, `S1`, `Grounding
-  and planning handoff`). Omit inapplicable sections rather than writing `N/A`,
+  local choice can fit in one decision record with its trace and handoff. Omit inapplicable sections rather than writing `N/A`,
   split a large inventory into a linked sibling under `design/` only when it
   sharpens review, and link unchanged code, schemas, and `research/*.md`.
   Persist `specs/<task>/rollout.md` only when [Release
@@ -113,7 +112,7 @@ Carried concerns: <risk, downstream owner, closing action — from unresolved sp
   downstream-cited anchors).
 - **Addressability & public seam contracts:** add `D<n>` only for genuine open
   forks and `S<n>` per non-trivial new or changed seam so Planning cites
-  `design/design.md#d1-...` and `#s1-...` directly. Trace every `spec.md`
+  `design/design.md#d1-...` and `#s1-...` directly. Trace every baseline
   obligation and pin exact keys, units, defaults, TTLs, budget formulas, error
   codes, signal names, serialization primitives, and narrow canonical lock
   paths using canonical nouns from `spec.md`, code, and

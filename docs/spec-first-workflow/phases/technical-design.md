@@ -1,10 +1,8 @@
 # Technical Design
 
-Use when structured work has open technical choices—**two-engineer divergence**
-across mechanisms, contracts, failure or trust semantics, rollout paths, or
-seams. Own technical architecture autonomously under [Decision
-Ownership](../../../AGENTS.md#decision-ownership) while preserving `spec.md`'s
-observable behavior.
+Enter from [Phase Selection](../../spec-first-workflow.md#phase-selection) or a
+Specification handoff assigned to Technical Design. Own technical architecture autonomously under [Decision
+Ownership](../../../AGENTS.md#decision-ownership) while preserving accepted observable behavior.
 
 **Boundary rule:** Close every choice that can collide across parallel units,
 alter a caller, wire, schema, config, or operator contract, break an invariant
@@ -22,23 +20,16 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
 
 1. **Ground in primary sources and map the Decision Frontier (static —
    read-only; skip builds, tests, and live services).**
-   - Verify `specs/<task>/intent.md` (when present) is `status: ready`
-     (otherwise exit via [Blocked
-     Exit](technical-design/non-standard-paths.md#blocked-exit) with
-     `reopen_owner: Intake`) and `specs/<task>/spec.md` is `status: ready`
-     (waived only for a skipped-Definition fixed external contract in
-     [Non-Standard Paths](technical-design/non-standard-paths.md); otherwise
-     exit via [Blocked
-     Exit](technical-design/non-standard-paths.md#blocked-exit) with
-     `reopen_owner: Specification`).
-   - Read `specs/<task>/intent.md` (settled decisions `I<n>` including
-     `Binding` strength, `Rejected` options, and `Why`, `Concrete scenarios`,
-     and `Priority / tie-breakers`), `specs/<task>/spec.md`
-     (all obligations:
-     `R<n>` including every `Open to Technical Design:` marker, `G<n>`,
-     `Terminology`, `Non-goals`, `Downstream handoff`, `Durable contract
-     update`, `Decisions, assumptions, and reopen triggers`, and `Carried
-     concerns`), prior `research/*.md`, and `workflow-plan.md` when present.
+   - Establish the accepted baseline from ready `spec.md` and ready
+     `intent.md` when present. For skipped Definition or behavior-preserving
+     work, apply [Non-Standard Paths](technical-design/non-standard-paths.md#behavior-preserving-change-or-skipped-definition).
+     Throughout authoring and review, use the selected baseline wherever a
+     step refers to specification obligations.
+   - Read settled intent (binding strength, rejected options and reasons,
+     scenarios, priorities), baseline obligations (requirements and open
+     markers, preserved guarantees, vocabulary, non-goals, handoffs, durable
+     updates, assumptions, reopen triggers and concerns), prior research, and
+     the workflow plan when present.
    - Verify baseline claims against **primary sources** in three groups
      (offload wide scans to a fresh `evidence-agent` under [Read-Only
      Delegation](../shared/read-only-delegation.md), verifying decision-critical
@@ -72,14 +63,14 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      | Deployable, worker, wire contract, migration, runtime config/trust material, or managed dependency change | [Release Closure](../rubrics/release-closure.md) |
      | Decision-changing static or external evidence gap (code or external contract) | Supporting [Research](research.md) **inside this phase** (inline, or `specs/<task>/research/<topic>.md` when reused downstream) |
 
-   - **Early exits:** route blockers/falsifications to [Blocked
-     Exit](technical-design/non-standard-paths.md#blocked-exit); route zero
-     open forks (with zero unpinned `Open to Technical Design:` identifiers and
-     no non-trivial `rollout.md`) to [No-Open-Decisions
+   - Close concerns assigned to Technical Design or route the missing input to
+     its owner. Carry only bounded risks with a downstream owner and action.
+   - Resolve evidence gaps that can change the route. Send upstream blockers
+     to [Blocked Exit](technical-design/non-standard-paths.md#blocked-exit).
+     If all obligations are forced, terminology is reconciled, and Release
+     Closure needs no non-trivial sequence, take the [No-Open-Decisions
      Exit](technical-design/non-standard-paths.md#no-open-decisions-exit).
-   - *Done when:* every obligation and `Open to Technical Design:` marker is
-     source-verified, the Decision Frontier is classified, and zero
-     decision-changing static gaps remain.
+     Otherwise continue with the open decisions or required rollout.
 
 2. **Close open decisions across triggered branches.** Load only routed
    branches and the design-time skills triggered inside [System
@@ -93,11 +84,9 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      trait, dependency, queue, fallback, or config key, steelman the strongest
      simpler substitute (`extend owner / collapse shallow chain -> std ->
      locked Cargo.lock crate -> maintained OSS -> custom`) and name the exact
-     `R<n>`, `G<n>`, invariant, or bound it breaks. Honor rejected choices in
-     `intent.md` (`I<n>`), `docs/decisions/`, and
-     `docs/backend-library-selection.md` unless their reopen condition is met or
-     the user explicitly requests it, and apply `intent.md`'s `Priority /
-     tie-breakers` on surviving trade-offs.
+     `R<n>`, `G<n>`, invariant, or bound it breaks. Honor [Intent binding rules](../interfaces/intent.md#field-rules) and use
+     requester priorities to break ties. Revisit a rejected repository choice
+     only under its recorded reopen condition or an explicit user request.
    - **Design It Twice:** load [Design It
      Twice](technical-design/design-it-twice.md) for any **one-way door** open
      fork unless existing repository conventions (`docs/decisions/`, sibling
@@ -108,16 +97,15 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      | Uncertainty | Action |
      | --- | --- |
      | Statically checkable in code, `Cargo.lock`, or primary docs | Settle now from primary sources. |
-     | Non-obvious locked crate source genuinely uncached locally | Record in `Assumptions and reopen triggers`, not `Verified anchors`. |
-     | Decision-changing runtime behavior, hard budget, or statically unproved Rust bound | Run an authorized read-only [Research](research.md) probe without mutating repo source, or flag `Planning hooks: integration-first` + concrete `Reopen if`. |
+     | Non-obvious locked crate source genuinely uncached locally | Record a bounded gap in `Assumptions and reopen triggers`. If it could reverse the selected mechanism, obtain primary evidence or reopen the missing input. |
+     | Runtime behavior, hard budget, or statically unproved Rust bound | Use an authorized read-only [Research](research.md) probe when needed. Defer proof with `Planning hooks: integration-first` and a concrete `Reopen if` only for a bounded risk over a closed choice. Route a missing decision-critical input to its owner. |
      | Non-decisive detail behind one seam | Leave open to Implementation. |
 
-   - Falsified `spec.md` or user-owned trade-off → [Blocked
+   - Falsified baseline or user-owned trade-off → [Blocked
      Exit](technical-design/non-standard-paths.md#blocked-exit).
-   - *Done when:* every fork, `Open to Technical Design:` marker, and
-     terminology collision is closed with steelman rationale and objective
-     `Reopen if`, and every relied-on symbol/bound is verified or flagged for
-     `Reopen if` / `integration-first`.
+   - Finish when the baseline has an owner and proving surface for each
+     obligation, shared identifiers are pinned, terminology collisions are
+     resolved, and each genuine fork has a decision per Design V1.
 
 3. **Persist draft artifact(s).** Write `specs/<task>/design/design.md` (and
    `specs/<task>/rollout.md` when [Release
@@ -129,61 +117,30 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      V1`, with zero residual `Blocked decisions`.
 
 4. **Run Author Pre-Flight (static, on-disk files only).** Repair gaps in place:
-   - **Trace & handoff:** every `spec.md` obligation sits in `Obligation trace`
+   - **Trace & handoff:** every baseline obligation sits in `Obligation trace`
      with owner and proving surface; zero `Non-goals` leaked; `Grounding and
      planning handoff` is complete for cold-start Planning.
    - **Walkthrough & witness:** when Rust Architecture triggered, walk every
      `S<n>` caller sketch line-by-line against primary signatures and compile
      reality; when System Design triggered, walk one worst-case failure or
-     interleaving witness using only the written `design.md` and `spec.md`.
+     interleaving witness using only the draft and its accepted baseline.
    - **Deletion & seam purity:** every added mechanism or structure traces to
-     `spec.md` or a steelman `D<n>`; remove internals behind one module's seam,
+     the baseline or a steelman `D<n>`; remove internals behind one module's seam,
      task slicing, or test/command prescriptions.
    - *Done when:* all three checks clear on the on-disk `draft`.
 
-5. **Dispatch and synthesize independent review.** Submit `draft` under
-   [Review](../shared/review.md) to fresh `reviewer-agent` lane(s) running
-   [Technical Design Review](technical-design-review.md) (fresh context window,
-   never forking parent history):
-   - **Brief hygiene:** on initial or fresh reviews, pass strictly the
-     candidate paths (`specs/<task>/design/design.md`, linked `design/*.md`,
-     `rollout.md`), input paths (`intent.md`, `spec.md` or cited external
-     contract, plus `research/*.md` cited in `Basis` or `design/`—omit uncited
-     `research/*.md` from Phase A / Axis 2 briefs so cold-start blindness holds;
-     pass them to Axis 1 in two-axis mode, or let a single reviewer inspect
-     `specs/<task>/research/` in Phase B), assigned axis/checks, and method path
-     (`technical-design-review.md`)—omitting author rationale or "already
-     verified" claims per [Review Lifecycle](../shared/review.md#lifecycle).
-     Bounded delta rechecks add only anchored findings and the repair delta or
-     refuting primary locators.
-   - **Two-axis parallel (2 reviewers):** **both** System Design and Rust
-     Architecture triggered **and** at least one applies: multiple crates or
-     crossings, a **one-way door** fork, or a non-trivial rollout. Dispatch
-     **Axis 1** and **Axis 2** under [Review
-     Topology](technical-design-review.md#review-topology).
-   - **Default (1 reviewer):** all other designs (all applicable checks under
-     [Review Topology](technical-design-review.md#review-topology)).
-   - **On `FAIL`:** handle findings under [Review
-     Lifecycle](../shared/review.md#lifecycle):
-     - *Confirmed `PHASE_DEFECT`:* repair in place, rerun affected step 4
-       checks, and re-run every failed or invalidated axis under [Review
-       Lifecycle](../shared/review.md#lifecycle) (an Axis 1 repair altering
-       seams, types, or handoff surfaces invalidates Axis 2; an Axis 2 repair
-       altering system mechanisms, failure semantics, or scope invalidates Axis
-       1; use a fresh review on any invalidated axis or when repair alters
-       interfaces, boundaries, or risk surface).
-     - *Confirmed `UPSTREAM_GAP`:* preserve clean independent local repairs
-       without another review, then take [Blocked
-       Exit](technical-design/non-standard-paths.md#blocked-exit).
-   - *Done when:* every active axis returns `PASS` or `CONCERNS` on the current
-     candidate (with any surviving disputed finding closed via
-     `adjudicator-agent`), or [Blocked
-     Exit](technical-design/non-standard-paths.md#blocked-exit) returns.
+5. **Dispatch independent review.** Use [Technical Design Review](technical-design-review.md#review-topology)
+   to select lanes and scope their inputs. Apply the [Review Lifecycle](../shared/review.md#lifecycle)
+   to findings. For confirmed local defects, repair the draft and repeat
+   affected pre-flight checks. Changes to Rust seams or handoff invalidate
+   the corresponding cold-start and Rust checks. Changes to system mechanisms,
+   failure semantics or scope invalidate the corresponding system checks.
+   For an upstream gap, preserve independent local repairs and take the
+   [Blocked Exit](technical-design/non-standard-paths.md#blocked-exit).
 
-6. **Finalize and hand off.** Record any bounded review `CONCERNS` in `Carried
-   concerns` and flip `status: ready` per [Design
-   V1](../interfaces/design-v1.md#field-rules), emit [Transition Result
-   V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
-   Technical Design`, `result: specs/<task>/design/design.md`, `review:
-   <locator or inline result>`, `movement_evidence: <review verdict and active
-   carried concerns>`, `reopen_owner: none`, `next_owner: Planning`), and stop.
+6. **Finalize and hand off.** Once review clears, finalize the design and any
+   rollout under [Design V1](../interfaces/design-v1.md#field-rules). Emit a
+   ready [Transition Result V1](../shared/transition.md#transition-result-v1)
+   naming Technical Design as owner, the reviewed design path as result, the
+   review and active concerns as movement evidence, and Planning as next owner.
+   Stop at that handoff.
