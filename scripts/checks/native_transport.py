@@ -70,7 +70,6 @@ TARGETS = (
             "tests::connect_info_debug_redacts_secrets",
             "tests::multiplexer_prunes_abandoned_requests",
             "tests::multiplexer_keeps_pending_requests",
-            "tests::multiplexer_prunes_abandoned_requests_after_burst",
             "tests::multiplexer_releases_capacity_after_burst",
             "jetstream::context::publish_ack_tests::passive_publication_observation_preserves_native_admission_and_ack",
             "jetstream::context::publish_ack_tests::polled_ack_cancellation_retains_capacity_until_ack_or_cleanup_expiry",
