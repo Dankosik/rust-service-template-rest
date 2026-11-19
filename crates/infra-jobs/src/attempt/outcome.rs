@@ -1,4 +1,5 @@
 use compact_str::{CompactString, format_compact};
+use enum_map::Enum;
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
@@ -7,13 +8,51 @@ use super::{AttemptId, ClaimFence, execute_before_deadline};
 use crate::engine::{Operation, WorkerGroup, observe_failure};
 use crate::kind::{
     Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
-    saturating_micros,
+    RetryBudget, RetrySchedule, saturating_micros,
 };
 use crate::state::FailureReason;
 
-const OUTBOX_MAX_RETRY_BASE_SECONDS: i64 = 54;
 const RETRY_JITTER_HALF_DIVISOR: i64 = 10;
 const RETRY_JITTER_SPAN_DIVISOR: i64 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub(super) enum AttemptOutcome {
+    Completed,
+    Timeout,
+    Retry,
+    Snoozed,
+    Cancelled,
+    Permanent,
+    Exhausted,
+}
+
+impl AttemptOutcome {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Timeout => "timeout",
+            Self::Retry => "retry",
+            Self::Snoozed => "snoozed",
+            Self::Cancelled => "cancelled",
+            Self::Permanent => FailureReason::Permanent.as_str(),
+            Self::Exhausted => FailureReason::Exhausted.as_str(),
+        }
+    }
+
+    pub(super) const fn is_span_error(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Retry | Self::Permanent | Self::Exhausted
+        )
+    }
+
+    pub(super) const fn of_failure(reason: FailureReason) -> Self {
+        match reason {
+            FailureReason::Permanent => Self::Permanent,
+            FailureReason::Exhausted => Self::Exhausted,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum Transition {
@@ -36,23 +75,25 @@ pub(super) enum Transition {
 }
 
 impl Transition {
-    pub(super) const COMPLETED_LABEL: &str = "completed";
-
-    pub(super) const fn label(&self) -> &'static str {
+    pub(super) const fn outcome(&self) -> AttemptOutcome {
         match self {
-            Self::Complete(_) => Self::COMPLETED_LABEL,
+            Self::Complete(_) => AttemptOutcome::Completed,
             Self::Retry {
                 cause: RetryCause::Timeout,
                 ..
-            } => "timeout",
+            } => AttemptOutcome::Timeout,
             Self::Retry {
                 cause: RetryCause::Failure,
                 ..
-            } => "retry",
-            Self::Fail { reason, .. } => reason.as_str(),
-            Self::Snooze { .. } => "snoozed",
-            Self::Release => "cancelled",
+            } => AttemptOutcome::Retry,
+            Self::Fail { reason, .. } => AttemptOutcome::of_failure(*reason),
+            Self::Snooze { .. } => AttemptOutcome::Snoozed,
+            Self::Release => AttemptOutcome::Cancelled,
         }
+    }
+
+    pub(super) const fn label(&self) -> &'static str {
+        self.outcome().label()
     }
 }
 
@@ -269,12 +310,12 @@ pub(super) enum HandlerOutcome {
 pub(super) fn map_outcome(
     attempt: &AttemptId,
     policy: Policy,
-    is_outbox: bool,
+    budget: RetryBudget,
     outcome: HandlerOutcome,
 ) -> Transition {
     let number = attempt.number;
     let exhausted = number >= policy.max_attempts;
-    let retry_budget_spent = exhausted && !is_outbox;
+    let retry_budget_spent = exhausted && budget.exhausts_transient();
     let retry_or_exhaust = |spent: bool, summary, cause, floor_micros| {
         let summary = sanitize_summary(summary);
         if spent {
@@ -285,7 +326,7 @@ pub(super) fn map_outcome(
         }
         Transition::Retry {
             summary,
-            base_micros: retry_base_micros(number, is_outbox),
+            base_micros: retry_base_micros(number, policy.retry),
             floor_micros,
             cause,
         }
@@ -346,15 +387,14 @@ pub(super) enum RetryCause {
     Timeout,
 }
 
-fn retry_base_micros(number: u16, is_outbox: bool) -> i64 {
-    let base_seconds = if is_outbox {
-        2_i64
+fn retry_base_micros(number: u16, schedule: RetrySchedule) -> i64 {
+    match schedule {
+        RetrySchedule::Quartic => i64::from(number).pow(4) * 1_000_000,
+        RetrySchedule::Exponential { max_base } => 2_i64
             .saturating_pow(u32::from(number.max(1)))
-            .min(OUTBOX_MAX_RETRY_BASE_SECONDS)
-    } else {
-        i64::from(number).pow(4)
-    };
-    base_seconds * 1_000_000
+            .saturating_mul(1_000_000)
+            .min(saturating_micros(max_base)),
+    }
 }
 
 fn payload_summary(kind: &str, error: &serde_json::Error) -> CompactString {
@@ -400,7 +440,12 @@ mod tests {
             kind: "sample",
             number,
         };
-        map_outcome(&attempt, Policy::default(), false, handler_outcome)
+        map_outcome(
+            &attempt,
+            Policy::default(),
+            RetryBudget::Exhaust,
+            handler_outcome,
+        )
     }
 
     #[test]
@@ -499,17 +544,30 @@ mod tests {
     }
 
     #[test]
-    fn outbox_timeouts_remain_retryable_after_the_budget_and_invalid_work_exhausts() {
+    fn persistent_exponential_timeouts_remain_retryable_and_invalid_work_exhausts() {
         let attempt = AttemptId {
             job_id: ID,
             kind: "sample",
             number: 25,
         };
-        let outcome =
-            |handler_outcome| map_outcome(&attempt, Policy::default(), true, handler_outcome);
+        let policy = Policy {
+            retry: RetrySchedule::Exponential {
+                max_base: Duration::from_secs(54),
+            },
+            ..Policy::default()
+        };
+        let outcome = |handler_outcome| {
+            map_outcome(
+                &attempt,
+                policy,
+                RetryBudget::PersistTransient,
+                handler_outcome,
+            )
+        };
         std::assert_matches!(
             outcome(HandlerOutcome::Timeout),
             Transition::Retry {
+                base_micros: 54_000_000,
                 floor_micros: 0,
                 cause: RetryCause::Timeout,
                 ..

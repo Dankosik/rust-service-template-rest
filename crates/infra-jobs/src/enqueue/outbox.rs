@@ -1,19 +1,49 @@
 use infra_postgres::{Tx, TxMode, observed};
 
 use super::{EnqueueError, encode_payload, is_valid_unique_key, notify_workers_after_commit};
-use crate::{Handler, JobId, JobKind, KindError, Kinds, KindsBuilder, Policy, trace_context};
+use crate::{
+    Handler, JobId, JobKind, KindError, KindName, Kinds, KindsBuilder, Policy, trace_context,
+};
 
-pub const KIND: &str = "publish_domain_event";
+pub const KIND: KindName = KindName::new("publish_domain_event");
 
 #[must_use]
-#[derive(Debug)]
-pub enum Admission {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutboxEnqueued {
     Created,
     Duplicate,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutboxEnqueueError {
+    #[error("payload contains a decoded NUL character")]
+    PayloadContainsNul,
+    #[error("outbox event identity conflicts with its immutable intent or business order")]
     EventIdConflict,
+    #[error("outbox aggregate version is occupied or its predecessor is missing")]
     OrderConflict,
+    #[error(
+        "outbox order requires a 1..=255 byte key without control characters and a positive version"
+    )]
     InvalidOrder,
+    #[error(transparent)]
+    Enqueue(#[from] EnqueueError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutboxReconcileError {
+    #[error("payload contains a decoded NUL character")]
+    PayloadContainsNul,
+    #[error("outbox event identity conflicts with its immutable intent or business order")]
+    EventIdConflict,
+    #[error(
+        "outbox order requires a 1..=255 byte key without control characters and a positive version"
+    )]
+    InvalidOrder,
+    #[error("outbox event has no existing receipt")]
     MissingReceipt,
+    #[error(transparent)]
+    Enqueue(#[from] EnqueueError),
 }
 
 pub fn publisher_kinds<T: JobKind>(
@@ -29,10 +59,8 @@ pub async fn enqueue<T: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     intent: &T,
     order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
-    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
-        return Ok(Admission::InvalidOrder);
-    };
+) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+    let payload = prepare_intent(intent, order)?;
     let (aggregate_key, version) = order.unzip();
     let trace = trace_context::capture();
     let id = JobId::new_v7();
@@ -63,56 +91,87 @@ pub async fn enqueue<T: JobKind>(
             aggregate_key,
             version,
             id.0,
-            KIND,
+            KIND.as_str(),
             trace.trace_parent(),
             trace.trace_state(),
         )
         .execute(&mut *tx),
     )
-    .await?;
+    .await
+    .map_err(EnqueueError::from)?;
     if inserted.rows_affected() == 1 {
-        notify_workers_after_commit(tx, KIND);
-        return Ok(Admission::Created);
+        notify_workers_after_commit(tx, KIND.as_str());
+        return Ok(OutboxEnqueued::Created);
     }
-    Ok(compare_receipt(tx, &payload, order)
-        .await?
-        .into_admission(Admission::OrderConflict))
+    match compare_receipt(tx, &payload, order).await? {
+        ReceiptComparison::Same => Ok(OutboxEnqueued::Duplicate),
+        ReceiptComparison::Different => Err(OutboxEnqueueError::EventIdConflict),
+        ReceiptComparison::Missing => Err(OutboxEnqueueError::OrderConflict),
+    }
 }
 
 pub async fn reconcile<T: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     intent: &T,
     order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
-    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
-        return Ok(Admission::InvalidOrder);
-    };
-    Ok(compare_receipt(tx, &payload, order)
-        .await?
-        .into_admission(Admission::MissingReceipt))
+) -> Result<(), OutboxReconcileError> {
+    let payload = prepare_intent(intent, order)?;
+    match compare_receipt(tx, &payload, order).await? {
+        ReceiptComparison::Same => Ok(()),
+        ReceiptComparison::Different => Err(OutboxReconcileError::EventIdConflict),
+        ReceiptComparison::Missing => Err(OutboxReconcileError::MissingReceipt),
+    }
 }
 
-enum PreparedIntent {
-    Ready(String),
+#[derive(Debug)]
+enum PrepareIntentError {
     InvalidOrder,
+    PayloadContainsNul,
+    Enqueue(EnqueueError),
+}
+
+impl From<EnqueueError> for PrepareIntentError {
+    fn from(error: EnqueueError) -> Self {
+        Self::Enqueue(error)
+    }
+}
+
+impl From<PrepareIntentError> for OutboxEnqueueError {
+    fn from(error: PrepareIntentError) -> Self {
+        match error {
+            PrepareIntentError::InvalidOrder => Self::InvalidOrder,
+            PrepareIntentError::PayloadContainsNul => Self::PayloadContainsNul,
+            PrepareIntentError::Enqueue(error) => Self::Enqueue(error),
+        }
+    }
+}
+
+impl From<PrepareIntentError> for OutboxReconcileError {
+    fn from(error: PrepareIntentError) -> Self {
+        match error {
+            PrepareIntentError::InvalidOrder => Self::InvalidOrder,
+            PrepareIntentError::PayloadContainsNul => Self::PayloadContainsNul,
+            PrepareIntentError::Enqueue(error) => Self::Enqueue(error),
+        }
+    }
 }
 
 fn prepare_intent<T: JobKind>(
     intent: &T,
     order: Option<(&str, i64)>,
-) -> Result<PreparedIntent, EnqueueError> {
+) -> Result<String, PrepareIntentError> {
     if T::NAME != KIND {
-        return Err(EnqueueError::OutboxKind);
+        return Err(EnqueueError::OutboxKind.into());
     }
     if order.is_some_and(|(key, version)| !is_valid_unique_key(key) || version < 1) {
-        return Ok(PreparedIntent::InvalidOrder);
+        return Err(PrepareIntentError::InvalidOrder);
     }
     let payload = encode_payload(intent)?;
     if contains_decoded_nul(&payload) {
-        return Err(EnqueueError::PayloadContainsNul);
+        return Err(PrepareIntentError::PayloadContainsNul);
     }
     serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    Ok(PreparedIntent::Ready(payload))
+    Ok(payload)
 }
 
 fn contains_decoded_nul(payload: &str) -> bool {
@@ -133,16 +192,6 @@ enum ReceiptComparison {
     Same,
     Different,
     Missing,
-}
-
-impl ReceiptComparison {
-    const fn into_admission(self, on_missing: Admission) -> Admission {
-        match self {
-            Self::Same => Admission::Duplicate,
-            Self::Different => Admission::EventIdConflict,
-            Self::Missing => on_missing,
-        }
-    }
 }
 
 async fn compare_receipt(
@@ -176,7 +225,7 @@ async fn compare_receipt(
 
 #[cfg(test)]
 mod tests {
-    use super::{EnqueueError, JobKind, KIND, PreparedIntent, prepare_intent};
+    use super::{JobKind, KIND, KindName, PrepareIntentError, prepare_intent};
 
     #[test]
     fn outbox_admission_distinguishes_literal_escapes_from_nul() {
@@ -184,19 +233,16 @@ mod tests {
         struct Intent(String);
 
         impl JobKind for Intent {
-            const NAME: &'static str = KIND;
+            const NAME: KindName = KIND;
         }
 
         for prefix in ["", "\\", "\\\\"] {
             let literal = Intent(format!(r"{prefix}\u0000"));
-            assert!(matches!(
-                prepare_intent(&literal, None),
-                Ok(PreparedIntent::Ready(_))
-            ));
+            assert!(prepare_intent(&literal, None).is_ok());
             let nul = Intent(format!("\\u0000{prefix}\0"));
             std::assert_matches!(
                 prepare_intent(&nul, None).err(),
-                Some(EnqueueError::PayloadContainsNul)
+                Some(PrepareIntentError::PayloadContainsNul)
             );
         }
     }

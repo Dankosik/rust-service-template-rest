@@ -12,11 +12,10 @@ const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 const RECONNECT_BASE_CAP: Duration = Duration::from_secs(15);
 
-pub(crate) async fn run_listener(
-    primary_group: &WorkerGroup,
-    engine: &Engine,
-    cancel: CancellationToken,
-) {
+type ReconnectBackoff = <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff;
+
+pub(crate) async fn run_listener(engine: &Engine, cancel: CancellationToken) {
+    let primary_group = engine.primary_group();
     let listener_pool = listener_pool(&primary_group.pool);
     let _ =
         Box::pin(cancel.run_until_cancelled(listen(primary_group, engine, &listener_pool))).await;
@@ -40,7 +39,7 @@ fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
     listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
 
-fn reconnect_backoff() -> <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff {
+fn reconnect_backoff() -> ReconnectBackoff {
     backon::ExponentialBuilder::default()
         .with_min_delay(POLL_INTERVAL)
         .with_max_delay(RECONNECT_BASE_CAP)
@@ -49,9 +48,7 @@ fn reconnect_backoff() -> <backon::ExponentialBuilder as backon::BackoffBuilder>
         .build()
 }
 
-fn next_reconnect_delay(
-    backoff: &mut <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff,
-) -> Duration {
+fn next_reconnect_delay(backoff: &mut ReconnectBackoff) -> Duration {
     backoff
         .next()
         .unwrap_or(RECONNECT_MAX_DELAY)

@@ -304,8 +304,13 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         }
     }
     // template:begin jobs:worker-bootstrap-pending-jobs
-    if let Some(error) = jobs::engine_failure(resources).now_or_never() {
-        return Some(error);
+    if resources
+        .work
+        .started_engine
+        .as_ref()
+        .is_some_and(infra_jobs::Started::has_failed)
+    {
+        return Some(WorkerError::EngineStopped);
     }
     // template:end jobs:worker-bootstrap-pending-jobs
     // template:begin messaging:worker-bootstrap-pending-consumer
