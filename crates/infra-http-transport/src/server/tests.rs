@@ -22,18 +22,11 @@ fn options() -> Http1Options {
 }
 
 fn app() -> Router {
-    let handler_1 = || async { "ok" };
-    let handler_2 = || async {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        "late"
-    };
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
-    let routes = Router::new()
-        .route("/ok", get(handler_1))
-        .route("/slow", get(handler_2));
+    let routes = Router::new().route("/ok", get(|| async { "ok" }));
     routes
 }
 
@@ -116,31 +109,45 @@ async fn an_unbounded_drain_budget_drains_completely() {
 
 #[tokio::test]
 async fn in_flight_request_finishes_during_drain() {
-    let server = Server::bind(loopback(), app(), options()).unwrap();
-    let addr = server.local_addr();
-    let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let drained = server.drain(Duration::from_secs(2)).await.unwrap();
-    assert_eq!(drained, Drained::Complete);
-    assert!(slow.await.unwrap().ends_with("late"));
+    let (server, mut peer, release) = pending_request(options()).await;
+    let graceful = server.connection_shutdown.drain.clone();
+    let draining = AbortOnDropHandle::new(tokio::spawn(server.drain(Duration::from_secs(2))));
+    tokio::time::timeout(Duration::from_secs(2), graceful.cancelled())
+        .await
+        .unwrap();
+    release.cancel();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(2), peer.read_to_string(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 "));
+    assert!(response.ends_with("finished"));
+    assert_eq!(draining.await.unwrap().unwrap(), Drained::Complete);
 }
 
-async fn pending_request() -> (Server, TcpStream) {
+async fn pending_request(options: Http1Options) -> (Server, TcpStream, CancellationToken) {
     let entered = Arc::new(tokio::sync::Notify::new());
-    let notify = entered.clone();
-    let handler_1 = move || {
-        let entered = notify.clone();
-        async move {
-            entered.notify_one();
-            std::future::pending::<&'static str>().await
+    let release = CancellationToken::new();
+    let handler = {
+        let entered = entered.clone();
+        let release = release.clone();
+        move || {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                entered.notify_one();
+                release.cancelled().await;
+                "finished"
+            }
         }
     };
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
-    let app = Router::new().route("/pending", get(handler_1));
-    let server = Server::bind(loopback(), app, options()).unwrap();
+    let app = Router::new().route("/pending", get(handler));
+    let server = Server::bind(loopback(), app, options).unwrap();
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -148,7 +155,7 @@ async fn pending_request() -> (Server, TcpStream) {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    (server, peer)
+    (server, peer, release)
 }
 
 async fn assert_peer_closed(mut peer: impl AsyncRead + Unpin) {
@@ -165,14 +172,14 @@ async fn assert_peer_closed(mut peer: impl AsyncRead + Unpin) {
 
 #[tokio::test]
 async fn dropping_server_forces_in_flight_connection_cleanup() {
-    let (server, peer) = pending_request().await;
+    let (server, peer, _) = pending_request(options()).await;
     drop(server);
     assert_peer_closed(peer).await;
 }
 
 #[tokio::test]
 async fn cancelling_drain_forces_in_flight_connection_cleanup() {
-    let (server, peer) = pending_request().await;
+    let (server, peer, _) = pending_request(options()).await;
     let graceful = server.connection_shutdown.drain.clone();
     let draining = tokio::spawn(server.drain(Duration::from_mins(1)));
     tokio::time::timeout(Duration::from_secs(2), graceful.cancelled())
@@ -185,7 +192,7 @@ async fn cancelling_drain_forces_in_flight_connection_cleanup() {
 
 #[tokio::test]
 async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
-    let (mut server, peer) = pending_request().await;
+    let (mut server, peer, _) = pending_request(options()).await;
     let stalled = tokio::spawn(std::future::pending());
     let abort = stalled.abort_handle();
     let accept = std::mem::replace(
@@ -224,7 +231,7 @@ async fn expired_confirmation_reports_a_live_accept_producer_even_with_no_connec
 
 #[tokio::test]
 async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_connections() {
-    let (server, peer) = pending_request().await;
+    let (server, peer, _) = pending_request(options()).await;
     server.accept_loop.abort();
     let failure = tokio::time::timeout(Duration::from_secs(2), server.accept_failure())
         .await
@@ -417,27 +424,11 @@ async fn oversized_header_is_431() {
 #[tokio::test]
 async fn connection_cap_refuses_the_excess() {
     let mut opts = options();
+    opts.header_read_timeout = Duration::from_secs(30);
     opts.connections.max_connections = NonZeroU32::new(1);
-    let server = Server::bind(loopback(), app(), opts).unwrap();
-    let addr = server.local_addr();
-    let first = TcpStream::connect(addr).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut second = TcpStream::connect(addr).await.unwrap();
-    second
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
-        .await
-        .unwrap();
-    let mut buf = Vec::new();
-    let outcome = tokio::time::timeout(Duration::from_secs(2), second.read_to_end(&mut buf)).await;
-    std::assert_matches!(
-        outcome,
-        Ok(Ok(0) | Err(_)),
-        "second connection should be closed: {outcome:?}"
-    );
-    assert!(
-        buf.is_empty(),
-        "refused connection must not receive a response"
-    );
+    let (server, first, _) = pending_request(opts).await;
+    let second = TcpStream::connect(server.local_addr()).await.unwrap();
+    assert_peer_closed(second).await;
     drop(first);
     server.drain(Duration::from_secs(1)).await.unwrap();
 }
