@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -323,6 +324,86 @@ class WorktreeSyncTests(unittest.TestCase):
             diverged = self._run([sys.executable, str(self.SCRIPT), "drift", "--no-fetch"], wt)
             self.assertIn("local_main: diverged from origin/main", diverged.stdout)
             self.assertNotIn("sync-main", diverged.stdout)
+
+    def test_retire_guards_regular_and_squash_merges(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            raw_path = Path(raw)
+            origin, primary, _, wt = self._setup_repo(raw_path)
+
+            # Refuses default branch and unmerged branch without PR proof
+            refuse_main = self._run([sys.executable, str(self.SCRIPT), "retire", "main", "--no-fetch"], primary, check=False)
+            self.assertEqual(refuse_main.returncode, 1)
+            self.assertIn("default branch", refuse_main.stderr)
+
+            (wt / "crates/foo/a.rs").write_text("fn a() { /* feat */ }\n", encoding="utf-8")
+            self._run(["git", "commit", "-qam", "feat commit"], wt)
+            unmerged = self._run([sys.executable, str(self.SCRIPT), "retire", "feat/one", "--no-fetch"], primary, check=False)
+            self.assertEqual(unmerged.returncode, 1)
+            self.assertIn("not an ancestor", unmerged.stderr)
+
+            # Refuses CWD inside target worktree, dirty worktree, and locked worktree
+            inside = self._run([sys.executable, str(self.SCRIPT), "retire", "feat/one", "--no-fetch"], wt, check=False)
+            self.assertEqual(inside.returncode, 1)
+            self.assertIn("inside target worktree", inside.stderr)
+
+            (wt / "untracked.tmp").write_text("wip\n", encoding="utf-8")
+            dirty = self._run([sys.executable, str(self.SCRIPT), "retire", "feat/one", "--no-fetch"], primary, check=False)
+            self.assertEqual(dirty.returncode, 1)
+            self.assertIn("uncommitted or untracked", dirty.stderr)
+            (wt / "untracked.tmp").unlink()
+
+            self._run(["git", "worktree", "lock", str(wt)], primary)
+            locked = self._run([sys.executable, str(self.SCRIPT), "retire", "feat/one", "--no-fetch"], primary, check=False)
+            self.assertEqual(locked.returncode, 1)
+            self.assertIn("locked", locked.stderr)
+            self._run(["git", "worktree", "unlock", str(wt)], primary)
+
+            # Squash-merge verified via gh stub: mismatched OID refuses, exact MERGED OID succeeds & prunes stale remote ref
+            self._run(["git", "push", "-q", "origin", "feat/one"], wt)
+            self._run(["git", "branch", "-q", "-D", "feat/one"], origin)
+            feat_oid = self._run(["git", "rev-parse", "refs/heads/feat/one"], primary).stdout.strip()
+            fake_bin = raw_path / "bin"
+            fake_bin.mkdir()
+            gh_stub = fake_bin / "gh"
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+
+            gh_stub.write_text(
+                '#!/usr/bin/env python3\nimport json\nprint(json.dumps({"state":"MERGED","headRefName":"feat/one","baseRefName":"main","headRefOid":"0"*40}))\n',
+                encoding="utf-8",
+            )
+            gh_stub.chmod(0o755)
+            bad_oid = subprocess.run(
+                [sys.executable, str(self.SCRIPT), "retire", "feat/one", "--pr", "99"],
+                cwd=primary, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(bad_oid.returncode, 1)
+            self.assertIn("does not match local feat/one", bad_oid.stderr)
+
+            gh_stub.write_text(
+                f'#!/usr/bin/env python3\nimport json\nprint(json.dumps({{"state":"MERGED","headRefName":"feat/one","baseRefName":"main","headRefOid":"{feat_oid}"}}))\n',
+                encoding="utf-8",
+            )
+            ok_squash = subprocess.run(
+                [sys.executable, str(self.SCRIPT), "retire", "feat/one", "--pr", "99"],
+                cwd=primary, env=env, capture_output=True, text=True, check=True,
+            )
+            self.assertIn("removed worktree:", ok_squash.stdout)
+            self.assertIn("deleted local branch: feat/one", ok_squash.stdout)
+            self.assertIn("pruned stale remote-tracking ref: origin/feat/one", ok_squash.stdout)
+            self.assertFalse(wt.exists())
+
+            # Regular ancestry merge retires cleanly without --pr
+            wt2 = raw_path / "repo.feat-two"
+            self._run(["git", "worktree", "add", "-q", "--no-track", "-b", "feat/two", str(wt2), "origin/main"], primary)
+            (wt2 / "crates/bar/b.rs").write_text("fn b() { /* two */ }\n", encoding="utf-8")
+            self._run(["git", "commit", "-qam", "feat two"], wt2)
+            self._run(["git", "push", "-q", "origin", "feat/two:main"], wt2)
+            ok_ancestor = self._run([sys.executable, str(self.SCRIPT), "retire", "feat/two"], primary)
+            self.assertIn("ancestor of origin/main", ok_ancestor.stdout)
+            self.assertFalse(wt2.exists())
+            self.assertNotEqual(
+                self._run(["git", "show-ref", "--verify", "--quiet", "refs/heads/feat/two"], primary, check=False).returncode, 0
+            )
 
 
 if __name__ == "__main__":

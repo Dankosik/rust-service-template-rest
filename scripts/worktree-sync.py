@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe default-branch fast-forward and overlap-aware drift checks for Git worktrees."""
+"""Safe default-branch fast-forward, drift checks, and verified post-merge retirement for Git worktrees."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SHARED_ROOT_FILES = frozenset(
@@ -38,6 +39,15 @@ MAX_LISTED_FILES = 20
 
 class GitError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class WorktreeEntry:
+    path: Path
+    branch_ref: str | None
+    is_primary: bool
+    prunable: bool
+    locked: bool
 
 
 def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -83,27 +93,34 @@ def _fetch_remote_branch(root: Path, remote: str, branch: str) -> None:
     _git("fetch", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}", cwd=root)
 
 
-def _find_branch_worktree(root: Path, branch: str) -> tuple[Path, bool] | None:
-    target_ref = f"refs/heads/{branch}"
+def _list_worktrees(root: Path) -> list[WorktreeEntry]:
     raw = _git("worktree", "list", "--porcelain", "-z", cwd=root).stdout
+    entries: list[WorktreeEntry] = []
     current_path: Path | None = None
     current_branch: str | None = None
     prunable = False
+    locked = False
 
-    def match() -> tuple[Path, bool] | None:
-        if current_path is not None and current_branch == target_ref:
-            return current_path, prunable
-        return None
+    def flush() -> None:
+        if current_path is not None:
+            entries.append(
+                WorktreeEntry(
+                    path=current_path,
+                    branch_ref=current_branch,
+                    is_primary=len(entries) == 0,
+                    prunable=prunable,
+                    locked=locked,
+                )
+            )
 
-    for entry in raw.split(b"\x00"):
-        line = os.fsdecode(entry)
+    for raw_line in raw.split(b"\x00"):
+        line = os.fsdecode(raw_line)
         if not line:
-            found = match()
-            if found is not None:
-                return found
+            flush()
             current_path = None
             current_branch = None
             prunable = False
+            locked = False
             continue
         if line.startswith("worktree "):
             current_path = Path(line[len("worktree ") :])
@@ -111,8 +128,19 @@ def _find_branch_worktree(root: Path, branch: str) -> tuple[Path, bool] | None:
             current_branch = line[len("branch ") :]
         elif line.startswith("prunable"):
             prunable = True
+        elif line.startswith("locked"):
+            locked = True
 
-    return match()
+    flush()
+    return entries
+
+
+def _find_branch_worktree(root: Path, branch: str) -> WorktreeEntry | None:
+    target_ref = f"refs/heads/{branch}"
+    for entry in _list_worktrees(root):
+        if entry.branch_ref == target_ref:
+            return entry
+    return None
 
 
 def _short_sha(root: Path, rev: str) -> str:
@@ -143,9 +171,8 @@ def cmd_sync_main(root: Path, remote: str, branch: str) -> int:
 
     if not _ref_exists(root, local_ref):
         if checked_out is not None:
-            wt_path, _ = checked_out
             raise GitError(
-                f"{branch} is checked out as an unborn branch at {wt_path}; refusing to create ref beneath active worktree"
+                f"{branch} is checked out as an unborn branch at {checked_out.path}; refusing to create ref beneath active worktree"
             )
         _git("branch", branch, remote_ref, cwd=root)
         print(f"created local {branch} at {remote_short} ({remote}/{branch})")
@@ -163,15 +190,14 @@ def cmd_sync_main(root: Path, remote: str, branch: str) -> int:
         )
 
     if checked_out is not None:
-        wt_path, prunable = checked_out
-        if prunable or not wt_path.is_dir():
+        if checked_out.prunable or not checked_out.path.is_dir():
             raise GitError(
-                f"{branch} is registered to missing/prunable worktree {wt_path}; inspect worktrees before updating"
+                f"{branch} is registered to missing/prunable worktree {checked_out.path}; inspect worktrees before updating"
             )
-        if _git("status", "--porcelain", "--untracked-files=normal", cwd=wt_path).stdout.strip():
-            raise GitError(f"{branch} is checked out with uncommitted changes at {wt_path}; left untouched")
-        _git("merge", "--ff-only", remote_ref, cwd=wt_path)
-        print(f"fast-forwarded checked-out {branch} at {wt_path}: {local_short} -> {remote_short}")
+        if _git("status", "--porcelain", "--untracked-files=normal", cwd=checked_out.path).stdout.strip():
+            raise GitError(f"{branch} is checked out with uncommitted changes at {checked_out.path}; left untouched")
+        _git("merge", "--ff-only", remote_ref, cwd=checked_out.path)
+        print(f"fast-forwarded checked-out {branch} at {checked_out.path}: {local_short} -> {remote_short}")
         return 0
 
     _git("fetch", ".", f"{remote_ref}:{local_ref}", cwd=root)
@@ -301,6 +327,109 @@ def cmd_drift(root: Path, remote: str, branch: str, default_branch: str, *, fetc
     return 0
 
 
+def _verify_merged_pr(root: Path, pr: str, target_branch: str, target_oid: str, default_branch: str) -> str:
+    try:
+        probe = subprocess.run(
+            ["gh", "pr", "view", pr, "--json", "state,headRefName,headRefOid,baseRefName"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise GitError(f"failed to run gh pr view {pr}: {exc}") from exc
+    if probe.returncode != 0:
+        stderr = probe.stderr.decode("utf-8", errors="replace").strip()
+        raise GitError(stderr or f"gh pr view {pr} exited with {probe.returncode}")
+    try:
+        data = json.loads(probe.stdout.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise GitError(f"invalid JSON from gh pr view {pr}: {exc}") from exc
+    if data.get("state") != "MERGED":
+        raise GitError(f"PR #{pr} state is {data.get('state')!r}, expected 'MERGED'")
+    if data.get("headRefName") != target_branch:
+        raise GitError(f"PR #{pr} head branch is {data.get('headRefName')!r}, expected {target_branch!r}")
+    if data.get("baseRefName") != default_branch:
+        raise GitError(f"PR #{pr} base branch is {data.get('baseRefName')!r}, expected {default_branch!r}")
+    if data.get("headRefOid") != target_oid:
+        raise GitError(
+            f"PR #{pr} merged head {str(data.get('headRefOid', ''))[:9]} does not match local {target_branch} ({target_oid[:9]}); refusing deletion"
+        )
+    return f"PR #{pr} merged at {target_oid[:9]}"
+
+
+def cmd_retire(
+    root: Path,
+    target_branch: str,
+    remote: str,
+    default_branch: str,
+    *,
+    pr: str | None,
+    fetch: bool,
+) -> int:
+    if target_branch == default_branch:
+        raise GitError(f"refusing to retire default branch {default_branch!r}")
+
+    local_ref = f"refs/heads/{target_branch}"
+    if not _ref_exists(root, local_ref):
+        raise GitError(f"local branch {target_branch!r} does not exist")
+
+    wt = _find_branch_worktree(root, target_branch)
+    if wt is not None:
+        if wt.is_primary or (wt.path / ".git").is_dir():
+            raise GitError(f"refusing to remove primary worktree {wt.path}")
+        if wt.locked:
+            raise GitError(f"worktree {wt.path} is locked; refusing removal")
+        if wt.prunable or not wt.path.is_dir():
+            raise GitError(f"worktree {wt.path} is missing/prunable; inspect before retiring {target_branch}")
+        cwd_real = Path.cwd().resolve()
+        wt_real = wt.path.resolve()
+        if cwd_real == wt_real or wt_real in cwd_real.parents:
+            raise GitError(f"current working directory is inside target worktree {wt.path}; run from outside it")
+        if _git("status", "--porcelain", "--untracked-files=normal", cwd=wt.path).stdout.strip():
+            raise GitError(f"worktree {wt.path} has uncommitted or untracked changes; refusing removal")
+
+    if fetch:
+        _fetch_remote_branch(root, remote, default_branch)
+
+    remote_default_ref = f"refs/remotes/{remote}/{default_branch}"
+    if not _ref_exists(root, remote_default_ref):
+        raise GitError(
+            f"missing {remote}/{default_branch}; run without --no-fetch or fetch {remote}/{default_branch} first"
+        )
+
+    target_oid = _git_text("rev-parse", local_ref, cwd=root)
+    target_short = _short_sha(root, local_ref)
+    remote_default_oid = _git_text("rev-parse", remote_default_ref, cwd=root)
+
+    if _is_ancestor(root, target_oid, remote_default_oid):
+        reason = f"ancestor of {remote}/{default_branch}"
+    elif pr is not None:
+        reason = _verify_merged_pr(root, pr, target_branch, target_oid, default_branch)
+    else:
+        raise GitError(
+            f"{target_branch} ({target_short}) is not an ancestor of {remote}/{default_branch}; pass --pr <number> to verify a GitHub squash-merge"
+        )
+
+    if wt is not None:
+        head_oid = _git_text("rev-parse", "HEAD", cwd=wt.path)
+        if head_oid != target_oid:
+            raise GitError(f"worktree {wt.path} HEAD moved during retirement; retry after checking status")
+        _git("worktree", "remove", "--", os.fspath(wt.path), cwd=root)
+        print(f"removed worktree: {wt.path}")
+
+    _git("update-ref", "-d", local_ref, target_oid, cwd=root)
+    print(f"deleted local branch: {target_branch} ({target_short}; {reason})")
+
+    remote_branch_ref = f"refs/remotes/{remote}/{target_branch}"
+    if fetch and _ref_exists(root, remote_branch_ref):
+        remote_probe = _git("ls-remote", "--heads", remote, f"refs/heads/{target_branch}", cwd=root, check=False)
+        if remote_probe.returncode == 0 and not remote_probe.stdout.strip():
+            _git("update-ref", "-d", remote_branch_ref, cwd=root)
+            print(f"pruned stale remote-tracking ref: {remote}/{target_branch}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -314,6 +443,15 @@ def main(argv: list[str] | None = None) -> int:
     drift_parser.add_argument("--branch", default=None, help="Default branch name (default: remote HEAD or main)")
     drift_parser.add_argument("--no-fetch", action="store_true", help="Inspect local refs without running git fetch")
 
+    retire_parser = subparsers.add_parser(
+        "retire", help="Verify a branch is merged, remove its linked worktree, and delete the local branch"
+    )
+    retire_parser.add_argument("target_branch", help="Merged local task branch to retire")
+    retire_parser.add_argument("--pr", default=None, help="GitHub PR number proving a squash-merge at exact HEAD")
+    retire_parser.add_argument("--remote", default="origin", help="Git remote name (default: origin)")
+    retire_parser.add_argument("--branch", default=None, help="Default branch name (default: remote HEAD or main)")
+    retire_parser.add_argument("--no-fetch", action="store_true", help="Inspect local refs without running git fetch")
+
     args = parser.parse_args(argv)
     try:
         root = _repo_root()
@@ -321,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
         branch = args.branch or default_branch
         if args.command == "sync-main":
             return cmd_sync_main(root, args.remote, branch)
-        return cmd_drift(root, args.remote, branch, default_branch, fetch=not args.no_fetch)
+        if args.command == "drift":
+            return cmd_drift(root, args.remote, branch, default_branch, fetch=not args.no_fetch)
+        return cmd_retire(root, args.target_branch, args.remote, branch, pr=args.pr, fetch=not args.no_fetch)
     except GitError as exc:
         print(f"worktree-sync: {exc}", file=sys.stderr)
         return 1

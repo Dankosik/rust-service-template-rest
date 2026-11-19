@@ -67,17 +67,19 @@
   separate concurrent mutable units under [Agent Harness](docs/agent-harness.md)
   (as sibling checkouts outside the repo root or native harness isolation, never
   nested inside the current checkout).
-- **Keep `main` fresh and check drift before landing.** After merging a PR,
-  fetch `origin/main` and fast-forward local `main` safely without force-updating
-  or touching a dirty `main` checkout. Before final validation, PR creation, or
-  merge, check drift and file overlap against `origin/main`, sync when behind on
-  overlapping or shared surfaces (or before landing), and re-run affected
-  validation on the synced tree.
+- **Keep `main` fresh and check drift before landing.** Before final validation,
+  PR creation, or merge, check drift and file overlap against `origin/main`,
+  sync when behind on overlapping or shared surfaces (or before landing), and
+  re-run affected validation on the synced tree. After merging a PR (without
+  `--delete-branch` inside a linked worktree), fetch `origin/main`, fast-forward
+  local `main` safely without force-updating or touching a dirty `main`
+  checkout, and immediately retire your merged worktree and local branch.
 - **Retire safely; leave other worktrees untouched.** Never `rm -rf` a worktree,
   force-remove dirty or unmerged work, or touch another session's worktree or
   branch. Retire only your own clean, preserved worktree when no live session,
   process, or lock uses it, via its owning manager (`wt remove --foreground`,
-  `git worktree remove`, or harness teardown).
+  `scripts/worktree-sync.py retire`, `git worktree remove`, or harness
+  teardown).
 
 ### Decision Ownership
 
