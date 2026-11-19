@@ -20,11 +20,15 @@ systems) can rely on.
 
 1. **Ground in primary sources (static by default — no builds, tests, or
    services).**
+   - Verify `specs/<task>/intent.md` exists and is at `status: ready`; if
+     missing or not `ready`, leave any existing `spec.md` untouched (create no
+     stub) and return [Transition Result
+     V1](../shared/transition.md#transition-result-v1) (`status: blocked`,
+     `owner: Definition`, `result: <missing or unready intent.md>`, `review:
+     none`, `reopen_owner: Intake`, `next_owner: none`).
    - If `specs/<task>/spec.md` already exists, load [Reopen Or Resume From
      Blocked](specification/non-standard-paths.md#reopen-or-resume-from-blocked).
-   - Read `specs/<task>/intent.md` (require `status: ready`; return `status:
-     blocked`, `reopen_owner: Intake` without creating a stub `spec.md` if it is
-     still an unconfirmed `draft`), `specs/<task>/workflow-plan.md` (when
+   - Read `specs/<task>/intent.md`, `specs/<task>/workflow-plan.md` (when
      present), prior `research/*.md`, [Domain
      Vocabulary](../../repo-architecture.md#domain-vocabulary), and primary
      sources: `api/`, code, migrations, config, `template/profiles.json`,
@@ -77,12 +81,13 @@ systems) can rely on.
      evidence owner ([Conflict Or
      Freshness](research-branches.md#conflict-or-freshness)), and carry bounded
      unknowns and `valid as of` refresh triggers into `Reopen if`.
-   - Settle every `intent.md` item (settled interview decisions `I<n>` including
-     their `Binding` strength, `Rejected` exclusions, and `Why` rationale,
-     `Concrete scenarios`, hard constraints and `Must not` prohibitions,
-     `Suggested mechanisms` translated to observable invariants unless
-     mandated, `Priority / tie-breakers`, delegated limits, assumptions `A<n>`,
-     `Terminology`, and `Open questions`) and surfaced fork in order:
+   - Settle every material [Intent](../interfaces/intent.md) obligation and
+     surfaced fork in order—honoring [Intent's `Binding`
+     rules](../interfaces/intent.md#field-rules) (routing primary-source
+     contradictions of `Binding: hard` to [Wrong Premise In
+     Intent](specification/non-standard-paths.md#wrong-premise-in-intent)) and
+     capturing any uncaptured observable goal implied by non-binding `Suggested
+     mechanisms` without enforcing the mechanism:
 
      | Source | Action |
      | --- | --- |
@@ -93,10 +98,10 @@ systems) can rely on.
      | Bounded assumption *(two-way door)* | Cheaply reversible behavioral choice strongly backed by repo convention or RFC SHOULD leaving callers, persisted-data fate, trust/privacy, and external commitments unchanged; add objective `Reopen if` *(e.g. default page limit = 50 matching sibling endpoints)*. |
      | Requester- or policy-owned fork *(one-way door)* | Unsettled choice altering user semantics, compatibility, persisted-data fate, authz/privacy exposure, or money/SLA/external effects *(e.g. cancelling a completed job deletes artifact vs `409`)* → [Blocked Frontier](specification/non-standard-paths.md#blocked-frontier). |
 
-   - *Done when:* all six probes on every touched entity/surface, every
-     `intent.md` item, and every `research/*.md` bounded unknown, conflict, or
-     refresh trigger map to `R<n>`, `G<n>`, `Non-goals`, `Downstream handoff`,
-     `Reopen if`, or `Blocked decisions`.
+   - *Done when:* all six probes on every touched entity/surface are closed or
+     verified vacuously closed, and every material `intent.md` item and
+     `research/*.md` bounded unknown, conflict, or refresh trigger maps to its
+     `spec.md` section (or `Blocked decisions`).
 
 3. **Render draft `spec.md`.** Write `specs/<task>/spec.md` at `status: draft`
    per [Specification V1](../interfaces/spec-v1.md).
@@ -105,11 +110,8 @@ systems) can rely on.
 
 4. **Run Author Pre-Flight (static, on-disk `draft` only).** Repair gaps in
    place:
-   - **Intent & research trace:** every `intent.md` settled decision (`I<n>`
-     respecting `Binding: hard | default` and without reviving any `Rejected`
-     option), `Concrete scenarios`, hard constraint, `Must not` prohibition,
-     assumption (`A<n>`), delegated limit, `Success signal`, `Open question`,
-     and live `research/*.md` unknown/refresh trigger maps to a `spec.md`
+   - **Intent & research trace:** every Step 2 `intent.md` obligation and live
+     `research/*.md` conflict, unknown, or refresh trigger maps to a `spec.md`
      anchor.
    - **Adversarial dry-run:** act as a literal, hostile implementer on the 1–2
      hardest multi-rule/unhappy paths and check every table cell is total—try to
@@ -131,13 +133,12 @@ systems) can rely on.
    under [Review](../shared/review.md) to fresh `reviewer-agent` lane(s) running
    [Specification Review](specification-review.md) with a fresh context window
    (never forking parent history):
-   - **Brief hygiene:** on initial or fresh reviews, pass strictly the candidate
-     path (`specs/<task>/spec.md`), input paths matching the assigned axis
-     (`intent.md`, plus `research/*.md` for Axis 1 or single-reviewer), assigned
-     axis/checks, and method path (`specification-review.md`)—omit author
-     summaries, rationale, or "already verified" claims that break cold-start
-     blindness or anchor the reviewer. Bounded delta rechecks add only the
-     anchored findings and repair delta or refuting primary locators.
+   - **Brief inputs:** per [Review Lifecycle](../shared/review.md#lifecycle),
+     pass strictly the candidate path (`specs/<task>/spec.md`), input paths
+     matching the assigned axis (`intent.md`, plus `research/*.md` for Axis 1 or
+     single-reviewer), assigned axis/checks, and method path
+     (`specification-review.md`). Bounded delta rechecks add only the anchored
+     findings and repair delta or refuting primary locators.
    - **Two-axis parallel (2 reviewers):** use for any multi-surface spec,
      breaking/external compatibility change, or authorization, money, data
      integrity, or concurrent state transitions—dispatch **Axis 1 (Grounding,
@@ -149,10 +150,13 @@ systems) can rely on.
    - **On `FAIL`:** verify citations/witnesses and handle refuted findings under
      [Review Lifecycle](../shared/review.md#lifecycle).
      - *Confirmed `PHASE_DEFECT`:* repair in place, rerun affected step 4
-       checks, and re-run every failed or invalidated axis (an Axis 2 repair
-       altering behavior, baseline claims, or affected surfaces invalidates Axis
-       1; an Axis 1 repair altering rules, guarantees, or scope invalidates Axis
-       2).
+       checks, and recheck under [Review
+       Lifecycle](../shared/review.md#lifecycle)—using a bounded delta recheck
+       only on an axis whose repair stays strictly within its anchored findings
+       without invalidating another axis, and a fresh review on every failed or
+       invalidated axis otherwise (an Axis 2 repair altering behavior, baseline
+       claims, or affected surfaces invalidates Axis 1; an Axis 1 repair
+       altering rules, guarantees, or scope invalidates Axis 2).
      - *Confirmed `UPSTREAM_GAP`:* repair independent local defects first, then
        exit via [Wrong Premise In
        Intent](specification/non-standard-paths.md#wrong-premise-in-intent) or
@@ -162,10 +166,11 @@ systems) can rely on.
      current candidate (or closes via `adjudicator-agent` under [Review
      Lifecycle](../shared/review.md#lifecycle)), or a `blocked` handoff returns.
 
-6. **Finalize and hand off.** Copy bounded `CONCERNS` into `Carried concerns`,
-   flip `status: ready` in `spec.md`, and return [Transition Result
-   V1](../shared/transition.md#transition-result-v1) (`status: ready`,
-   `owner: Definition`, `result: specs/<task>/spec.md`) with `next_owner:
+6. **Finalize and hand off.** Record surviving bounded `CONCERNS` in `Carried
+   concerns` (omit when none), flip `status: ready` in `spec.md`, and return
+   [Transition Result V1](../shared/transition.md#transition-result-v1)
+   (`status: ready`, `owner: Definition`, `result: specs/<task>/spec.md`,
+   `review: <Review Result V1 locator or inline result>`) with `next_owner:
    Technical Design` whenever [Phase
    Selection](../../spec-first-workflow.md#phase-selection) triggers Technical
    Design, any `Open to Technical Design:` clause exists, or a `Downstream
