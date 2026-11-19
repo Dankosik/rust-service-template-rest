@@ -164,20 +164,7 @@ pub(crate) async fn serve(
         config.http.grace_period,
     ));
     if let Ended::Failure(error) = &ended {
-        if resources.logger.is_some() {
-            #[allow(
-                unused_variables,
-                reason = "retained messaging supplies the failure kind"
-            )]
-            let failure_kind: Option<&str> = None;
-            // template:begin messaging:worker-bootstrap-log-consumer-failure
-            let failure_kind =
-                matches!(error, WorkerError::ConsumerStopped(_)).then_some("consumer_stopped");
-            // template:end messaging:worker-bootstrap-log-consumer-failure
-            tracing::error!(failure.kind = failure_kind, error = %error, "jobs worker failed");
-        } else {
-            crate::report_failure(error);
-        }
+        report_worker_failure(error, resources.logger.is_some());
     }
     let outcome = shutdown::run(shutdown::Plan {
         http: &config.http,
@@ -193,6 +180,23 @@ pub(crate) async fn serve(
     }
 }
 
+fn report_worker_failure(error: &WorkerError, has_logger: bool) {
+    if has_logger {
+        #[allow(
+            unused_variables,
+            reason = "retained messaging supplies the failure kind"
+        )]
+        let failure_kind: Option<&str> = None;
+        // template:begin messaging:worker-bootstrap-log-consumer-failure
+        let failure_kind =
+            matches!(error, WorkerError::ConsumerStopped(_)).then_some("consumer_stopped");
+        // template:end messaging:worker-bootstrap-log-consumer-failure
+        tracing::error!(failure.kind = failure_kind, error = %error, "jobs worker failed");
+    } else {
+        crate::report_failure(error);
+    }
+}
+
 async fn run_worker(
     config: &WorkerConfig,
     register: Register<'_>,
@@ -200,6 +204,19 @@ async fn run_worker(
     background: &Background,
     resources: &mut Resources,
 ) -> Ended {
+    match start_worker(config, register, signals, background, resources).await {
+        Ok(()) => wait_for_stop(resources, background, signals).await,
+        Err(ended) => ended,
+    }
+}
+
+async fn start_worker(
+    config: &WorkerConfig,
+    register: Register<'_>,
+    signals: &mut Signals,
+    background: &Background,
+    resources: &mut Resources,
+) -> Result<(), Ended> {
     let prepared = {
         let admission = prepare(config, register, background, resources);
         tokio::pin!(admission);
@@ -209,32 +226,18 @@ async fn run_worker(
             task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
             result = &mut admission => result.map_err(Ended::Failure),
         }
-    };
-    let prepared = match prepared {
-        Ok(prepared) => prepared,
-        Err(ended) => return pending_failure(resources, background).map_or(ended, Ended::Failure),
-    };
-    if let Some(ended) = pending_end(resources, background, signals) {
-        return ended;
     }
+    .map_err(|ended| pending_failure(resources, background).map_or(ended, Ended::Failure))?;
+    check_pending_end(resources, background, signals)?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
-    if let Some(ended) = jobs::start_engine(prepared.engine, resources, background, signals) {
-        return ended;
-    }
+    jobs::start_engine(prepared.engine, resources, background, signals)?;
     // template:end jobs:worker-bootstrap-start-admitted-jobs
     // template:begin messaging:worker-bootstrap-start-admitted-consumer
-    if let Some(ended) =
-        messaging::start_consumer(prepared.consumer, resources, background, signals)
-    {
-        return ended;
-    }
+    messaging::start_consumer(prepared.consumer, resources, background, signals)?;
     // template:end messaging:worker-bootstrap-start-admitted-consumer
-    if let Err(ended) = activate_readiness(prepared.readiness, resources, background, signals).await
-    {
-        return ended;
-    }
+    activate_readiness(prepared.readiness, resources, background, signals).await?;
     tracing::info!("jobs_worker_ready");
-    wait_for_stop(resources, background, signals).await
+    Ok(())
 }
 
 async fn activate_readiness(
@@ -248,9 +251,7 @@ async fn activate_readiness(
         ended = wait_for_stop(resources, background, signals) => return Err(ended),
         result = readiness.ensure_fresh() => result,
     };
-    if let Some(ended) = pending_end(resources, background, signals) {
-        return Err(ended);
-    }
+    check_pending_end(resources, background, signals)?;
     let refresher = fresh
         .and_then(|()| readiness.activate())
         .map_err(|error| Ended::Failure(WorkerError::Admission(error)))?;
@@ -270,18 +271,18 @@ fn signal_ended(result: Result<(), SignalError>, background: &Background) -> End
     }
 }
 
-fn pending_end(
+fn check_pending_end(
     resources: &Resources,
     background: &Background,
     signals: &mut Signals,
-) -> Option<Ended> {
+) -> Result<(), Ended> {
     if let Some(error) = pending_failure(resources, background) {
-        return Some(Ended::Failure(error));
+        return Err(Ended::Failure(error));
     }
     match signals.take_pending() {
-        Ok(false) => None,
-        Ok(true) => Some(Ended::Signal),
-        Err(error) => Some(Ended::Failure(error.into())),
+        Ok(false) => Ok(()),
+        Ok(true) => Err(Ended::Signal),
+        Err(error) => Err(Ended::Failure(error.into())),
     }
 }
 
@@ -325,18 +326,7 @@ async fn prepare(
     let identity = worker_identity(&config.observability.otel.service_name);
     let (metrics, exporter_state) =
         telemetry::install_observability(config, &identity, resources).await?;
-    let connection_caps = config.finite_listener_connection_caps();
-    match rlimit::increase_nofile_limit(u64::MAX) {
-        Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
-        Ok(open_file_limit) if open_file_limit < connection_caps => {
-            tracing::warn!(
-                open_file_limit,
-                connection_caps,
-                "open_file_limit_below_connection_caps"
-            );
-        }
-        Ok(_) => {}
-    }
+    raise_open_file_limit(config.finite_listener_connection_caps());
     install_panic_hook();
     // template:begin webhooks:worker-bootstrap-webhook-tls
     if !config.webhooks.endpoints.is_empty() {
@@ -356,7 +346,7 @@ async fn prepare(
     );
     telemetry::spawn_metrics_tasks(&metrics, background);
     // template:begin jobs:worker-bootstrap-pool-config
-    let postgres = postgres::pool_config(config, capabilities.jobs.is_some())?;
+    let postgres = postgres::validate_pool_config(config, capabilities.jobs.is_some())?;
     // template:end jobs:worker-bootstrap-pool-config
     // template:begin outbox:worker-bootstrap-outbox-pool-inputs
     if capabilities.messages.is_none() {
@@ -400,6 +390,20 @@ async fn prepare(
         consumer,
         // template:end messaging:worker-bootstrap-prepared-consumer-value
     })
+}
+
+fn raise_open_file_limit(connection_caps: u64) {
+    match rlimit::increase_nofile_limit(u64::MAX) {
+        Err(error) => tracing::warn!(error = %error, "open_file_limit_unchanged"),
+        Ok(open_file_limit) if open_file_limit < connection_caps => {
+            tracing::warn!(
+                open_file_limit,
+                connection_caps,
+                "open_file_limit_below_connection_caps"
+            );
+        }
+        Ok(_) => {}
+    }
 }
 
 async fn prepare_readiness(
@@ -458,7 +462,7 @@ fn register_capabilities(
         // template:end outbox:worker-bootstrap-postgres-messages-value
         // template:begin messaging:worker-bootstrap-plan-messaging
     };
-    let messages = messaging::MessagingPlan::retain(config, messages)?;
+    let messages = messaging::MessagingPlan::consumer(config, messages)?;
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-plan-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration

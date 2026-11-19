@@ -210,7 +210,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         .unwrap();
         let (registration, retained_client) = lifetime.await.unwrap();
         assert!(registration.upgrade().is_some());
-        let address = serving.app_listener.as_ref().unwrap().local_addr();
+        let address = serving.http_server.as_ref().unwrap().local_addr();
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(assert_resource_unavailable(address), async {
                 tokens

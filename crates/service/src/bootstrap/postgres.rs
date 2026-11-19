@@ -1,18 +1,16 @@
 use super::background::Background;
 use infra_postgres::{Dsn, PgPool, PoolOptions, SessionSettingsSource};
 use secrecy::ExposeSecret;
-use service_config::Config;
+use service_config::{Config, PostgresConfig};
 
 use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 
-pub(super) async fn open(
+pub(super) async fn open<'a>(
+    postgres: &PostgresConfig,
     config: &Config,
     background: &mut Background,
-    retained: &mut Option<PgPool>,
-) -> Result<(), BootstrapError> {
-    let Some(postgres) = &config.postgres else {
-        return Ok(());
-    };
+    retained: &'a mut Option<PgPool>,
+) -> Result<&'a PgPool, BootstrapError> {
     let raw = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
     let local_development = config.app.is_local_development();
@@ -65,5 +63,5 @@ pub(super) async fn open(
             )
         });
     }
-    Ok(())
+    Ok(&*pool)
 }

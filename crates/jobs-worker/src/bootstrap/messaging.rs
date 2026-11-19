@@ -9,7 +9,7 @@ use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{Ended, WorkerError, pending_end, worker_identity};
+use super::{Ended, WorkerError, check_pending_end, worker_identity};
 use crate::background::Background;
 use crate::resources::{BrokerResource, Resources};
 use crate::signals::Signals;
@@ -19,24 +19,23 @@ const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) struct RetainedMessages {
     pub(super) registry: MessagingRegistry,
     // template:begin outbox:worker-bootstrap-postgres-messages-field
-    pub(super) postgres_messages: Option<crate::PostgresMessages>,
+    pub(super) postgres_messages: Option<crate::PostgresMessageFactory>,
     // template:end outbox:worker-bootstrap-postgres-messages-field
 }
 
 pub(super) struct MessagingPlan {
     options: MessagingOptions,
-    consumer: Option<RetainedMessages>,
+    retained_messages: Option<RetainedMessages>,
 }
 
 impl MessagingPlan {
-    pub(super) fn retain(
+    pub(super) fn consumer(
         config: &WorkerConfig,
         messages: RetainedMessages,
     ) -> Result<Option<Self>, WorkerError> {
-        messages.registry.check_publication_limit(
-            usize::try_from(config.messaging.max_payload_bytes.as_u64())
-                .map_err(|_| WorkerError::MessagingPayloadBound)?,
-        )?;
+        messages
+            .registry
+            .check_publication_limit(max_payload_bytes(config)?)?;
         let consumes_messages = messages.registry.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
         let consumes_messages = consumes_messages || messages.postgres_messages.is_some();
@@ -55,7 +54,7 @@ impl MessagingPlan {
         };
         Ok(Some(Self {
             options: messaging_options(config, keys.source_stream, Some(consumer))?,
-            consumer: Some(messages),
+            retained_messages: Some(messages),
         }))
     }
 
@@ -64,7 +63,7 @@ impl MessagingPlan {
         let source_stream = config.messaging.producer_source_stream()?;
         Ok(Self {
             options: messaging_options(config, source_stream, None)?,
-            consumer: None,
+            retained_messages: None,
         })
     }
     // template:end outbox:worker-bootstrap-outbox-messaging
@@ -75,10 +74,13 @@ pub(super) async fn connect_messaging(
     cancel: &CancellationToken,
     resources: &mut Resources,
 ) -> Result<Option<Consumer>, WorkerError> {
-    let MessagingPlan { options, consumer } = plan;
+    let MessagingPlan {
+        options,
+        retained_messages,
+    } = plan;
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
-    let mut consumer = consumer;
-    if let Some(messages) = &mut consumer {
+    let mut retained_messages = retained_messages;
+    if let Some(messages) = &mut retained_messages {
         messages.activate_postgres_messages(resources)?;
         messages
             .registry
@@ -94,26 +96,27 @@ pub(super) async fn connect_messaging(
         return Err(MessagingError::Connection.into());
     };
     let messaging = startup.admit().await?;
-    drop(
-        resources
-            .broker
-            .replace(BrokerResource::Admitted(messaging)),
-    );
+    resources.broker = Some(BrokerResource::Admitted(messaging));
     let messaging = resources
         .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
-    if let Some(registration) = consumer {
+    if let Some(messages) = retained_messages {
         Ok(Some(
             messaging
-                .consumer(registration.registry, deadline, cancel)
+                .consumer(messages.registry, deadline, cancel)
                 .await?,
         ))
     } else {
         Ok(None)
     }
+}
+
+fn max_payload_bytes(config: &WorkerConfig) -> Result<usize, WorkerError> {
+    usize::try_from(config.messaging.max_payload_bytes.as_u64())
+        .map_err(|_| WorkerError::MessagingPayloadBound)
 }
 
 fn messaging_options(
@@ -133,8 +136,7 @@ fn messaging_options(
         allow_plaintext: messaging.plaintext_admitted(),
         tls_first: messaging.tls_first,
         source_stream: source_stream.to_owned(),
-        max_payload_bytes: usize::try_from(messaging.max_payload_bytes.as_u64())
-            .map_err(|_| WorkerError::MessagingPayloadBound)?,
+        max_payload_bytes: max_payload_bytes(config)?,
         consumer,
     })
 }
@@ -149,14 +151,14 @@ pub(super) fn start_consumer(
     resources: &mut Resources,
     background: &Background,
     signals: &mut Signals,
-) -> Option<Ended> {
-    let consumer = consumer?;
-    if let Some(ended) = pending_end(resources, background, signals) {
-        return Some(ended);
-    }
+) -> Result<(), Ended> {
+    let Some(consumer) = consumer else {
+        return Ok(());
+    };
+    check_pending_end(resources, background, signals)?;
     resources.consumer = Some(consumer.start(&background.cancel));
     tracing::info!("messaging_consuming_started");
-    None
+    Ok(())
 }
 
 pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {

@@ -43,7 +43,6 @@ pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, Conf
         },
         ObjectStorageCredentials::WorkloadIdentity => CredentialSource::WorkloadIdentity,
     };
-    let credentials_label = settings.credentials.label();
     let storage = ObjectStorage::try_new(ObjectStorageOptions {
         provider,
         bucket: settings.bucket.clone(),
@@ -54,7 +53,7 @@ pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, Conf
     })?;
     tracing::info!(
         object_storage.provider = storage.provider_name(),
-        object_storage.credentials = credentials_label,
+        object_storage.credentials = settings.credentials.label(),
         object_storage.max_object_bytes = settings.max_object_bytes.as_u64(),
         object_storage.max_concurrency = settings.max_concurrency,
         "object_storage_configured"

@@ -41,11 +41,14 @@ impl Background {
                 record_first(&first_failure, name);
             },
         );
-        let task = self.tracker.spawn(async move {
-            let _guard = guard;
-            task.await;
-        });
-        self.aborts.lock().push(task.abort_handle());
+        let abort = self
+            .tracker
+            .spawn(async move {
+                let _guard = guard;
+                task.await;
+            })
+            .abort_handle();
+        self.aborts.lock().push(abort);
     }
 
     pub(crate) fn failure(&self) -> Option<&'static str> {

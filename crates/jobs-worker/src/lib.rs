@@ -28,7 +28,7 @@ pub struct Registration<'a> {
     pub messages: infra_messaging::Registry,
     // template:end messaging:worker-registration-messaging
     // template:begin outbox:worker-registration-postgres-messages
-    postgres_messages: Option<PostgresMessages>,
+    postgres_messages: Option<PostgresMessageFactory>,
     // template:end outbox:worker-registration-postgres-messages
     // template:begin webhooks:worker-registration-outbound-webhooks
     outbound_webhooks: &'a service_config::WebhooksConfig,
@@ -40,7 +40,7 @@ pub struct Registration<'a> {
 }
 
 // template:begin outbox:worker-postgres-messages-factory
-type PostgresMessages = Box<
+type PostgresMessageFactory = Box<
     dyn FnOnce(infra_postgres::PgPool, &mut infra_messaging::Registry) -> Result<(), BuildError>,
 >;
 // template:end outbox:worker-postgres-messages-factory
@@ -159,7 +159,7 @@ where
         return reported_exit(operator::run(&args.options, &request));
     }
     // template:end jobs:worker-operator-dispatch
-    worker_exit(start(&args.options, Box::new(register)))
+    worker_exit(run_worker(&args.options, Box::new(register)))
 }
 
 fn reported_exit(success: bool) -> ExitCode {
@@ -177,7 +177,7 @@ fn worker_exit(result: Result<shutdown::Outcome, bootstrap::WorkerError>) -> Exi
     })
 }
 
-fn start(
+fn run_worker(
     options: &LoadOptions,
     register: Register<'_>,
 ) -> Result<shutdown::Outcome, bootstrap::WorkerError> {
@@ -237,7 +237,7 @@ mod tests {
 
     use super::bootstrap::WorkerError;
     use super::shutdown::Outcome;
-    use super::{ExitCode, start, worker_exit};
+    use super::{ExitCode, run_worker, worker_exit};
 
     #[test]
     fn exit_code_maps_the_three_rows() {
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn start_with_registration_reads_configuration_first() {
-        let started = start(
+        let started = run_worker(
             &missing_file(),
             Box::new(|_| Err("registration must not run before configuration".into())),
         );

@@ -65,18 +65,18 @@ struct Budget {
 }
 
 impl Budget {
-    fn until(process_deadline: Instant) -> Self {
+    fn for_process_deadline(process_deadline: Instant) -> Self {
         Self {
             deadline: process_deadline - RUNTIME_SHUTDOWN_TIMEOUT,
         }
     }
 
-    fn remaining(&self, want: Duration) -> Duration {
+    fn clamp(&self, want: Duration) -> Duration {
         want.min(self.deadline.saturating_duration_since(Instant::now()))
     }
 
     fn stage_deadline(&self, want: Duration) -> Instant {
-        Instant::now() + self.remaining(want)
+        Instant::now() + self.clamp(want)
     }
 }
 
@@ -96,7 +96,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         signals,
         deadline,
     } = plan;
-    let budget = Budget::until(deadline);
+    let budget = Budget::for_process_deadline(deadline);
     let mut outcome = stage("stop_work", async {
         stop_work(http, &resources);
         Outcome::Graceful
@@ -122,45 +122,24 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // template:end messaging:worker-shutdown-drop-consumer
     let listeners_outcome = close_listeners(
         std::mem::take(&mut resources.listeners),
-        budget.remaining(LISTENERS),
+        budget.clamp(LISTENERS),
     )
     .await;
     outcome = outcome.max(listeners_outcome);
     let background_outcome = stage(
         "background_join",
-        join_background(&background, budget.remaining(BACKGROUND_JOIN)),
+        join_background(&background, budget.clamp(BACKGROUND_JOIN)),
     )
     .await;
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
-    if !background.tracker.is_empty() {
-        outcome = Outcome::Degraded;
-        background.abort();
-        tracing::warn!("background join expired; abort requested");
-        stage_or(
-            "background_abort",
-            wait_for_background_abort(&background, dependency_deadline),
-            (),
-        )
-        .await;
-    }
-    // template:begin jobs:worker-shutdown-native-failures
-    let background_outcome = if background_outcome == Outcome::Graceful
-        && resources
-            .started_engine
-            .as_ref()
-            .is_some_and(|engine| engine.failed().now_or_never().is_some())
-    {
-        Outcome::Degraded
-    } else {
-        background_outcome
-    };
-    // template:end jobs:worker-shutdown-native-failures
+    let background_outcome = finish_background(
+        &background,
+        &resources,
+        background_outcome,
+        dependency_deadline,
+    )
+    .await;
     outcome = outcome.max(background_outcome);
-    if background_outcome == Outcome::Degraded {
-        tracing::warn!("background_join_failed");
-    } else {
-        tracing::info!("background_joined");
-    }
     let dependencies_outcome = close_dependencies(&mut resources, dependency_deadline).await;
     outcome = outcome.max(dependencies_outcome);
     if background.failure().is_some() {
@@ -176,6 +155,45 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         outcome,
     )
     .await
+}
+
+async fn finish_background(
+    background: &Background,
+    #[allow(
+        unused_variables,
+        reason = "the jobs profile inspects native engine failures"
+    )]
+    resources: &Resources,
+    mut outcome: Outcome,
+    abort_deadline: Instant,
+) -> Outcome {
+    if !background.tracker.is_empty() {
+        outcome = Outcome::Degraded;
+        background.abort();
+        tracing::warn!("background join expired; abort requested");
+        stage_or(
+            "background_abort",
+            wait_for_background_abort(background, abort_deadline),
+            (),
+        )
+        .await;
+    }
+    // template:begin jobs:worker-shutdown-native-failures
+    if outcome == Outcome::Graceful
+        && resources
+            .started_engine
+            .as_ref()
+            .is_some_and(|engine| engine.failed().now_or_never().is_some())
+    {
+        outcome = Outcome::Degraded;
+    }
+    // template:end jobs:worker-shutdown-native-failures
+    if outcome == Outcome::Degraded {
+        tracing::warn!("background_join_failed");
+    } else {
+        tracing::info!("background_joined");
+    }
+    outcome
 }
 
 async fn stage(name: &'static str, operation: impl Future<Output = Outcome>) -> Outcome {
@@ -228,7 +246,7 @@ async fn drain(
     if !work_started {
         return DrainOutcome::NoCleanupNeeded;
     }
-    let drain_budget = budget.remaining(drain_timeout);
+    let drain_budget = budget.clamp(drain_timeout);
     tracing::info!(
         budget = ?drain_budget,
         // template:begin jobs:worker-shutdown-drain-start-log
@@ -237,32 +255,11 @@ async fn drain(
         "drain_started"
     );
     let deadline = Instant::now() + drain_budget;
-    let joined = async {
-        let jobs = async {
-            // template:begin jobs:worker-shutdown-drain-jobs
-            if let Some(engine) = &resources.started_engine {
-                engine.drained().await;
-            }
-            // template:end jobs:worker-shutdown-drain-jobs
-        };
-        let messages = async {
-            // template:begin messaging:worker-shutdown-drain-messaging
-            if let Some(consumer) = resources.consumer.as_mut() {
-                return consumer
-                    .finish(deadline)
-                    .await
-                    .err()
-                    .map(|error| error.to_string());
-            }
-            // template:end messaging:worker-shutdown-drain-messaging
-            None::<String>
-        };
-        let ((), messaging_error) = tokio::join!(jobs, messages);
-        messaging_error
-    };
     let forced = tokio::select! {
         biased;
-        messaging_error = joined => messaging_error.map(|error| ("messaging", Some(error))),
+        messaging_error = drain_active_work(resources, deadline) => {
+            messaging_error.map(|error| ("messaging", Some(error)))
+        }
         () = tokio::time::sleep_until(deadline) => Some(("budget", None)),
         result = signals.wait() => Some(match result {
             Ok(()) => ("second_signal", None),
@@ -289,6 +286,38 @@ async fn drain(
             DrainOutcome::NeedsForcedCleanup
         }
     }
+}
+
+async fn drain_active_work(
+    #[allow(unused_variables, reason = "retained profiles drain started work")]
+    resources: &mut Resources,
+    #[allow(
+        unused_variables,
+        reason = "the messaging profile bounds consumer finish"
+    )]
+    deadline: Instant,
+) -> Option<String> {
+    let jobs = async {
+        // template:begin jobs:worker-shutdown-drain-jobs
+        if let Some(engine) = &resources.started_engine {
+            engine.drained().await;
+        }
+        // template:end jobs:worker-shutdown-drain-jobs
+    };
+    let messages = async {
+        // template:begin messaging:worker-shutdown-drain-messaging
+        if let Some(consumer) = resources.consumer.as_mut() {
+            return consumer
+                .finish(deadline)
+                .await
+                .err()
+                .map(|error| error.to_string());
+        }
+        // template:end messaging:worker-shutdown-drain-messaging
+        None::<String>
+    };
+    let ((), messaging_error) = tokio::join!(jobs, messages);
+    messaging_error
 }
 
 async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instant) {
@@ -493,11 +522,11 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Out
         // template:end messaging:worker-shutdown-close-messaging
         outcome
     };
-    let (pool, messaging) = tokio::join!(
+    let (pool_outcome, messaging_outcome) = tokio::join!(
         stage("postgres_close", pool_close),
         stage("messaging_close", messaging_close),
     );
-    pool.max(messaging)
+    pool_outcome.max(messaging_outcome)
 }
 
 async fn finish_telemetry(
@@ -505,10 +534,8 @@ async fn finish_telemetry(
     deadline: Instant,
     mut outcome: Outcome,
 ) -> Outcome {
-    if let Some(logger) = &resources.logger {
+    let log_reserve = if let Some(logger) = &resources.logger {
         logger.begin_shutdown();
-    }
-    let log_reserve = if resources.logger.is_some() {
         LOG_CLOSE_RESERVE.min(deadline.saturating_duration_since(Instant::now()))
     } else {
         Duration::ZERO
@@ -588,18 +615,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stages_are_clamped_to_the_remaining_deadline() {
-        let budget = Budget::until(Instant::now() + Duration::from_secs(11));
-        assert_eq!(
-            budget.remaining(Duration::from_secs(4)),
-            Duration::from_secs(4)
-        );
+        let budget = Budget::for_process_deadline(Instant::now() + Duration::from_secs(11));
+        assert_eq!(budget.clamp(Duration::from_secs(4)), Duration::from_secs(4));
         tokio::time::advance(Duration::from_secs(8)).await;
-        assert_eq!(
-            budget.remaining(Duration::from_secs(4)),
-            Duration::from_secs(2)
-        );
+        assert_eq!(budget.clamp(Duration::from_secs(4)), Duration::from_secs(2));
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(budget.remaining(Duration::from_secs(4)), Duration::ZERO);
+        assert_eq!(budget.clamp(Duration::from_secs(4)), Duration::ZERO);
     }
 
     #[tokio::test]
