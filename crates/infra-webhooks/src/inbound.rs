@@ -155,7 +155,6 @@ impl Receiver {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -178,7 +177,6 @@ impl Receiver {
         .map_err(ReceiveError::from)
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive_bytes(
         &self,
         endpoint_id: &str,
