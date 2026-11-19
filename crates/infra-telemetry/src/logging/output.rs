@@ -173,7 +173,7 @@ impl Shared {
 pub(super) struct Output {
     sender: crossbeam_channel::Sender<Record>,
     shared: Arc<Shared>,
-    writer: thread::Thread,
+    worker_thread: thread::Thread,
 }
 
 impl Output {
@@ -183,7 +183,7 @@ impl Output {
             Some(Ok(())) => {
                 drop(open);
                 if self.sender.len() >= DEEP_QUEUE_RECORDS {
-                    self.writer.unpark();
+                    self.worker_thread.unpark();
                 }
             }
             Some(Err(crossbeam_channel::TrySendError::Full(_))) => {
@@ -311,7 +311,7 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
         Output {
             sender,
             shared: Arc::clone(&shared),
-            writer: worker.thread().clone(),
+            worker_thread: worker.thread().clone(),
         },
         LoggerGuard {
             shared,
@@ -371,11 +371,11 @@ fn write_records<W: Write>(
     let mut carried: Option<Record> = None;
     let mut last_write: Option<Instant> = None;
     loop {
-        let carried_over = carried.is_some();
         let first = if let Some(record) = carried.take() {
             record
         } else {
-            match wait_for_record(&records, shutdown, dirty.then_some(FLUSH_INTERVAL)) {
+            let record = match wait_for_record(&records, shutdown, dirty.then_some(FLUSH_INTERVAL))
+            {
                 NextRecord::Record(record) => record,
                 NextRecord::Flush => {
                     flush_sink(&mut writer, shared);
@@ -383,11 +383,12 @@ fn write_records<W: Write>(
                     continue;
                 }
                 NextRecord::Closed => break,
+            };
+            if last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
+                gather(&records, BATCH_WINDOW);
             }
+            record
         };
-        if !carried_over && last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
-            gather(&records, BATCH_WINDOW);
-        }
         batch.clear();
         batch.push(&first);
         while let Ok(record) = records.try_recv() {
@@ -1004,7 +1005,7 @@ mod tests {
                 drain: AtomicU32::new(0),
                 counters: Counters::new(),
             }),
-            writer: waiter.thread().clone(),
+            worker_thread: waiter.thread().clone(),
         };
 
         for _ in 0..DEEP_QUEUE_RECORDS {

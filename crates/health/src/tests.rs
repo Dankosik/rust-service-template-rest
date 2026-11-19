@@ -1009,21 +1009,20 @@ proptest! {
         let stale_after = Duration::from_millis(stale_after_ms);
         let origin = Instant::now();
         let mut elapsed_ms = 0_u64;
-        let mut previous: Option<Check> = None;
+        let mut state = State::NotEvaluated;
         let mut streak = 0_u32;
         let mut published: Option<(bool, u64)> = None;
         for (succeeds, gap_ms) in steps {
             elapsed_ms += gap_ms;
-            let at = origin + Duration::from_millis(elapsed_ms);
+            let now = origin + Duration::from_millis(elapsed_ms);
             let observed = if succeeds {
                 Ok(())
             } else {
                 Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::from_millis(1) })
             };
             let threshold = NonZeroU32::new(failure_threshold).unwrap();
-            let was_ready = previous.as_ref().is_some_and(|check| check.is_ready_at(at, stale_after));
-            let (check, _) =
-                apply_failure_threshold(previous.as_ref(), observed, threshold, at, was_ready);
+            let log = state.apply_round(observed, now, threshold, stale_after);
+            prop_assert!(log.is_some());
 
             streak = if succeeds { 0 } else { streak + 1 };
             let fresh_ready = published.is_some_and(|(ready, at_ms)| {
@@ -1031,10 +1030,19 @@ proptest! {
             });
             let expect_ready = succeeds || (fresh_ready && streak < failure_threshold);
 
-            prop_assert_eq!(check.verdict.is_ok(), expect_ready);
-            prop_assert_eq!(check.consecutive_failures, streak);
+            let State::Evaluated(check) = &state else {
+                return Err(proptest::test_runner::TestCaseError::fail(
+                    "apply_round should evaluate state",
+                ));
+            };
+            prop_assert_eq!(check.verdict.is_ready(), expect_ready);
+            if let Verdict::Ready {
+                consecutive_failures,
+            } = check.verdict
+            {
+                prop_assert_eq!(consecutive_failures, streak);
+            }
             published = Some((expect_ready, elapsed_ms));
-            previous = Some(check);
         }
     }
 }
