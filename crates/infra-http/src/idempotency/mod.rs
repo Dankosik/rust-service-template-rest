@@ -33,6 +33,10 @@ macro_rules! created_json_response {
 
         const _: () = {
             #[derive(::utoipa::ToSchema)]
+            #[expect(
+                dead_code,
+                reason = "The schema wrapper exists only for the OpenAPI derive"
+            )]
             struct __InfraHttpCreatedBody($body);
 
             impl ::utoipa::IntoResponses for $name {
