@@ -60,7 +60,7 @@ pub(super) async fn build_engine(
         Some(kinds) => Some(Engine::new(
             super::postgres::admitted_pool(resources)?,
             kinds,
-            config.jobs.max_workers,
+            config.jobs().max_workers,
         )),
         None => None,
     };

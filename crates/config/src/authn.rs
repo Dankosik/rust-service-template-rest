@@ -193,7 +193,7 @@ pub(crate) struct AuthnInput {
     /// Whitespace determines absence only; a present credential retains
     /// its exact bytes for the provider, including surrounding whitespace.
     #[serde(default)]
-    #[serde_as(as = "crate::de::BlankSecretAsNone")]
+    #[serde_as(as = "crate::de::BlankAsNoneVerbatim")]
     introspection_client_secret: Option<SecretString>,
     /// Immediate provider-exchange capacity. Missing uses 32.
     #[serde(default)]
@@ -213,6 +213,14 @@ pub(crate) struct AuthnInput {
     cache_ttl: Option<Duration>,
     // template:end oidc-introspection:authn-config-introspection-variant
 }
+
+// template:begin oidc-introspection:authn-introspection-cache-config
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntrospectionCacheConfig {
+    pub capacity: usize,
+    pub ttl: Duration,
+}
+// template:end oidc-introspection:authn-introspection-cache-config
 
 #[derive(Clone, Default)]
 pub enum AuthnConfig {
@@ -236,9 +244,7 @@ pub enum AuthnConfig {
         introspection_client_id: String,
         introspection_client_secret: SecretString,
         provider_concurrency: NonZeroU32,
-        cache_enabled: bool,
-        cache_capacity: usize,
-        cache_ttl: Duration,
+        cache: Option<IntrospectionCacheConfig>,
     },
     // template:end oidc-introspection:authn-admitted-introspection-variant
 }
@@ -494,9 +500,10 @@ impl AuthnInput {
             introspection_client_id: introspection_client_id?,
             introspection_client_secret: secret?,
             provider_concurrency,
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
+            cache: cache_enabled.then_some(IntrospectionCacheConfig {
+                capacity: cache_capacity,
+                ttl: cache_ttl,
+            }),
         })
     }
     // template:end oidc-introspection:authn-admit-introspection

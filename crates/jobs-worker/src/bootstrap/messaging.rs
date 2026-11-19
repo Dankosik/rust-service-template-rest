@@ -42,13 +42,13 @@ impl MessagingPlan {
         if !consumes_messages {
             return Ok(None);
         }
-        let keys = config.messaging.consumer_keys()?;
+        let keys = config.messaging().consumer_keys()?;
         let consumer = ConsumerOptions {
             durable_name: keys.durable.to_owned(),
             filter_subject: keys.filter_subject.to_owned(),
             dlq_subject: keys.dlq_subject.to_owned(),
             dlq_stream: None,
-            concurrency: std::num::NonZeroUsize::try_from(config.messaging.consumer_concurrency)
+            concurrency: std::num::NonZeroUsize::try_from(config.messaging().consumer_concurrency)
                 .map_err(|_| WorkerError::MessagingConcurrency)?,
         };
         Ok(Some(Self {
@@ -59,7 +59,7 @@ impl MessagingPlan {
 
     // template:begin outbox:worker-bootstrap-outbox-messaging
     pub(super) fn for_producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
-        let source_stream = config.messaging.producer_source_stream()?;
+        let source_stream = config.messaging().producer_source_stream()?;
         Ok(Self {
             options: messaging_options(config, source_stream, None)?,
             retained_messages: None,
@@ -112,7 +112,7 @@ pub(super) async fn connect_messaging(
 }
 
 fn max_payload_bytes(config: &WorkerConfig) -> Result<usize, WorkerError> {
-    usize::try_from(config.messaging.max_payload_bytes.as_u64())
+    usize::try_from(config.messaging().max_payload_bytes.as_u64())
         .map_err(|_| WorkerError::MessagingPayloadBound)
 }
 
@@ -121,21 +121,25 @@ fn messaging_options(
     source_stream: &str,
     consumer: Option<ConsumerOptions>,
 ) -> Result<MessagingOptions, WorkerError> {
-    let messaging = &config.messaging;
+    let messaging = config.messaging();
     let security = if messaging.tls_first {
         TransportSecurity::TlsFirst
-    } else if messaging.plaintext_admitted() {
+    } else if messaging.plaintext_admitted {
         TransportSecurity::AllowPlaintext
     } else {
         TransportSecurity::Tls
     };
     Ok(MessagingOptions {
-        connection_name: worker_identity(&config.observability.otel.service_name),
+        connection_name: worker_identity(&config.observability().otel.service_name),
         servers: messaging.urls.clone(),
-        credentials: messaging.credentials.as_ref().map(|source| match source {
-            MessagingCredentials::Inline(secret) => Credentials::Inline(secret.clone()),
-            MessagingCredentials::File(path) => Credentials::File(path.clone()),
-        }),
+        credentials: messaging
+            .credentials
+            .as_ref()
+            .and_then(|source| match source {
+                MessagingCredentials::Inline(secret) => Some(Credentials::Inline(secret.clone())),
+                MessagingCredentials::File(path) => Some(Credentials::File(path.clone())),
+                MessagingCredentials::Unauthenticated => None,
+            }),
         root_ca_path: messaging.root_ca_path.clone(),
         security,
         source_stream: source_stream.to_owned(),

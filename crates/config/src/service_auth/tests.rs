@@ -1,6 +1,6 @@
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
+use crate::load::load_from;
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_env};
 use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
@@ -159,7 +159,7 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
         jwt_type,
         trust: loaded,
         signing_key,
-    } = &cfg.service_auth
+    } = cfg.service_auth()
     else {
         panic!("expected jwt service authentication");
     };
@@ -203,7 +203,10 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         env(&[listener.as_slice(), development.as_slice(), jwt.as_slice()].concat()),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("grpc.security"), "{err}");
+    assert!(
+        err.validation_errors().unwrap().names("grpc.security"),
+        "{err}"
+    );
     load_from(
         &LoadOptions::default(),
         BUILD,
@@ -221,7 +224,10 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
             env(&[listener.as_slice(), environment.as_slice()].concat()),
         )
         .unwrap_err();
-        assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");
+        assert!(
+            err.validation_errors().unwrap().names("service_auth.mode"),
+            "{err}"
+        );
         assert!(!err.to_string().contains("private-environment-value"));
     }
 }

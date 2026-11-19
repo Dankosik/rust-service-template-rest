@@ -9,6 +9,65 @@ use serde::de::{IntoDeserializer as _, Unexpected};
 use serde::{Deserialize, Deserializer};
 use serde_with::DeserializeAs;
 
+pub(crate) trait Mode {
+    fn deserialize_as<'de, T, As, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: Default,
+        As: DeserializeAs<'de, T>,
+        D: Deserializer<'de>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Keep;
+
+impl Mode for Keep {
+    fn deserialize_as<'de, T, As, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: Default,
+        As: DeserializeAs<'de, T>,
+        D: Deserializer<'de>,
+    {
+        As::deserialize_as(deserializer)
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "only profiles with secondary process snapshots ignore fields inside shared sections"
+)]
+#[derive(Debug, Default)]
+pub(crate) struct Skip;
+
+impl Mode for Skip {
+    fn deserialize_as<'de, T, As, D>(deserializer: D) -> Result<T, D::Error>
+    where
+        T: Default,
+        As: DeserializeAs<'de, T>,
+        D: Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(T::default())
+    }
+}
+
+pub(crate) type ModeMarker<T> = PhantomData<fn() -> T>;
+
+pub(crate) struct When<M, As = serde_with::Same>(ModeMarker<(M, As)>);
+
+impl<'de, M, T, As> DeserializeAs<'de, T> for When<M, As>
+where
+    M: Mode,
+    T: Default,
+    As: DeserializeAs<'de, T>,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        M::deserialize_as::<T, As, D>(deserializer)
+    }
+}
+
 pub(crate) struct StrictString;
 
 impl<'de> DeserializeAs<'de, String> for StrictString {
@@ -26,6 +85,15 @@ impl<'de> DeserializeAs<'de, PathBuf> for StrictString {
         D: Deserializer<'de>,
     {
         string(deserializer).map(PathBuf::from)
+    }
+}
+
+impl<'de> DeserializeAs<'de, SecretString> for StrictString {
+    fn deserialize_as<D>(deserializer: D) -> Result<SecretString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string(deserializer).map(SecretString::from)
     }
 }
 
@@ -80,20 +148,7 @@ impl<'de> DeserializeAs<'de, bool> for StrictBool {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct StrictEnum<T = ()>(pub(crate) T);
-
-impl<'de, T> Deserialize<'de> for StrictEnum<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        StrictEnum::<()>::deserialize_as(deserializer).map(Self)
-    }
-}
+pub(crate) struct StrictEnum;
 
 impl<'de, T> DeserializeAs<'de, T> for StrictEnum
 where
@@ -105,21 +160,6 @@ where
     {
         let raw = string(deserializer)?;
         T::deserialize(raw.as_str().into_deserializer())
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "only optional webhook profiles require non-optional secrets"
-)]
-pub(crate) struct StrictSecret;
-
-impl<'de> DeserializeAs<'de, SecretString> for StrictSecret {
-    fn deserialize_as<D>(deserializer: D) -> Result<SecretString, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        string(deserializer).map(SecretString::from)
     }
 }
 
@@ -204,15 +244,18 @@ where
     }
 }
 
-pub(crate) struct BlankSecretAsNone;
+pub(crate) struct BlankAsNoneVerbatim;
 
-impl<'de> DeserializeAs<'de, Option<SecretString>> for BlankSecretAsNone {
-    fn deserialize_as<D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
+impl<'de, T> DeserializeAs<'de, Option<T>> for BlankAsNoneVerbatim
+where
+    T: From<String>,
+{
+    fn deserialize_as<D>(deserializer: D) -> Result<Option<T>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let raw: Option<String> = Option::<StrictString>::deserialize_as(deserializer)?;
-        Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| SecretString::from(value))))
+        Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| T::from(value))))
     }
 }
 
@@ -271,6 +314,8 @@ pub(crate) fn display_duration(duration: Duration) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     #[rstest::rstest]
@@ -317,6 +362,12 @@ mod tests {
             #[serde_as(as = "BlankAsNone")]
             path: Option<String>,
             #[serde(default)]
+            #[serde_as(as = "BlankAsNoneVerbatim")]
+            raw: Option<String>,
+            #[serde(default)]
+            #[serde_as(as = "BlankAsNoneVerbatim")]
+            secret: Option<SecretString>,
+            #[serde(default)]
             #[serde_as(as = "Option<StrictBool>")]
             flag: Option<bool>,
             #[serde(default)]
@@ -326,22 +377,33 @@ mod tests {
             #[serde_as(as = "Option<StrictDuration>")]
             ttl: Option<Duration>,
             #[serde(default)]
-            #[serde_as(as = "BTreeMap<_, StrictSecret>")]
+            #[serde_as(as = "BTreeMap<_, StrictString>")]
             secrets: BTreeMap<String, SecretString>,
         }
 
         let valid: Probe = toml::from_str(
-            "path = \"/tmp/key\"\nflag = \" true \"\nkind = \"alpha\"\nttl = \"5s\"\n[secrets]\nk = \"v\"\n",
+            "path = \" /tmp/key \"\nraw = \" exact \"\nsecret = \" pw \"\nflag = \" true \"\nkind = \"alpha\"\nttl = \"5s\"\n[secrets]\nk = \"v\"\n",
         )
         .unwrap();
         assert_eq!(valid.path.as_deref(), Some("/tmp/key"));
+        assert_eq!(valid.raw.as_deref(), Some(" exact "));
+        assert_eq!(
+            valid.secret.as_ref().map(ExposeSecret::expose_secret),
+            Some(" pw ")
+        );
         assert_eq!(valid.flag, Some(true));
         assert_eq!(valid.kind, Some(Kind::Alpha));
         assert_eq!(valid.ttl, Some(Duration::from_secs(5)));
         assert_eq!(valid.secrets.len(), 1);
 
+        let blank: Probe = toml::from_str("raw = \"   \"\nsecret = \"\\t\"\n").unwrap();
+        assert_eq!(blank.raw, None);
+        assert!(blank.secret.is_none());
+
         for invalid in [
             "path = false\n",
+            "raw = 1\n",
+            "secret = 1\n",
             "flag = 1\n",
             "flag = \"yes\"\n",
             "kind = false\n",
@@ -352,5 +414,27 @@ mod tests {
         ] {
             assert!(toml::from_str::<Probe>(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn when_adapter_decodes_on_keep_and_ignores_on_skip() {
+        #[serde_with::serde_as]
+        #[derive(Debug, Deserialize, educe::Educe)]
+        #[educe(Default(bound = false))]
+        #[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+        struct Probe<M: Mode> {
+            #[serde_as(as = "When<M, StrictDuration>")]
+            timeout: Duration,
+            #[serde(skip)]
+            _mode: ModeMarker<M>,
+        }
+
+        let kept: Probe<Keep> = toml::from_str("timeout = \"3s\"\n").unwrap();
+        assert_eq!(kept.timeout, Duration::from_secs(3));
+        assert!(toml::from_str::<Probe<Keep>>("timeout = { bad = 1 }\n").is_err());
+
+        let skipped: Probe<Skip> = toml::from_str("timeout = { bad = 1 }\n").unwrap();
+        assert_eq!(skipped.timeout, Duration::ZERO);
+        assert!(toml::from_str::<Probe<Skip>>("unknown = 1\n").is_err());
     }
 }

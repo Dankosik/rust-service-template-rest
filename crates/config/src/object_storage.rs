@@ -3,11 +3,10 @@ use std::time::Duration;
 use bytesize::{ByteSize, GIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde_with::DeserializeAs;
 
 use crate::app::local_development_only;
 use crate::de::{
-    BlankSecretAsNone, StrictBool, StrictCount, StrictDuration, StrictEnum, StrictString,
+    BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration, StrictEnum, StrictString,
 };
 use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, int_range, non_blank, required,
@@ -56,26 +55,26 @@ pub(crate) struct ObjectStorageInput {
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
     #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     region: Option<String>,
     #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     #[debug(skip)]
     endpoint: Option<String>,
     #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     expected_bucket_owner: Option<String>,
     #[serde_as(as = "StrictBool")]
     path_style: bool,
     #[serde_as(as = "StrictEnum")]
     credentials: CredentialsKind,
     #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     access_key_id: Option<String>,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
     #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     secret_access_key: Option<SecretString>,
     #[educe(Default(expression = ByteSize::mib(8)))]
     max_object_bytes: ByteSize,
@@ -342,18 +341,6 @@ impl ObjectStorageInput {
                 Ok(ObjectStorageCredentials::WorkloadIdentity)
             }
         }
-    }
-}
-
-struct BlankStringAsNone;
-
-impl<'de> DeserializeAs<'de, Option<String>> for BlankStringAsNone {
-    fn deserialize_as<D>(deserializer: D) -> Result<Option<String>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw: Option<String> = Option::<StrictString>::deserialize_as(deserializer)?;
-        Ok(raw.filter(|value| !value.trim().is_empty()))
     }
 }
 

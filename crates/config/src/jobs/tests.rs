@@ -2,7 +2,7 @@ use std::assert_matches;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{load_jobs_operator_from, load_worker_from};
+use crate::load::{ErrorKind, InputError, load_jobs_operator_from, load_worker_from};
 use crate::test_support::{BUILD, env, load_worker_env, write};
 use crate::validate::validate_with;
 
@@ -52,7 +52,7 @@ fn unknown_keys_in_the_section_fail() {
 #[test]
 fn jobs_environment_sets_max_workers() {
     let cfg = load_worker_env(&[("APP__JOBS__MAX_WORKERS", "8")]);
-    assert_eq!(cfg.jobs.max_workers.get(), 8);
+    assert_eq!(cfg.jobs().max_workers.get(), 8);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn worker_config_ignores_service_only_sections_without_demanding_their_secrets()
         env(&[]),
     )
     .unwrap();
-    assert_eq!(cfg.jobs.max_workers.get(), 2);
+    assert_eq!(cfg.jobs().max_workers.get(), 2);
 
     let unknown = write(&dir, "unknown.toml", "[unrelated]\nvalue = 1\n");
     let err = load_worker_from(
@@ -94,7 +94,7 @@ fn worker_config_ignores_service_only_sections_without_demanding_their_secrets()
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(err, Error::Deserialize(_), "{err}");
+    assert_matches!(err.0, ErrorKind::Deserialize(_), "{err}");
 }
 
 #[test]
@@ -197,7 +197,8 @@ fn jobs_operator_uses_the_shared_source_precedence() {
     .unwrap_err();
     assert_matches!(
         &blanked,
-        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        JobsOperatorLoadError::Config(error)
+            if error.validation_errors().is_some_and(|errors| errors.names("postgres.dsn")),
         "{blanked}"
     );
 }
@@ -218,21 +219,25 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     .unwrap_err();
     assert_matches!(
         invalid_opt_in,
-        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("app.allow_insecure_development")
+        JobsOperatorLoadError::Config(error)
+            if error
+                .validation_errors()
+                .is_some_and(|errors| errors.names("app.allow_insecure_development"))
     );
 
     let unknown =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
     assert_matches!(
         unknown,
-        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{unknown}"
     );
     let missing =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "true")])).unwrap_err();
     assert_matches!(
         &missing,
-        JobsOperatorLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        JobsOperatorLoadError::Config(error)
+            if error.validation_errors().is_some_and(|errors| errors.names("postgres.dsn")),
         "{missing}"
     );
     let budgets = load_jobs_operator_from(
@@ -242,7 +247,7 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     .unwrap_err();
     assert_matches!(
         &budgets,
-        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{budgets}"
     );
     let secret = "fixture-private-value";
@@ -250,7 +255,7 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", secret)])).unwrap_err();
     assert_matches!(
         error,
-        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{error}"
     );
     assert!(!error.to_string().contains(secret));
@@ -271,7 +276,7 @@ fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
     .unwrap_err();
     assert_matches!(
         error,
-        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{error}"
     );
 
@@ -282,7 +287,7 @@ fn jobs_operator_rejects_unknown_sections_and_typo_variables() {
     .unwrap_err();
     assert_matches!(
         &typo,
-        JobsOperatorLoadError::Config(Error::Deserialize(_)),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{typo}"
     );
     assert!(!typo.to_string().contains("secret-pw"));
@@ -311,7 +316,7 @@ fn jobs_operator_prescans_unrelated_sections() {
         .unwrap_err();
         assert_matches!(
             &error,
-            JobsOperatorLoadError::Config(Error::SecretInFile { key, .. })
+            JobsOperatorLoadError::Config(Error(ErrorKind::Input(InputError::SecretInFile { key, .. })))
                 if key == "observability.otel.exporter.otlp_headers",
             "{error}"
         );
@@ -329,7 +334,7 @@ fn jobs_operator_prescans_unrelated_sections() {
     .unwrap_err();
     assert_matches!(
         error,
-        JobsOperatorLoadError::Config(Error::UnaddressableKey { .. }),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Input(InputError::UnaddressableKey { .. }))),
         "{error}"
     );
     let malformed = load_jobs_operator_from(
@@ -339,7 +344,7 @@ fn jobs_operator_prescans_unrelated_sections() {
     .unwrap_err();
     assert_matches!(
         malformed,
-        JobsOperatorLoadError::Config(Error::MalformedEnvName { .. }),
+        JobsOperatorLoadError::Config(Error(ErrorKind::Input(InputError::MalformedEnvName { .. }))),
         "{malformed}"
     );
 }

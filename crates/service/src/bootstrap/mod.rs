@@ -200,7 +200,7 @@ where
         Err(err) => return fail_to_stderr(&err),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
+        .worker_threads(config.runtime().effective_worker_threads())
         .enable_all()
         .build()
     {
@@ -258,7 +258,7 @@ async fn serve(
         .signals
         .insert(Signals::install().map_err(BootstrapError::Signals)?);
     let config = Box::new(config);
-    let http_config = config.http.clone();
+    let http_config = config.http().clone();
     let mut background = Background::new(CancellationToken::new());
     let mut background_failures = background.failure_observer();
     let mut dependencies = Dependencies::default();
@@ -342,8 +342,8 @@ async fn install_telemetry(
         .tracer_provider
         .insert(install_tracer_provider(&telemetry::tracing_options(config)).await?);
     handles.logger = Some(install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
+        level: &config.log().level,
+        format: match config.log().format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
@@ -454,21 +454,20 @@ async fn start(
     let service_auth = service_auth::prepare(config)?;
     // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    if let Some(postgres) = &config.postgres {
+    if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
         probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
-    if let Some(settings) = &config.cache {
+    if let Some(settings) = config.cache() {
         dependencies.cache = Some(cache::open(settings).await?);
     }
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = config
-        .object_storage
-        .as_ref()
+        .object_storage()
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
@@ -478,9 +477,9 @@ async fn start(
     let readiness = Readiness::new(
         probes,
         RefreshPolicy::try_new(
-            config.health.refresh_interval,
-            config.health.probe_budget,
-            config.health.failure_threshold,
+            config.health().refresh_interval,
+            config.health().probe_budget,
+            config.health().failure_threshold,
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     );
@@ -493,7 +492,7 @@ async fn start(
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
         // template:begin webhooks:bootstrap-outbound-webhooks-state
         outbound_webhooks: infra_webhooks::outbound::Producer::new(
-            config.outbound_webhook_endpoints.iter().cloned(),
+            config.outbound_webhook_endpoints().iter().cloned(),
         ),
         // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
@@ -502,7 +501,7 @@ async fn start(
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if let Some(grpc_config) = &config.grpc {
+    let grpc_prepared = if let Some(grpc_config) = config.grpc() {
         Some(grpc::prepare(
             grpc_config,
             registration.grpc,
@@ -588,10 +587,10 @@ impl BoundListeners {
         grpc_prepared: Option<grpc::Prepared>,
         // template:end grpc:bootstrap-grpc-bind-input
     ) -> Result<Self, BootstrapError> {
-        let http = config.http.listener();
+        let http = config.http().listener();
         let http_listener = BoundListener::bind(http.addr)?;
         let diagnostics = config
-            .observability
+            .observability()
             .metrics
             .addr
             .map(BoundListener::bind)
@@ -673,7 +672,7 @@ async fn http_application(
     // template:end http-idempotency:bootstrap-http-idempotency-inputs
 ) -> Result<infra_http::Application, BootstrapError> {
     let contract = crate::api::contract()?;
-    let http = config.http.listener();
+    let http = config.http().listener();
     let options = HardenOptions {
         max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: http.request_timeout,
@@ -892,9 +891,9 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,
@@ -1219,9 +1218,9 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,

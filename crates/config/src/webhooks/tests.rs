@@ -5,7 +5,7 @@ use secrecy::SecretString;
 
 use super::{WebhookEndpointConfig, WebhooksConfig};
 use crate::LoadOptions;
-use crate::load::{Error, load_from, load_worker_from};
+use crate::load::{ErrorKind, InputError, load_from, load_worker_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
 use crate::validate::validate_with;
 
@@ -85,12 +85,12 @@ fn webhooks_environment_builds_endpoint_local_signing_keys() {
         ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "4"),
     ]);
     assert_eq!(
-        cfg.webhooks
+        cfg.webhooks()
             .max_concurrent_deliveries
             .map(std::num::NonZeroU32::get),
         Some(4)
     );
-    let endpoint = cfg.webhooks.endpoints.get("partner").unwrap();
+    let endpoint = cfg.webhooks().endpoints.get("partner").unwrap();
     assert_eq!(endpoint.url, destination);
     assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
     assert_eq!(
@@ -128,7 +128,7 @@ fn webhooks_secret_without_its_key_segment_is_not_echoed() {
     )
     .unwrap_err();
     let rendered = err.to_string();
-    assert_matches!(&err, Error::Deserialize(_), "{rendered}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{rendered}");
     assert!(
         rendered.contains("webhooks.endpoints.partner"),
         "{rendered}"
@@ -157,7 +157,12 @@ fn webhooks_endpoint_id_the_environment_cannot_name_is_refused() {
         )]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::UnaddressableKey { key, .. } if key == "webhooks.endpoints.Partner", "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::UnaddressableKey { key, .. })
+            if key == "webhooks.endpoints.Partner",
+        "{err}"
+    );
 }
 
 #[test]
@@ -182,8 +187,8 @@ fn webhooks_hyphenated_endpoint_id_meets_its_environment_secret() {
         )]),
     )
     .unwrap();
-    assert_eq!(cfg.webhooks.endpoints.len(), 1);
-    let endpoint = cfg.webhooks.endpoints.get("partner-v2").unwrap();
+    assert_eq!(cfg.webhooks().endpoints.len(), 1);
+    let endpoint = cfg.webhooks().endpoints.get("partner-v2").unwrap();
     assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
 }
 
@@ -201,7 +206,12 @@ fn webhooks_blank_environment_secret_is_refused() {
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("webhooks.endpoints.partner.secret"), "{err}");
+    assert!(
+        err.validation_errors()
+            .unwrap()
+            .names("webhooks.endpoints.partner.secret"),
+        "{err}"
+    );
     assert_eq!(
         err.to_string(),
         "configuration is invalid: webhooks.endpoints.partner.secret: cannot be empty"
@@ -221,7 +231,11 @@ fn webhooks_blank_previous_secret_ends_the_rotation() {
         ),
         ("APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET", "  "),
     ]);
-    assert!(cfg.webhooks.endpoints["partner"].previous_secret.is_none());
+    assert!(
+        cfg.webhooks().endpoints["partner"]
+            .previous_secret
+            .is_none()
+    );
 }
 
 #[test]
@@ -244,7 +258,11 @@ fn webhooks_file_placeholders_document_environment_only_keys() {
         )]),
     )
     .unwrap();
-    assert!(cfg.webhooks.endpoints["partner"].previous_secret.is_none());
+    assert!(
+        cfg.webhooks().endpoints["partner"]
+            .previous_secret
+            .is_none()
+    );
 }
 
 #[test]
@@ -260,7 +278,7 @@ fn service_uses_the_workers_endpoint_ids_without_delivery_urls_or_signing_keys()
         ..LoadOptions::default()
     };
     let service = load_from(&options, BUILD, env(&[])).unwrap();
-    assert_eq!(service.outbound_webhook_endpoints, ["orders", "partner"]);
+    assert_eq!(service.outbound_webhook_endpoints(), ["orders", "partner"]);
     assert!(!format!("{service:?}").contains("https://partner.example/events"));
 
     let worker = load_worker_from(
@@ -281,9 +299,9 @@ fn service_uses_the_workers_endpoint_ids_without_delivery_urls_or_signing_keys()
     .unwrap();
     assert!(
         service
-            .outbound_webhook_endpoints
+            .outbound_webhook_endpoints()
             .iter()
-            .eq(worker.webhooks.endpoints.keys())
+            .eq(worker.webhooks().endpoints.keys())
     );
 }
 
@@ -298,7 +316,7 @@ fn service_rejects_a_misspelled_webhook_section_key() {
         )]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     let message = err.to_string();
     assert!(message.contains("unknown field `endpoint`"), "{err}");
     assert!(!message.contains("fixture-private-path"), "{err}");

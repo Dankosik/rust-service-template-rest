@@ -14,7 +14,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         jwt_type,
         trust,
         signing_key,
-    } = &config.service_auth
+    } = config.service_auth()
     else {
         return Ok(PreparedServiceAuth {
             verifier: None,
