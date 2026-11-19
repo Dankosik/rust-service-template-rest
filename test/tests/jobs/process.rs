@@ -8,7 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 // template:begin outbox:test-jobs-process-nats-imports-2
 use async_nats::jetstream::{self, stream};
 // template:end outbox:test-jobs-process-nats-imports-2
-use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
+use infra_jobs::{JobKind, enqueue};
 use infra_postgres::{PgPool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use integration_tests::poll_until;
@@ -550,16 +550,11 @@ async fn prepare(pool: &PgPool) {
 }
 
 async fn enqueue_committed(pool: &PgPool, action: ProbeAction) -> String {
-    let enqueued = in_tx(pool, async |tx| -> Result<_, TxError> {
-        Ok(enqueue(tx, &Probe { action }, EnqueueOptions::default())
-            .await
-            .expect("enqueue"))
+    let id = in_tx(pool, async |tx| -> Result<_, TxError> {
+        Ok(enqueue(tx, &Probe { action }).await.expect("enqueue"))
     })
     .await
     .expect("enqueue");
-    let Enqueued::Created(id) = enqueued else {
-        panic!("duplicate enqueue");
-    };
     id.to_string()
 }
 
@@ -1230,14 +1225,14 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
                      ELSE to_timestamp($2) END \
          FROM generate_series(1, 2003) AS seq",
     )
-    .bind(Probe::NAME)
+    .bind(Probe::NAME.as_str())
     .bind(OLDEST_DUE_UNIX_SECONDS)
     .execute(&pool)
     .await
     .expect("scheduled and due jobs with two tied oldest entries");
     assert_eq!(inserted.rows_affected(), 2_003);
     let database_url = child_database_url(&pool).await;
-    let failed_kinds = vec![Probe::NAME];
+    let failed_kinds = vec![Probe::NAME.as_str()];
     // template:begin outbox:test-jobs-process-nats-fixture-use-4
     let nats = NatsFixture::create().await;
     let failed_kinds = {
@@ -1302,7 +1297,7 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
          OR (kind = $2 AND state = 'pending' AND not_before <= statement_timestamp())",
     )
     .bind(completed_id)
-    .bind(Probe::NAME)
+    .bind(Probe::NAME.as_str())
     .execute(&mut *locked)
     .await
     .expect("claim and cleanup skip these rows while observation still sees them");
@@ -1358,7 +1353,7 @@ async fn worker_backlog_age_includes_expired_leases_without_pending_jobs(pool: P
                       (statement_timestamp() - interval '1 hour'), \
                       (statement_timestamp() + interval '1 hour')) AS lease(expiry)",
     )
-    .bind(Probe::NAME)
+    .bind(Probe::NAME.as_str())
     .bind(OLDEST_LEASE_EXPIRY)
     .execute(&pool)
     .await

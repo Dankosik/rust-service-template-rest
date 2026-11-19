@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use infra_postgres::{Tx, TxMode, observed};
 
-use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
+use crate::kind::{InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
 
 // template:begin outbox:jobs-outbox-module
@@ -13,12 +13,6 @@ pub mod outbox;
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
 const MIN_PAYLOAD_CAPACITY: usize = 256;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EnqueueOptions<'a> {
-    pub delay: Duration,
-    pub unique_key: Option<&'a str>,
-}
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,11 +34,7 @@ pub enum EnqueueError {
     // template:begin outbox:jobs-outbox-enqueue-error
     #[error("{} requires the dedicated outbox enqueue operation", outbox::KIND)]
     OutboxKind,
-    #[error("payload contains a decoded NUL character")]
-    PayloadContainsNul,
     // template:end outbox:jobs-outbox-enqueue-error
-    #[error("job kind {0:?} is not a valid kind name")]
-    InvalidKind(&'static str),
     #[error(
         "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
     )]
@@ -86,14 +76,44 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &K,
-    options: EnqueueOptions<'_>,
+) -> Result<JobId, EnqueueError> {
+    enqueue_delayed(tx, payload, Duration::ZERO).await
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub async fn enqueue_delayed<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+) -> Result<JobId, EnqueueError> {
+    match enqueue_inner(tx, payload, delay, None).await? {
+        Enqueued::Created(id) => Ok(id),
+        Enqueued::Duplicate => Err(EnqueueError::Database(sqlx::Error::RowNotFound)),
+    }
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub async fn enqueue_unique<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    unique_key: &str,
+    delay: Duration,
+) -> Result<Enqueued, EnqueueError> {
+    enqueue_inner(tx, payload, delay, Some(unique_key)).await
+}
+
+async fn enqueue_inner<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+    unique_key: Option<&str>,
 ) -> Result<Enqueued, EnqueueError> {
     // template:begin outbox:jobs-outbox-enqueue-guard
     if K::NAME == outbox::KIND {
         return Err(EnqueueError::OutboxKind);
     }
     // template:end outbox:jobs-outbox-enqueue-guard
-    let prepared = prepare(payload, options)?;
+    let prepared = prepare(payload, delay, unique_key)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
     let inserted = observed!(
@@ -104,7 +124,7 @@ pub async fn enqueue<K: JobKind>(
                      statement_timestamp() + ($3::bigint * interval '1 microsecond'), $4, $5) \
              ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
              DO NOTHING",
-            K::NAME,
+            K::NAME.as_str(),
             prepared.unique_key,
             prepared.delay_micros,
             trace.trace_parent(),
@@ -119,7 +139,7 @@ pub async fn enqueue<K: JobKind>(
         return Ok(Enqueued::Duplicate);
     }
     if prepared.delay_micros == 0 {
-        notify_workers_after_commit(tx, K::NAME);
+        notify_workers_after_commit(tx, K::NAME.as_str());
     }
     Ok(Enqueued::Created(id))
 }
@@ -137,13 +157,7 @@ pub async fn compare_live_payload<K: JobKind>(
     unique_key: &str,
     payload: &K,
 ) -> Result<LivePayloadComparison, EnqueueError> {
-    let prepared = prepare(
-        payload,
-        EnqueueOptions {
-            delay: Duration::ZERO,
-            unique_key: Some(unique_key),
-        },
-    )?;
+    let prepared = prepare(payload, Duration::ZERO, Some(unique_key))?;
     let stored = observed!(
         "compare job payload",
         sqlx::query!(
@@ -153,7 +167,7 @@ pub async fn compare_live_payload<K: JobKind>(
                AND unique_key = $2::text COLLATE \"C\" \
                AND state IN ('pending', 'running') \
              FOR UPDATE",
-            K::NAME,
+            K::NAME.as_str(),
             prepared.unique_key,
         )
         .fetch_optional(&mut *tx),
@@ -227,23 +241,18 @@ fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
     payload: &K,
-    options: EnqueueOptions<'a>,
+    delay: Duration,
+    unique_key: Option<&'a str>,
 ) -> Result<Prepared<'a>, EnqueueError> {
-    if !kind::is_valid_kind_name(K::NAME) {
-        return Err(EnqueueError::InvalidKind(K::NAME));
-    }
-    if options
-        .unique_key
-        .is_some_and(|key| !is_valid_unique_key(key))
-    {
+    if unique_key.is_some_and(|key| !is_valid_unique_key(key)) {
         return Err(EnqueueError::InvalidUniqueKey);
     }
-    let delay_micros = checked_delay_micros(options.delay)?;
+    let delay_micros = checked_delay_micros(delay)?;
     let payload = encode_payload(payload)?;
     serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
         payload,
-        unique_key: options.unique_key,
+        unique_key,
         delay_micros,
     })
 }
@@ -275,12 +284,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{
-        EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
-        prepare,
-    };
-    use crate::JobKind;
+    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter, prepare};
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
+    use crate::{JobKind, KindName};
     use serde::ser::Error as _;
     use serde::{Deserialize, Serialize};
 
@@ -290,28 +296,21 @@ mod tests {
     }
 
     impl JobKind for Widget {
-        const NAME: &'static str = "widget";
+        const NAME: KindName = KindName::new("widget");
     }
 
     #[derive(Serialize, Deserialize)]
     struct Raw(String);
 
     impl JobKind for Raw {
-        const NAME: &'static str = "raw";
+        const NAME: KindName = KindName::new("raw");
     }
 
     #[derive(Serialize, Deserialize)]
     struct Keyed(BTreeMap<String, String>);
 
     impl JobKind for Keyed {
-        const NAME: &'static str = "keyed";
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct BadKind;
-
-    impl JobKind for BadKind {
-        const NAME: &'static str = "Bad Name";
+        const NAME: KindName = KindName::new("keyed");
     }
 
     #[derive(Deserialize)]
@@ -347,7 +346,7 @@ mod tests {
     }
 
     impl JobKind for Streamed {
-        const NAME: &'static str = "streamed";
+        const NAME: KindName = KindName::new("streamed");
     }
 
     fn widget() -> Widget {
@@ -356,40 +355,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_kind_wins_over_a_bad_key() {
-        let err = prepare(
-            &BadKind,
-            EnqueueOptions {
-                delay: Duration::ZERO,
-                unique_key: Some(""),
-            },
-        )
-        .unwrap_err();
-        std::assert_matches!(err, EnqueueError::InvalidKind("Bad Name"));
-    }
-
     #[derive(Serialize, Deserialize)]
     struct Reading {
         value: f64,
     }
 
     impl JobKind for Reading {
-        const NAME: &'static str = "reading";
+        const NAME: KindName = KindName::new("reading");
     }
 
     #[test]
     fn key_and_delay_validation_precede_non_finite_serialization() {
         let payload = Reading { value: f64::NAN };
         for (key, invalid_key) in [("", true), ("valid", false)] {
-            let err = prepare(
-                &payload,
-                EnqueueOptions {
-                    delay: MAX_DELAY + Duration::from_nanos(1),
-                    unique_key: Some(key),
-                },
-            )
-            .unwrap_err();
+            let err =
+                prepare(&payload, MAX_DELAY + Duration::from_nanos(1), Some(key)).unwrap_err();
             if invalid_key {
                 std::assert_matches!(err, EnqueueError::InvalidUniqueKey);
             } else {
@@ -405,7 +385,7 @@ mod tests {
             failure: StreamFailure::None,
             calls: AtomicUsize::new(0),
         };
-        let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+        let err = prepare(&payload, Duration::ZERO, None).unwrap_err();
         std::assert_matches!(err, EnqueueError::PayloadDoesNotDecode(_));
         assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
     }
@@ -413,46 +393,25 @@ mod tests {
     #[test]
     fn unique_key_bounds() {
         let accepted = "k".repeat(MAX_UNIQUE_KEY_BYTES);
-        let prepared = prepare(
-            &widget(),
-            EnqueueOptions {
-                delay: Duration::ZERO,
-                unique_key: Some(&accepted),
-            },
-        )
-        .unwrap();
+        let prepared = prepare(&widget(), Duration::ZERO, Some(&accepted)).unwrap();
         assert_eq!(prepared.unique_key, Some(accepted.as_str()));
 
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(""),
-                },
-            ),
+            prepare(&widget(), Duration::ZERO, Some("")),
             Err(EnqueueError::InvalidUniqueKey)
         );
         std::assert_matches!(
             prepare(
                 &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(&"k".repeat(MAX_UNIQUE_KEY_BYTES + 1)),
-                },
+                Duration::ZERO,
+                Some(&"k".repeat(MAX_UNIQUE_KEY_BYTES + 1)),
             ),
             Err(EnqueueError::InvalidUniqueKey)
         );
         let crossing = format!("{}é", "a".repeat(254));
         assert_eq!(crossing.len(), 256);
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(&crossing),
-                },
-            ),
+            prepare(&widget(), Duration::ZERO, Some(&crossing)),
             Err(EnqueueError::InvalidUniqueKey)
         );
     }
@@ -461,13 +420,7 @@ mod tests {
     fn unique_key_rejects_control_characters() {
         for key in ["\n", "\u{0}", "\u{7f}", "\u{85}"] {
             std::assert_matches!(
-                prepare(
-                    &widget(),
-                    EnqueueOptions {
-                        delay: Duration::ZERO,
-                        unique_key: Some(key),
-                    },
-                ),
+                prepare(&widget(), Duration::ZERO, Some(key)),
                 Err(EnqueueError::InvalidUniqueKey),
                 "{key:?}"
             );
@@ -476,38 +429,16 @@ mod tests {
 
     #[test]
     fn delay_bounds() {
-        assert!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: MAX_DELAY,
-                    unique_key: None,
-                },
-            )
-            .is_ok()
-        );
+        assert!(prepare(&widget(), MAX_DELAY, None).is_ok());
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: MAX_DELAY + Duration::from_nanos(1),
-                    unique_key: None,
-                },
-            ),
+            prepare(&widget(), MAX_DELAY + Duration::from_nanos(1), None),
             Err(EnqueueError::InvalidDelay(InvalidDelay))
         );
     }
 
     #[test]
     fn checked_delay_drops_sub_microseconds() {
-        let prepared = prepare(
-            &widget(),
-            EnqueueOptions {
-                delay: Duration::new(1, 999_999_999),
-                unique_key: None,
-            },
-        )
-        .unwrap();
+        let prepared = prepare(&widget(), Duration::new(1, 999_999_999), None).unwrap();
         assert_eq!(prepared.delay_micros, 1_999_999);
         assert_eq!(checked_delay_micros(Duration::ZERO), Ok(0));
         assert_eq!(checked_delay_micros(MAX_DELAY), Ok(3_153_600_000_000_000));
@@ -520,13 +451,13 @@ mod tests {
     #[test]
     fn payload_size_bound() {
         let exact = Raw("a".repeat(MAX_PAYLOAD_BYTES - 2));
-        let prepared = prepare(&exact, EnqueueOptions::default()).unwrap();
+        let prepared = prepare(&exact, Duration::ZERO, None).unwrap();
         assert_eq!(prepared.payload.len(), MAX_PAYLOAD_BYTES);
         assert_eq!(prepared.payload, format!("\"{}\"", exact.0));
 
         for length in [MAX_PAYLOAD_BYTES - 1, MAX_PAYLOAD_BYTES * 8] {
             let too_big = Raw("a".repeat(length));
-            let err = prepare(&too_big, EnqueueOptions::default()).unwrap_err();
+            let err = prepare(&too_big, Duration::ZERO, None).unwrap_err();
             std::assert_matches!(
                 err,
                 EnqueueError::PayloadTooLarge { bytes } if bytes == length + 2
@@ -540,7 +471,7 @@ mod tests {
             ("a".to_owned(), "é\n\"\\".to_owned()),
             ("b".to_owned(), "🦀".to_owned()),
         ]));
-        let prepared = prepare(&payload, EnqueueOptions::default()).unwrap();
+        let prepared = prepare(&payload, Duration::ZERO, None).unwrap();
         assert_eq!(prepared.payload, r#"{"a":"é\n\"\\","b":"🦀"}"#);
     }
 
@@ -556,7 +487,7 @@ mod tests {
                 failure,
                 calls: AtomicUsize::new(0),
             };
-            let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+            let err = prepare(&payload, Duration::ZERO, None).unwrap_err();
             match failure {
                 StreamFailure::Custom => {
                     let EnqueueError::Serialize(error) = err else {

@@ -8,7 +8,7 @@ use infra_idempotency_store::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Record, RequestFingerprint, ScopeKey,
     Store,
 };
-use infra_jobs::{EnqueueOptions, JobKind, enqueue};
+use infra_jobs::{JobKind, KindName, enqueue_unique};
 use infra_postgres::{Dsn, PgPool, Tx};
 use integration_tests::dsn_for;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ struct WidgetWelcome {
 }
 
 impl JobKind for WidgetWelcome {
-    const NAME: &'static str = "widgets.welcome";
+    const NAME: KindName = KindName::new("widgets.welcome");
 }
 
 const KEY: &[u8] = b"widget";
@@ -72,16 +72,9 @@ async fn replicas(pool: &PgPool) -> (Replica, Replica) {
 
 async fn enqueue_widget(tx: &mut Tx<'_>, widget: u64) {
     let key = WIDGET.to_string();
-    let _enqueued = enqueue(
-        tx,
-        &WidgetWelcome { widget },
-        EnqueueOptions {
-            delay: Duration::ZERO,
-            unique_key: Some(&key),
-        },
-    )
-    .await
-    .expect("the enqueue attempt succeeds");
+    let _enqueued = enqueue_unique(tx, &WidgetWelcome { widget }, &key, Duration::ZERO)
+        .await
+        .expect("the enqueue attempt succeeds");
 }
 
 async fn committed_job_id(pool: &PgPool) -> String {
@@ -91,7 +84,7 @@ async fn committed_job_id(pool: &PgPool) -> String {
         "SELECT id::text FROM background_jobs \
          WHERE kind = $1 AND payload_text = $2 AND unique_key = $3 AND state = 'pending'",
     )
-    .bind(WidgetWelcome::NAME)
+    .bind(WidgetWelcome::NAME.as_str())
     .bind(payload)
     .bind(WIDGET.to_string())
     .fetch_one(pool)

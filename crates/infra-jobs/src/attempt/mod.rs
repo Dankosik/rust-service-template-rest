@@ -22,7 +22,8 @@ use crate::state::FailureReason;
 use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{
-    HandlerOutcome, RetryCause, Transition, WritePlan, Written, map_outcome, send_outcome, write_of,
+    AttemptOutcome, HandlerOutcome, Transition, WritePlan, Written, map_outcome, send_outcome,
+    write_of,
 };
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
@@ -72,45 +73,6 @@ pub(crate) fn describe_metrics() {
         Unit::Count,
         "Queue outcome acknowledgement disposition"
     );
-}
-
-#[derive(Clone, Copy, Enum)]
-enum AttemptOutcome {
-    Completed,
-    Timeout,
-    Retry,
-    Snoozed,
-    Cancelled,
-    Permanent,
-    Exhausted,
-}
-
-impl AttemptOutcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Completed => Transition::COMPLETED_LABEL,
-            Self::Timeout => "timeout",
-            Self::Retry => "retry",
-            Self::Snoozed => "snoozed",
-            Self::Cancelled => "cancelled",
-            Self::Permanent => FailureReason::Permanent.as_str(),
-            Self::Exhausted => FailureReason::Exhausted.as_str(),
-        }
-    }
-
-    const fn of_retry(cause: RetryCause) -> Self {
-        match cause {
-            RetryCause::Failure => Self::Retry,
-            RetryCause::Timeout => Self::Timeout,
-        }
-    }
-
-    const fn of_failure(reason: FailureReason) -> Self {
-        match reason {
-            FailureReason::Permanent => Self::Permanent,
-            FailureReason::Exhausted => Self::Exhausted,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Enum)]
@@ -245,25 +207,24 @@ pub(crate) fn record_exhausted(handles: &KindMetrics, attempt: &AttemptId, summa
 }
 
 fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
-    let outcome = transition.label();
+    if matches!(transition, Transition::Fail { .. }) {
+        return;
+    }
+    let outcome = transition.outcome();
+    let label = outcome.label();
+    handles.attempt(outcome).increment(1);
     match transition {
         Transition::Complete(_) => {
-            handles.attempt(AttemptOutcome::Completed).increment(1);
-            tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
+            tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
-            handles.attempt(AttemptOutcome::Snoozed).increment(1);
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_finished");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, error = error_field(summary), "job_attempt_finished");
         }
         Transition::Release => {
-            handles.attempt(AttemptOutcome::Cancelled).increment(1);
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_finished");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_finished");
         }
-        Transition::Retry { summary, cause, .. } => {
-            handles
-                .attempt(AttemptOutcome::of_retry(*cause))
-                .increment(1);
-            log_attempt_failed(attempt, outcome, summary);
+        Transition::Retry { summary, .. } => {
+            log_attempt_failed(attempt, label, summary);
         }
         Transition::Fail { .. } => {}
     }
@@ -370,12 +331,10 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
 }
 
 fn record_on_span(span: &tracing::Span, transition: &Transition) {
-    span.record("outcome", transition.label());
-    match transition {
-        Transition::Retry { .. } | Transition::Fail { .. } => {
-            span.record("otel.status_code", "ERROR");
-        }
-        Transition::Complete(_) | Transition::Snooze { .. } | Transition::Release => {}
+    let outcome = transition.outcome();
+    span.record("outcome", outcome.label());
+    if outcome.is_span_error() {
+        span.record("otel.status_code", "ERROR");
     }
 }
 
@@ -388,18 +347,23 @@ impl AttemptRun<'_> {
         let transition = map_outcome(
             &self.attempt,
             self.registered.policy,
-            self.registered.is_outbox,
+            self.registered.retry_budget(),
             handler_outcome,
         );
         let handles = self.registered.metrics();
         self.observe_outcome(handles, &transition, handler_duration);
         let Some(plan) = write_of(&transition) else {
-            self.observe_acknowledged(handles, Operation::Record, Written::Applied);
+            self.observe_acknowledged(handles, Operation::Record, Written::Applied, false);
             return;
         };
         let written = self.persist(plan).await;
         match written {
-            Some(written) => self.observe_acknowledged(handles, plan.operation(), written),
+            Some(written) => self.observe_acknowledged(
+                handles,
+                plan.operation(),
+                written,
+                matches!(transition, Transition::Release),
+            ),
             None => self.observe_uncertain(),
         }
         if let Transition::Fail { reason, summary } = &transition {
@@ -524,7 +488,13 @@ impl AttemptRun<'_> {
         observe_attempt(handles, &self.attempt, transition);
     }
 
-    fn observe_acknowledged(&self, handles: &KindMetrics, operation: Operation, written: Written) {
+    fn observe_acknowledged(
+        &self,
+        handles: &KindMetrics,
+        operation: Operation,
+        written: Written,
+        released: bool,
+    ) {
         observe_recovery(self.group, operation);
         let persistence = Persistence::acknowledged(written);
         handles.persistence(persistence).increment(1);
@@ -535,7 +505,7 @@ impl AttemptRun<'_> {
             disposition = persistence.label(),
             "job_persistence_finished"
         );
-        if written == Written::Applied && operation == Operation::Release {
+        if written == Written::Applied && released {
             self.group
                 .lifecycle
                 .counters
@@ -722,7 +692,7 @@ mod tests {
     }
 
     impl crate::JobKind for DecodeProbe {
-        const NAME: &'static str = "test.decode_probe";
+        const NAME: crate::KindName = crate::KindName::new("test.decode_probe");
     }
 
     #[tokio::test]
@@ -738,7 +708,9 @@ mod tests {
             }
         });
         let registry = kinds.validate().unwrap();
-        let registered = registry.get(<DecodeProbe as crate::JobKind>::NAME).unwrap();
+        let registered = registry
+            .get(<DecodeProbe as crate::JobKind>::NAME.as_str())
+            .unwrap();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
@@ -985,7 +957,12 @@ mod tests {
                 };
                 record_on_span(
                     &span,
-                    &map_outcome(&attempt, Policy::default(), false, handler_outcome),
+                    &map_outcome(
+                        &attempt,
+                        Policy::default(),
+                        crate::kind::RetryBudget::Exhaust,
+                        handler_outcome,
+                    ),
                 );
             }
         });

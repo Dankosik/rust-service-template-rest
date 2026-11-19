@@ -147,7 +147,7 @@ impl CompletionBatch {
         );
     }
 
-    fn retire(&mut self) -> SmallVec<[oneshot::Sender<CompletionReply>; 16]> {
+    fn retire(&mut self) -> SmallVec<[oneshot::Sender<CompletionReply>; INLINE_BATCH_CAPACITY]> {
         std::mem::take(&mut self.queued)
             .into_iter()
             .map(QueuedCompletion::retire)
@@ -237,22 +237,10 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
         deadline,
         execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
             let statement = match query {
-                CompletionQuery::Single(ClaimFence {
-                    job_id,
-                    generation,
-                    token,
-                }) => Either::Left(
-                    sqlx::query!(
-                        "UPDATE background_jobs AS job \
-                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-                         WHERE job.id = $1 AND job.claim_generation = $2 AND job.claim_token = $3 \
-                           AND job.claim_expires_at IS NOT NULL",
-                        job_id.0,
-                        generation,
-                        token,
-                    )
-                    .execute(&mut *connection)
-                    .map_ok(CompletionWrite::Single),
+                CompletionQuery::Single(fence) => Either::Left(
+                    complete_query(fence)
+                        .execute(&mut *connection)
+                        .map_ok(CompletionWrite::Single),
                 ),
                 CompletionQuery::Multiple {
                     ids,

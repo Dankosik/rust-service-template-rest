@@ -5,8 +5,8 @@ use arrayvec::ArrayString;
 use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
-use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
-use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
+use infra_jobs::outbox::{self as job_outbox, KIND as OUTBOX_KIND};
+use infra_jobs::{Handler, Job, JobError, JobKind, KindName, Kinds, Policy, RetrySchedule};
 use infra_postgres::{Tx, TxMode};
 use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
@@ -28,13 +28,12 @@ const POLICY: Policy = Policy {
     max_attempts: 25,
     timeout: Duration::from_secs(30),
     max_running: None,
+    retry: RetrySchedule::Exponential {
+        max_base: Duration::from_secs(54),
+    },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutboxEnqueued {
-    Created,
-    Duplicate,
-}
+pub use infra_jobs::outbox::OutboxEnqueued;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
@@ -42,6 +41,8 @@ pub enum OutboxEnqueueError {
     PublisherRequired,
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
     PayloadTooLarge { bytes: usize, max_bytes: usize },
+    #[error("outbox payload contains a decoded NUL character")]
+    PayloadContainsNul,
     #[error("outbox event identity conflicts with its immutable intent or business order")]
     EventIdConflict,
     #[error("outbox aggregate version is occupied or its predecessor is missing")]
@@ -52,6 +53,30 @@ pub enum OutboxEnqueueError {
     InvalidOrder,
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
+}
+
+impl From<job_outbox::OutboxEnqueueError> for OutboxEnqueueError {
+    fn from(error: job_outbox::OutboxEnqueueError) -> Self {
+        match error {
+            job_outbox::OutboxEnqueueError::PayloadContainsNul => Self::PayloadContainsNul,
+            job_outbox::OutboxEnqueueError::EventIdConflict => Self::EventIdConflict,
+            job_outbox::OutboxEnqueueError::OrderConflict => Self::OrderConflict,
+            job_outbox::OutboxEnqueueError::InvalidOrder => Self::InvalidOrder,
+            job_outbox::OutboxEnqueueError::Enqueue(error) => Self::Jobs(error),
+        }
+    }
+}
+
+impl From<job_outbox::OutboxReconcileError> for OutboxEnqueueError {
+    fn from(error: job_outbox::OutboxReconcileError) -> Self {
+        match error {
+            job_outbox::OutboxReconcileError::PayloadContainsNul => Self::PayloadContainsNul,
+            job_outbox::OutboxReconcileError::EventIdConflict => Self::EventIdConflict,
+            job_outbox::OutboxReconcileError::InvalidOrder => Self::InvalidOrder,
+            job_outbox::OutboxReconcileError::MissingReceipt => Self::PublisherRequired,
+            job_outbox::OutboxReconcileError::Enqueue(error) => Self::Jobs(error),
+        }
+    }
 }
 
 #[derive_where::derive_where(Clone, Debug)]
@@ -131,18 +156,11 @@ impl PreparedEvent {
         order: Option<(&str, i64)>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
-        let admission = if self.has_bound_publication() {
-            job_outbox::enqueue(tx, &intent, order).await?
+        if self.has_bound_publication() {
+            Ok(job_outbox::enqueue(tx, &intent, order).await?)
         } else {
-            job_outbox::reconcile(tx, &intent, order).await?
-        };
-        match admission {
-            Admission::Created => Ok(OutboxEnqueued::Created),
-            Admission::Duplicate => Ok(OutboxEnqueued::Duplicate),
-            Admission::EventIdConflict => Err(OutboxEnqueueError::EventIdConflict),
-            Admission::OrderConflict => Err(OutboxEnqueueError::OrderConflict),
-            Admission::InvalidOrder => Err(OutboxEnqueueError::InvalidOrder),
-            Admission::MissingReceipt => Err(OutboxEnqueueError::PublisherRequired),
+            job_outbox::reconcile(tx, &intent, order).await?;
+            Ok(OutboxEnqueued::Duplicate)
         }
     }
 
@@ -315,7 +333,7 @@ struct PublishDomainEvent {
 }
 
 impl JobKind for PublishDomainEvent {
-    const NAME: &'static str = OUTBOX_KIND;
+    const NAME: KindName = OUTBOX_KIND;
 }
 
 impl From<&PreparedEvent> for PublishDomainEvent {

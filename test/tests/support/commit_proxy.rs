@@ -32,6 +32,7 @@ pub(crate) enum Fault {
 pub(crate) enum Boundary {
     Commit(Option<&'static str>),
     Autocommit(&'static str),
+    OutsideTransaction(&'static str),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -400,12 +401,20 @@ async fn relay(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TransactionState {
+    #[default]
+    Autocommit,
+    Open,
+}
+
 #[derive(Debug, Default)]
 struct Frontend {
     pending: BytesMut,
     started: bool,
     statements: HashMap<Vec<u8>, Vec<u8>>,
     portals: HashMap<Vec<u8>, Vec<u8>>,
+    transaction: TransactionState,
     matched: bool,
     executed_since_sync: bool,
 }
@@ -441,11 +450,21 @@ impl Frontend {
             Some(b'S') => None,
             _ => return None,
         };
-        if sql.is_some_and(|sql| sql.starts_with(b"BEGIN") || sql == b"ROLLBACK") {
+        if sql.is_some_and(|sql| sql.starts_with(b"BEGIN")) {
+            self.transaction = TransactionState::Open;
             self.matched = false;
             return None;
         }
+        if sql == Some(b"ROLLBACK") {
+            self.transaction = TransactionState::Autocommit;
+            self.matched = false;
+            return None;
+        }
+        let in_transaction = self.transaction == TransactionState::Open;
         let commit = message.first() == Some(&b'Q') && sql == Some(COMMIT);
+        if commit {
+            self.transaction = TransactionState::Autocommit;
+        }
         let mut arming = lock(arming);
         let Arming::Armed { fault, boundary } = *arming else {
             if commit {
@@ -459,8 +478,14 @@ impl Frontend {
                 Some(statement),
                 matches!(message.first(), Some(b'Q' | b'S')),
             ),
+            Boundary::OutsideTransaction(statement) => (
+                Some(statement),
+                !in_transaction && matches!(message.first(), Some(b'Q' | b'S')),
+            ),
         };
-        if let (Some(statement), Some(sql)) = (statement, sql) {
+        if let (Some(statement), Some(sql)) = (statement, sql)
+            && !(matches!(boundary, Boundary::OutsideTransaction(_)) && in_transaction)
+        {
             self.matched |= std::str::from_utf8(sql).is_ok_and(|sql| sql.contains(statement));
         }
         if !at_boundary {
