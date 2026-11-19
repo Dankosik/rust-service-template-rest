@@ -89,7 +89,7 @@ proposal: <flow or Rust interface: types, methods, invariants, ordering, error m
 caller_sketch: <3-8 line realistic call-site usage against existing workspace types, or entry->finality trace>
 hidden_complexity: <what stays inside the module or mechanism behind the seam>
 dependencies_and_cost: <dependency category/adapters, failure/cancellation/concurrency profile, budgets & unit cost>
-thin_leverage_and_risks: <where this candidate bends, breaks, or pays extra cost>
+thin_leverage_and_risks: <where this candidate bends, breaks, pays extra cost, or locks in one-way doors>
 blocker_or_gap: <hard constraint conflict, infeasible pressure, missing spec rule, or none>
 anchors: <source-verified repo and Cargo.lock locators used, or uncached gaps>
 ```
