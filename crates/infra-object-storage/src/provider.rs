@@ -232,7 +232,7 @@ fn valid_bucket(bucket: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provider, Target, UploadChecksum, admit};
+    use super::{Provider, Target, UploadChecksum, resolve};
     use crate::ConfigError;
 
     const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
