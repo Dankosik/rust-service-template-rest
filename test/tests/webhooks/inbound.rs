@@ -717,7 +717,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     }))
     .expect("historical inbound payload");
     infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
-        let _enqueued = infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
+        let _id = infra_jobs::enqueue(tx, &incoming)
             .await
             .expect("enqueue historical payload");
         Ok(())
@@ -1353,7 +1353,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
         "INSERT INTO background_jobs (kind, payload, not_before) \
          VALUES ($1, $2, statement_timestamp())",
     )
-    .bind(<Incoming as infra_jobs::JobKind>::NAME)
+    .bind(<Incoming as infra_jobs::JobKind>::NAME.as_str())
     .bind(serde_json::to_value(&incoming).expect("serialize historical payload"))
     .execute(&pool)
     .await

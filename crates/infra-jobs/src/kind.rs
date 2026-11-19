@@ -44,8 +44,36 @@ pub(crate) fn saturating_micros(duration: Duration) -> i64 {
 
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Debug, derive_more::Display,
+)]
+#[debug("KindName({_0:?})")]
+pub struct KindName(&'static str);
+
+impl KindName {
+    /// ```compile_fail
+    /// const _: infra_jobs::KindName = infra_jobs::KindName::new("Not.Valid");
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        assert!(is_valid_kind_name(name), "invalid job kind name");
+        Self(name)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl AsRef<str> for KindName {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
 pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
-    const NAME: &'static str;
+    const NAME: KindName;
 }
 
 #[derive(
@@ -126,7 +154,7 @@ impl<K: JobKind, P> fmt::Debug for Job<K, P> {
         formatter
             .debug_struct("Job")
             .field("id", &self.attempt.fence.job_id)
-            .field("kind", &K::NAME)
+            .field("kind", &K::NAME.as_str())
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
     }
@@ -140,7 +168,7 @@ pub(crate) enum Disposition {
     Snooze { delay_micros: i64 },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
@@ -263,11 +291,33 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RetrySchedule {
+    #[default]
+    Quartic,
+    Exponential {
+        max_base: Duration,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetryBudget {
+    Exhaust,
+    PersistTransient,
+}
+
+impl RetryBudget {
+    pub(crate) const fn exhausts_transient(self) -> bool {
+        matches!(self, Self::Exhaust)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub max_attempts: u16,
     pub timeout: Duration,
     pub max_running: Option<NonZeroU32>,
+    pub retry: RetrySchedule,
 }
 
 impl Default for Policy {
@@ -276,6 +326,7 @@ impl Default for Policy {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             timeout: DEFAULT_TIMEOUT,
             max_running: None,
+            retry: RetrySchedule::Quartic,
         }
     }
 }
@@ -317,10 +368,11 @@ impl KindsBuilder {
         policy: Policy,
         run: impl Fn(Job<K>) -> HandlerFuture + Send + Sync + 'static,
     ) -> &mut Self {
+        let name = K::NAME.as_str();
         self.entries.push(Registered {
-            name: K::NAME,
+            name,
             policy,
-            is_outbox: crate::RESERVED_OUTBOX_KIND == Some(K::NAME),
+            is_outbox: crate::RESERVED_OUTBOX_KIND == Some(name),
             running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
@@ -361,9 +413,6 @@ impl KindsBuilder {
         }
         let mut seen = HashSet::with_capacity(self.entries.len());
         for entry in &self.entries {
-            if !is_valid_kind_name(entry.name) {
-                return Err(KindError::InvalidName(entry.name));
-            }
             if !seen.insert(entry.name) {
                 return Err(KindError::Duplicate(entry.name));
             }
@@ -372,6 +421,11 @@ impl KindsBuilder {
             }
             if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&entry.policy.timeout) {
                 return Err(KindError::InvalidTimeout { kind: entry.name });
+            }
+            if let RetrySchedule::Exponential { max_base } = entry.policy.retry
+                && !(MIN_TIMEOUT..=MAX_DELAY).contains(&max_base)
+            {
+                return Err(KindError::InvalidRetryMaxBase { kind: entry.name });
             }
         }
         Ok(Kinds {
@@ -475,10 +529,6 @@ pub enum KindError {
     NoKinds,
     #[error("job kind {0:?} is registered twice")]
     Duplicate(&'static str),
-    #[error(
-        "job kind name {0:?} must be 1 to {MAX_KIND_LEN} characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
-    )]
-    InvalidName(&'static str),
     #[error("job kind {kind:?}: max_attempts must be between 1 and {MAX_ATTEMPTS}")]
     InvalidMaxAttempts { kind: &'static str },
     #[error(
@@ -487,6 +537,12 @@ pub enum KindError {
         jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_TIMEOUT)
     )]
     InvalidTimeout { kind: &'static str },
+    #[error(
+        "job kind {kind:?}: exponential retry max_base must be between {} and {}",
+        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MIN_TIMEOUT),
+        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_DELAY)
+    )]
+    InvalidRetryMaxBase { kind: &'static str },
 }
 
 pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
@@ -504,13 +560,6 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     true
 }
 
-/// ```compile_fail
-/// const _: () = infra_jobs::assert_valid_kind_name("Not.Valid");
-/// ```
-pub const fn assert_valid_kind_name(name: &str) {
-    assert!(is_valid_kind_name(name), "invalid job kind name");
-}
-
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
@@ -524,6 +573,14 @@ impl Registered {
     pub(crate) fn metrics(&self) -> &crate::attempt::KindMetrics {
         self.metrics
             .get_or_init(|| crate::attempt::KindMetrics::new(self.name))
+    }
+
+    pub(crate) const fn retry_budget(&self) -> RetryBudget {
+        if self.is_outbox {
+            RetryBudget::PersistTransient
+        } else {
+            RetryBudget::Exhaust
+        }
     }
 }
 
@@ -553,10 +610,8 @@ mod tests {
     }
 
     impl JobKind for Sample {
-        const NAME: &'static str = "sample";
+        const NAME: KindName = KindName::new("sample");
     }
-
-    const _: () = assert_valid_kind_name(Sample::NAME);
 
     async fn accept(_: Job<Sample>) -> Result<(), JobError> {
         Ok(())
@@ -566,21 +621,14 @@ mod tests {
     struct Alpha;
 
     impl JobKind for Alpha {
-        const NAME: &'static str = "alpha";
+        const NAME: KindName = KindName::new("alpha");
     }
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Beta;
 
     impl JobKind for Beta {
-        const NAME: &'static str = "beta";
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Bad;
-
-    impl JobKind for Bad {
-        const NAME: &'static str = "Bad";
+        const NAME: KindName = KindName::new("beta");
     }
 
     fn job_id(text: &str) -> JobId {
@@ -622,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_refuses_empty_duplicate_and_invalid_name() {
+    fn validate_refuses_empty_and_duplicate_kinds() {
         let err = KindsBuilder::new().validate().unwrap_err();
         assert_eq!(err, KindError::NoKinds);
         assert_eq!(err.to_string(), "no job kind is registered");
@@ -639,15 +687,6 @@ mod tests {
         let err = kinds.validate().unwrap_err();
         assert_eq!(err, KindError::Duplicate("sample"));
         assert_eq!(err.to_string(), "job kind \"sample\" is registered twice");
-
-        let mut kinds = KindsBuilder::new();
-        kinds.register(Policy::default(), |_: Job<Bad>| async { Ok(()) });
-        let err = kinds.validate().unwrap_err();
-        assert_eq!(err, KindError::InvalidName("Bad"));
-        assert_eq!(
-            err.to_string(),
-            "job kind name \"Bad\" must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
-        );
     }
 
     #[test]
@@ -686,6 +725,24 @@ mod tests {
             .to_string(),
             "job kind \"sample\": timeout must be between 1s and 1h"
         );
+        assert_eq!(
+            refuse(Policy {
+                retry: RetrySchedule::Exponential {
+                    max_base: Duration::from_millis(999),
+                },
+                ..Policy::default()
+            }),
+            KindError::InvalidRetryMaxBase { kind: "sample" }
+        );
+        assert_eq!(
+            refuse(Policy {
+                retry: RetrySchedule::Exponential {
+                    max_base: MAX_DELAY + Duration::from_nanos(1),
+                },
+                ..Policy::default()
+            }),
+            KindError::InvalidRetryMaxBase { kind: "sample" }
+        );
         admit(Policy {
             max_attempts: 1,
             timeout: MIN_TIMEOUT,
@@ -694,6 +751,15 @@ mod tests {
         admit(Policy {
             max_attempts: MAX_ATTEMPTS,
             timeout: MAX_TIMEOUT,
+            retry: RetrySchedule::Exponential {
+                max_base: MAX_DELAY,
+            },
+            ..Policy::default()
+        });
+        admit(Policy {
+            retry: RetrySchedule::Exponential {
+                max_base: MIN_TIMEOUT,
+            },
             ..Policy::default()
         });
     }
@@ -780,7 +846,7 @@ mod tests {
             }
         });
         let registry = kinds.validate().unwrap();
-        let registered = registry.get(Sample::NAME).unwrap();
+        let registered = registry.get(Sample::NAME.as_str()).unwrap();
         let token = CancellationToken::new();
         let future = (registered.dispatch)(
             Attempt {

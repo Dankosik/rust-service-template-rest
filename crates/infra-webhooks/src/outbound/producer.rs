@@ -4,7 +4,7 @@ use bytes::Bytes;
 use compact_str::CompactString;
 use foldhash::HashSet;
 use http::HeaderValue;
-use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
+use infra_jobs::{EnqueueError, JobId, json_payload_len};
 use infra_postgres::{Tx, TxMode};
 
 use super::{Delivery, delivery_version};
@@ -44,10 +44,7 @@ impl Producer {
             content_type: CompactString::from(content_type),
             body,
         };
-        match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default()).await? {
-            Enqueued::Created(id) => Ok(id),
-            Enqueued::Duplicate => Err(OutboundError::UnexpectedDuplicate),
-        }
+        Ok(infra_jobs::enqueue(tx, &delivery).await?)
     }
 
     async fn preflight(
@@ -119,8 +116,6 @@ pub enum OutboundError {
     InvalidContentType,
     #[error("outbound webhook enqueue failed")]
     Enqueue(#[from] EnqueueError),
-    #[error("outbound webhook enqueue unexpectedly deduplicated")]
-    UnexpectedDuplicate,
 }
 
 #[cfg(test)]

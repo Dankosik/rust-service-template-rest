@@ -12,7 +12,7 @@ const LAST_ATTEMPT_SUCCESS: &str = "jobs_outbox_last_attempt_success";
 const ORDERED_SAMPLE_CAP: i64 = 1_000;
 
 pub(super) fn is_registered(kinds: &[&str]) -> bool {
-    kinds.contains(&KIND)
+    kinds.contains(&KIND.as_str())
 }
 
 pub(super) fn init_metrics() {

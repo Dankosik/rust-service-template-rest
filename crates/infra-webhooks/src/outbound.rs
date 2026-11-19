@@ -13,7 +13,7 @@ use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http::{HeaderMap, Request, StatusCode, Uri, header};
-use infra_jobs::{Handler, Job, JobError, JobKind, KindsBuilder, Policy};
+use infra_jobs::{Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use metrics::{Counter, SharedString};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,6 @@ use crate::protocol::KeyRing;
 
 pub use producer::{JSON_CONTENT_TYPE, OutboundError, Producer};
 
-const DELIVERY_KIND: &str = "webhooks.deliver";
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 const OUTCOME_DELIVERED: &str = "delivered";
@@ -39,6 +38,7 @@ pub const DELIVERY_POLICY: Policy = Policy {
     max_attempts: 20,
     timeout: Duration::from_secs(30),
     max_running: None,
+    retry: RetrySchedule::Quartic,
 };
 
 const LIMITS: Limits = Limits {
@@ -227,10 +227,8 @@ impl Delivery {
 }
 
 impl JobKind for Delivery {
-    const NAME: &'static str = DELIVERY_KIND;
+    const NAME: KindName = KindName::new("webhooks.deliver");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(DELIVERY_KIND);
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {

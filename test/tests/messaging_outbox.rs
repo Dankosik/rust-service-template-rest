@@ -986,11 +986,14 @@ async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
     let jobs = template_pool(&pool, 3).await;
     let intent = prepared(&fixture, "live-transform", "preserve route");
     let key = event_key(intent.message_id());
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
-        intent.enqueue(tx).await.map_err(Step::from)
-    })
-    .await
-    .unwrap();
+    assert_eq!(
+        in_tx(&jobs, async |tx| -> Result<_, Step> {
+            intent.enqueue(tx).await.map_err(Step::from)
+        })
+        .await
+        .unwrap(),
+        OutboxEnqueued::Created
+    );
     let run = start(&jobs, kinds).await;
     let attempt = poll_until("relay attempts publication", WAIT, POLL, async || {
         let row = job(&jobs, &key).await;
@@ -1040,7 +1043,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     let too_large = event("oversized-new-intent", &"x".repeat(53));
     let before = outbox_count(&jobs).await;
     let refused = in_tx(&jobs, async |tx| -> Result<(), Step> {
-        publication.prepare(&too_large)?.enqueue(tx).await?;
+        let _ = publication.prepare(&too_large)?.enqueue(tx).await?;
         Ok(())
     })
     .await;
@@ -1150,7 +1153,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     make_due(generation).await;
     let interrupted = prepared(&fixture, "final-lease", "interrupted");
     in_tx(&jobs, async |tx| -> Result<(), Step> {
-        interrupted.enqueue(tx).await?;
+        assert_eq!(interrupted.enqueue(tx).await?, OutboxEnqueued::Created);
         sqlx::query(
             "UPDATE background_jobs SET state='running', attempts=25,
              claim_generation=nextval('background_jobs_claim_generation'),
@@ -1371,11 +1374,14 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .collect();
     for id in ["substituted", "malformed-outer"] {
         let intent = prepared(&fixture, id, "original");
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .unwrap();
+        assert_eq!(
+            in_tx(&jobs, async |tx| -> Result<_, Step> {
+                intent.enqueue(tx).await.map_err(Step::from)
+            })
+            .await
+            .unwrap(),
+            OutboxEnqueued::Created
+        );
         let changed = sqlx::query(
             "UPDATE background_jobs SET payload_text = CASE WHEN $2 THEN '{' ELSE
              jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb($3::text), false)::text END
