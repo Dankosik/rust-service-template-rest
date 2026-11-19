@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_nats::jetstream::{self, stream};
 use domain_events::EventPayload;
+use futures_util::StreamExt as _;
 use infra_messaging::{ConsumerOptions, Messaging, MessagingOptions, Registry, Route};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -26,17 +27,13 @@ fn deadline() -> Instant {
 }
 
 async fn provision(
-    url: &str,
+    broker: async_nats::Client,
     stream_name: &str,
     subject: &str,
     dlq_stream: &str,
     dlq_subject: &str,
 ) -> jetstream::Context {
-    let jetstream = jetstream::new(
-        async_nats::connect(url)
-            .await
-            .expect("NATS_URL must point to the JetStream broker selected for this suite"),
-    );
+    let jetstream = jetstream::new(broker);
     jetstream
         .create_stream(stream::Config {
             name: stream_name.to_owned(),
@@ -67,6 +64,9 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
 
     let url = std::env::var("NATS_URL")
         .expect("NATS_URL is required; run scripts/profiles/integration.sh messaging");
+    let broker = async_nats::connect(&url)
+        .await
+        .expect("NATS_URL must point to the JetStream broker selected for this suite");
     let suffix = std::process::id();
     let (stream_name, subject, durable) = (
         format!("TEST_IDLE_{suffix}"),
@@ -77,7 +77,14 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
         format!("TEST_IDLE_DLQ_{suffix}"),
         format!("test.idle_dlq.{suffix}"),
     );
-    let jetstream = provision(&url, &stream_name, &subject, &dlq_stream, &dlq_subject).await;
+    let jetstream = provision(
+        broker.clone(),
+        &stream_name,
+        &subject,
+        &dlq_stream,
+        &dlq_subject,
+    )
+    .await;
 
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
@@ -91,7 +98,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
             source_stream: stream_name.clone(),
             max_payload_bytes: 1024,
             consumer: Some(ConsumerOptions {
-                durable_name: durable,
+                durable_name: durable.clone(),
                 filter_subject: subject.clone(),
                 dlq_subject,
                 dlq_stream: Some(dlq_stream.clone()),
@@ -109,24 +116,69 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     registry
         .register(&route, |_, _| async { Ok(()) })
         .expect("handler is registered");
-    let mut handle = messaging
+    let consumer = messaging
         .consumer(registry, deadline(), &cancel)
         .await
-        .expect("durable consumer is admitted")
-        .start(&cancel);
+        .expect("durable consumer is admitted");
 
-    tokio::time::sleep(Duration::from_secs(33)).await;
+    let stream = jetstream
+        .get_stream(&stream_name)
+        .await
+        .expect("fixture stream");
+    let bound = stream
+        .get_consumer::<jetstream::consumer::pull::Config>(&durable)
+        .await
+        .expect("fixture durable");
+    let mut config = bound.cached_info().config.clone();
+    config.max_expires = Duration::from_secs(3);
+    stream
+        .update_consumer(config)
+        .await
+        .expect("short idle pull expiry");
+    let mut pulls = broker
+        .subscribe(format!("$JS.API.CONSUMER.MSG.NEXT.{stream_name}.{durable}"))
+        .await
+        .expect("observe pulls for the test durable");
+    broker.flush().await.expect("pull subscription is active");
+
+    let mut handle = consumer.start(&cancel);
+    let first = tokio::time::timeout_at(deadline(), pulls.next())
+        .await
+        .expect("the consumer sends the first idle pull")
+        .expect("pull subscription remains open");
+    let first_reply = first.reply.expect("idle pull has a reply subject");
+    let mut replies = broker
+        .subscribe(first_reply.clone())
+        .await
+        .expect("observe the first pull reply");
+    broker.flush().await.expect("reply subscription is active");
+    let expiry = tokio::time::timeout_at(deadline(), replies.next())
+        .await
+        .expect("the broker replies when the idle pull expires")
+        .expect("reply subscription remains open");
+    assert_eq!(expiry.status, Some(async_nats::StatusCode::TIMEOUT));
+    let renewed = tokio::time::timeout_at(deadline(), pulls.next())
+        .await
+        .expect("the consumer renews the expired idle pull")
+        .expect("pull subscription remains open");
+    assert_ne!(
+        renewed.reply.expect("renewed pull has a reply subject"),
+        first_reply
+    );
 
     let errors = scrape
         .render()
         .lines()
         .filter(|line| line.starts_with("messaging_consumer_stream_errors_total"))
-        .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
-        .sum::<f64>();
-    assert!(
-        errors < 1.0,
-        "an idle pull expiry counted as a failed batch"
-    );
+        .map(|line| {
+            line.rsplit_once(' ')
+                .expect("stream error metric has a sample value")
+                .1
+                .parse::<u64>()
+                .expect("stream error metric is a counter")
+        })
+        .sum::<u64>();
+    assert_eq!(errors, 0, "an idle pull expiry counted as a failed batch");
 
     handle
         .finish(deadline())

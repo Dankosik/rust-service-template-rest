@@ -375,8 +375,8 @@ run_messaging() {
 		start_owned_messaging "${ROOT_DIR}/env/nats/nats-server.conf" ordinary
 		ordinary_url=${owned_url}
 	fi
-	# idle_pull waits out pull expiries (33 s in CI); run it beside the jetstream
-	# suite after one shared compile step.
+	# Run the isolated idle-pull probe beside the JetStream suite after one
+	# shared compile step.
 	if cargo test --locked -p infra-messaging --features integration --test jetstream --test idle_pull --example dlq_recovery --no-run; then
 		local idle_log="${messaging_work_dir}/idle-pull-test.log"
 		local idle_pid idle_status=0
