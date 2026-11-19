@@ -3,6 +3,7 @@ use crate::load::{load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
 use crate::validate::admit_with;
 use crate::{LoadOptions, LogFormat};
+use secrecy::ExposeSecret as _;
 use std::assert_matches;
 
 fn dsn() -> SecretString {
@@ -66,6 +67,30 @@ fn pooled_processes_can_disable_notifications() {
     let worker = crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
     assert!(!worker.postgres.as_ref().unwrap().notifications);
     // template:end jobs:worker-postgres-notifications-test
+}
+
+#[test]
+fn the_migration_override_supplies_its_own_endpoint_and_credentials() {
+    let options = LoadOptions::default();
+    let shared = "postgres://api@pool:6432/app?sslmode=verify-full";
+    let direct = "postgres://ddl:example@db:5432/app?sslmode=verify-full";
+    let variables = [
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", shared),
+        ("APP__POSTGRES__PASSWORD_FILE", "/run/secrets/api-password"),
+        ("APP__POSTGRES__MIGRATION_DSN", direct),
+    ];
+    let service = load_from(&options, BUILD, env(&variables)).unwrap();
+    let runtime = service.postgres.as_ref().unwrap();
+    assert_eq!(runtime.dsn.expose_secret(), shared);
+    assert_eq!(
+        runtime.password_file.as_deref(),
+        Some(std::path::Path::new("/run/secrets/api-password"))
+    );
+
+    let migration = load_migration_from(&options, BUILD, env(&variables)).unwrap();
+    assert_eq!(migration.postgres().dsn.expose_secret(), direct);
+    assert!(migration.postgres().password_file.is_none());
 }
 
 #[rstest::rstest]
