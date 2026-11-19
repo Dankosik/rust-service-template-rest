@@ -148,6 +148,7 @@ pub fn prepare_pool_with_notifications(
     let connect_options = session_connect_options(dsn, options.application_name, settings)
         .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
     let alive = Arc::new(());
+    let liveness = Arc::downgrade(&alive);
     let pool_options = PgPoolOptions::new()
         .max_connections(options.max_connections.get())
         .acquire_timeout(ACQUIRE_TIMEOUT)
@@ -157,16 +158,13 @@ pub fn prepare_pool_with_notifications(
         .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
         .before_acquire(ping_if_idle)
-        .after_release({
-            let alive = Arc::clone(&alive);
-            move |conn, _meta| {
-                let _ = &alive;
-                conn.shrink_buffers();
-                Box::pin(async { Ok(true) })
-            }
+        .after_release(move |conn, _meta| {
+            let _ = &alive;
+            conn.shrink_buffers();
+            Box::pin(async { Ok(true) })
         });
     let pool = pool_options.connect_lazy_with(connect_options);
-    PoolPolicy::register(&pool, &alive, options, notifications);
+    PoolPolicy::register(&pool, liveness, options, notifications);
     pool
 }
 
@@ -187,7 +185,7 @@ impl PoolPolicy {
         self.alive.strong_count() > 0
     }
 
-    fn register(pool: &PgPool, alive: &Arc<()>, options: &PoolOptions<'_>, notifications: bool) {
+    fn register(pool: &PgPool, alive: Weak<()>, options: &PoolOptions<'_>, notifications: bool) {
         let key = Self::key(pool);
         let mut policies = POOL_POLICIES.lock();
         policies.retain(|address, policy| *address != key && policy.is_live());
@@ -201,7 +199,7 @@ impl PoolPolicy {
             policies.insert(
                 key,
                 Self {
-                    alive: Arc::downgrade(alive),
+                    alive,
                     slots,
                     notifications,
                 },
