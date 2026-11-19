@@ -8,8 +8,8 @@ while leaving internals behind a single module's seam to Implementation.
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
-Basis: intent.md, spec.md | <cited external contract>[, research/<topic>.md ...][, rollout.md]
-Carried concerns: <risk, downstream owner, closing action; omit when none>
+Basis: intent.md, spec.md | <cited external contract>[, research/<topic>.md ...]
+Carried concerns: <risk, downstream owner, closing action — from unresolved spec.md Carried concerns (in draft) or review CONCERNS (before ready); omit when none>
 
 ## Obligation trace
 
@@ -45,9 +45,11 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 <Applicable System Probes #6–#7 outputs: deadline/retry/drain arithmetic + single retry owner, per-unit/concurrency caps & shedding, config rules, bounded-cardinality signals, correlation, readiness/shutdown.>
 
-### Rollout and mixed-version compatibility
+## Rollout and mixed-version compatibility
 
-<`no deployment impact`, `standard single-step deploy`, or `rollout.md`; lock-safe DDL + serialized payload compatibility; for `expand -> migrate -> contract`, state `same-release` vs `multi-release`.>
+<Omit when Release Closure / rollout did not trigger.>
+
+<`no deployment impact`, `standard single-step deploy`, or link to `rollout.md`; lock-safe DDL + serialized payload compatibility; for `expand -> migrate -> contract`, state `same-release` vs `multi-release`.>
 
 ## Rust architecture, seams, and ownership
 
@@ -99,13 +101,16 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
   sharpens review, and link unchanged code, schemas, and `research/*.md`.
   Persist `specs/<task>/rollout.md` only when [Release
   Closure](../rubrics/release-closure.md) needs a non-trivial sequence.
-- **Lifecycle (`status`) & ID stability:** start at `draft`; flip to `ready`
-  only after [Technical Design Review](../phases/technical-design-review.md)
-  permits handoff and bounded `CONCERNS` appear in `Carried concerns`. Use
+- **Lifecycle (`status`) & ID stability:** start at `draft` (carrying any
+  unresolved `spec.md` `Carried concerns`); flip to `ready` only after
+  [Technical Design Review](../phases/technical-design-review.md) permits
+  handoff and any review `CONCERNS` are appended to `Carried concerns`. Use
   `blocked` with `Blocked decisions` whenever saving partial work or
-  invalidating a persisted design on a blocked handoff. On reopen, keep
-  surviving `D<n>` and `S<n>` IDs stable (retire deleted IDs instead of
-  renumbering downstream-cited anchors).
+  invalidating a persisted design on a blocked handoff. When
+  `specs/<task>/rollout.md` is persisted alongside `design.md`, keep its
+  `status` (`draft | ready | blocked`) in lockstep. On reopen, keep surviving
+  `D<n>` and `S<n>` IDs stable (retire deleted IDs instead of renumbering
+  downstream-cited anchors).
 - **Addressability & public seam contracts:** add `D<n>` only for genuine open
   forks and `S<n>` per non-trivial new or changed seam so Planning cites
   `design/design.md#d1-...` and `#s1-...` directly. Trace every `spec.md`
