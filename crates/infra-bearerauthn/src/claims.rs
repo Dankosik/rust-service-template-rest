@@ -358,8 +358,7 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 // template:begin oidc-introspection:authn-claims-introspection-validation
 impl VerifiedClaims {
     pub(crate) fn is_reusable_at(&self, now: u64) -> bool {
-        now < self.principal.expires_at()
-            && is_active_at(self.not_before, Duration::from_secs(now))
+        now < self.principal.expires_at() && is_active_at(self.not_before, Duration::from_secs(now))
     }
 }
 

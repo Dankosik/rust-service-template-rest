@@ -298,12 +298,10 @@ impl Expiry<TokenDigest, VerifiedClaims> for Retention {
 
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
     match now.duration_since(UNIX_EPOCH) {
-        Ok(now_from_epoch) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
-            principal
-                .expiry_from_epoch()
-                .saturating_sub(now_from_epoch)
-                .min(ttl)
-        }
+        Ok(now_from_epoch) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => principal
+            .expiry_from_epoch()
+            .saturating_sub(now_from_epoch)
+            .min(ttl),
         _ => Duration::ZERO,
     }
 }
