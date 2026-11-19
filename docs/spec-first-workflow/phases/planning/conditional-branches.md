@@ -12,10 +12,8 @@ slices plus an integrated check in `tasks.md`'s `Completion`.
 
 - Wire real production code through the seam (doubles belong only behind an
   accepted seam; stubs or test-only wiring fail). State the observable seam
-  behavior `T<id>` exercises locally (plus any source-mandated `Additional
-  proof`) instead of deferring it to `unverified`, leaving probe and fixture
-  choices to Implementation.
-- **Gate risk-dependent slices:** add coding edge `T<id>` (`T<id> — retires
+  behavior `T<ID>` exercises locally instead of deferring it to `unverified`.
+- **Gate risk-dependent slices:** add coding edge `T<ID>` (`T<ID> — retires
   <assumption>`) on every task whose work would be discarded if the seam
   falsifies; keep independent tasks unblocked.
 - Record the exact assumption and upstream reopen owner (`Technical Design` or
@@ -38,8 +36,6 @@ wide for one atomic green task, sequence `expand -> migrate -> contract`:
   separate `Expand` and `Contract` across releases, keep post-deploy `Contract`
   outside Release 1's ledger (record it in `Boundary -> Out of scope` citing
   `rollout.md`).
-
-Keep any refactor provable inside one Lead session as a single atomic task.
 
 ## Claim Rules
 

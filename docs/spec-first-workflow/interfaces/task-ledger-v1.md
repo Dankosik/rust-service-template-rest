@@ -39,8 +39,9 @@ Global constraints: <active rules, cross-task pinned shared identifiers, shared 
   - `[acceptance]` gates final validation (e.g., `T1 [acceptance]`);
     `[effect:<action>]` gates a named external action (e.g., `release approval
     [effect:release]`).
-- Keep IDs, non-default shape tags, and stage tags identical in each packet
-  (checked mechanically by `make ledger-check TASK=<task>`).
+- Keep IDs, non-default shape tags, and `Depends on` (targets and stages)
+  identical in each packet (checked mechanically by `make ledger-check
+  TASK=<task>`).
 - `Global constraints` links accepted owners and pins cross-task shared
   identifiers once; update in place when guidance changes.
 
