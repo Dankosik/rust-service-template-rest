@@ -73,7 +73,8 @@ review only on a green, proof-complete candidate.
 - Otherwise freeze the candidate and dispatch `reviewer-agent` (tier per
   harness adapter) under [Implementation Review](../implementation-review.md)
   with mode, pinned diff command and commit list, accepted bundle paths
-  (`specs/<task>/`), and current check receipts.
+  (`specs/<task>/`), and current check receipts — omitting builder or Delivery
+  Owner narrative justifications or self-review claims.
 
 | Review Return | Action |
 | --- | --- |

@@ -194,9 +194,11 @@ closed protected decisions, execute directly without workflow artifacts or
 delegation, finish under Validation budget, and report the outcome, executed
 checks, and material limitations. Load [Review](docs/spec-first-workflow/shared/review.md#trigger)
 at the final boundary when requested, when touching authorization, money, data
-integrity, concurrency, or hard-to-reverse migration, when correctness remains
-uncertain, or when adding a crate, dependency or crate feature, trait or layer,
-custom general mechanism, config key, or parallel path.
+integrity, concurrency, or hard-to-reverse migration, when a non-trivial
+behavior change relies on tests authored in the same thread without a
+pre-existing independent oracle, when correctness remains uncertain, or when
+adding a crate, dependency or crate feature, trait or layer, custom general
+mechanism, config key, or parallel path.
 
 Keep tasks and lanes inside an active Implementation ledger under its owner
 through final validation. When an outcome exceeds Direct Work (beyond an
