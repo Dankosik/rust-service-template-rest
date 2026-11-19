@@ -410,14 +410,14 @@ mod tests {
         ));
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
-            let (_, partner) = state.active.endpoint("partner").expect("partner endpoint");
+            let (_, partner) = state.state.endpoint("partner").expect("partner endpoint");
             partner.record(OutcomeSlot::Accepted);
-            let (_, cloned_partner) = cloned.active.endpoint("partner").expect("partner endpoint");
+            let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
             cloned_partner.record(OutcomeSlot::Accepted);
             partner.record_rejection("invalid_signature");
             partner.record_rejection("invalid_token");
-            let _ = state.active.unknown_endpoint();
-            let _ = cloned.active.unknown_endpoint();
+            let _ = state.state.reject_unknown_endpoint();
+            let _ = cloned.state.reject_unknown_endpoint();
         });
         let mut samples: Vec<(Vec<Label>, u64)> = snapshotter
             .snapshot()
@@ -466,7 +466,7 @@ mod tests {
         let second_snapshotter = second_recorder.snapshotter();
         let inert = WebhookState::inert();
         metrics::with_local_recorder(&second_recorder, || {
-            let _ = inert.clone().active.unknown_endpoint();
+            let _ = inert.clone().state.reject_unknown_endpoint();
         });
         assert_eq!(second_snapshotter.snapshot().into_vec().len(), 1);
     }

@@ -431,12 +431,11 @@ fn classify_response(
             let Some(delay) = retry_after(&response.headers, response_time) else {
                 return Err((failure, failure.into_job_error()));
             };
-            match JobError::retry_after_at_least(failure.reason(), delay) {
-                Ok(retry) => Err((failure, retry)),
-                Err(_) => {
-                    let exceeded = DeliveryFailure::RetryAfterExceedsMaxDelay(response.status);
-                    Err((exceeded, exceeded.into_job_error()))
-                }
+            if let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) {
+                Err((failure, retry))
+            } else {
+                let exceeded = DeliveryFailure::RetryAfterExceedsMaxDelay(response.status);
+                Err((exceeded, exceeded.into_job_error()))
             }
         }
         Err(error) => {
