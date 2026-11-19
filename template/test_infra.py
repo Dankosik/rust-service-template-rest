@@ -167,5 +167,126 @@ class TemplateInitValidationTests(unittest.TestCase):
         self.assertEqual(resolved.outbound_http, "bounded")
 
 
+class WorktreeSyncTests(unittest.TestCase):
+    SCRIPT = ROOT / "scripts/worktree-sync.py"
+
+    @staticmethod
+    def _run(cmd: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=check)
+
+    def _setup_repo(self, tmp: Path) -> tuple[Path, Path, Path, Path]:
+        origin = tmp / "origin.git"
+        primary = tmp / "repo"
+        pusher = tmp / "pusher"
+        self._run(["git", "init", "--bare", "-q", "-b", "main", str(origin)], tmp)
+        self._run(["git", "clone", "-q", str(origin), str(primary)], tmp)
+        for repo in (primary,):
+            self._run(["git", "config", "user.email", "test@example.invalid"], repo)
+            self._run(["git", "config", "user.name", "Test"], repo)
+        (primary / "crates/foo").mkdir(parents=True)
+        (primary / "crates/bar").mkdir(parents=True)
+        (primary / "crates/grpc-contracts").mkdir(parents=True)
+        (primary / "quality").mkdir(parents=True)
+        (primary / "crates/foo/a.rs").write_text("fn a() {}\n", encoding="utf-8")
+        (primary / "crates/foo/old.rs").write_text("fn old() {}\n", encoding="utf-8")
+        (primary / "crates/bar/b.rs").write_text("fn b() {}\n", encoding="utf-8")
+        (primary / "crates/grpc-contracts/lib.rs").write_text("pub struct Rpc;\n", encoding="utf-8")
+        (primary / "quality/architecture.json").write_text(
+            '{"version":1,"members":{"crates/grpc-contracts/Cargo.toml":{"role":"contract"}}}\n',
+            encoding="utf-8",
+        )
+        self._run(["git", "add", "."], primary)
+        self._run(["git", "commit", "-qm", "init"], primary)
+        self._run(["git", "push", "-q", "-u", "origin", "main"], primary)
+        self._run(["git", "clone", "-q", str(origin), str(pusher)], tmp)
+        self._run(["git", "config", "user.email", "test@example.invalid"], pusher)
+        self._run(["git", "config", "user.name", "Test"], pusher)
+        wt = tmp / "repo.feat-one"
+        self._run(["git", "worktree", "add", "-q", "--no-track", "-b", "feat/one", str(wt), "origin/main"], primary)
+        return origin, primary, pusher, wt
+
+    def test_sync_main_edge_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            _, primary, pusher, wt = self._setup_repo(Path(raw))
+
+            (pusher / "crates/bar/b.rs").write_text("fn b() { /* v2 */ }\n", encoding="utf-8")
+            self._run(["git", "commit", "-qam", "advance main"], pusher)
+            self._run(["git", "push", "-q", "origin", "main"], pusher)
+
+            # Dirty checked-out main refuses even when status.showUntrackedFiles=no
+            self._run(["git", "config", "status.showUntrackedFiles", "no"], primary)
+            (primary / "untracked.txt").write_text("wip\n", encoding="utf-8")
+            dirty = self._run([sys.executable, str(self.SCRIPT), "sync-main"], wt, check=False)
+            self.assertEqual(dirty.returncode, 1)
+            self.assertIn("uncommitted changes", dirty.stderr)
+            (primary / "untracked.txt").unlink()
+            self._run(["git", "config", "--unset", "status.showUntrackedFiles"], primary)
+
+            # Clean checked-out main fast-forwards
+            ok = self._run([sys.executable, str(self.SCRIPT), "sync-main"], wt)
+            self.assertIn("fast-forwarded checked-out main", ok.stdout)
+
+            # Strictly-ahead checked-out main must fail closed (not report fast-forward)
+            (primary / "local_only.txt").write_text("ahead\n", encoding="utf-8")
+            self._run(["git", "add", "local_only.txt"], primary)
+            self._run(["git", "commit", "-qm", "local ahead"], primary)
+            ahead = self._run([sys.executable, str(self.SCRIPT), "sync-main"], wt, check=False)
+            self.assertEqual(ahead.returncode, 1)
+            self.assertIn("refusing non-fast-forward update", ahead.stderr)
+            self._run(["git", "reset", "--hard", "origin/main"], primary)
+
+            # Non-checked-out main fast-forwards and single-branch clone updates refs/remotes/origin/main
+            self._run(["git", "checkout", "-q", "--detach"], primary)
+            (pusher / "crates/bar/b.rs").write_text("fn b() { /* v3 */ }\n", encoding="utf-8")
+            self._run(["git", "commit", "-qam", "advance main v3"], pusher)
+            self._run(["git", "push", "-q", "origin", "main"], pusher)
+            self._run(["git", "config", "remote.origin.fetch", "+refs/heads/feat/one:refs/remotes/origin/feat/one"], primary)
+            non_checked = self._run([sys.executable, str(self.SCRIPT), "sync-main"], wt)
+            self.assertIn("fast-forwarded local main", non_checked.stdout)
+
+            # Unborn branch checked out in a worktree must fail closed
+            unborn = Path(raw) / "repo.orphan"
+            self._run(["git", "worktree", "add", "-q", "--orphan", "-b", "release", str(unborn)], primary)
+            self._run(["git", "push", "-q", "origin", "HEAD:refs/heads/release"], pusher)
+            refused = self._run([sys.executable, str(self.SCRIPT), "sync-main", "--branch", "release"], wt, check=False)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("unborn branch", refused.stderr)
+
+    def test_drift_overlap_renames_staged_and_architecture_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            _, primary, pusher, wt = self._setup_repo(Path(raw))
+
+            # Up-to-date from subdirectory
+            up = self._run([sys.executable, str(self.SCRIPT), "drift", "--no-fetch"], wt / "crates/foo")
+            self.assertIn("status: up-to-date", up.stdout)
+
+            # Upstream edits shared contract crate from quality/architecture.json -> shared-or-same-crate
+            (pusher / "crates/grpc-contracts/lib.rs").write_text("pub struct RpcV2;\n", encoding="utf-8")
+            self._run(["git", "commit", "-qam", "contract bump"], pusher)
+            self._run(["git", "push", "-q", "origin", "main"], pusher)
+            shared = self._run([sys.executable, str(self.SCRIPT), "drift"], wt)
+            self.assertIn("status: shared-or-same-crate", shared.stdout)
+            self.assertIn("crates/grpc-contracts/lib.rs", shared.stdout)
+
+            # Upstream renames crates/foo/old.rs -> crates/foo/renamed.rs; branch stages edit to old.rs then reverts working tree
+            self._run(["git", "mv", "crates/foo/old.rs", "crates/foo/renamed.rs"], pusher)
+            self._run(["git", "commit", "-qm", "rename old"], pusher)
+            self._run(["git", "push", "-q", "origin", "main"], pusher)
+            (wt / "crates/foo/old.rs").write_text("fn old() { /* staged */ }\n", encoding="utf-8")
+            self._run(["git", "add", "crates/foo/old.rs"], wt)
+            (wt / "crates/foo/old.rs").write_text("fn old() {}\n", encoding="utf-8")
+            overlap = self._run([sys.executable, str(self.SCRIPT), "drift"], wt / "crates/foo")
+            self.assertIn("status: direct-overlap", overlap.stdout)
+            self.assertIn("crates/foo/old.rs", overlap.stdout)
+
+            # Diverged local main should not recommend wt sync-main
+            (primary / "diverge.txt").write_text("local\n", encoding="utf-8")
+            self._run(["git", "add", "diverge.txt"], primary)
+            self._run(["git", "commit", "-qm", "diverge local main"], primary)
+            diverged = self._run([sys.executable, str(self.SCRIPT), "drift", "--no-fetch"], wt)
+            self.assertIn("local_main: diverged from origin/main", diverged.stdout)
+            self.assertNotIn("run `wt sync-main`", diverged.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
