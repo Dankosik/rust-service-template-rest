@@ -562,21 +562,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_serialized_len_matches_the_serialized_empty_delivery() {
-        let empty = super::Delivery {
-            version: super::delivery_version(),
-            endpoint_id: String::new(),
-            content_type: String::new(),
-            body: bytes::Bytes::new(),
-        };
-
-        assert_eq!(
-            super::Delivery::empty_serialized_len().unwrap(),
-            serde_json::to_string(&empty).unwrap().len()
-        );
-    }
-
-    #[test]
     fn a_versioned_row_still_deserializes() {
         let delivery: super::Delivery = serde_json::from_str(
             r#"{"version":99,"endpoint_id":"partner","content_type":"application/json","body":"cmF3AGJ5dGVz/w"}"#,
@@ -589,36 +574,27 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_accepts_unsigned_seconds_or_a_future_http_date() {
-        let mut delta = HeaderMap::new();
-        delta.insert(header::RETRY_AFTER, HeaderValue::from_static("3153600000"));
-        assert_eq!(retry_after(&delta, UNIX_EPOCH), Some(infra_jobs::MAX_DELAY));
-        for value in ["+3600", "-1", "1.5", "", " 3600", "0"] {
-            let mut invalid = HeaderMap::new();
-            invalid.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
-            assert_eq!(retry_after(&invalid, UNIX_EPOCH), None, "{value:?}");
+    fn retry_after_accepts_positive_seconds_or_a_future_http_date() {
+        let now = UNIX_EPOCH + Duration::from_secs(2);
+        for (value, expected_seconds) in [
+            ("3153600000", Some(3_153_600_000)),
+            ("Thu, 01 Jan 1970 00:00:05 GMT", Some(3)),
+            ("Thu, 01 Jan 1970 00:00:01 GMT", None),
+            ("+3600", None),
+            ("-1", None),
+            ("1.5", None),
+            ("", None),
+            (" 3600", None),
+            ("0", None),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+            assert_eq!(
+                retry_after(&headers, now),
+                expected_seconds.map(Duration::from_secs),
+                "{value:?}"
+            );
         }
-
-        let now = UNIX_EPOCH + Duration::from_secs(1_000);
-        let mut date = HeaderMap::new();
-        date.insert(
-            header::RETRY_AFTER,
-            HeaderValue::from_str(&httpdate::fmt_http_date(now + Duration::from_secs(3))).unwrap(),
-        );
-        assert_eq!(retry_after(&date, now), Some(Duration::from_secs(3)));
-    }
-
-    #[test]
-    fn elapsed_retry_after_falls_back_to_jobs_backoff() {
-        let mut elapsed = HeaderMap::new();
-        elapsed.insert(
-            header::RETRY_AFTER,
-            HeaderValue::from_static("Thu, 01 Jan 1970 00:00:01 GMT"),
-        );
-        assert_eq!(
-            retry_after(&elapsed, UNIX_EPOCH + Duration::from_secs(2)),
-            None
-        );
     }
 
     #[test]

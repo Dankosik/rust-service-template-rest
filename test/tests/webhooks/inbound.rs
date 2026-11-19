@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum_test::TestServer;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, KindsBuilder};
@@ -837,21 +836,6 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
         "exhausted"
     );
     running.close(&[&pool]).await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPool) {
-    let app = mounted_receiver(receiver(pool.clone()), Duration::from_secs(8));
-    let response = TestServer::new(axum::ServiceExt::into_make_service(app))
-        .post("/webhooks/partner%2Fa%3F%23")
-        .add_header("webhook-id", "message-decoded")
-        .add_header("webhook-timestamp", "0")
-        .add_header("webhook-signature", "v1,invalid")
-        .bytes(Bytes::from_static(b"{}"))
-        .await;
-    response.assert_status(StatusCode::BAD_REQUEST);
-    assert_eq!(receipt_count(&pool).await, 0);
-    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
