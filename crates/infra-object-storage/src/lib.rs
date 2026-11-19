@@ -168,20 +168,20 @@ impl PresignedUrl {
 
 impl ObjectStorage {
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
-        let admitted = provider::admit(&options.provider, &options.bucket)?;
+        let resolved = provider::resolve(&options.provider, &options.bucket)?;
         if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {
             return Err(ConfigError::MaxConcurrency);
         }
         let http_client = https_client();
         let credentials = options
             .credentials
-            .credentials_provider(&admitted, &http_client)?;
-        Ok(Self::build(options, admitted, http_client, credentials))
+            .credentials_provider(&resolved, &http_client)?;
+        Ok(Self::build(options, resolved, http_client, credentials))
     }
 
     fn build(
         options: ObjectStorageOptions,
-        admitted: provider::Admitted,
+        resolved: provider::ResolvedProvider,
         http_client: SharedHttpClient,
         credentials: SharedCredentialsProvider,
     ) -> Self {
@@ -208,13 +208,13 @@ impl ObjectStorage {
                     .grace_period(STALL_GRACE)
                     .build(),
             );
-        let amazon_s3 = match admitted.target {
+        let amazon_s3 = match resolved.target {
             provider::Target::AmazonS3 {
                 expected_bucket_owner,
             } => {
                 config = config.force_path_style(false);
                 Some(AmazonS3Target {
-                    cloud_region: admitted.region.clone(),
+                    cloud_region: resolved.region.clone(),
                     expected_bucket_owner,
                 })
             }
@@ -223,7 +223,7 @@ impl ObjectStorage {
                 None
             }
         };
-        config = config.region(Region::new(admitted.region));
+        config = config.region(Region::new(resolved.region));
         observe::describe();
         Self {
             inner: Arc::new(Inner {
@@ -231,7 +231,7 @@ impl ObjectStorage {
                 provider_name: provider.name(),
                 amazon_s3,
                 bucket,
-                checksum: admitted.checksum,
+                checksum: resolved.checksum,
                 max_object_bytes,
                 operation_timeout,
                 admission: Arc::new(Semaphore::new(max_concurrency)),
@@ -531,7 +531,7 @@ impl ObjectStorage {
     }
 
     fn operation_config(&self, context: &CallContext, call: Call) -> aws_sdk_s3::config::Builder {
-        let remaining = context.remaining().unwrap_or(self.inner.operation_timeout);
+        let remaining = context.remaining();
         let (timeout, retry) = call_policy(call, remaining, self.inner.operation_timeout);
         aws_sdk_s3::Config::builder()
             .timeout_config(timeout)

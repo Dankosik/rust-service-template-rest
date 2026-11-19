@@ -90,6 +90,7 @@ pub(crate) enum CallStop {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallContext {
+    deadline: Deadline,
     context: OperationContext,
     uses_parent_deadline: bool,
 }
@@ -102,13 +103,14 @@ impl CallContext {
             _ => (Deadline::new(now, timeout), false),
         };
         Self {
+            deadline,
             context: OperationContext::new(Some(deadline), parent.cancellation().child_token()),
             uses_parent_deadline,
         }
     }
 
-    pub(crate) fn remaining(&self) -> Option<Duration> {
-        self.context.remaining()
+    pub(crate) fn remaining(&self) -> Duration {
+        self.deadline.remaining()
     }
 
     pub(crate) fn stopped(&self) -> Option<CallStop> {

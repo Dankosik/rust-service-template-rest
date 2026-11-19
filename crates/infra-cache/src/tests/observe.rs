@@ -41,7 +41,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
         tls: true,
     };
     metrics::with_local_recorder(&recorder, || {
-        let histograms = NamespaceHistograms::default();
+        let histograms = NamespaceHistograms::new(crate::namespace!("causes"));
         for operation in [Operation::Get, Operation::Set, Operation::Delete] {
             for error_type in [
                 ErrorType::Auth,
@@ -51,7 +51,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Parse,
                 ErrorType::Other,
             ] {
-                OperationGuard::start("causes", &histograms, operation, &server)
+                OperationGuard::start(&histograms, operation, &server)
                     .record_error(error_type, None);
             }
         }

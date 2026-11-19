@@ -23,6 +23,10 @@ impl Namespace {
             None
         }
     }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.0
+    }
 }
 
 /// ```
@@ -44,7 +48,6 @@ macro_rules! namespace {
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
-    name: &'static str,
     histograms: Arc<NamespaceHistograms>,
 }
 
@@ -56,11 +59,10 @@ pub struct CacheLookup {
 
 impl Cache {
     #[must_use]
-    pub fn namespace(&self, Namespace(name): Namespace) -> CacheNamespace {
+    pub fn namespace(&self, namespace: Namespace) -> CacheNamespace {
         CacheNamespace {
             cache: self.clone(),
-            name,
-            histograms: Arc::default(),
+            histograms: Arc::new(NamespaceHistograms::new(namespace)),
         }
     }
 }
@@ -98,7 +100,7 @@ impl CacheLookup {
 
         let result = namespace.get(child.as_ref().unwrap_or(parent), key).await;
         parent.check()?;
-        Ok(result.unwrap_or_default())
+        Ok(result.ok().flatten())
     }
 }
 
@@ -138,7 +140,7 @@ impl CacheNamespace {
             parent,
             Operation::Get,
             |connection| {
-                let mut pipeline = redis::Pipeline::with_capacity(2);
+                let mut pipeline = redis::Pipeline::with_capacity(READ_TRANSACTION_COMMANDS);
                 pipeline
                     .atomic()
                     .cmd("EXISTS")
@@ -170,29 +172,31 @@ impl CacheNamespace {
             .ok()
             .filter(|milliseconds| *milliseconds > 0)
             .ok_or(SetError::InvalidTtl)?;
-        let operation = Operation::Set;
         let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
         if value.len() > self.cache.max_value_bytes {
-            LocalSizeRefusal::Value.record(self.name);
+            LocalSizeRefusal::Value.record(self.histograms.namespace());
             return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
         }
         let build_query = |connection| {
             query_mutation(
                 key.set_command(value, milliseconds.cast_unsigned()),
                 connection,
-                operation,
+                |value| matches!(value, redis::Value::Okay),
             )
         };
-        self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
+        self.run(parent, Operation::Set, build_query, |()| Ok(Outcome::Ok))
             .await
             .map_err(Into::into)
     }
 
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
-        let operation = Operation::Delete;
         let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
-        let build_query = |connection| query_mutation(key.delete_command(), connection, operation);
-        self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
+        let build_query = |connection| {
+            query_mutation(key.delete_command(), connection, |value| {
+                matches!(value, redis::Value::Int(0 | 1))
+            })
+        };
+        self.run(parent, Operation::Delete, build_query, |()| Ok(Outcome::Ok))
             .await
             .map_err(Into::into)
     }
@@ -207,12 +211,7 @@ impl CacheNamespace {
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,
     {
-        let guard = OperationGuard::start(
-            self.name,
-            &self.histograms,
-            operation,
-            &self.cache.link.server,
-        );
+        let guard = OperationGuard::start(&self.histograms, operation, &self.cache.link.server);
         match self
             .cache
             .link
@@ -232,12 +231,10 @@ impl CacheNamespace {
     }
 
     fn admit_key<'a>(&self, key: &'a str) -> Result<NamespacedKey<'a>, OperationError> {
-        let full_key = NamespacedKey {
-            namespace: self.name,
-            key,
-        };
+        let namespace = self.histograms.namespace();
+        let full_key = NamespacedKey { namespace, key };
         if full_key.len() > self.cache.max_key_bytes {
-            LocalSizeRefusal::Key.record(self.name);
+            LocalSizeRefusal::Key.record(namespace);
             return Err(OperationError::KeyTooLarge);
         }
         Ok(full_key)
@@ -247,24 +244,30 @@ impl CacheNamespace {
 pub(super) async fn query_mutation(
     command: redis::Cmd,
     mut connection: MultiplexedConnection,
-    operation: Operation,
+    accepts: fn(redis::Value) -> bool,
 ) -> redis::RedisResult<()> {
     let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
-    match (operation, reply_data(reply)?) {
-        (Operation::Set, redis::Value::Okay) | (Operation::Delete, redis::Value::Int(0 | 1)) => {
-            Ok(())
-        }
-        _ => Err((redis::ErrorKind::Parse, "unexpected cache command reply").into()),
+    if accepts(reply_data(reply)?) {
+        Ok(())
+    } else {
+        Err((redis::ErrorKind::Parse, "unexpected cache command reply").into())
     }
 }
+
+const READ_TRANSACTION_COMMANDS: usize = 2;
+const READ_TRANSACTION_REPLIES: usize = READ_TRANSACTION_COMMANDS + 2;
 
 async fn query_read(
     pipeline: redis::Pipeline,
     mut connection: MultiplexedConnection,
     max_value_bytes: usize,
 ) -> redis::RedisResult<Option<Vec<u8>>> {
-    let replies =
-        tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
+    let replies = tokio::task::unconstrained(connection.send_packed_commands(
+        &pipeline,
+        0,
+        READ_TRANSACTION_REPLIES,
+    ))
+    .await?;
     decode_read_transaction(replies, max_value_bytes)
 }
 
@@ -277,7 +280,7 @@ fn decode_read_transaction(
     let unexpected =
         || redis::RedisError::from((redis::ErrorKind::Parse, "unexpected cache read reply"));
     let [multi, exists_queued, range_queued, exec] =
-        <[_; 4]>::try_from(replies).map_err(|_| unexpected())?;
+        <[_; READ_TRANSACTION_REPLIES]>::try_from(replies).map_err(|_| unexpected())?;
     if reply_data(multi)? != Value::Okay {
         return Err(unexpected());
     }
@@ -289,7 +292,8 @@ fn decode_read_transaction(
     let Value::Array(results) = reply_data(exec)? else {
         return Err(unexpected());
     };
-    let [exists, value] = <[_; 2]>::try_from(results).map_err(|_| unexpected())?;
+    let [exists, value] =
+        <[_; READ_TRANSACTION_COMMANDS]>::try_from(results).map_err(|_| unexpected())?;
     match (reply_data(exists)?, reply_data(value)?) {
         (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
         (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= max_value_bytes + 1 => {
@@ -317,13 +321,13 @@ const fn valid_namespace(name: &str) -> bool {
 }
 
 struct NamespacedKey<'a> {
-    namespace: &'static str,
+    namespace: Namespace,
     key: &'a str,
 }
 
 impl NamespacedKey<'_> {
     fn len(&self) -> usize {
-        self.namespace.len() + 1 + self.key.len()
+        self.namespace.as_str().len() + 1 + self.key.len()
     }
 
     fn set_command(self, value: &[u8], ttl_ms: u64) -> redis::Cmd {
@@ -351,6 +355,6 @@ impl NamespacedKey<'_> {
 
 impl redis::ToRedisArgs for NamespacedKey<'_> {
     fn write_redis_args<W: redis::RedisWrite + ?Sized>(&self, out: &mut W) {
-        out.write_arg_fmt(format_args!("{}:{}", self.namespace, self.key));
+        out.write_arg_fmt(format_args!("{}:{}", self.namespace.as_str(), self.key));
     }
 }
