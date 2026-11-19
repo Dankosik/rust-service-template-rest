@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, header};
+use http::{Request, StatusCode, header};
 
 use tls_test_support::TlsMaterial;
 
@@ -296,43 +296,38 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
             .is_cancelled()
     );
 
-    let (address, server) = tls_server_stall_after_headers(&material).await;
-    let client = fixture_client(address, &material);
-    let mut exchange = Box::pin(client.execute(request(), deadline()));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut exchange)
-            .await
-            .is_err(),
-        "stalled exchange completed unexpectedly"
-    );
-    drop(exchange);
-    server.abort();
-    assert!(
-        server
-            .await
-            .expect_err("drop fixture aborts")
-            .is_cancelled()
-    );
-
-    let (address, server) = tls_server_stall_after_headers(&material).await;
-    let context = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
-    let client = fixture_client(address, &material);
-    let mut exchange = Box::pin(client.execute_with_context(request(), &context));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut exchange)
-            .await
-            .is_err(),
-        "stalled exchange completed unexpectedly"
-    );
-    context.cancel();
-    std::assert_matches!(exchange.await, Err(Error::Cancelled));
-    server.abort();
-    assert!(
-        server
-            .await
-            .expect_err("cancel fixture aborts")
-            .is_cancelled()
-    );
+    for cancel in [false, true] {
+        let (address, server) = tls_server_stall_after_headers(&material).await;
+        let client = fixture_client(address, &material);
+        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+        let (seen, status) = tokio::sync::oneshot::channel();
+        let mut exchange =
+            Box::pin(
+                client.execute_with_response_status(request(), &context, |code| {
+                    seen.send(code).unwrap();
+                }),
+            );
+        tokio::select! {
+            biased;
+            result = &mut exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
+            observed = tokio::time::timeout(Duration::from_secs(1), status) => {
+                assert_eq!(observed.unwrap().unwrap(), StatusCode::OK);
+            }
+        }
+        if cancel {
+            context.cancel();
+            std::assert_matches!(exchange.await, Err(Error::Cancelled));
+        } else {
+            drop(exchange);
+        }
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("stalled fixture aborts")
+                .is_cancelled()
+        );
+    }
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -346,11 +341,17 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
         ),
         1
     );
-    assert!(scrape.lines().any(|line| {
-        line.starts_with("http_client_request_duration_seconds_count")
-            && line.contains("outbound_outcome=\"cancelled\"")
-            && line.ends_with(" 2")
-    }));
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"cancelled\"",
+                "http_response_status_code=\"200\""
+            ],
+        ),
+        2
+    );
+    assert_eq!(recorded_count(&scrape, &[]), 3);
     assert!(!scrape.contains("error_type=\"cancelled\""));
     let spans = diagnostics.0.lock().expect("span diagnostic lock");
     assert_eq!(spans.len(), 3);
