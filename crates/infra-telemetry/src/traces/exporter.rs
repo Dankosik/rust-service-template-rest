@@ -136,31 +136,32 @@ impl CollectorConfig {
                 .map(ExposeSecret::expose_secret),
             TYPED_HEADERS,
         );
-        if typed_endpoint.is_some()
-            && let Some(headers) = &standard.headers
-        {
-            return Err(TracingError::AmbientCredential { name: headers.name });
-        }
-        if typed_headers.is_some() && typed_endpoint.is_none() {
-            return Err(TracingError::UnboundCredential {
-                name: TYPED_HEADERS,
-            });
-        }
-        let headers = typed_headers.as_ref().or(standard.headers.as_ref());
-        let mut credentials = headers
-            .map(|header| Credential {
+        let (endpoint, source, headers) = match (
+            typed_endpoint.as_ref(),
+            typed_headers.as_ref(),
+            standard.headers.as_ref(),
+        ) {
+            (Some(_), _, Some(headers)) => {
+                return Err(TracingError::AmbientCredential { name: headers.name });
+            }
+            (None, Some(_), _) => {
+                return Err(TracingError::UnboundCredential {
+                    name: TYPED_HEADERS,
+                });
+            }
+            (Some(endpoint), headers, None) => (Some(endpoint), EndpointSource::Typed, headers),
+            (None, None, headers) => (standard.endpoint(), EndpointSource::Environment, headers),
+        };
+        let credentials = [
+            headers.map(|header| Credential {
                 scope: header.scope,
                 name: header.name,
-            })
-            .into_iter()
-            .chain(
-                [trust.client_certificate.as_ref(), trust.client_key.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .map(TrustFile::credential),
-            );
-        let Some(endpoint) = typed_endpoint.as_ref().or_else(|| standard.endpoint()) else {
-            return match credentials.next() {
+            }),
+            trust.client_certificate.as_ref().map(TrustFile::credential),
+            trust.client_key.as_ref().map(TrustFile::credential),
+        ];
+        let Some(endpoint) = endpoint else {
+            return match credentials.into_iter().flatten().next() {
                 Some(credential) => Err(TracingError::UnboundCredential {
                     name: credential.name,
                 }),
@@ -170,11 +171,7 @@ impl CollectorConfig {
         let url = collector_url(endpoint)?;
         verify_collector_security(&url, endpoint.scope, &standard, trust, credentials)?;
         Ok(Some(Self {
-            source: if endpoint.scope == SettingScope::Typed {
-                EndpointSource::Typed
-            } else {
-                EndpointSource::Environment
-            },
+            source,
             url,
             headers: headers.map(parse_headers).transpose()?.unwrap_or_default(),
         }))
@@ -186,18 +183,29 @@ fn verify_collector_security(
     selected_scope: SettingScope,
     standard: &StandardEnv,
     trust: &CollectorTrust,
-    mut credentials: impl Iterator<Item = Credential>,
+    credentials: [Option<Credential>; 3],
 ) -> Result<(), TracingError> {
-    if url.scheme() != "https"
-        && let Some(name) = trust
+    if url.scheme() != "https" {
+        return match trust
             .certificate
             .as_ref()
             .map(|file| file.variable)
-            .or_else(|| credentials.next().map(|credential| credential.name))
-    {
-        return Err(TracingError::InsecureCollector { name });
+            .or_else(|| {
+                credentials
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .map(|credential| credential.name)
+            }) {
+            Some(name) => Err(TracingError::InsecureCollector { name }),
+            None => Ok(()),
+        };
     }
-    for credential in credentials.filter(|credential| credential.scope != SettingScope::Typed) {
+    for credential in credentials
+        .into_iter()
+        .flatten()
+        .filter(|credential| credential.scope != SettingScope::Typed)
+    {
         verify_standard_recipient(credential, standard, selected_scope, url)?;
     }
     Ok(())
@@ -304,6 +312,20 @@ impl TrustFile {
         }
         Ok(pem)
     }
+
+    fn load_certificates(&self) -> Result<Vec<reqwest::Certificate>, TracingError> {
+        let certificates = reqwest::Certificate::from_pem_bundle(&self.read()?).map_err(|_| {
+            TracingError::TrustPem {
+                name: self.variable,
+            }
+        })?;
+        if certificates.is_empty() {
+            return Err(TracingError::TrustPem {
+                name: self.variable,
+            });
+        }
+        Ok(certificates)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -333,6 +355,30 @@ impl CollectorTrust {
             certificate: file(CERTIFICATE_VARS),
             client_certificate: file(CLIENT_CERTIFICATE_VARS),
             client_key: file(CLIENT_KEY_VARS),
+        }
+    }
+
+    fn load_client_identity(&self) -> Result<Option<reqwest::Identity>, TracingError> {
+        match (&self.client_certificate, &self.client_key) {
+            (Some(certificate), Some(key)) => {
+                let mut pem = key.read()?;
+                if certificate.path.as_os_str() != key.path.as_os_str() {
+                    pem.push(b'\n');
+                    pem.extend(certificate.read()?);
+                }
+                reqwest::Identity::from_pem(&pem)
+                    .map(Some)
+                    .map_err(|_| TracingError::IdentityPem)
+            }
+            (Some(present), None) => Err(TracingError::IncompleteIdentity {
+                present: present.variable,
+                missing: OTEL_EXPORTER_OTLP_CLIENT_KEY,
+            }),
+            (None, Some(present)) => Err(TracingError::IncompleteIdentity {
+                present: present.variable,
+                missing: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
+            }),
+            (None, None) => Ok(None),
         }
     }
 }
@@ -394,42 +440,10 @@ fn collector_client(
         .no_proxy()
         .referer(false);
     if let Some(file) = &trust.certificate {
-        let certificates = reqwest::Certificate::from_pem_bundle(&file.read()?).map_err(|_| {
-            TracingError::TrustPem {
-                name: file.variable,
-            }
-        })?;
-        if certificates.is_empty() {
-            return Err(TracingError::TrustPem {
-                name: file.variable,
-            });
-        }
-        builder = builder.tls_certs_only(certificates);
+        builder = builder.tls_certs_only(file.load_certificates()?);
     }
-    match (&trust.client_certificate, &trust.client_key) {
-        (Some(certificate), Some(key)) => {
-            let mut pem = key.read()?;
-            if certificate.path.as_os_str() != key.path.as_os_str() {
-                pem.push(b'\n');
-                pem.extend(certificate.read()?);
-            }
-            let identity =
-                reqwest::Identity::from_pem(&pem).map_err(|_| TracingError::IdentityPem)?;
-            builder = builder.identity(identity);
-        }
-        (Some(present), None) => {
-            return Err(TracingError::IncompleteIdentity {
-                present: present.variable,
-                missing: OTEL_EXPORTER_OTLP_CLIENT_KEY,
-            });
-        }
-        (None, Some(present)) => {
-            return Err(TracingError::IncompleteIdentity {
-                present: present.variable,
-                missing: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
-            });
-        }
-        (None, None) => {}
+    if let Some(identity) = trust.load_client_identity()? {
+        builder = builder.identity(identity);
     }
     builder.build().map_err(|_| TracingError::ClientBuild)
 }

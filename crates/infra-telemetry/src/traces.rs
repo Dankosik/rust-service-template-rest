@@ -189,7 +189,7 @@ pub async fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
     let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
-    let handle = prepare_tracer_provider(options, |name| std::env::var_os(name), &trust).await?;
+    let handle = prepare_tracer_provider(options, |name| std::env::var_os(name), trust).await?;
     global::set_text_map_propagator(TraceContextPropagator::new());
     global::set_tracer_provider(handle.provider.clone());
     Ok(handle)
@@ -198,9 +198,9 @@ pub async fn install_tracer_provider(
 async fn prepare_tracer_provider(
     options: &TracingOptions,
     env: impl Fn(&str) -> Option<OsString>,
-    trust: &CollectorTrust,
+    trust: CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let collector = CollectorConfig::resolve(options, trust, &env)?;
+    let collector = CollectorConfig::resolve(options, &trust, &env)?;
 
     let builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
@@ -217,13 +217,14 @@ async fn prepare_tracer_provider(
     let timeout = export_timeout(&env);
     let (compression, ignored_compression) = compression(&env);
     let (batch_config, invalid_batch_sizes) = batch_config(&env);
-    let trust_files = trust.clone();
+    let has_certificate_file = trust.certificate.is_some();
+    let has_client_certificate = trust.client_certificate.is_some();
     let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
     let preparation = tokio::task::spawn_blocking(move || {
         span_exporter(
             collector.url.as_str(),
             collector.headers,
-            &trust_files,
+            &trust,
             timeout,
             compression,
         )
@@ -250,8 +251,8 @@ async fn prepare_tracer_provider(
         provider,
         exporter_state: ExporterState::Initialized {
             endpoint_source: collector.source,
-            has_certificate_file: trust.certificate.is_some(),
-            has_client_certificate: trust.client_certificate.is_some(),
+            has_certificate_file,
+            has_client_certificate,
             ignored_compression,
             invalid_batch_sizes,
         },
@@ -263,7 +264,7 @@ fn batch_config(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> (sdktrace::BatchConfig, Vec<&'static str>) {
     let mut invalid = Vec::new();
-    let mut size = |name: &'static str, default| {
+    let mut parse_size = |name: &'static str, default| {
         let Some(value) = env(name).filter(|value| !value.is_empty()) else {
             return default;
         };
@@ -276,8 +277,8 @@ fn batch_config(
         invalid.push(name);
         default
     };
-    let queue_size = size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_CAPACITY);
-    let batch_size = size(
+    let queue_size = parse_size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_CAPACITY);
+    let batch_size = parse_size(
         sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
         sdktrace::OTEL_BSP_MAX_EXPORT_BATCH_SIZE_DEFAULT,
     );

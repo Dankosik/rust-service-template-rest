@@ -95,7 +95,7 @@ pub(super) fn is_denied_target(target: &str) -> bool {
         "rustls-platform-verifier",
     ]
     .iter()
-    .any(|family| super::within(target, family))
+    .any(|family| super::is_within_target(target, family))
 }
 
 pub(super) fn is_known_diagnostic(metadata: &Metadata<'_>) -> bool {

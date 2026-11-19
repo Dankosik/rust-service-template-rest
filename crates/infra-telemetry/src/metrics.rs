@@ -55,6 +55,7 @@ fn publish_memory_limit() {
 }
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const SCHEDULER_FRESHNESS_LIMIT: Duration = Duration::from_secs(1);
 const SCHEDULER_LAG_METRIC: &str = "runtime_scheduler_lag_seconds";
 const SCHEDULER_LAG_MAX_METRIC: &str = "runtime_scheduler_lag_max_seconds";
 const SCHEDULER_SAMPLES_METRIC: &str = "runtime_scheduler_samples_total";
@@ -100,7 +101,7 @@ impl Progress {
         metrics::gauge!(SCHEDULER_LAG_MAX_METRIC).set(f64::NAN);
         metrics::counter!(SCHEDULER_SAMPLES_METRIC).absolute(0);
         metrics::gauge!(SCHEDULER_AGE_METRIC).set(f64::NAN);
-        metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(1.0);
+        metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(SCHEDULER_FRESHNESS_LIMIT.as_secs_f64());
     }
 
     fn record(&self, completed: Instant, lag: Duration) -> Duration {

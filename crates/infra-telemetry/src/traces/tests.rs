@@ -17,7 +17,7 @@ pub(super) fn tracer_provider(
     env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    runtime().block_on(prepare_tracer_provider(options, env, trust))
+    runtime().block_on(prepare_tracer_provider(options, env, trust.clone()))
 }
 
 #[derive(Debug)]

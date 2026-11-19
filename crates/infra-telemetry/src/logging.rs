@@ -74,7 +74,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
     let subscriber = registry
         .with(filter)
         // template:begin object-storage:telemetry-sdk-log-cap-apply
-        .with(sdk_log_cap(options.level))
+        .with(aws_sdk_log_cap(options.level))
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
         .with(format);
@@ -287,14 +287,14 @@ fn static_targets(directive: &str) -> Option<Targets> {
     directive.parse().ok()
 }
 
-fn within(target: &str, root: &str) -> bool {
+fn is_within_target(target: &str, prefix: &str) -> bool {
     target
-        .strip_prefix(root)
+        .strip_prefix(prefix)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
 }
 
 // template:begin object-storage:telemetry-sdk-log-cap
-fn sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
+fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
     let named: Vec<String> = directive
         .split(',')
         .filter_map(|segment| {
@@ -306,7 +306,7 @@ fn sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
         let target = metadata.target();
         *metadata.level() <= tracing::Level::INFO
             || !target.starts_with("aws_")
-            || named.iter().any(|name| within(target, name))
+            || named.iter().any(|name| is_within_target(target, name))
     })
 }
 // template:end object-storage:telemetry-sdk-log-cap
