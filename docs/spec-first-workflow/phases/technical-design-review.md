@@ -20,12 +20,15 @@ owners -> required input -> observable result and proving surface`.
 Anchor a missing trace at its source obligation and a broken trace at its first
 unsupported or incompatible edge. Continue the unaffected traces. Trace each
 included component, edge, store, or dependency back to the obligation or
-constraint that justifies it. Activate only lenses exposed by current evidence:
-flow and authority, cross-flow coherence, current contract/runtime contradiction,
-selection against common drivers, required-input availability, Rust ownership or
-panel-receipt compatibility, performance/scale including the stated unit cost
-and its bound, operator signal for each failure, degradation, or recovery path,
-proof feasibility, and release closure.
+constraint that justifies it. Where flows interact, independently try to break
+their shared guarantee using [Material Flow](system-integration-design.md#material-flow).
+
+Activate only lenses exposed by current evidence: flow and authority,
+current contract/runtime contradiction, comparison of viable mechanisms under
+the same scenario and accepted drivers, required-input availability, Rust
+ownership or panel-receipt compatibility, performance/scale including the
+stated unit cost and its bound, operator signal for each failure, degradation,
+or recovery path, proof feasibility, and release closure.
 
 Credit current [Rust Ownership Review](rust-code-ownership-design.md#rust-ownership-review)
 receipts for the lenses they cover on this candidate. The panel can satisfy

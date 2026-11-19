@@ -7,9 +7,16 @@ one behaviorally equivalent system mechanism and its material flows.
 Consume the ready Specification, current runtime/generated/provider/consumer
 authority, relevant repository architecture, accepted risks and proof
 obligations, and decision-changing Research. Derive material drivers and hard
-constraints, compare viable same-level substitutes only while a real fork
-survives, and trace each affected actor or trigger to caller-visible completion
-or durable finality under [Material Flow](#material-flow).
+constraints from those inputs.
+
+When several mechanisms could meet the same obligation, compare them using
+the same concrete scenario. Include the current mechanism when viable. Show
+where their consequences differ on a material driver, then weigh the choice
+against all accepted drivers. Name the cost accepted and what evidence would
+reverse the decision. If the options are equivalent on those drivers, choose
+the simplest. If only one is viable, name the fact that settles the choice.
+For a hard-to-reverse choice where independent designs could reduce anchoring,
+use [Generative Candidate Lanes](../shared/read-only-delegation.md#generative-candidate-lanes).
 
 When choosing a custom infrastructure mechanism, state the current requirement
 or lifecycle cost that rules out suitable repository, standard-library, or
@@ -33,8 +40,8 @@ Load only methods exposed by the decision:
 - CI gates, tool pins, the image, or publication -> `rust-delivery-platform`;
 - potential impact on deployment, operation, or recovery, including changes to
   runtime configuration or trust material -> [Release Closure](../rubrics/release-closure.md);
-- non-mechanical Rust placement -> [Rust Code / Ownership
-  Design](rust-code-ownership-design.md).
+- open Rust placement, invariant ownership, caller obligations, or dependency
+  direction between modules -> [Rust Code / Ownership Design](rust-code-ownership-design.md).
 
 Durable delivery, replay, and reconciliation have no dedicated skill; decide
 them here from [Repository Architecture](../../repo-architecture.md) and record
@@ -46,10 +53,6 @@ results. A surviving technical disagreement uses [Parent-Owned
 Recovery](../shared/transition.md#parent-owned-recovery) before this decision
 closes. A signature-sensitive shape fixes exact bytes, algorithm, and one
 deterministic non-secret vector.
-
-Trade-off: For each material choice with viable alternatives, state the
-decisive constraint, the cost accepted, and what evidence or changed
-assumption would reverse the choice.
 
 Enforcement: For each critical invariant, name the mechanism and boundary
 that enforce it; account for every effectful path that could bypass it.
@@ -78,6 +81,12 @@ At every material crossing record only what Implementation must not invent:
   restoration boundary;
 - when scale-sensitive, workload envelope, critical path, amplification,
   serialization/parallelism/queueing, structural ceiling, and proving boundary.
+
+When flows can affect the same guarantee, try the smallest ordering,
+interruption, or replay that could break it. At the decisive step, identify
+what happened, what the next actor can know, and what the design permits it
+to do. Resolve any case where an allowed action breaks the guarantee or the
+actor cannot carry out required recovery.
 
 Show current and target flows only when their difference changes a decision.
 Use a diagram only when compact text cannot make ordering, fan-out,

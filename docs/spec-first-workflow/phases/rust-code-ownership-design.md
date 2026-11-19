@@ -1,19 +1,19 @@
 # Rust Code / Ownership Design
 
-Use when crate, module, or file ownership is not mechanically forced by the
-crate graph, [`quality/architecture.json`](../../../quality/architecture.json), or
-[Repository Architecture](../../repo-architecture.md). Own
-the exact responsibility map and inverse file map without writing
-implementation.
+Use when crate, module, or file placement is open. Even with fixed files,
+use this phase to settle who enforces an invariant, what callers must
+guarantee, or which module may depend on another. Leave equivalent private
+coding choices and function bodies to Implementation.
 
-Apply `rust-coder`'s earliest-owner rule and `rust-structural-quality`'s
-deletion test to the ready behavior/design and current code, callers, the
-composition root, the generated contract, tests, and replacement paths. Return
-[Ownership Map V1](#ownership-map-v1) without function-body or statement-level
-design.
-
-Change cost: For a new abstraction or responsibility split, apply
-`rust-structural-quality` to the proposed ownership map.
+Ground placement in the accepted design, crate graph,
+[`quality/architecture.json`](../../../quality/architecture.json), and
+[Repository Architecture](../../repo-architecture.md). Check current callers,
+composition, generated contracts, tests, and replacement paths. For an open
+ownership choice, walk an affected caller through each viable option. What
+must the caller know or do, and where is the guarantee enforced? For a new
+abstraction or responsibility split, apply `rust-structural-quality`'s deletion
+test and trace which callers would have to change together if the rule changed.
+Record the selected owners and files in [Ownership Map V1](#ownership-map-v1).
 
 Refinement: When implementation evidence improves placement, update the
 affected ownership-map entries and recheck only invalidated decisions
