@@ -1,27 +1,39 @@
+use super::variables::VariableSource;
+
 pub(super) fn describe_rejection(
     error: &config::ConfigError,
-    variable_sources: &[(String, &'static str)],
+    variable_sources: &[(String, VariableSource)],
 ) -> String {
     let (key, rejection) = classify(error);
+    let expected = match rejection {
+        Rejection::AsWritten => return error.to_string(),
+        Rejection::Expected(expected) => Some(expected),
+        Rejection::Unexplained => None,
+    };
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
     let mut sources = variable_sources
         .iter()
         .filter(|(path, _)| value_key.is_none_or(|key| is_at_or_under(path, key)))
         .map(|(_, source)| *source);
     let first = sources.next();
-    let hide_value = value_key.is_none() || first.is_some();
+    if value_key.is_some() && first.is_none() {
+        return error.to_string();
+    }
     let place = key.map_or_else(String::new, |key| format!(" for key `{key}`"));
     let origin = match first {
-        Some(source) if sources.all(|other| other == source) => format!(" in {source}"),
-        Some(_) => " in the environment or the secrets directory".to_owned(),
+        Some(source) if sources.all(|other| other == source) => {
+            format!(" in {}", source.as_str())
+        }
+        Some(_) => format!(
+            " in {} or {}",
+            VariableSource::Environment.as_str(),
+            VariableSource::SecretsDir.as_str()
+        ),
         None => String::new(),
     };
-    match rejection {
-        Rejection::Expected(expected) if hide_value => {
-            format!("invalid value, expected {expected}{place}{origin}")
-        }
-        Rejection::Unexplained if hide_value => format!("invalid value{place}{origin}"),
-        Rejection::AsWritten | Rejection::Expected(_) | Rejection::Unexplained => error.to_string(),
+    match expected {
+        Some(expected) => format!("invalid value, expected {expected}{place}{origin}"),
+        None => format!("invalid value{place}{origin}"),
     }
 }
 
@@ -77,7 +89,10 @@ mod tests {
     const VALUE: &str = "hunter2";
 
     fn describe(error: &config::ConfigError) -> String {
-        describe_rejection(error, &[("http.addr".to_owned(), "the environment")])
+        describe_rejection(
+            error,
+            &[("http.addr".to_owned(), VariableSource::Environment)],
+        )
     }
 
     #[test]

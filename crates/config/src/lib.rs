@@ -170,7 +170,7 @@ impl ConfigInput {
             let inbound_webhooks = self.inbound_webhooks.admit(self.postgres.enabled, v);
             // template:end inbound-webhooks:config-inbound-webhooks-validate
             // template:begin webhooks:config-outbound-webhooks-validate
-            let outbound_webhook_endpoints = self.webhooks.endpoint_ids(v);
+            let outbound_webhook_endpoints = self.webhooks.admit(v);
             // template:end webhooks:config-outbound-webhooks-validate
             self.health.validate(v);
             self.log.validate(v);

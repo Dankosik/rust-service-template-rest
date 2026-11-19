@@ -5,11 +5,29 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, Violations, non_blank};
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+pub(crate) struct ObservabilityFields<Metrics, Otel> {
+    metrics: Metrics,
+    pub(crate) otel: Otel,
+}
+
+type ObservabilityInput = ObservabilityFields<MetricsConfig, OtelConfig>;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(from = "ObservabilityInput")]
 pub struct ObservabilityConfig {
     pub metrics: MetricsConfig,
     pub otel: OtelConfig,
+}
+
+impl From<ObservabilityInput> for ObservabilityConfig {
+    fn from(input: ObservabilityInput) -> Self {
+        Self {
+            metrics: input.metrics,
+            otel: input.otel,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -44,8 +62,47 @@ pub enum TracesSampler {
     ParentBasedTraceIdRatio,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+struct TracesSamplerInput(#[serde(deserialize_with = "crate::de::string_enum")] TracesSampler);
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct TracesSamplerArgInput(#[serde(deserialize_with = "crate::de::ratio")] f64);
+
+impl Default for TracesSamplerArgInput {
+    fn default() -> Self {
+        Self(0.10)
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+pub(crate) struct OtelFields<Sampler, SamplerArg, Exporter> {
+    #[serde(deserialize_with = "crate::de::string")]
+    pub(crate) service_name: String,
+    traces_sampler: Sampler,
+    traces_sampler_arg: SamplerArg,
+    exporter: Exporter,
+}
+
+impl<Sampler: Default, SamplerArg: Default, Exporter: Default> Default
+    for OtelFields<Sampler, SamplerArg, Exporter>
+{
+    fn default() -> Self {
+        Self {
+            service_name: "service".to_owned(),
+            traces_sampler: Sampler::default(),
+            traces_sampler_arg: SamplerArg::default(),
+            exporter: Exporter::default(),
+        }
+    }
+}
+
+type OtelInput = OtelFields<TracesSamplerInput, TracesSamplerArgInput, OtelExporterConfig>;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "OtelInput")]
 pub struct OtelConfig {
     // template:begin postgres:otel-postgres-application-name-doc
     /// It also supplies PostgreSQL `application_name` for pooled and migrator
@@ -55,25 +112,28 @@ pub struct OtelConfig {
     /// The jobs worker derives its own identity from it: `{name}-jobs-worker`.
     // template:end jobs:otel-jobs-worker-identity-doc
     /// The initializer rewrites this default for a derived service.
-    #[serde(deserialize_with = "crate::de::string")]
     pub service_name: String,
-    #[serde(deserialize_with = "crate::de::string_enum")]
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
-    #[serde(deserialize_with = "crate::de::ratio")]
     pub traces_sampler_arg: f64,
     pub exporter: OtelExporterConfig,
 }
 
+impl From<OtelInput> for OtelConfig {
+    fn from(input: OtelInput) -> Self {
+        Self {
+            service_name: input.service_name,
+            traces_sampler: input.traces_sampler.0,
+            traces_sampler_arg: input.traces_sampler_arg.0,
+            exporter: input.exporter,
+        }
+    }
+}
+
 impl Default for OtelConfig {
     fn default() -> Self {
-        Self {
-            service_name: "service".to_owned(),
-            traces_sampler: TracesSampler::default(),
-            traces_sampler_arg: 0.10,
-            exporter: OtelExporterConfig::default(),
-        }
+        Self::from(OtelInput::default())
     }
 }
 

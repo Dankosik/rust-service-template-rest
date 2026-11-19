@@ -138,18 +138,18 @@ impl Default for MessagingConfig {
 impl MessagingInput {
     pub(crate) fn admit(
         self,
-        insecure_development: bool,
+        local_development: bool,
         v: &mut Violations,
     ) -> Result<MessagingConfig, Rejected> {
-        let plaintext = v.take(local_development_only(
+        v.check(local_development_only(
             "messaging.allow_plaintext",
             self.allow_plaintext,
-            insecure_development,
+            local_development,
         ));
-        let unauthenticated = v.take(local_development_only(
+        v.check(local_development_only(
             "messaging.allow_unauthenticated",
             self.allow_unauthenticated,
-            insecure_development,
+            local_development,
         ));
         let credentials = match (self.credentials, self.credentials_file) {
             (Some(_), Some(_)) => Err(v.reject(ValidationError::new(
@@ -160,27 +160,22 @@ impl MessagingInput {
             (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
             (None, None) => Ok(None),
         };
-        let url_check = validate_urls(
+        validate_urls(
             &self.urls,
             self.tls_first,
             self.allow_plaintext || self.trusted_network,
             v,
         );
-        let payload_size_check = v.take(int_range(
-            "messaging.max_payload_bytes",
-            self.max_payload_bytes.as_u64(),
-            1..=MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
-        ));
-        let resident_delivery_check = payload_size_check.and_then(|()| {
-            v.take(resident_delivery_bound(
-                self.max_payload_bytes,
-                self.consumer_concurrency,
-            ))
-        });
-        plaintext?;
-        unauthenticated?;
-        url_check?;
-        resident_delivery_check?;
+        v.check(
+            int_range(
+                "messaging.max_payload_bytes",
+                self.max_payload_bytes.as_u64(),
+                1..=MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
+            )
+            .and_then(|()| {
+                validate_resident_delivery_bound(self.max_payload_bytes, self.consumer_concurrency)
+            }),
+        );
         Ok(MessagingConfig {
             urls: self.urls,
             credentials: credentials?,
@@ -200,17 +195,13 @@ impl MessagingInput {
 }
 
 impl MessagingConfig {
-    fn is_active(&self) -> bool {
-        !self.urls.is_empty()
-    }
-
     #[must_use]
     pub fn plaintext_admitted(&self) -> bool {
         self.allow_plaintext || self.trusted_network
     }
 
     pub fn producer_source_stream(&self) -> Result<&str, ValidationError> {
-        if !self.is_active() {
+        if self.urls.is_empty() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
         if self.credentials.is_none() && !self.allow_unauthenticated {
@@ -248,7 +239,7 @@ impl MessagingConfig {
     }
 }
 
-fn resident_delivery_bound(
+fn validate_resident_delivery_bound(
     max_payload_bytes: ByteSize,
     consumer_concurrency: NonZeroU32,
 ) -> Result<(), ValidationError> {
@@ -267,37 +258,35 @@ fn resident_delivery_bound(
     Ok(())
 }
 
-fn validate_urls(
-    urls: &[String],
-    tls_first: bool,
-    plaintext_admitted: bool,
-    v: &mut Violations,
-) -> Result<(), Rejected> {
+fn validate_urls(urls: &[String], tls_first: bool, plaintext_admitted: bool, v: &mut Violations) {
     let mut plaintext = false;
-    let mut rejected = Ok(());
+    let mut all_valid = true;
     for (index, raw) in urls.iter().enumerate() {
-        match uses_plaintext(index, raw) {
+        match validate_url_is_plaintext(index, raw) {
             Ok(is_plaintext) => plaintext |= is_plaintext,
-            Err(error) => rejected = Err(v.reject(error)),
+            Err(error) => {
+                v.reject(error);
+                all_valid = false;
+            }
         }
     }
-    rejected?;
-    if plaintext && tls_first {
-        return Err(v.reject(ValidationError::new(
+    if !all_valid || !plaintext {
+        return;
+    }
+    if tls_first {
+        v.reject(ValidationError::new(
             "messaging.tls_first",
             "requires every configured URL to use tls://",
-        )));
-    }
-    if plaintext && !plaintext_admitted {
-        return Err(v.reject(ValidationError::new(
+        ));
+    } else if !plaintext_admitted {
+        v.reject(ValidationError::new(
             "messaging.allow_plaintext",
             "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
-        )));
+        ));
     }
-    Ok(())
 }
 
-fn uses_plaintext(index: usize, raw: &str) -> Result<bool, ValidationError> {
+fn validate_url_is_plaintext(index: usize, raw: &str) -> Result<bool, ValidationError> {
     let key = format!("messaging.urls[{index}]");
     non_blank(&key, raw)?;
     if shared_rules::uri::has_whitespace_or_control(raw) {
@@ -306,8 +295,9 @@ fn uses_plaintext(index: usize, raw: &str) -> Result<bool, ValidationError> {
             "must not contain whitespace or controls",
         ));
     }
-    let url = Url::parse(raw)
-        .map_err(|_| ValidationError::new(key.clone(), "must be a valid NATS URL"))?;
+    let Ok(url) = Url::parse(raw) else {
+        return Err(ValidationError::new(key, "must be a valid NATS URL"));
+    };
     if url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()

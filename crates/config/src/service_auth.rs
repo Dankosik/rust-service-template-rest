@@ -2,7 +2,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{Rejected, ValidationError, Violations, missing, required_when};
+use crate::validate::{Rejected, ValidationError, Violations, optional_pair, required_non_blank};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -77,13 +77,13 @@ impl ServiceAuthConfig {
 impl ServiceAuthInput {
     pub(crate) fn admit(
         self,
-        insecure_development: bool,
+        local_development: bool,
         grpc_enabled: bool,
         v: &mut Violations,
     ) -> Result<ServiceAuthConfig, Rejected> {
         match self.mode {
             ServiceAuthMode::None => {
-                if grpc_enabled && !insecure_development {
+                if grpc_enabled && !local_development {
                     v.reject(ValidationError::new(
                         "service_auth.mode",
                         "must be jwt when grpc.enabled is true unless app.allow_insecure_development is enabled",
@@ -103,14 +103,34 @@ impl ServiceAuthInput {
             }
             ServiceAuthMode::Jwt => {
                 let condition = "service_auth.mode = jwt";
-                let name = v.take(required_when("service_auth.name", self.name, condition));
-                let jwt_type = v.take(required_when(
+                let name = v.take(required_non_blank(
+                    "service_auth.name",
+                    self.name,
+                    condition,
+                ));
+                let jwt_type = v.take(required_non_blank(
                     "service_auth.jwt_type",
                     self.jwt_type,
                     condition,
                 ));
-                let trust = v.take(required_when("service_auth.trust", self.trust, condition));
-                let signing_key = v.take(signing_key(self.key_id, self.private_key));
+                let trust = v.take(required_non_blank(
+                    "service_auth.trust",
+                    self.trust,
+                    condition,
+                ));
+                let signing_key = v
+                    .take(optional_pair(
+                        "service_auth.key_id",
+                        self.key_id,
+                        "service_auth.private_key",
+                        self.private_key,
+                    ))
+                    .map(|pair| {
+                        pair.map(|(key_id, private_key)| ServiceSigningKey {
+                            key_id,
+                            private_key,
+                        })
+                    });
                 Ok(ServiceAuthConfig::Jwt {
                     name: name?,
                     jwt_type: jwt_type?,
@@ -119,27 +139,6 @@ impl ServiceAuthInput {
                 })
             }
         }
-    }
-}
-
-fn signing_key(
-    key_id: Option<String>,
-    private_key: Option<SecretString>,
-) -> Result<Option<ServiceSigningKey>, ValidationError> {
-    match (key_id, private_key) {
-        (Some(key_id), Some(private_key)) => Ok(Some(ServiceSigningKey {
-            key_id,
-            private_key,
-        })),
-        (Some(_), None) => Err(missing(
-            "service_auth.private_key",
-            "service_auth.key_id is set",
-        )),
-        (None, Some(_)) => Err(missing(
-            "service_auth.key_id",
-            "service_auth.private_key is set",
-        )),
-        (None, None) => Ok(None),
     }
 }
 

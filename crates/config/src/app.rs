@@ -18,7 +18,10 @@ impl BuildInfo {
     }
 }
 
-pub(crate) fn insecure_development(env: &str, requested: bool) -> Result<bool, ValidationError> {
+pub(crate) fn validate_local_development(
+    env: &str,
+    requested: bool,
+) -> Result<bool, ValidationError> {
     if requested && !matches!(env, "local" | "development") {
         return Err(ValidationError::new(
             "app.allow_insecure_development",
@@ -35,9 +38,9 @@ pub(crate) fn insecure_development(env: &str, requested: bool) -> Result<bool, V
 pub(crate) fn local_development_only(
     key: &str,
     enabled: bool,
-    insecure_development: bool,
+    local_development: bool,
 ) -> Result<(), ValidationError> {
-    if enabled && !insecure_development {
+    if enabled && !local_development {
         return Err(ValidationError::new(
             key,
             "requires app.allow_insecure_development = true",
@@ -46,37 +49,72 @@ pub(crate) fn local_development_only(
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+struct BlankAsNoneString(
+    #[serde(default, deserialize_with = "crate::de::blank_as_none")] Option<String>,
+);
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct AppConfig {
+pub(crate) struct AppFields<Version, Commit, InstanceId> {
     #[serde(deserialize_with = "crate::de::string")]
-    pub env: String,
-    /// Permit development-only settings when `env` is `local` or `development`.
+    pub(crate) env: String,
     #[serde(deserialize_with = "crate::de::boolean")]
-    pub allow_insecure_development: bool,
-    /// Service version published as `service.version`. Empty means "use the
-    /// build's own version".
-    #[serde(deserialize_with = "crate::de::string")]
-    pub version: String,
-    /// Source revision published as `vcs.ref.head.revision`. Empty means
-    /// "use the revision stamped into the binary".
-    #[serde(deserialize_with = "crate::de::string")]
-    pub commit: String,
-    /// Replica identity published as `service.instance.id`. Set it to a distinct
-    /// value per replica. An omitted or blank value uses a process-local UUID.
-    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
-    pub instance_id: Option<String>,
+    pub(crate) allow_insecure_development: bool,
+    version: Version,
+    commit: Commit,
+    instance_id: InstanceId,
 }
 
-impl Default for AppConfig {
+impl<Version: Default, Commit: Default, InstanceId: Default> Default
+    for AppFields<Version, Commit, InstanceId>
+{
     fn default() -> Self {
         Self {
             env: default_env(),
             allow_insecure_development: false,
-            version: String::new(),
-            commit: String::new(),
-            instance_id: None,
+            version: Version::default(),
+            commit: Commit::default(),
+            instance_id: InstanceId::default(),
         }
+    }
+}
+
+type AppInput = AppFields<crate::de::StrictString, crate::de::StrictString, BlankAsNoneString>;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(from = "AppInput")]
+pub struct AppConfig {
+    pub env: String,
+    /// Permit development-only settings when `env` is `local` or `development`.
+    pub allow_insecure_development: bool,
+    /// Service version published as `service.version`. Empty means "use the
+    /// build's own version".
+    pub version: String,
+    /// Source revision published as `vcs.ref.head.revision`. Empty means
+    /// "use the revision stamped into the binary".
+    pub commit: String,
+    /// Replica identity published as `service.instance.id`. Set it to a distinct
+    /// value per replica. An omitted or blank value uses a process-local UUID.
+    pub instance_id: Option<String>,
+}
+
+impl From<AppInput> for AppConfig {
+    fn from(input: AppInput) -> Self {
+        Self {
+            env: input.env,
+            allow_insecure_development: input.allow_insecure_development,
+            version: input.version.0,
+            commit: input.commit.0,
+            instance_id: input.instance_id.0,
+        }
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self::from(AppInput::default())
     }
 }
 
@@ -89,33 +127,15 @@ pub(crate) fn deserialize_migration_app<'de, D>(deserializer: D) -> Result<AppCo
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct MigrationAppInput {
-        #[serde(default = "default_env", deserialize_with = "crate::de::string")]
-        env: String,
-        #[serde(default, deserialize_with = "crate::de::boolean")]
-        allow_insecure_development: bool,
-        #[serde(default, deserialize_with = "crate::de::string")]
-        version: String,
-        #[serde(default, deserialize_with = "crate::de::string")]
-        commit: String,
-        #[serde(default, rename = "instance_id")]
-        _instance_id: serde::de::IgnoredAny,
-    }
+    type MigrationAppInput =
+        AppFields<crate::de::StrictString, crate::de::StrictString, serde::de::IgnoredAny>;
 
-    let MigrationAppInput {
-        env,
-        allow_insecure_development,
-        version,
-        commit,
-        ..
-    } = MigrationAppInput::deserialize(deserializer)?;
+    let input = MigrationAppInput::deserialize(deserializer)?;
     Ok(AppConfig {
-        env,
-        allow_insecure_development,
-        version,
-        commit,
+        env: input.env,
+        allow_insecure_development: input.allow_insecure_development,
+        version: input.version.0,
+        commit: input.commit.0,
         instance_id: None,
     })
 }
@@ -124,7 +144,7 @@ where
 impl AppConfig {
     #[must_use]
     pub fn is_local_development(&self) -> bool {
-        insecure_development(&self.env, self.allow_insecure_development).unwrap_or(false)
+        validate_local_development(&self.env, self.allow_insecure_development).unwrap_or(false)
     }
 
     pub(crate) fn apply_build_info(&mut self, build: BuildInfo) {
@@ -138,7 +158,7 @@ impl AppConfig {
 
     pub(crate) fn validate(&self, v: &mut Violations) {
         v.check(non_blank("app.env", &self.env));
-        v.check(insecure_development(&self.env, self.allow_insecure_development).map(|_| ()));
+        v.check(validate_local_development(&self.env, self.allow_insecure_development).map(|_| ()));
         v.check(non_blank("app.version", &self.version));
         v.check(non_blank("app.commit", &self.commit));
     }

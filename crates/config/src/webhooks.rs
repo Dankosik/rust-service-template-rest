@@ -19,7 +19,7 @@ pub(crate) struct ServiceWebhooksInput {
 }
 
 impl ServiceWebhooksInput {
-    pub(crate) fn endpoint_ids(self, violations: &mut Violations) -> Vec<String> {
+    pub(crate) fn admit(self, violations: &mut Violations) -> Vec<String> {
         for id in self.endpoints.keys() {
             violations.check(validate_endpoint_id("webhooks.endpoints", id));
         }

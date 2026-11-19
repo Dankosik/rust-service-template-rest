@@ -13,20 +13,8 @@ pub(crate) struct JobsOperatorInput {
     postgres: OperatorPostgresInput,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct OperatorAppInput {
-    #[serde(deserialize_with = "crate::de::string")]
-    env: String,
-    #[serde(deserialize_with = "crate::de::boolean")]
-    allow_insecure_development: bool,
-    #[serde(rename = "version")]
-    _version: serde::de::IgnoredAny,
-    #[serde(rename = "commit")]
-    _commit: serde::de::IgnoredAny,
-    #[serde(rename = "instance_id")]
-    _instance_id: serde::de::IgnoredAny,
-}
+type OperatorAppInput =
+    crate::app::AppFields<serde::de::IgnoredAny, serde::de::IgnoredAny, serde::de::IgnoredAny>;
 
 #[derive(Clone, Debug)]
 pub struct JobsOperatorConfig {
@@ -44,7 +32,7 @@ impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let mut violations = Violations::default();
         let local_development = violations
-            .take(crate::app::insecure_development(
+            .take(crate::app::validate_local_development(
                 &self.app.env,
                 self.app.allow_insecure_development,
             ))

@@ -236,6 +236,14 @@ fn merge<T: DeserializeOwned>(
     options: &LoadOptions,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<T, Error> {
+    let (files, variables) = collect_inputs(options, environment)?;
+    merge_inputs(files, variables)
+}
+
+fn collect_inputs(
+    options: &LoadOptions,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<(Vec<ScannedFile>, variables::Variables), Error> {
     let mut errors = Vec::new();
     let variables =
         collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
@@ -250,11 +258,16 @@ fn merge<T: DeserializeOwned>(
         }
     }
     match errors.len() {
-        0 => {}
-        1 => return Err(errors.remove(0)),
-        _ => return Err(Error::InputErrors(errors)),
+        0 => Ok((files, variables)),
+        1 => Err(errors.remove(0)),
+        _ => Err(Error::InputErrors(errors)),
     }
+}
 
+fn merge_inputs<T: DeserializeOwned>(
+    files: Vec<ScannedFile>,
+    variables: variables::Variables,
+) -> Result<T, Error> {
     let mut builder = config::Config::builder();
     let mut table_keys = BTreeSet::new();
     let mut datetime_keys = BTreeMap::new();
@@ -287,7 +300,7 @@ fn merge<T: DeserializeOwned>(
             datetime_keys.remove(parent);
             path = parent;
         }
-        let value = config::Value::new(Some(&variable.source.to_owned()), variable.value);
+        let value = config::Value::new(Some(&variable.source.as_str().to_owned()), variable.value);
         builder = builder
             .set_override(&variable.key, value)
             .map_err(|error| Error::Merge(error.to_string()))?;
@@ -403,21 +416,21 @@ fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
 fn record_datetimes<'a>(
     table: &'a toml::Table,
     file_path: &Path,
-    path: &mut Vec<&'a str>,
+    key_segments: &mut Vec<&'a str>,
     datetime_keys: &mut BTreeMap<String, PathBuf>,
 ) {
     for (key, value) in table {
-        path.push(key);
-        let dotted = path.join(".");
+        key_segments.push(key);
+        let dotted = key_segments.join(".");
         if let toml::Value::Table(nested) = value {
             datetime_keys.remove(&dotted);
-            record_datetimes(nested, file_path, path, datetime_keys);
+            record_datetimes(nested, file_path, key_segments, datetime_keys);
         } else if contains_datetime(value) {
             datetime_keys.insert(dotted, file_path.to_owned());
         } else {
             datetime_keys.remove(&dotted);
         }
-        path.pop();
+        key_segments.pop();
     }
 }
 
@@ -432,18 +445,18 @@ fn contains_datetime(value: &toml::Value) -> bool {
 fn record_tables_and_find_override<'a>(
     table: &'a toml::Table,
     table_keys: &mut BTreeSet<String>,
-    path: &mut Vec<&'a str>,
+    key_segments: &mut Vec<&'a str>,
 ) -> Option<String> {
     for (segment, value) in table {
-        path.push(segment);
-        let dotted_key = path.join(".");
+        key_segments.push(segment);
+        let dotted_key = key_segments.join(".");
         let found = if let Some(nested) = value.as_table() {
             table_keys.insert(dotted_key);
-            record_tables_and_find_override(nested, table_keys, path)
+            record_tables_and_find_override(nested, table_keys, key_segments)
         } else {
             table_keys.contains(&dotted_key).then_some(dotted_key)
         };
-        path.pop();
+        key_segments.pop();
         if found.is_some() {
             return found;
         }
@@ -451,21 +464,23 @@ fn record_tables_and_find_override<'a>(
     None
 }
 
-fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
+fn first_unaddressable_key<'a>(
+    table: &'a toml::Table,
+    key_segments: &mut Vec<&'a str>,
+) -> Option<String> {
     for (key, value) in table {
-        path.push(key);
+        key_segments.push(key);
         let found = if is_env_addressable(key) {
             match value {
-                toml::Value::Table(nested) => first_unaddressable_key(nested, path),
-                toml::Value::Array(_) => {
-                    first_key_in_array(value).map(|suffix| format!("{}{suffix}", path.join(".")))
-                }
+                toml::Value::Table(nested) => first_unaddressable_key(nested, key_segments),
+                toml::Value::Array(_) => first_key_in_array(value)
+                    .map(|suffix| format!("{}{suffix}", key_segments.join("."))),
                 _ => None,
             }
         } else {
-            Some(path.join("."))
+            Some(key_segments.join("."))
         };
-        path.pop();
+        key_segments.pop();
         if found.is_some() {
             return found;
         }

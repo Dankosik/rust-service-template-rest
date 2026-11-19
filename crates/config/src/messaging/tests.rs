@@ -30,7 +30,7 @@ fn fixture_credentials() -> SecretString {
 #[test]
 fn defaults_are_inactive_and_within_the_delivery_budget() {
     let config = admit(MessagingInput::default(), false).unwrap();
-    assert!(!config.is_active());
+    assert!(config.urls.is_empty());
     assert!(!config.tls_first);
     assert_eq!(config.max_payload_bytes, ByteSize::kib(256));
     assert_eq!(config.consumer_concurrency, NonZeroU32::MIN);
