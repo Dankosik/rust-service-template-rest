@@ -172,7 +172,7 @@ impl ProviderFields {
             "object_storage.expected_bucket_owner",
             self.expected_bucket_owner,
         );
-        self.refuse_path_style(v);
+        refuse_path_style(self.path_style, v);
         Ok(ObjectStorageProvider::AmazonS3 {
             region: region?,
             expected_bucket_owner: owner?,
@@ -187,8 +187,8 @@ impl ProviderFields {
             ));
         }
         let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-        self.refuse_owner(v);
-        self.refuse_path_style(v);
+        refuse_owner(&self.expected_bucket_owner, v);
+        refuse_path_style(self.path_style, v);
         Ok(ObjectStorageProvider::CloudflareR2 {
             endpoint: endpoint?,
         })
@@ -200,28 +200,28 @@ impl ProviderFields {
         v: &mut Violations,
     ) -> Result<(String, Option<String>), Rejected> {
         let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-        self.refuse_owner(v);
+        refuse_owner(&self.expected_bucket_owner, v);
         if provider != ProviderKind::S3Compatible {
-            self.refuse_path_style(v);
+            refuse_path_style(self.path_style, v);
         }
         Ok((endpoint?, optional_text(self.region)))
     }
+}
 
-    fn refuse_owner(&self, v: &mut Violations) {
-        v.check(forbidden(
-            "object_storage.expected_bucket_owner",
-            &self.expected_bucket_owner,
-            "is accepted only when object_storage.provider = amazon_s3",
+fn refuse_owner(expected_bucket_owner: &str, v: &mut Violations) {
+    v.check(forbidden(
+        "object_storage.expected_bucket_owner",
+        expected_bucket_owner,
+        "is accepted only when object_storage.provider = amazon_s3",
+    ));
+}
+
+fn refuse_path_style(path_style: bool, v: &mut Violations) {
+    if path_style {
+        v.reject(ValidationError::new(
+            "object_storage.path_style",
+            "must be false unless object_storage.provider = s3_compatible",
         ));
-    }
-
-    fn refuse_path_style(&self, v: &mut Violations) {
-        if self.path_style {
-            v.reject(ValidationError::new(
-                "object_storage.path_style",
-                "must be false unless object_storage.provider = s3_compatible",
-            ));
-        }
     }
 }
 

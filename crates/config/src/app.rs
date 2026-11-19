@@ -51,9 +51,7 @@ pub(crate) fn local_development_only(
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(transparent)]
-struct BlankAsNoneString(
-    #[serde(default, deserialize_with = "crate::de::blank_as_none")] Option<String>,
-);
+struct BlankAsNoneString(#[serde(deserialize_with = "crate::de::blank_as_none")] Option<String>);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
