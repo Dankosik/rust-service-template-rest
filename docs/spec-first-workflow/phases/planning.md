@@ -7,12 +7,12 @@ Leave test cases, fixtures, assertions, proving layers, and exact test commands
 to Implementation. Do not require their prior design or approval.
 
 Consume ready behavior, design, rollout, risk, and repository-owner inputs.
-Reconcile every accepted implementation-changing obligation
-to one independently acceptable task, named task deltas, proved
-no-implementation, or scope exit.
-
-Delta: Make the current-to-target change explicit and anchor its accepted
-mechanism and ownership. Leave routine coding choices to Implementation.
+For each accepted obligation, identify the task deltas, final validation, or
+external action that will satisfy it, current evidence that it is already met,
+or its authorized scope exit. Trace each task to the obligation it serves,
+directly or through a prerequisite.
+Compare its current-to-target change and acceptance criteria with the source,
+including limits and exceptions. Anchor the accepted mechanism and its owner.
 
 Before expanding task packets, establish each Outcome, dependency, and
 final observable, then apply [Task Review / Readiness's atomicity
@@ -23,41 +23,42 @@ independent review below.
 
 For the [implementation handoff](../shared/transition.md#implementation-handoff),
 persist [Task Ledger V1](../interfaces/task-ledger-v1.md) even for one executable
-unit. If there is no executable unit, record that disposition in the phase
-result. A fixed unit may stay inline only when no durable boundary exists.
-For a ledger, keep dependency, status, and
-results in `tasks.md`, and put each task packet in `tasks/<ID>-<slug>.md` using
-[Task Packet V1](../interfaces/task-packet-v1.md). Packets contain code and test-writing work.
-Test execution and reviews belong
-to Completion, not schedulable ledger tasks. The packet defines what must become
-true; Implementation chooses how. Apply the [Planning Ledger
-Contract](planning/ledger-contract.md). Load [Conditional Planning
-Branches](planning/conditional-branches.md) only for integration-first
-uncertainty or broad contract fan-out, and complete the [Readiness dry
-run](#readiness-dry-run) below before declaring readiness.
+unit. If no implementation delta remains, submit the supporting sources in the
+phase result for independent review without creating a ledger. Name the owner
+and stage of any outstanding proof or external effect. If a missing required
+input prevents a conclusion, record the blocker and its owner. A fixed unit may
+stay inline only when no durable boundary exists.
+
+Keep dependencies, status, and results in `tasks.md` and each [Task Packet
+V1](../interfaces/task-packet-v1.md) in `tasks/<ID>-<slug>.md`. Packets cover
+implementation and test writing. Completion owns test execution and review.
+Apply the [Planning Ledger Contract](planning/ledger-contract.md). Load
+[Conditional Planning Branches](planning/conditional-branches.md) only for
+integration-first uncertainty or broad contract fan-out.
 
 ## Readiness Dry Run
 
-Walk the next task through its implementation using accepted behavior, design,
-current sources, and dependency timing under the [Ready
-Frontier](planning/ledger-contract.md#ready-frontier). This is a written
-walkthrough; do not launch tests, services, or probes.
+Check the whole plan against Completion. Could every task meet its criteria
+while an accepted outcome still fails? Trace each dependency to the source,
+producer, or external owner that can supply it by the stage that consumes it.
+The order must allow all tasks to reach `Implemented` before final validation.
+For example, coding cannot depend on the assembled plan's `Accepted` result.
+Keep an explicitly required release approval at the release step.
 
-Confirm each existing item the task consumes — such as a function, type, trait
-implementation, configuration key, or library API and its semantics — against
-its source: current repository code, and for a crate, the source of the version
-locked in `Cargo.lock`. A plan's or design's description of that item is not
-evidence. A consumed item that is missing, or whose source contradicts the
-planned use, leaves the task unready.
+Use the [Ready Frontier](planning/ledger-contract.md#ready-frontier) to identify
+every task eligible to start immediately, regardless of listing order or worker
+capacity. Walk each through implementation from the handoff alone. Confirm
+the existence and semantics of each existing API, type, configuration key, or
+other input it consumes against the current source. For a crate, use the
+source of the version locked in `Cargo.lock`. Reuse source checks shared by
+several tasks. If a task marked ready lacks a required input or its source
+contradicts the planned use, correct its dependencies or reopen the input.
 
-Preserve real external dependencies at their consuming action; an unavailable
-future test environment does not block coding from closed inputs. Do not persist
-waves; the Orchestrator refills the ready frontier after implementation results,
-and Leads choose useful parallel subtask lanes.
+For later tasks, check their promised inputs, outputs, and dependency timing.
+Leave dispatch order to the Orchestrator as the frontier changes. This is a
+written walkthrough without tests, services, or probes.
 
-Apply [Task Review / Readiness](task-review-readiness.md) through shared
-[Review](../shared/review.md). Ready when the next unit can implement from
-closed inputs without chat history or a new decision, with proof placed in
-final validation and later dependencies annotated under the [Ready
-Frontier](planning/ledger-contract.md#ready-frontier). Reopen the smallest
-upstream owner of an input missing for the next authorized action.
+Submit the fixed plan or no-implementation result to independent
+[Task Review / Readiness](task-review-readiness.md) under shared
+[Review](../shared/review.md). Reopen the smallest owner of any missing
+decision or required input.

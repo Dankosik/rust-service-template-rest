@@ -27,13 +27,16 @@ Exclusive locks:
 Final validation:
 - Claim: <what must be true in the assembled ledger>
 - Checks: <local completion checks; any explicit additional requirement with its source, or none; concrete test commands remain executor-owned>
-- Observable: <result at the selected test boundary; live observation only when explicitly required>
+- Observable: <observable result and any proof boundary explicitly required by an accepted source>
 
 Reopen if:
 <smallest upstream invalidation condition>
 ```
 
-The implementing agent fills in test cases and commands while writing code.
+For a removal, name the old behavior and the entry point where it must cease.
+For a pure rename, name the behavior that must still hold after the rename.
+Implementation chooses the proving layer, fixtures, test cases, and commands
+within any explicit proof requirement.
 [Evidence Contract](../shared/evidence-contract.md#required-and-optional-proof)
 owns required proof. A product claim does not automatically require a live
 scenario, and an agent-authored packet cannot expand local acceptance. Empty
