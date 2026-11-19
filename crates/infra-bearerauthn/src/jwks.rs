@@ -73,16 +73,22 @@ struct JwtKey {
 }
 
 pub(crate) struct KeySet {
-    keys: Vec<JwtKey>,
+    by_algorithm: HashMap<JwtAlgorithm, AlgorithmKeys>,
     generation: u64,
     acquired_at: tokio::time::Instant,
+}
+
+#[derive(Default)]
+struct AlgorithmKeys {
+    all: Vec<ParsedPublicKey>,
+    by_kid: HashMap<String, Vec<usize>>,
 }
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
     pub(crate) fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.by_algorithm.is_empty()
     }
 
     pub(crate) fn require_fresh(
@@ -101,36 +107,37 @@ impl KeySet {
         self.generation
     }
 
-    fn candidates(
-        &self,
-        kid: Option<&str>,
-        algorithm: JwtAlgorithm,
-    ) -> impl Iterator<Item = &ParsedPublicKey> {
-        self.keys
-            .iter()
-            .filter(move |key| {
-                key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
-            })
-            .map(|key| &key.public_key)
-    }
-
     pub(crate) fn verify(
         &self,
         input: &SignatureInput<'_>,
     ) -> Result<(), SignatureVerificationError> {
-        let mut miss = SignatureVerificationError::NoCandidate;
-        for key in self.candidates(input.kid, input.algorithm) {
-            if key.verify_sig(input.message, input.signature).is_ok() {
-                return Ok(());
-            }
-            miss = SignatureVerificationError::BadSignature;
+        let keys = self
+            .by_algorithm
+            .get(&input.algorithm)
+            .ok_or(SignatureVerificationError::NoCandidate)?;
+        let verifies =
+            |key: &ParsedPublicKey| key.verify_sig(input.message, input.signature).is_ok();
+        let verified = if let Some(kid) = input.kid {
+            keys.by_kid
+                .get(kid)
+                .ok_or(SignatureVerificationError::NoCandidate)?
+                .iter()
+                .any(|&index| verifies(&keys.all[index]))
+        } else {
+            keys.all.iter().any(verifies)
+        };
+        if verified {
+            Ok(())
+        } else {
+            Err(SignatureVerificationError::BadSignature)
         }
-        Err(miss)
     }
 
     #[cfg(test)]
     pub(crate) fn has_kid(&self, kid: &str) -> bool {
-        self.keys.iter().any(|key| key.kid.as_deref() == Some(kid))
+        self.by_algorithm
+            .values()
+            .any(|keys| keys.by_kid.contains_key(kid))
     }
 }
 
@@ -227,8 +234,16 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
     if parsed.has_non_encryption_rejections_without_keys() {
         return Err(KeySetFailure::NoUsableKeys);
     }
+    let mut by_algorithm = HashMap::<JwtAlgorithm, AlgorithmKeys>::new();
+    for key in parsed.keys {
+        let keys = by_algorithm.entry(key.algorithm).or_default();
+        if let Some(kid) = key.kid {
+            keys.by_kid.entry(kid).or_default().push(keys.all.len());
+        }
+        keys.all.push(key.public_key);
+    }
     Ok(KeySet {
-        keys: parsed.keys,
+        by_algorithm,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         acquired_at,
     })
@@ -615,7 +630,9 @@ pub(crate) mod tests {
     pub(crate) use super::fixtures::{
         JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
     };
-    use super::{JwtAlgorithm, KeySetFailure, parse_key_set};
+    use super::{
+        JwtAlgorithm, KeySetFailure, SignatureInput, SignatureVerificationError, parse_key_set,
+    };
     use crate::test_metrics::{Diagnostics, labeled};
 
     pub(crate) fn ec_signing() -> EncodingKey {
@@ -653,6 +670,51 @@ pub(crate) mod tests {
         assert!(keys.has_kid("padded"));
         assert!(!keys.has_kid("bad-point"));
         assert!(!keys.has_kid("unconfigured"));
+    }
+
+    #[test]
+    fn signature_verification_keeps_duplicate_kids_and_matches_only_the_token_algorithm() {
+        let first = ec_signing();
+        let second = ec_signing();
+        let unnamed = ec_signing();
+        let keys = key_set(
+            &[
+                jwk(&first, Algorithm::ES256, Some("shared"), true),
+                jwk(&rsa_signing(), Algorithm::RS256, Some("rsa"), true),
+                jwk(&unnamed, Algorithm::ES256, None, true),
+                jwk(&second, Algorithm::ES256, Some("shared"), true),
+            ],
+            &[JwtAlgorithm::Es256, JwtAlgorithm::Rs256],
+        );
+        let message = b"header.payload";
+        let signature = |signing| {
+            let encoded = jsonwebtoken::crypto::sign(message, signing, Algorithm::ES256).unwrap();
+            URL_SAFE_NO_PAD.decode(encoded).unwrap()
+        };
+        let verify = |kid: Option<&str>, signature: &[u8]| {
+            keys.verify(&SignatureInput {
+                message,
+                signature,
+                kid,
+                algorithm: JwtAlgorithm::Es256,
+            })
+        };
+        let first_signature = signature(&first);
+        let second_signature = signature(&second);
+        let unnamed_signature = signature(&unnamed);
+
+        assert!(verify(Some("shared"), &first_signature).is_ok());
+        assert!(verify(Some("shared"), &second_signature).is_ok());
+        assert!(verify(None, &second_signature).is_ok());
+        assert!(verify(None, &unnamed_signature).is_ok());
+        assert!(matches!(
+            verify(Some("shared"), &unnamed_signature),
+            Err(SignatureVerificationError::BadSignature)
+        ));
+        assert!(matches!(
+            verify(Some("rsa"), &second_signature),
+            Err(SignatureVerificationError::NoCandidate)
+        ));
     }
 
     #[test]

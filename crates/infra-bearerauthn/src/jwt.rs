@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant as MonotonicInstant},
 };
 
+use arc_swap::Guard;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
 use moka::{Expiry, sync::Cache};
@@ -11,7 +12,7 @@ use shared_rules::rfc7515;
 use crate::{
     JwtAlgorithm, PresentedToken, Principal, VerificationError, VerificationReason,
     claims::{ClaimPolicy, VerifiedClaims, validate_jwt_claims},
-    jwks::{KeySet, MAX_SIGNATURE_BYTES, SignatureInput},
+    jwks::{KeySet, MAX_SIGNATURE_BYTES, SignatureInput, SignatureVerificationError},
     refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh},
 };
 
@@ -204,6 +205,7 @@ impl JwtVerifier {
             }
             self.cache.invalidate(bytes);
         }
+        let keys = Guard::into_inner(keys);
         let cached = self.verify_uncached(token, &unix_now, keys).await?;
         let principal = cached.verified.principal.clone();
         self.cache.insert(bytes.into(), cached);
@@ -243,17 +245,25 @@ impl JwtVerifier {
             kid: admitted.kid.as_deref(),
             algorithm: admitted.algorithm,
         };
-        let signing_keys = self
-            .verify_signature(keys, &input, || {
-                decode_payload()
-                    .and_then(|payload| validate_claims(payload, unix_now()?))
-                    .is_ok()
-            })
-            .await?;
-        let payload = decode_payload()?;
-        let sampled_at = MonotonicInstant::now();
-        let now = unix_now()?;
-        let verified = validate_claims(payload, now)?;
+        let (signing_keys, verified, sampled_at, now) = if let Err(miss) = keys.verify(&input) {
+            let Ok(preflight) =
+                decode_payload().and_then(|payload| validate_claims(payload, unix_now()?))
+            else {
+                return Err(miss.into());
+            };
+            let signing_keys = self
+                .verify_after_signature_miss(&keys, &input, miss)
+                .await?;
+            let sampled_at = MonotonicInstant::now();
+            let now = unix_now()?;
+            preflight.check_at(now)?;
+            (signing_keys, preflight, sampled_at, now)
+        } else {
+            let payload = decode_payload()?;
+            let sampled_at = MonotonicInstant::now();
+            let now = unix_now()?;
+            (keys, validate_claims(payload, now)?, sampled_at, now)
+        };
         signing_keys.require_fresh(self.jwks_max_age)?;
         let ttl =
             MAX_VERIFIED_CACHE_TTL.min(verified.principal.expiry_from_epoch().saturating_sub(now));
@@ -277,11 +287,13 @@ impl JwtVerifier {
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
         let typ = header.typ.as_deref();
         let admitted_type = match self.token_profile {
-            TokenProfile::Rfc9068 => typ.is_some_and(is_access_token_type),
+            TokenProfile::Rfc9068 => typ.is_some_and(|typ| rfc7515::typ_is(typ, "at+jwt")),
             // RFC 8725 §3.11
-            TokenProfile::ResourceServer => {
-                typ.is_none_or(|typ| is_generic_jwt_type(typ) || is_access_token_type(typ))
-            }
+            TokenProfile::ResourceServer => typ.is_none_or(|typ| {
+                rfc7515::typ_subtype(typ).is_some_and(|subtype| {
+                    subtype.eq_ignore_ascii_case("jwt") || subtype.eq_ignore_ascii_case("at+jwt")
+                })
+            }),
         };
         if !admitted_type {
             return Err(VerificationError::invalid(VerificationReason::Profile));
@@ -292,19 +304,13 @@ impl JwtVerifier {
         })
     }
 
-    async fn verify_signature(
+    async fn verify_after_signature_miss(
         &self,
-        checked: Arc<KeySet>,
+        checked: &Arc<KeySet>,
         input: &SignatureInput<'_>,
-        claims_would_be_admitted: impl FnOnce() -> bool,
+        miss: SignatureVerificationError,
     ) -> Result<Arc<KeySet>, VerificationError> {
-        let Err(miss) = checked.verify(input) else {
-            return Ok(checked);
-        };
-        if !claims_would_be_admitted() {
-            return Err(miss.into());
-        }
-        match self.key_store.refresh_for_signature_miss(&checked).await {
+        match self.key_store.refresh_for_signature_miss(checked).await {
             SignatureRefresh::NewerSet(key_set) => {
                 key_set.require_fresh(self.jwks_max_age)?;
                 key_set.verify(input)?;
@@ -321,14 +327,6 @@ impl JwtVerifier {
     }
 }
 
-fn is_access_token_type(value: &str) -> bool {
-    rfc7515::typ_is(value, "at+jwt")
-}
-
-fn is_generic_jwt_type(value: &str) -> bool {
-    rfc7515::typ_is(value, "jwt")
-}
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
@@ -340,7 +338,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, VERIFIED_CACHE_CAPACITY,
+        ClaimPolicy, Guard, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile,
+        VERIFIED_CACHE_CAPACITY,
     };
     use crate::{
         Failure, Transport, VerificationReason,
@@ -537,10 +536,11 @@ mod tests {
             check(&verifier, &stale).await.unwrap_err(),
             VerificationReason::Signature
         );
+        let checked = Guard::into_inner(verifier.key_store.current());
         assert_matches!(
             verifier
                 .key_store
-                .refresh_for_signature_miss(&verifier.key_store.current())
+                .refresh_for_signature_miss(&checked)
                 .await,
             SignatureRefresh::NoNewerSet
         );
@@ -1833,22 +1833,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_token_verified_after_a_refresh_is_remembered_under_the_refreshed_set() {
+    async fn a_refresh_only_verifies_and_remembers_tokens_still_live_after_the_wait() {
+        use std::cell::Cell;
+
         let (installed, rotated) = (ec_signing(), ec_signing());
-        let memo = Arc::new(ec_verifier(&installed, "old"));
+        let memo = ec_verifier(&installed, "old");
         memo.key_store.expire_refresh_cooldown_for_test();
         let token = ec_token(&rotated, "new", &serde_json::json!({}));
-        let call = tokio::spawn({
-            let (memo, token) = (Arc::clone(&memo), token.clone());
-            async move { verify_at(&memo, &token, 1_000).await.map(|_| ()) }
-        });
-        tokio::task::yield_now().await;
+        let expiring = ec_token(&rotated, "new", &serde_json::json!({"exp": 1_001}));
+        let header = format!("Bearer {expiring}");
+        let bearer = parse_bearer([header.as_bytes()]).unwrap();
+        let now = Cell::new(Duration::from_secs(1_000));
+        let mut live_waiter = std::pin::pin!(verify_at(&memo, &token, 1_000));
+        let mut expiring_waiter = std::pin::pin!(memo.verify_with_now(&bearer, || Ok(now.get())));
+        assert!(futures_util::poll!(live_waiter.as_mut()).is_pending());
+        assert!(futures_util::poll!(expiring_waiter.as_mut()).is_pending());
+
         let rotated_set = key_set(
             &[jwk(&rotated, Algorithm::ES256, Some("new"), true)],
             &[JwtAlgorithm::Es256],
         );
+        now.set(Duration::from_secs(1_500));
         memo.key_store.finish(1, Ok(rotated_set));
-        assert_eq!(call.await.unwrap(), Ok(()));
+        assert_eq!(
+            expiring_waiter.await.unwrap_err().reason,
+            VerificationReason::Expired
+        );
+        live_waiter.await.unwrap();
         let cached = memo.cache.get(token.as_bytes()).unwrap();
         assert_eq!(cached.key_generation, memo.key_store.current().generation());
         assert!(verify_at(&memo, &token, 1_000).await.is_ok());

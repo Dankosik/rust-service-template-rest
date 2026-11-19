@@ -21,11 +21,12 @@ pub(crate) struct ClaimPolicy {
 impl ClaimPolicy {
     pub(crate) fn try_new(
         issuer: String,
-        audiences: Vec<String>,
+        mut audiences: Vec<String>,
     ) -> Result<Self, PreparationError> {
         if audiences.is_empty() || audiences.iter().any(|audience| audience.trim().is_empty()) {
             return Err(PreparationError::invalid_options());
         }
+        audiences.sort_unstable();
         Ok(Self { issuer, audiences })
     }
 
@@ -37,10 +38,25 @@ impl ClaimPolicy {
         if issuer != self.issuer {
             return Err(VerificationError::invalid(VerificationReason::Issuer));
         }
-        if !audience.contains_any(&self.audiences) {
+        if !self.accepts_audience(audience) {
             return Err(VerificationError::invalid(VerificationReason::Audience));
         }
         Ok(())
+    }
+
+    fn accepts_audience(&self, audience: &StringOrStrings<'_>) -> bool {
+        let values = match audience {
+            StringOrStrings::One(value) => std::slice::from_ref(value),
+            StringOrStrings::Many(values) => values.as_slice(),
+        };
+        if let [accepted] = self.audiences.as_slice() {
+            return values.iter().any(|value| accepted == value);
+        }
+        values.iter().any(|value| {
+            self.audiences
+                .binary_search_by(|candidate| candidate.as_str().cmp(value.as_ref()))
+                .is_ok()
+        })
     }
 }
 
@@ -90,7 +106,7 @@ struct RawAct<'a> {
     #[serde(borrow)]
     sub: Cow<'a, str>,
     #[serde(borrow)]
-    client_id: Option<Cow<'a, str>>,
+    client_id: Option<BorrowableString<'a>>,
 }
 
 struct EmptyActorSubject;
@@ -101,48 +117,37 @@ fn parse_actor(JsonObject(raw): JsonObject<RawAct<'_>>) -> Result<Actor, EmptyAc
     }
     Ok(Actor::new(
         raw.sub.into_owned(),
-        raw.client_id.map(Cow::into_owned),
+        raw.client_id
+            .map(|BorrowableString(value)| value.into_owned()),
     ))
-}
-
-impl StringOrStrings<'_> {
-    fn contains_any(&self, accepted: &[String]) -> bool {
-        let values = match self {
-            Self::One(value) => std::slice::from_ref(value),
-            Self::Many(values) => values.as_slice(),
-        };
-        values
-            .iter()
-            .any(|value| accepted.iter().any(|candidate| candidate == value))
-    }
 }
 
 // template:begin oidc-jwt:authn-claims-jwt-type
 #[derive(Deserialize)]
 struct JwtClaims<'a> {
     #[serde(borrow)]
-    iss: Option<Cow<'a, str>>,
+    iss: Option<BorrowableString<'a>>,
     #[serde(borrow)]
     aud: Option<StringOrStrings<'a>>,
     exp: Option<NumericDate>,
     #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<NumericDate>,
     #[serde(borrow)]
-    sub: Option<Cow<'a, str>>,
+    sub: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    client_id: Option<Cow<'a, str>>,
+    client_id: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    azp: Option<Cow<'a, str>>,
+    azp: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    appid: Option<Cow<'a, str>>,
+    appid: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    cid: Option<Cow<'a, str>>,
+    cid: Option<BorrowableString<'a>>,
     #[serde(borrow, default)]
     scope: ScopeClaim<'a>,
     #[serde(borrow)]
     scp: Option<StringOrStrings<'a>>,
     #[serde(borrow)]
-    jti: Option<Cow<'a, str>>,
+    jti: Option<BorrowableString<'a>>,
     iat: Option<NumericDate>,
     #[serde(borrow)]
     act: Option<JsonObject<RawAct<'a>>>,
@@ -192,15 +197,15 @@ struct Envelope {
 #[derive(Deserialize)]
 struct ActiveClaims<'a> {
     #[serde(borrow)]
-    iss: Option<Cow<'a, str>>,
+    iss: Option<BorrowableString<'a>>,
     #[serde(borrow)]
     aud: Option<StringOrStrings<'a>>,
     exp: Option<u64>,
     nbf: Option<u64>,
     #[serde(borrow)]
-    sub: Option<Cow<'a, str>>,
+    sub: Option<BorrowableString<'a>>,
     #[serde(borrow)]
-    client_id: Option<Cow<'a, str>>,
+    client_id: Option<BorrowableString<'a>>,
     #[serde(borrow, default, deserialize_with = "present_scope_string")]
     scope: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -223,11 +228,15 @@ pub(crate) struct VerifiedClaims {
 }
 
 impl VerifiedClaims {
+    pub(crate) fn check_at(&self, now: Duration) -> Result<(), VerificationError> {
+        check_lifetime(self.principal.expiry_from_epoch(), self.not_before, now)
+    }
+
     pub(crate) fn into_principal_checked_at(
         self,
         now: Duration,
     ) -> Result<Principal, VerificationError> {
-        check_lifetime(self.principal.expiry_from_epoch(), self.not_before, now)?;
+        self.check_at(now)?;
         Ok(self.principal)
     }
 }
@@ -245,7 +254,7 @@ pub(crate) fn validate_jwt_claims(
     let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
         .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
     let scope = claims.scope.resolve(token_profile, claims.scp)?;
-    let (Some(issuer), Some(audience), Some(NumericDate(expiry))) =
+    let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
         (claims.iss, claims.aud, claims.exp)
     else {
         return Err(invalid(VerificationReason::MissingClaim));
@@ -260,7 +269,7 @@ pub(crate) fn validate_jwt_claims(
                 non_empty(claims.sub),
                 non_empty(claims.client_id),
                 claims.iat,
-                claims.jti.as_deref().filter(|jti| !jti.is_empty()),
+                claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
             ) else {
                 return Err(invalid(VerificationReason::MissingClaim));
             };
@@ -282,11 +291,12 @@ pub(crate) fn validate_jwt_claims(
         .map(parse_actor)
         .transpose()
         .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
+    let issuer = issuer.into_owned();
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
             Identity {
-                issuer: policy.issuer.clone(),
+                issuer,
                 identifiers,
                 scopes,
                 payload,
@@ -387,7 +397,9 @@ pub(crate) fn validate_introspection_claims(
         return Err(invalid(VerificationReason::Inactive));
     }
     let claims: ActiveClaims<'_> = serde_json::from_str(payload).map_err(|_| malformed())?;
-    let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
+    let (Some(BorrowableString(issuer)), Some(audience), Some(expiry)) =
+        (claims.iss, claims.aud, claims.exp)
+    else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
     policy.check_issuer_and_audience(&issuer, &audience)?;
@@ -408,7 +420,7 @@ pub(crate) fn validate_introspection_claims(
         not_before,
         principal: Principal::new(
             Identity {
-                issuer: policy.issuer.clone(),
+                issuer: issuer.into_owned(),
                 identifiers,
                 scopes,
                 payload: payload.to_owned(),
@@ -454,8 +466,9 @@ impl Identifiers {
     }
 }
 
-fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
-    value.filter(|value| !value.is_empty()).map(Cow::into_owned)
+fn non_empty(value: Option<BorrowableString<'_>>) -> Option<String> {
+    let BorrowableString(value) = value?;
+    (!value.is_empty()).then(|| value.into_owned())
 }
 
 pub(crate) struct Scopes(Vec<String>);
@@ -597,7 +610,7 @@ mod tests {
 
     #[test]
     fn registered_claim_validation_enforces_shape_and_order() {
-        let verify = |extra: serde_json::Value| {
+        let verify = |policy: &ClaimPolicy, extra: serde_json::Value| {
             let mut claims = serde_json::json!({
                 "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
             });
@@ -606,13 +619,14 @@ mod tests {
             }
             validate_jwt_claims(
                 claims.to_string().into_bytes(),
-                &policy(),
+                policy,
                 TokenProfile::ResourceServer,
                 Duration::from_secs(1000),
             )
             .map(|verified| verified.principal.expires_at())
             .map_err(|error| error.reason)
         };
+        let single_audience = policy();
         for (extra, expected) in [
             (serde_json::json!({}), Ok(1000)),
             (serde_json::json!({"aud": ["other", "api"]}), Ok(1000)),
@@ -684,7 +698,27 @@ mod tests {
                 Err(VerificationReason::MalformedClaims),
             ),
         ] {
-            assert_eq!(verify(extra.clone()), expected, "{extra}");
+            assert_eq!(verify(&single_audience, extra.clone()), expected, "{extra}");
+        }
+
+        let multiple_audiences = ClaimPolicy::try_new(
+            "https://issuer.example".to_owned(),
+            Vec::from(["api", "accounts", "storefront", "billing"].map(str::to_owned)),
+        )
+        .unwrap();
+        for (audience, expected) in [
+            (serde_json::json!("api"), Ok(1000)),
+            (serde_json::json!(["other", "api"]), Ok(1000)),
+            (
+                serde_json::json!(["API", "other"]),
+                Err(VerificationReason::Audience),
+            ),
+        ] {
+            assert_eq!(
+                verify(&multiple_audiences, serde_json::json!({"aud": audience})),
+                expected,
+                "{audience}"
+            );
         }
     }
 
