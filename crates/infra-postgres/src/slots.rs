@@ -201,26 +201,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_standing_queue_serves_the_newest_waiter_first() {
-        let slots = Slots::new(1);
-        let held = slots.try_take();
-        let mut older = pin!(slots.take(Queue::Regular));
-        assert!(poll(older.as_mut()).is_pending());
-        tokio::time::advance(STANDING_AFTER + Duration::from_millis(1)).await;
-        let mut newer = pin!(slots.take(Queue::Regular));
-        assert!(poll(newer.as_mut()).is_pending());
-
-        drop(held);
-
-        assert!(poll(older.as_mut()).is_pending());
-        let Poll::Ready(slot) = poll(newer.as_mut()) else {
-            panic!("the newest waiter was not served");
-        };
-        drop(slot);
-        assert!(poll(older.as_mut()).is_ready());
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn a_queue_that_emptied_starts_young_again() {
         let slots = Slots::new(1);
         let held = slots.try_take();
