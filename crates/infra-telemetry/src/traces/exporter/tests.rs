@@ -225,6 +225,7 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
     let headers = parse_headers(Setting {
+        scope: SettingScope::Typed,
         name: TYPED_HEADERS,
         raw: OsStr::new("authorization=Basic%20x, x-tenant = t1 ,"),
     })
@@ -251,6 +252,7 @@ fn malformed_header_entries_fail_by_position() {
         ("auth=private%00", 1),
     ] {
         let err = parse_headers(Setting {
+            scope: SettingScope::Typed,
             name: TYPED_HEADERS,
             raw: OsStr::new(raw),
         })

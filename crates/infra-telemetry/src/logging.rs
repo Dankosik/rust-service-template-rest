@@ -125,7 +125,7 @@ where
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         match self {
             Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
-            Self::Env(filter) => filter.register_callsite(metadata),
+            Self::Env(filter) => <EnvFilter as Layer<S>>::register_callsite(filter, metadata),
         }
     }
 
@@ -224,7 +224,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        let interest = self.0.register_callsite(metadata);
+        let interest = <DirectiveFilter as Layer<S>>::register_callsite(&self.0, metadata);
         match admission(metadata) {
             Admission::Always => Interest::always(),
             Admission::Never => Interest::never(),
