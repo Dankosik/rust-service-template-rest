@@ -1481,8 +1481,15 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertFalse((verify_dir / "attempt-old-00.log").exists())
 
     def test_self_test_changes_invalidate_a_receipt_for_explicit_routing_inputs(self) -> None:
+        profile_tests = "scripts/tests/test_profile_runners.py"
         with (self.fixture / "Makefile").open("a", encoding="utf-8") as makefile:
-            makefile.write("validation-lock-self-test verify-check python-lint:\n\t@:\n")
+            makefile.write(
+                "validation-lock-self-test python-lint:\n\t@:\n"
+                f"verify-check: {profile_tests}\n\t@:\n"
+            )
+        profile_test_file = self.fixture / profile_tests
+        profile_test_file.parent.mkdir(parents=True)
+        profile_test_file.touch()
 
         test_files = [
             self.fixture / relative
@@ -1496,12 +1503,19 @@ class VerifyRunnerTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("import unittest\n", encoding="utf-8")
 
-        args = ("--files", "scripts/tests/test_verify.py")
+        args = ("--files", "scripts/harness/test_sync.py")
         first = self._run_verify(*args)
         self.assertEqual(first.returncode, 0, first.stderr)
         reused = self._run_verify(*args)
         self.assertEqual(reused.returncode, 0, reused.stderr)
         self.assertIn("reusing exact passing receipt:", reused.stdout)
+
+        with self.subTest("requested scope changes"):
+            additional_path = "scripts/checks/test_make.py"
+            expanded = self._run_verify(*args, additional_path)
+            self.assertEqual(expanded.returncode, 0, expanded.stderr)
+            self.assertIn("==> make verify-check\n", expanded.stdout)
+            self.assertIn(f"scope: {additional_path},{args[1]}\n", expanded.stdout)
 
         for path in test_files:
             with self.subTest(path=path.relative_to(self.fixture)):
@@ -1510,6 +1524,13 @@ class VerifyRunnerTests(unittest.TestCase):
                 self.assertEqual(checked.returncode, 0, checked.stderr)
                 self.assertIn("==> make verify-check\n", checked.stdout)
                 self.assertNotIn("reusing exact passing receipt:", checked.stdout)
+
+        with self.subTest("selected profile test file disappears"):
+            profile_test_file.unlink()
+            missing = self._run_verify(*args)
+            self.assertEqual(missing.returncode, 1, missing.stdout)
+            self.assertIn("command: make verify-check", missing.stderr)
+            self.assertIn(profile_tests, missing.stderr)
 
 
 if __name__ == "__main__":

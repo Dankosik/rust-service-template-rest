@@ -97,12 +97,13 @@ def fingerprint_candidate(
     resolved_base_sha: str,
     merge_base_sha: str,
     include_quality_configs: bool = False,
+    additional_inputs: Sequence[str] = (),
 ) -> str:
     head = _git_output(repo, "rev-parse", "HEAD")
     if head is None:
         raise RunnerError(2, "HEAD commit is unavailable")
 
-    watched = [*files, "tools/versions.env"]
+    watched = [*files, *additional_inputs, "tools/versions.env"]
     if include_quality_configs:
         watched.extend(
             (
@@ -122,7 +123,10 @@ def fingerprint_candidate(
         )
     )
 
-    for rel in watched:
+    for rel in files:
+        digest.update(f"scope  {rel}\n".encode("utf-8"))
+
+    for rel in sorted(set(watched)):
         target = repo / rel
         try:
             st = target.lstat()
@@ -757,17 +761,28 @@ def run(argv: Sequence[str] | None = None) -> int:
     if "verify-check" in make_targets:
         self_test_inputs.extend(
             (
-                "scripts/tests/test_checks_and_image.py",
-                "scripts/checks/test_make.py",
-                "scripts/image/test_publication.py",
-                "scripts/harness/test_sync.py",
                 "make/source.mk",
+                "make/template.mk",
+                "scripts/checks/test_make.py",
+                "scripts/harness/test_sync.py",
+                "scripts/image/test_publication.py",
+                "scripts/tests/test_checks_and_image.py",
+                "scripts/tests/test_image_inputs.py",
+                "scripts/tests/test_image_inventory.py",
+                "scripts/tests/test_profile_runners.py",
+                "scripts/tests/test_verify.py",
             )
         )
         if (repo / "make/source.mk").is_file():
-            self_test_inputs.append("scripts/tests/template-init-safety.py")
+            self_test_inputs.extend(
+                (
+                    "scripts/template/check_init.sh",
+                    "scripts/template/matrix.py",
+                    "scripts/tests/template-init-safety.py",
+                )
+            )
     elif "publish-image-metadata-check" in make_targets:
-        self_test_inputs.append("scripts/image/test_publication.py")
+        self_test_inputs.extend(("make/template.mk", "scripts/image/test_publication.py"))
     input_files = sorted({*files, *self_test_inputs})
 
     try:
@@ -779,8 +794,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         with lock_ctx as child_env:
             candidate = fingerprint_candidate(
-                repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                 merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                additional_inputs=self_test_inputs,
             )
             execution_head = _git_output(repo, "rev-parse", "HEAD")
             if execution_head is None:
@@ -840,8 +856,9 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                     if proc.returncode == 0:
                         candidate_after = fingerprint_candidate(
-                            repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                            repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                             merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                            additional_inputs=self_test_inputs,
                         )
                         if candidate_after != candidate:
                             with attempt_path.open("a", encoding="utf-8") as handle:
@@ -876,8 +893,9 @@ def run(argv: Sequence[str] | None = None) -> int:
 
                 total_duration = int(time.time()) - started
                 candidate_after = fingerprint_candidate(
-                    repo, input_files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
+                    repo, files, base_ref=base_ref, resolved_base_sha=resolved_base_sha,
                     merge_base_sha=merge_base_sha, include_quality_configs=include_quality_configs,
+                    additional_inputs=self_test_inputs,
                 )
                 if candidate_after != candidate:
                     with attempt_path.open("a", encoding="utf-8") as handle:
