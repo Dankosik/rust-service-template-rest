@@ -65,16 +65,12 @@ Evaluate these triggers before loading a phase owner:
 | --- | --- |
 | New structured work lacks a confirmed [Intent](spec-first-workflow/interfaces/intent.md) at `status: ready`, or outcome, scope, authority, observable success, or first owner is ambiguous | [Intake](spec-first-workflow/phases/intake.md) |
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
-| Structured work lacks a reviewed behavioral contract ([Specification V1](spec-first-workflow/interfaces/spec-v1.md)) | [Specification](spec-first-workflow/phases/specification.md) |
-| Structured work lacks a reviewed technical design ([Design V1](spec-first-workflow/interfaces/design-v1.md)) because Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery or rollout mechanism, or Rust placement, invariant ownership, caller obligations, or dependency direction (even with fixed files) | [Technical Design](spec-first-workflow/phases/technical-design.md) |
+| Structured work has neither a current reviewed [spec.md](spec-first-workflow/interfaces/spec-v1.md) at `status: ready` nor a fixed external contract covering all behavioral obligations with zero open behavioral forks | [Specification](spec-first-workflow/phases/specification.md) |
+| Structured work lacks a reviewed technical design ([Design V1](spec-first-workflow/interfaces/design-v1.md)) because Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery or rollout mechanism, or Rust placement, invariant ownership, caller obligations, or dependency direction (even with fixed files), or an `Open to Technical Design:` clause, handoff or carried concern still needs a Technical Design decision | [Technical Design](spec-first-workflow/phases/technical-design.md) |
 | Structured work needs a ready task ledger, or an existing ledger must be resliced or reconciled after an upstream or handoff change | [Planning](spec-first-workflow/phases/planning.md) |
 | The user starts a ready plan in a new session, or an accepted inline unit or active implementation task is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 
-Intake is required for new structured work unless a complete Intent already
-exists; Specification and Planning are required unless ready equivalent
-authority already supplies their output (for Specification, a reviewed `spec.md`
-at `status: ready` or a fixed external contract with zero open behavioral
-forks—never `intent.md` alone). Reopen Intake whenever requester
+A ready Intent alone cannot substitute for the behavioral contract. Run Planning unless equivalent authority already supplies its ready output. Reopen Intake whenever requester
 meaning is missing or changed. Load only the triggered owner, recording
 `skipped` solely when a durable [Transition
 result](spec-first-workflow/shared/transition.md) requires that disposition.

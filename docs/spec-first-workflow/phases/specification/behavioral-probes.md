@@ -1,8 +1,8 @@
 # Behavioral Probes
 
-Single source of truth for the six divergence axes walked during
-[Specification](../specification.md) step 2 and verified during
-[Specification Review](../specification-review.md).
+For every touched entity and surface, apply all six probes. Close each with a
+rule, guarantee or fork, or verify the primary-source fact that makes the probe
+inapplicable.
 
 1. **States & boundaries:** For each touched entity and input, which transitions
    are legal, forbidden, or idempotent on repeat? What changes at omitted vs
@@ -28,6 +28,6 @@ Single source of truth for the six divergence axes walked during
    consumers, boot paths, or optional profiles
    (`template/profiles.json`) must hold—and for any authorized breaking
    change, what do former callers see?
-6. **Operational & quantitative** *(when triggered)*: Which invalid config or
+6. **Operational & quantitative**: Which invalid config or
    dependency failures reject startup vs degrade at runtime? Which operator or
    audit signals and labeled numeric targets (with workload envelope) apply?
