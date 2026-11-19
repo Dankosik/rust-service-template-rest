@@ -330,7 +330,7 @@ pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), 
     }
     value
         .checked_to_offset(UtcOffset::UTC)
-        .filter(|utc| (0..10_000).contains(&utc.year()))
+        .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())
         .map(drop)
         .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
