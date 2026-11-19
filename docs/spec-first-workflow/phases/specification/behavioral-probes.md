@@ -1,6 +1,6 @@
 # Behavioral Probes
 
-Single source of truth for the five divergence axes probed during
+Single source of truth for the six divergence axes walked during
 [Specification](../specification.md) step 2 and verified during
 [Specification Review](../specification-review.md).
 
@@ -12,17 +12,22 @@ Single source of truth for the five divergence axes probed during
    which wins and what does the loser see? If multiple conditions fail at once
    (auth + invalid payload + replay, env + file config), which wins? Must the
    next read observe the write immediately, or is bounded lag allowed?
-3. **Failure, replay & promises:** On every relied-on response, status, event,
+3. **Promises, failure & replay:** On every relied-on response, status, event,
    or ack, can an observer see success before the promised effect holds
    (*false-positive success*) or miss a landed effect (*unobservable
-   completion*)? How do retries, partial failures, auth-vs-not-found exposure,
-   and secret/PII redaction behave?
-4. **Blast radius & existing state:** What happens to **pre-existing persisted
+   completion*)? How do retries, replays, timeouts, and partial failures
+   behave?
+4. **Trust, authorization & privacy:** Which actor/identity, tenant, or scope
+   may invoke each entry seam or observe each resource, and how do
+   unauthenticated, forbidden, and not-found responses differ? Can keys,
+   cursors, or caches leak or collide across callers? What untrusted-input
+   bounds and secret/PII redaction rules apply?
+5. **Blast radius & existing state:** What happens to **pre-existing persisted
    rows and in-flight work** at deploy time (backfill, lazy upgrade,
    grandfather, reject) and during mixed-version overlap? Which callers,
    consumers, boot paths, or optional profiles
    (`scripts/template/profiles.json`) must hold—and for any authorized breaking
    change, what do former callers see?
-5. **Operational & quantitative** *(when triggered)*: Which invalid config or
+6. **Operational & quantitative** *(when triggered)*: Which invalid config or
    dependency failures reject startup vs degrade at runtime? Which operator or
    audit signals and labeled numeric targets (with workload envelope) apply?

@@ -36,6 +36,10 @@ source. Omit the section when none remain.
 - Label a material assumption where it affects meaning and state what would
   prompt reconsideration. Silence alone cannot delegate a requester-owned
   decision or grant authority to act.
+- Preserve requester-supplied concrete examples, edge-case scenarios, and
+  explicitly rejected options (with why) inside the affected section so a fresh
+  Definition session does not re-ask settled branches or misread flattened
+  prose.
 - Check that the next agent can choose and justify a course of action within
   those limits. Return a decision to the requester only when new evidence
   changes the agreed outcome, reveals a material preference that cannot be

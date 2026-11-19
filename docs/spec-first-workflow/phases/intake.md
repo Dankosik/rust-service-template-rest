@@ -6,17 +6,20 @@ observable success, or the first owner is unresolved.
 
 When forming a new Intent, the root session runs a [grilling
 interview](../shared/grilling.md) with the requester, grounding questions in
-their words, prior decisions, and primary codebase/contract facts (directly or
-via a fresh `evidence-agent`) so code-exposed product forks settle before
-Definition. Route deeper external-contract or baseline gaps to
-[Research](research.md).
+their words, prior decisions, [Domain
+Vocabulary](../../repo-architecture.md#domain-vocabulary), and primary
+codebase/contract facts (directly or via a fresh `evidence-agent`) so overloaded
+terms and code-exposed product forks settle before Definition. Route deeper
+external-contract or baseline gaps to [Research](research.md).
 
 When reopened with `specs/<task>/spec.md` at `status: blocked`, open the
-interview with its `Blocked decisions` (`B1..Bn`) frontier as the first
-grilling round, follow up on any newly revealed requester uncertainty until the
-frontier closes, fold answers into `specs/<task>/intent.md`, and return control
-so Definition can resume without re-asking settled branches. On any other
-reopen, interview strictly on what changed.
+interview with its `Blocked decisions` (`B1..Bn`) root frontier as the first
+grilling round—holding back any `Follow-up if <option>` lines until the
+requester's answer takes that branch—then ask triggered follow-ups and any newly
+revealed requester uncertainty until the frontier closes, fold answers into
+`specs/<task>/intent.md`, and return control so Definition can resume without
+re-asking settled branches. On any other reopen, interview strictly on what
+changed.
 
 Check whether a plausible reading fulfills the wording while leaving the
 requester's real problem unsolved, weighing it against their goal, prior
