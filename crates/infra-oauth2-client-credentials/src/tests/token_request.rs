@@ -511,99 +511,81 @@ async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_s
     }
 }
 
+async fn assert_cancelled_attempt_leaves_survivor_its_own_attempt(
+    delegated: bool,
+    inherited: bool,
+) {
+    let fixture = Fixture::new().await;
+    let caller = OperationContext::with_timeout(Duration::from_secs(10));
+    let call_context = if inherited {
+        caller.child_context()
+    } else {
+        caller.clone()
+    };
+    let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
+        if key.name() == "oauth2_token_acquisitions_total"
+            && key
+                .labels()
+                .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
+        {
+            caller.cancel();
+        }
+    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    fixture.token_json(
+        StatusCode::BAD_REQUEST,
+        &serde_json::json!({"error": "invalid_client"}),
+    );
+    let gate = fixture.block_tokens();
+    let subject = subject_token("subject");
+    let service = (!delegated).then(|| fixture.service_client());
+    let exchange = delegated.then(|| fixture.exchange_client());
+    let mut first = Box::pin(async {
+        if let Some(client) = &exchange {
+            client
+                .execute(fixture.request(), &subject, &call_context)
+                .await
+        } else {
+            service
+                .as_ref()
+                .unwrap()
+                .execute(fixture.request(), &call_context)
+                .await
+        }
+    });
+    tokio::select! {
+        () = fixture.token_received() => {}
+        result = &mut first => panic!("provider response must be gated: {result:?}"),
+    }
+    let mut survivor = Box::pin(async {
+        if let Some(client) = &exchange {
+            fixture.send_exchange(client, "subject").await
+        } else {
+            fixture.send(service.as_ref().unwrap()).await
+        }
+    });
+    poll_pending(survivor.as_mut()).await;
+    gate.add_permits(1);
+    assert_matches!(
+        first.await,
+        Err(Error::Acquisition(AcquisitionError::Cancelled))
+    );
+    assert_eq!(fixture.resource_request_count(), 0);
+
+    fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
+    gate.add_permits(1);
+    assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(fixture.token_request_count(), 2);
+    assert_eq!(fixture.resource_request_count(), 1);
+    fixture.finish().await;
+}
+
 #[tokio::test]
 async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
-    for inherited in [false, true] {
-        let fixture = Fixture::new().await;
-        let service = fixture.service_client();
-        let caller = OperationContext::with_timeout(Duration::from_secs(10));
-        let call_context = if inherited {
-            caller.child_context()
-        } else {
-            caller.clone()
-        };
-        let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
-            if key.name() == "oauth2_token_acquisitions_total"
-                && key
-                    .labels()
-                    .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
-            {
-                caller.cancel();
-            }
-        });
-        let _recorder = metrics::set_default_local_recorder(&recorder);
-        fixture.token_json(
-            StatusCode::BAD_REQUEST,
-            &serde_json::json!({"error": "invalid_client"}),
-        );
-        let gate = fixture.block_tokens();
-        let mut first = Box::pin(service.execute(fixture.request(), &call_context));
-        tokio::select! {
-            () = fixture.token_received() => {}
-            result = &mut first => panic!("provider response must be gated: {result:?}"),
+    for delegated in [false, true] {
+        for inherited in [false, true] {
+            assert_cancelled_attempt_leaves_survivor_its_own_attempt(delegated, inherited).await;
         }
-        let mut survivor = Box::pin(fixture.send(&service));
-        poll_pending(survivor.as_mut()).await;
-        gate.add_permits(1);
-        assert_matches!(
-            first.await,
-            Err(Error::Acquisition(AcquisitionError::Cancelled))
-        );
-        assert_eq!(fixture.resource_request_count(), 0);
-
-        fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-        gate.add_permits(1);
-        assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
-        assert_eq!(fixture.token_request_count(), 2);
-        assert_eq!(fixture.resource_request_count(), 1);
-        fixture.finish().await;
-    }
-
-    for inherited in [false, true] {
-        let fixture = Fixture::new().await;
-        let exchange = fixture.exchange_client();
-        let caller = OperationContext::with_timeout(Duration::from_secs(10));
-        let call_context = if inherited {
-            caller.child_context()
-        } else {
-            caller.clone()
-        };
-        let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
-            if key.name() == "oauth2_token_acquisitions_total"
-                && key
-                    .labels()
-                    .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
-            {
-                caller.cancel();
-            }
-        });
-        let _recorder = metrics::set_default_local_recorder(&recorder);
-        fixture.token_json(
-            StatusCode::BAD_REQUEST,
-            &serde_json::json!({"error": "invalid_client"}),
-        );
-        let gate = fixture.block_tokens();
-        let subject = subject_token("subject");
-        let mut first = Box::pin(exchange.execute(fixture.request(), &subject, &call_context));
-        tokio::select! {
-            () = fixture.token_received() => {}
-            result = &mut first => panic!("provider response must be gated: {result:?}"),
-        }
-        let mut survivor = Box::pin(fixture.send_exchange(&exchange, "subject"));
-        poll_pending(survivor.as_mut()).await;
-        gate.add_permits(1);
-        assert_matches!(
-            first.await,
-            Err(Error::Acquisition(AcquisitionError::Cancelled))
-        );
-        assert_eq!(fixture.resource_request_count(), 0);
-
-        fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-        gate.add_permits(1);
-        assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
-        assert_eq!(fixture.token_request_count(), 2);
-        assert_eq!(fixture.resource_request_count(), 1);
-        fixture.finish().await;
     }
 }
 

@@ -303,7 +303,7 @@ async fn expired_deadline_refuses_before_network_work() {
 
 #[tokio::test]
 async fn stopped_request_context_refuses_all_entry_points_before_dispatch() {
-    fn refused<T>(expired: bool, result: Result<T, Error>) -> bool {
+    fn refused<T>(expired: bool, result: &Result<T, Error>) -> bool {
         if expired {
             matches!(result, Err(Error::Timeout))
         } else {
@@ -325,16 +325,16 @@ async fn stopped_request_context_refuses_all_entry_points_before_dispatch() {
         }
         assert!(refused(
             expired,
-            client
+            &client
                 .execute(request(), &context)
                 .await
                 .map_err(Error::from)
         ));
         assert!(refused(
             expired,
-            client.execute_for_headers(request(), &context).await
+            &client.execute_for_headers(request(), &context).await
         ));
-        assert!(refused(expired, client.prepare(request(), &context)));
+        assert!(refused(expired, &client.prepare(request(), &context)));
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())

@@ -282,16 +282,9 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
     );
 }
 
-#[tokio::test]
-async fn observation_records_timeout_cancellation_and_polled_drop_once() {
-    let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let material = TlsMaterial::new(FIXTURE_HOST);
-    let (address, server) = tls_server_stall_after_headers(&material).await;
-    let timed = fixture_client(address, &material)
+async fn exercise_stalled_attempts(material: &TlsMaterial) {
+    let (address, server) = tls_server_stall_after_headers(material).await;
+    let timed = fixture_client(address, material)
         .execute(request(), &context())
         .await;
     std::assert_matches!(
@@ -310,8 +303,8 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     );
 
     for cancel in [false, true] {
-        let (address, server) = tls_server_stall_after_headers(&material).await;
-        let client = fixture_client(address, &material);
+        let (address, server) = tls_server_stall_after_headers(material).await;
+        let client = fixture_client(address, material);
         let context = OperationContext::with_timeout(Duration::from_secs(1));
         let (seen, status) = tokio::sync::oneshot::channel();
         let prepared = client.prepare(request(), &context).expect("prepared");
@@ -348,6 +341,17 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
                 .is_cancelled()
         );
     }
+}
+
+#[tokio::test]
+async fn observation_records_timeout_cancellation_and_polled_drop_once() {
+    let recorder = observation_recorder();
+    let diagnostics = SpanDiagnostics::default();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    exercise_stalled_attempts(&material).await;
 
     let scrape = recorder.handle().render();
     assert_eq!(

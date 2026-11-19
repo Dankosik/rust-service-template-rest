@@ -214,12 +214,9 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
         .unwrap()
         .unwrap();
 
+    let subject = subject_token("alice");
     assert_closed_calls(&fixture, ClosedClient::Service(&service_clone)).await;
-    assert_closed_calls(
-        &fixture,
-        ClosedClient::Exchange(&exchange_clone, subject_token("alice")),
-    )
-    .await;
+    assert_closed_calls(&fixture, ClosedClient::Exchange(&exchange_clone, &subject)).await;
     assert_eq!(fixture.token_request_count(), 3);
     assert_eq!(fixture.resource_request_count(), 4);
     drop(gate);
@@ -370,9 +367,10 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
     fixture.finish().await;
 }
 
+#[derive(Clone, Copy)]
 enum ClosedClient<'a> {
     Service(&'a ServiceHttpClient),
-    Exchange(&'a ExchangeHttpClient, OnBehalfOf),
+    Exchange(&'a ExchangeHttpClient, &'a OnBehalfOf),
 }
 
 async fn assert_closed_calls(fixture: &Fixture, client: ClosedClient<'_>) {
@@ -392,7 +390,7 @@ async fn assert_closed_calls(fixture: &Fixture, client: ClosedClient<'_>) {
         (cancelled.clone(), AcquisitionError::Cancelled),
         (cancelled.child_context(), AcquisitionError::Cancelled),
     ] {
-        let error = match &client {
+        let error = match client {
             ClosedClient::Service(service) => service
                 .with_context(&ctx)
                 .execute(fixture.request())

@@ -38,6 +38,7 @@ enum RequestAuth {
     AuthorizationConflict,
 }
 
+#[derive(Clone, Copy)]
 enum AdmissionRefusal {
     AuthorizationConflict,
     SubjectRequired,
