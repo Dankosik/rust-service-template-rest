@@ -10,13 +10,27 @@ pub(crate) const TRACEPARENT: HeaderName = HeaderName::from_static(TRACEPARENT_K
 pub(crate) const TRACESTATE: HeaderName = HeaderName::from_static(TRACESTATE_KEY);
 const TRACEPARENT_MAX_BYTES: usize = 256;
 const TRACESTATE_MAX_BYTES: usize = 512;
-const TRACE_HEADERS: [(&str, HeaderName, usize); 2] = [
-    (TRACEPARENT_KEY, TRACEPARENT, TRACEPARENT_MAX_BYTES),
-    (TRACESTATE_KEY, TRACESTATE, TRACESTATE_MAX_BYTES),
+struct TraceHeader {
+    key: &'static str,
+    name: HeaderName,
+    max_bytes: usize,
+}
+
+const TRACE_HEADERS: [TraceHeader; 2] = [
+    TraceHeader {
+        key: TRACEPARENT_KEY,
+        name: TRACEPARENT,
+        max_bytes: TRACEPARENT_MAX_BYTES,
+    },
+    TraceHeader {
+        key: TRACESTATE_KEY,
+        name: TRACESTATE,
+        max_bytes: TRACESTATE_MAX_BYTES,
+    },
 ];
 
-fn trace_header(key: &str) -> Option<(&'static str, HeaderName, usize)> {
-    TRACE_HEADERS.into_iter().find(|(name, _, _)| *name == key)
+fn trace_header(key: &str) -> Option<TraceHeader> {
+    TRACE_HEADERS.into_iter().find(|header| header.key == key)
 }
 
 pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
@@ -39,16 +53,16 @@ struct HeaderInjector<'a>(&'a mut HeaderMap);
 
 impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
-        let Some((_, name, max_bytes)) = trace_header(key) else {
+        let Some(header) = trace_header(key) else {
             return;
         };
         if !value.is_empty()
-            && value.len() <= max_bytes
+            && value.len() <= header.max_bytes
             && value
                 .bytes()
                 .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
         {
-            self.0.insert(name, value);
+            self.0.insert(header.name, value);
         }
     }
 }
@@ -57,14 +71,14 @@ struct HeaderExtractor<'a>(&'a HeaderMap);
 
 impl Extractor for HeaderExtractor<'_> {
     fn get(&self, key: &str) -> Option<&str> {
-        let (_, name, _) = trace_header(key)?;
-        self.0.get(name).map(async_nats::HeaderValue::as_str)
+        let header = trace_header(key)?;
+        self.0.get(header.name).map(async_nats::HeaderValue::as_str)
     }
 
     fn keys(&self) -> Vec<&str> {
         TRACE_HEADERS
             .into_iter()
-            .filter_map(|(key, name, _)| self.0.get(name).map(|_| key))
+            .filter_map(|header| self.0.get(header.name).map(|_| header.key))
             .collect()
     }
 }

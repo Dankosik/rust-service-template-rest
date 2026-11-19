@@ -46,29 +46,34 @@ impl Registry {
                 schema_version,
             } = *key;
             let subject = route.subject.as_str();
-            let schema = route.schema.ok_or(ContractError::Undocumented {
+            let collect_schema = route.schema.ok_or(ContractError::Undocumented {
                 event_type,
                 schema_version,
             })?;
-            let (payload, rendered) = schema();
+            let (payload_schema_name, raw_definitions) = collect_schema();
             let mut definitions = BTreeMap::new();
-            for (name, schema) in rendered {
-                let mut schema = serde_json::to_value(schema)?;
+            for (name, raw_schema) in raw_definitions {
+                let mut rendered_schema = serde_json::to_value(raw_schema)?;
                 match schemas.get(&name) {
-                    Some(original) if original != &schema => {
+                    Some(original) if original != &rendered_schema => {
                         return Err(ContractError::SchemaName(name));
                     }
                     Some(_) => {}
                     None => {
-                        schemas.insert(name.clone(), schema.clone());
+                        schemas.insert(name.clone(), rendered_schema.clone());
                     }
                 }
-                relocate_schema_refs(&mut schema);
-                definitions.insert(name, schema);
+                relocate_schema_refs(&mut rendered_schema);
+                definitions.insert(name, rendered_schema);
             }
             channels.entry(subject).or_default().insert(
                 format!("{event_type}.v{schema_version}"),
-                message(event_type, schema_version, &payload, &definitions),
+                message(
+                    event_type,
+                    schema_version,
+                    &payload_schema_name,
+                    &definitions,
+                ),
             );
         }
         let channels: BTreeMap<&str, Value> = channels
@@ -92,7 +97,7 @@ const CREATED_AT_DESCRIPTION: &str =
 fn message(
     event_type: &str,
     schema_version: u16,
-    payload: &str,
+    payload_schema_name: &str,
     definitions: &BTreeMap<String, Value>,
 ) -> Value {
     let identity = json!({
@@ -127,7 +132,7 @@ fn message(
             "schemaFormat": "application/schema+json;version=draft-2020-12",
             "schema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "$ref": payload_schema_reference(payload),
+                "$ref": payload_schema_reference(payload_schema_name),
                 "$defs": definitions,
             },
         },

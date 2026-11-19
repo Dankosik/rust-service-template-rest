@@ -11,7 +11,7 @@ use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::connection::NativeConnection;
 use crate::consumer::Consumer;
 use crate::error::MessagingError;
-use crate::probe::{MessagingProbe, PublishWork};
+use crate::probe::{MessagingProbe, PublishWorkMetrics};
 use crate::producer::{Producer, PublishMetrics};
 use crate::registry::Registry;
 // template:begin outbox:messaging-outbox-refusal-import
@@ -66,7 +66,7 @@ pub struct OutboxProducer(pub(crate) Producer);
 pub struct MessagingStartup {
     options: MessagingOptions,
     publication_permits: usize,
-    envelope_limit: usize,
+    envelope_limit_bytes: usize,
     deadline: Instant,
     cancel: CancellationToken,
     phase: StartupPhase,
@@ -85,11 +85,11 @@ pub(crate) struct Shared {
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
     pub(crate) max_payload_bytes: usize,
-    pub(crate) envelope_limit: usize,
+    pub(crate) envelope_limit_bytes: usize,
     draining: AtomicBool,
     failed: AtomicBool,
     pub(crate) publish_metrics: PublishMetrics,
-    pub(crate) publish_work: PublishWork,
+    pub(crate) publish_work_metrics: PublishWorkMetrics,
 }
 
 impl Shared {
@@ -148,11 +148,11 @@ impl Messaging {
         if options.max_payload_bytes == 0 {
             return Err(MessagingError::Bounds);
         }
-        let envelope_limit = options
+        let envelope_limit_bytes = options
             .max_payload_bytes
             .checked_add(HEADER_LIMIT_BYTES)
             .ok_or(MessagingError::Bounds)?;
-        let publication_permits = PUBLICATION_WINDOW_BYTES / envelope_limit;
+        let publication_permits = PUBLICATION_WINDOW_BYTES / envelope_limit_bytes;
         if publication_permits == 0
             || options
                 .consumer
@@ -164,7 +164,7 @@ impl Messaging {
         Ok(MessagingStartup {
             options,
             publication_permits,
-            envelope_limit,
+            envelope_limit_bytes,
             deadline,
             cancel,
             phase: StartupPhase::Prepared,
@@ -181,7 +181,12 @@ impl Messaging {
     // template:begin outbox:messaging-outbox-producer-access
     pub fn outbox_producer(&self) -> Result<OutboxProducer, MessagingError> {
         self.topology.outbox_source.map_err(|refusal| {
-            refusal_failure("source_stream", refusal, self.shared.envelope_limit, None)
+            refusal_failure(
+                "source_stream",
+                refusal,
+                self.shared.envelope_limit_bytes,
+                None,
+            )
         })?;
         Ok(OutboxProducer(self.producer()))
     }
@@ -259,7 +264,7 @@ impl MessagingStartup {
             .build(client.clone());
         let topology = admit_topology(
             options,
-            self.envelope_limit,
+            self.envelope_limit_bytes,
             client,
             &jetstream,
             deadline,
@@ -271,11 +276,11 @@ impl MessagingStartup {
                 jetstream,
                 source_stream: options.source_stream.clone(),
                 max_payload_bytes: options.max_payload_bytes,
-                envelope_limit: self.envelope_limit,
+                envelope_limit_bytes: self.envelope_limit_bytes,
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
                 publish_metrics: PublishMetrics::register(),
-                publish_work: PublishWork::register(
+                publish_work_metrics: PublishWorkMetrics::register(
                     self.publication_permits,
                     &options.connection_name,
                 ),

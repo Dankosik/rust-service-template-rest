@@ -10,11 +10,23 @@ use time::OffsetDateTime;
 use crate::error::EnvelopeError;
 use crate::registry::route_key;
 
+const MAX_PAYLOAD_JSON_DEPTH: usize = 127;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EventIdentity {
+    Direct {
+        message_id: String,
+    },
+    Bound {
+        message_id: String,
+        publication_id: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     subject: Subject,
-    pub(crate) message_id: String,
-    pub(crate) publication_id: Option<String>,
+    identity: EventIdentity,
     event_type: Cow<'static, str>,
     schema_version: u16,
     occurred_at: OffsetDateTime,
@@ -53,8 +65,9 @@ impl PreparedEvent {
         crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
-            message_id: event.id.clone(),
-            publication_id: None,
+            identity: EventIdentity::Direct {
+                message_id: event.id.clone(),
+            },
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
             occurred_at,
@@ -85,14 +98,28 @@ impl PreparedEvent {
         crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
-            message_id,
-            publication_id: Some(publication_id),
+            identity: EventIdentity::Bound {
+                message_id,
+                publication_id,
+            },
             event_type: event_type.into(),
             schema_version,
             occurred_at,
             payload,
         })
     }
+
+    pub(crate) fn bind_outbox_id(&mut self, id: String) {
+        self.identity = EventIdentity::Bound {
+            message_id: id.clone(),
+            publication_id: id,
+        };
+    }
+
+    pub(crate) const fn has_bound_publication(&self) -> bool {
+        matches!(self.identity, EventIdentity::Bound { .. })
+    }
+
     #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
@@ -102,11 +129,18 @@ impl PreparedEvent {
     }
     #[must_use]
     pub fn message_id(&self) -> &str {
-        &self.message_id
+        match &self.identity {
+            EventIdentity::Direct { message_id } | EventIdentity::Bound { message_id, .. } => {
+                message_id
+            }
+        }
     }
     #[must_use]
     pub fn publication_id(&self) -> &str {
-        self.publication_id.as_deref().unwrap_or(&self.message_id)
+        match &self.identity {
+            EventIdentity::Direct { message_id } => message_id,
+            EventIdentity::Bound { publication_id, .. } => publication_id,
+        }
     }
     #[must_use]
     pub fn event_type(&self) -> &str {
@@ -131,30 +165,33 @@ impl PreparedEvent {
 }
 
 pub(crate) fn payload_depth_allowed(bytes: &[u8]) -> bool {
+    enum ScanState {
+        Value,
+        String,
+        Escape,
+    }
+
     let mut depth = 0_usize;
-    let mut in_string = false;
-    let mut escaped = false;
+    let mut state = ScanState::Value;
     for &byte in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else {
-            match byte {
-                b'"' => in_string = true,
+        match state {
+            ScanState::Escape => state = ScanState::String,
+            ScanState::String => match byte {
+                b'\\' => state = ScanState::Escape,
+                b'"' => state = ScanState::Value,
+                _ => {}
+            },
+            ScanState::Value => match byte {
+                b'"' => state = ScanState::String,
                 b'[' | b'{' => {
                     depth += 1;
-                    if depth > 127 {
+                    if depth > MAX_PAYLOAD_JSON_DEPTH {
                         return false;
                     }
                 }
                 b']' | b'}' => depth = depth.saturating_sub(1),
                 _ => {}
-            }
+            },
         }
     }
     true

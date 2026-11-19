@@ -17,6 +17,7 @@ use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
 const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
+const ORIGINAL_ID_PRESENT_VALUE: &str = "1";
 const RETAINED_HEADERS: [HeaderName; 6] = [
     header_name::MESSAGE_ID,
     header_name::EVENT_TYPE,
@@ -62,8 +63,11 @@ pub(crate) fn dead_letter_bounds(
         .into_values()
         .max()?;
     let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + SHA256_HEX_LEN;
-    let identity_bytes = checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?
-        .max(checked_header_line_bytes(ORIGINAL_ID_PRESENT.as_ref(), 1)?);
+    let identity_bytes =
+        checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?.max(checked_header_line_bytes(
+            ORIGINAL_ID_PRESENT.as_ref(),
+            ORIGINAL_ID_PRESENT_VALUE.len(),
+        )?);
     let additions = transfer_headers(transfer_id_bytes, subject_bytes, reason_bytes, stream_bytes)
         .into_iter()
         .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
@@ -100,7 +104,7 @@ pub(crate) fn dead_letter_headers(
     if message_id.is_empty() {
         headers.insert(header_name::MESSAGE_ID, transfer_id);
     } else if message_id == transfer_id {
-        headers.insert(ORIGINAL_ID_PRESENT, "1");
+        headers.insert(ORIGINAL_ID_PRESENT, ORIGINAL_ID_PRESENT_VALUE);
     }
     for (name, value) in transfer_headers(transfer_id, subject, reason.label(), stream) {
         headers.insert(name, value);
@@ -159,7 +163,7 @@ fn has_ambiguous_original_id(
     stored_publication_id: &str,
 ) -> bool {
     message_id == stored_publication_id
-        && header_value(headers, ORIGINAL_ID_PRESENT) != "1"
+        && header_value(headers, ORIGINAL_ID_PRESENT) != ORIGINAL_ID_PRESENT_VALUE
         && message_id
             .strip_prefix(DEAD_LETTER_ID_PREFIX)
             .is_some_and(|digest| {

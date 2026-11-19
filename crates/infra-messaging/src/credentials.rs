@@ -1,5 +1,5 @@
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -60,8 +60,8 @@ pub(crate) struct CredentialsFile {
 }
 
 impl CredentialsFile {
-    pub(crate) async fn admit(path: PathBuf) -> Result<Self, CredentialsFileError> {
-        let path: Arc<Path> = path.into();
+    pub(crate) async fn admit(path: &Path) -> Result<Self, CredentialsFileError> {
+        let path: Arc<Path> = Arc::from(path);
         let reading = Arc::new(Semaphore::new(1));
         let (jwt, _) = read(&path, &reading).await?;
         Ok(Self {
@@ -233,9 +233,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let first = nkeys::KeyPair::new_user();
         std::fs::write(file.path(), creds("first.jwt.value", &first)).unwrap();
-        let credentials = CredentialsFile::admit(file.path().to_owned())
-            .await
-            .unwrap();
+        let credentials = CredentialsFile::admit(file.path()).await.unwrap();
 
         drop(credentials.answer(b"cancelled-nonce"));
         assert!(
@@ -286,7 +284,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sentinel-path.creds");
-        let error = CredentialsFile::admit(path.clone()).await.unwrap_err();
+        let error = CredentialsFile::admit(&path).await.unwrap_err();
         assert_eq!(
             error,
             CredentialsFileError::Unreadable(std::io::ErrorKind::NotFound)
@@ -294,7 +292,7 @@ mod tests {
         assert!(!error.to_string().contains("sentinel"), "{error}");
 
         std::fs::write(&path, "sentinel-content").unwrap();
-        let error = CredentialsFile::admit(path.clone()).await.unwrap_err();
+        let error = CredentialsFile::admit(&path).await.unwrap_err();
         assert_eq!(error, CredentialsFileError::Malformed);
         assert!(!error.to_string().contains("sentinel"), "{error}");
 
@@ -302,7 +300,7 @@ mod tests {
         let mut at_limit = creds("user.jwt.value", &user).into_bytes();
         at_limit.resize(1024 * 1024, b'\n');
         std::fs::write(&path, &at_limit).unwrap();
-        let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
+        let credentials = CredentialsFile::admit(&path).await.unwrap();
         assert!(
             !recorder
                 .handle()
@@ -355,7 +353,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("user.creds");
             std::fs::write(&path, creds("user.jwt.value", &nkeys::KeyPair::new_user())).unwrap();
-            let file = CredentialsFile::admit(path).await.unwrap();
+            let file = CredentialsFile::admit(&path).await.unwrap();
             let (release, gate) = tokio::sync::oneshot::channel::<()>();
             let blocker = tokio::task::spawn_blocking(move || gate.blocking_recv());
             {
@@ -397,7 +395,7 @@ mod tests {
             let replacement = directory.path().join("replacement");
             let user = nkeys::KeyPair::new_user();
             std::fs::write(&path, creds("initial", &user)).unwrap();
-            let file = CredentialsFile::admit(path.clone()).await.unwrap();
+            let file = CredentialsFile::admit(&path).await.unwrap();
             nix::unistd::mkfifo(&replacement, nix::sys::stat::Mode::S_IRUSR).unwrap();
             std::fs::rename(&replacement, &path).unwrap();
             let outcome =

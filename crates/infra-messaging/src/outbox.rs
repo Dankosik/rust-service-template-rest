@@ -17,6 +17,7 @@ use crate::{EnvelopeError, OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
+const JSON_STRING_QUOTES_BYTES: usize = "\"\"".len();
 
 const POLICY: Policy = Policy {
     max_attempts: 25,
@@ -79,8 +80,7 @@ impl<T: EventPayload + Serialize> OutboxRoute<T> {
         let prefix = format!("outbox-v1-{}-", self.publisher_id.get().simple());
         let id =
             crate::wire::prefixed_digest_hex(&prefix, &Sha256::digest(event.id.as_bytes()).into());
-        prepared.publication_id = Some(id.clone());
-        prepared.message_id = id;
+        prepared.bind_outbox_id(id);
         Ok(prepared)
     }
 }
@@ -133,7 +133,7 @@ impl PreparedEvent {
         order: Option<(&str, i64)>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
-        let admission = if self.publication_id.is_some() {
+        let admission = if self.has_bound_publication() {
             job_outbox::enqueue(tx, &intent, order).await?
         } else {
             job_outbox::reconcile(tx, &intent, order).await?
@@ -185,7 +185,7 @@ impl PreparedEvent {
                 let (chunk, tail) = rest.split_at(end);
                 total += infra_jobs::json_payload_len(chunk)
                     .map_err(infra_jobs::EnqueueError::Serialize)?
-                    - 2;
+                    - JSON_STRING_QUOTES_BYTES;
                 budget -= chunk.len();
                 rest = tail;
             }
