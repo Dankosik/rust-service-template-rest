@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::mem::DropGuard;
 use std::sync::{Arc, Weak};
 
 use infra_postgres::observed;
@@ -13,6 +14,8 @@ use super::{
     deadline_reached_or_cleanup_ended, execute_before_deadline, within,
 };
 use crate::engine::{Operation, WorkerGroup, observe_failure};
+
+const INLINE_BATCH_CAPACITY: usize = 16;
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
@@ -81,9 +84,12 @@ impl CompletionGroup {
         fence: ClaimFence,
         slots: &Arc<AttemptSlots>,
         memberships: &MembershipGauge,
-    ) -> (impl Drop + use<'a>, oneshot::Receiver<CompletionReply>) {
+    ) -> (
+        DropGuard<ClaimFence, impl FnOnce(ClaimFence) + use<'a>>,
+        oneshot::Receiver<CompletionReply>,
+    ) {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let registration = std::mem::DropGuard::new(fence, |fence| {
+        let registration = DropGuard::new(fence, |fence| {
             let retired = {
                 let mut queued = self.queued.lock();
                 queued
@@ -183,13 +189,17 @@ pub(super) async fn complete_batched(
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
     let completion_group = group.completions.group(supervisor_deadline);
-    let (_registration, mut reply_rx) =
+    let (registration, mut reply_rx) =
         completion_group.register(fence, slots, &group.completions.memberships);
     let writer = match completion_group.writer_or_reply(&mut reply_rx).await {
         WriteTurn::Write(writer) => writer,
-        WriteTurn::Reply(reply) => return reply,
+        WriteTurn::Reply(reply) => {
+            DropGuard::dismiss(registration);
+            return reply;
+        }
     };
     let batch = CompletionBatch::new(std::mem::take(&mut *completion_group.queued.lock()));
+    DropGuard::dismiss(registration);
     write_batch(group, batch, supervisor_deadline).await;
     drop(writer);
     reply_rx.await.unwrap_or(Err(Unacknowledged))
@@ -202,8 +212,46 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
     {
         return;
     }
+    if let [entry] = batch.queued.as_slice() {
+        let ClaimFence {
+            job_id,
+            generation,
+            token,
+        } = entry.fence;
+        let result = within(
+            &group.lifecycle.cleanup,
+            deadline,
+            execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
+                observed(
+                    "complete jobs",
+                    sqlx::query!(
+                        "UPDATE background_jobs AS job \
+                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                         WHERE job.id = $1 AND job.claim_generation = $2 AND job.claim_token = $3 \
+                           AND job.claim_expires_at IS NOT NULL",
+                        job_id.0,
+                        generation,
+                        token,
+                    )
+                    .execute(&mut *connection),
+                )
+                .await
+            }),
+        )
+        .await;
+        match result {
+            Some(Ok(result)) => batch.finish([Ok(Written::from_rows(result.rows_affected()))]),
+            Some(Err(error)) => {
+                observe_failure(group, Operation::Record, &error);
+                drop(error);
+                batch.finish([Err(Unacknowledged)]);
+            }
+            None => {}
+        }
+        return;
+    }
     let result = {
-        type BatchColumn<T> = SmallVec<[T; 16]>;
+        type BatchColumn<T> = SmallVec<[T; INLINE_BATCH_CAPACITY]>;
         let (ids, generations, tokens): (BatchColumn<_>, BatchColumn<_>, BatchColumn<_>) = batch
             .queued
             .iter()
@@ -253,8 +301,11 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
     }
 }
 
-fn written_by_position(positions: &[i64], len: usize) -> Vec<Written> {
-    let mut written = vec![Written::Unchanged; len];
+fn written_by_position(
+    positions: &[i64],
+    len: usize,
+) -> SmallVec<[Written; INLINE_BATCH_CAPACITY]> {
+    let mut written = SmallVec::<[_; INLINE_BATCH_CAPACITY]>::from_elem(Written::Unchanged, len);
     for &position in positions {
         if let Some(entry) = usize::try_from(position - 1)
             .ok()

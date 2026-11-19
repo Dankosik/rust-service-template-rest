@@ -103,7 +103,7 @@ pub(super) enum Written {
 }
 
 impl Written {
-    const fn from_rows(rows: u64) -> Self {
+    pub(super) const fn from_rows(rows: u64) -> Self {
         if rows == 1 {
             Self::Applied
         } else {
