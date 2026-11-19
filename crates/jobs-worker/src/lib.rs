@@ -65,10 +65,10 @@ impl<'a> Registration<'a> {
             postgres_messages: None,
             // template:end outbox:worker-bootstrap-postgres-messages-initial
             // template:begin webhooks:worker-registration-outbound-webhooks-value
-            outbound_webhooks: &config.webhooks,
+            outbound_webhooks: config.webhooks(),
             // template:end webhooks:worker-registration-outbound-webhooks-value
             // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
-            inbound_webhook_endpoints: &config.inbound_webhook_endpoints,
+            inbound_webhook_endpoints: config.inbound_webhook_endpoints(),
             // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
             background,
         }
@@ -184,7 +184,7 @@ fn run_worker(
     let (config, runtime) = load_config_and_runtime(options).inspect_err(|error| {
         report_failure(error);
     })?;
-    let grace = config.http.grace_period;
+    let grace = config.http().grace_period;
     let signals = {
         let _entered = runtime.enter();
         signals::Signals::install()
@@ -222,7 +222,7 @@ fn load_config_and_runtime(
 ) -> Result<(service_config::WorkerConfig, tokio::runtime::Runtime), bootstrap::WorkerError> {
     let config = service_config::load_worker(options, BUILD_INFO, shutdown::TAIL)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
+        .worker_threads(config.runtime().effective_worker_threads())
         .enable_all()
         .build()
         .map_err(bootstrap::WorkerError::Runtime)?;

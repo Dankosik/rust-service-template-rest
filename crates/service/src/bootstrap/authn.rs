@@ -18,8 +18,8 @@ pub(super) async fn prepare(
     config: &Config,
     background: &mut Background,
 ) -> Result<Option<Verifier>, BootstrapError> {
-    let mode = config.authn.mode();
-    match &config.authn {
+    let mode = config.authn().mode();
+    match config.authn() {
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
         AuthnConfig::OidcJwt {
             issuer,
@@ -60,9 +60,7 @@ pub(super) async fn prepare(
             introspection_client_id,
             introspection_client_secret,
             provider_concurrency,
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
+            cache,
         } => {
             const INTROSPECTION_ENDPOINT_KEY: &str = "authn.introspection_endpoint";
             let issuer = issuer_url(mode, issuer)?;
@@ -75,12 +73,15 @@ pub(super) async fn prepare(
                         "does not fit this platform",
                     )
                 })?;
-            let cache =
-                infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
-                    .map_err(preparation_error(
-                        mode,
-                        "authn.cache_capacity/authn.cache_ttl",
-                    ))?;
+            let cache = cache
+                .map(|cache| {
+                    infra_bearerauthn::IntrospectionCacheOptions::try_new(cache.capacity, cache.ttl)
+                })
+                .transpose()
+                .map_err(preparation_error(
+                    mode,
+                    "authn.cache_capacity/authn.cache_ttl",
+                ))?;
             infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
                 issuer,
                 audiences: audience.as_slice().to_vec(),
@@ -88,7 +89,7 @@ pub(super) async fn prepare(
                 client_id: introspection_client_id.clone(),
                 client_secret: introspection_client_secret.clone(),
                 provider_concurrency,
-                cache: cache_enabled.then_some(cache),
+                cache,
             })
             .map(Some)
             .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))

@@ -20,7 +20,7 @@ bytesize = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 config = { workspace = true }
 const_format = { workspace = true }
-derive_more = { workspace = true, features = ["debug", "deref", "into_iterator"] }
+derive_more = { workspace = true, features = ["debug", "into_iterator"] }
 educe = { workspace = true, features = ["Default"] }
 itertools = { workspace = true, features = ["use_std"] }
 jiff = { workspace = true, features = ["std"] }

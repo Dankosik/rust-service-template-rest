@@ -2,7 +2,7 @@ use shared_rules::rfc9110::is_tchar;
 
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentType(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +27,42 @@ impl ContentType {
 
     pub(crate) fn into_string(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for ContentType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ContentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ContentType {
+    type Err = InvalidContentType;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_new(value)
+    }
+}
+
+impl TryFrom<String> for ContentType {
+    type Error = InvalidContentType;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl TryFrom<&str> for ContentType {
+    type Error = InvalidContentType;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_new(value)
     }
 }
 
@@ -94,7 +130,12 @@ mod tests {
             "Text/Plain\t; title=\"a;\\\"b\\\\c\t\" ; empty=\"\";\t;",
             &maximum,
         ] {
-            assert_eq!(ContentType::try_new(value).unwrap().as_str(), value);
+            let parsed: ContentType = value.parse().unwrap();
+            assert_eq!(parsed.as_str(), value);
+            assert_eq!(parsed.as_ref(), value);
+            assert_eq!(parsed.to_string(), value);
+            assert_eq!(ContentType::try_from(value).unwrap(), parsed);
+            assert_eq!(ContentType::try_from(value.to_owned()).unwrap(), parsed);
         }
         for value in [
             "",

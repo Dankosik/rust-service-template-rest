@@ -42,7 +42,6 @@ futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 axum = { workspace = true, features = ["macros"] }
 derive_more = { workspace = true, features = ["debug"] }
-derive-where = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
 infra-http-transport = { workspace = true }

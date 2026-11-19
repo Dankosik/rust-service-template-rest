@@ -192,7 +192,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            registration.into(),
+            registration,
             &tests::shared_metrics(),
             &mut background,
             &mut dependencies,
@@ -237,9 +237,9 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         assert!(!refresh.is_closed());
 
         let outcome = shutdown::run(shutdown::Plan {
-            http_config: &config.http,
+            http_config: config.http(),
             signals: &mut signals,
-            deadline: Instant::now() + config.http.grace_period,
+            deadline: Instant::now() + config.http().grace_period,
             serving,
             background,
             dependencies,

@@ -66,10 +66,10 @@ impl UploadSource {
 }
 
 impl PutBody {
-    pub fn stream<B, E>(len: u64, body: B) -> Self
+    pub fn stream<B>(len: u64, body: B) -> Self
     where
-        B: Body<Data = Bytes, Error = E> + Send + 'static,
-        E: Into<BoxError> + 'static,
+        B: Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<BoxError> + 'static,
     {
         let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         Self {
@@ -242,10 +242,10 @@ impl<B> ExactLength<B> {
     }
 }
 
-impl<B, E> Body for ExactLength<B>
+impl<B> Body for ExactLength<B>
 where
-    B: Body<Data = Bytes, Error = E>,
-    E: Into<BoxError>,
+    B: Body<Data = Bytes>,
+    B::Error: Into<BoxError>,
 {
     type Data = Bytes;
     type Error = BoxError;

@@ -162,12 +162,11 @@ impl OperationGuard {
         }
     }
 
-    pub(crate) fn succeed(&mut self) {
+    pub(crate) fn succeed(mut self) {
         self.finish(Outcome::Ok);
     }
 
-    pub(crate) fn fail(&mut self, failure: impl Into<Failure>) -> ObjectStorageError {
-        let failure = failure.into();
+    pub(crate) fn fail(mut self, failure: &Failure) -> ObjectStorageError {
         let outcome = match failure.error {
             ObjectStorageError::NotFound => Outcome::NotFound,
             ObjectStorageError::TooLarge => Outcome::TooLarge,
@@ -178,15 +177,11 @@ impl OperationGuard {
             ObjectStorageError::Rejected => Outcome::Rejected,
             ObjectStorageError::Integrity => Outcome::Integrity,
         };
-        self.record_failure(outcome, &failure);
+        self.record_failure(outcome, failure);
         failure.error
     }
 
-    pub(crate) fn fail_mutation(
-        &mut self,
-        failure: impl Into<Failure<MutationError>>,
-    ) -> MutationError {
-        let failure = failure.into();
+    fn fail_mutation(mut self, failure: &Failure<MutationError>) -> MutationError {
         let outcome = match failure.error {
             MutationError::OutcomeUnknown(_) => Outcome::Unknown,
             MutationError::NotApplied(reason) => match reason {
@@ -199,8 +194,34 @@ impl OperationGuard {
                 MutationFailure::Rejected => Outcome::Rejected,
             },
         };
-        self.record_failure(outcome, &failure);
+        self.record_failure(outcome, failure);
         failure.error
+    }
+
+    pub(crate) fn finish_read<T>(
+        self,
+        result: Result<T, Failure>,
+    ) -> Result<T, ObjectStorageError> {
+        match result {
+            Ok(value) => {
+                self.succeed();
+                Ok(value)
+            }
+            Err(failure) => Err(self.fail(&failure)),
+        }
+    }
+
+    pub(crate) fn finish_mutation<T>(
+        self,
+        result: Result<T, Failure<MutationError>>,
+    ) -> Result<T, MutationError> {
+        match result {
+            Ok(value) => {
+                self.succeed();
+                Ok(value)
+            }
+            Err(failure) => Err(self.fail_mutation(&failure)),
+        }
     }
 
     fn record_failure<E>(&mut self, outcome: Outcome, failure: &Failure<E>) {
@@ -243,7 +264,7 @@ impl OperationGuard {
         });
     }
 
-    pub(crate) fn cancel(&mut self) {
+    pub(crate) fn cancel(mut self) {
         self.finish(Outcome::Cancelled);
     }
 

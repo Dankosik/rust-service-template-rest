@@ -6,7 +6,7 @@ use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use crate::CacheError;
+use crate::StartError;
 
 const DEFAULT_USER: &str = "default";
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
@@ -34,10 +34,10 @@ pub(crate) enum ReadFailure {
 }
 
 impl PasswordFile {
-    pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
+    pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, StartError> {
         let content =
-            read_password_file(&path).map_err(|kind| CacheError::PasswordFile { kind })?;
-        password_from(content).ok_or(CacheError::PasswordFileEmpty)?;
+            read_password_file(&path).map_err(|kind| StartError::PasswordFile { kind })?;
+        password_from(content).ok_or(StartError::PasswordFileEmpty)?;
         Ok(Self {
             path,
             username: username

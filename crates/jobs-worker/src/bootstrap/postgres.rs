@@ -25,12 +25,9 @@ pub(super) fn required_pool_config(
     if !has_ordinary_jobs && !has_publisher {
         return Ok(None);
     }
-    let postgres = config
-        .postgres
-        .as_ref()
-        .ok_or(WorkerError::PostgresDisabled)?;
+    let postgres = config.postgres().ok_or(WorkerError::PostgresDisabled)?;
     super::jobs::validate_pool_capacity(
-        has_ordinary_jobs.then_some(config.jobs.max_workers),
+        has_ordinary_jobs.then_some(config.jobs().max_workers),
         has_publisher,
         postgres.max_connections,
     )?;
@@ -45,7 +42,7 @@ pub(super) async fn admit_pool(
 ) -> Result<(), WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
-    let local_development = config.app.is_local_development();
+    let local_development = config.app().is_local_development();
     let pool = open_pool(config, postgres, background, resources, move || {
         Dsn::admit_for_environment(
             dsn.expose_secret(),
@@ -55,7 +52,7 @@ pub(super) async fn admit_pool(
     })
     .await?;
     migrate::verify_history(&pool).await?;
-    resources.pool = Some(PoolResource::Admitted(pool));
+    resources.dependencies.pool = Some(PoolResource::Admitted(pool));
     Ok(())
 }
 
@@ -67,7 +64,7 @@ async fn open_pool(
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
-    let application_name = application_name(&config.observability.otel.service_name);
+    let application_name = application_name(&config.observability().otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
         postgres.max_connections,
@@ -75,7 +72,7 @@ async fn open_pool(
     );
     let pool =
         infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
-    resources.pool = Some(PoolResource::Starting(pool.clone()));
+    resources.dependencies.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
@@ -143,7 +140,7 @@ fn application_name(service_name: &str) -> String {
 }
 
 pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    match resources.pool.as_ref() {
+    match resources.dependencies.pool.as_ref() {
         Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
         Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
     }
@@ -185,7 +182,7 @@ mod tests {
     #[test]
     fn stopped_or_expired_preparation_cannot_admit_a_late_pool() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
+        let postgres = config.postgres().unwrap();
         for (expired, result_ready) in [(false, false), (true, false), (true, true)] {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -229,12 +226,12 @@ mod tests {
                     }
                 }
             });
-            assert!(resources.pool.is_none());
+            assert!(resources.dependencies.pool.is_none());
             if !result_ready {
                 release.send(()).unwrap();
             }
             drop(runtime);
-            assert!(resources.pool.is_none());
+            assert!(resources.dependencies.pool.is_none());
             assert!(probe(&resources).is_none());
             assert!(background.tracker.is_empty());
         }
@@ -243,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn failed_preparation_task_withholds_its_panic_payload() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
+        let postgres = config.postgres().unwrap();
         let mut resources = Resources::default();
         let background = Background::new();
         let error = open_pool(&config, postgres, &background, &mut resources, || {
@@ -256,7 +253,7 @@ mod tests {
             "postgres credential preparation task failed"
         );
         assert!(std::error::Error::source(&error).is_none());
-        assert!(resources.pool.is_none());
+        assert!(resources.dependencies.pool.is_none());
     }
 
     #[test]

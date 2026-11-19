@@ -80,7 +80,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     use operation_context::Stopped;
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    use crate::{MutationError, OperationError, SetError};
+    use crate::{MutationError, OperationError, SetError, UnknownOutcome};
 
     let captured = super::connection::CapturedLogs::default();
     let writer = captured.clone();
@@ -133,7 +133,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     assert_eq!(
         write.await,
         Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Unavailable
+            UnknownOutcome::Unavailable
         )))
     );
 

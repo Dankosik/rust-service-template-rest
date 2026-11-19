@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
-use super::{ENV_PREFIX, ENV_SEPARATOR, Error};
+use super::{ENV_PREFIX, ENV_SEPARATOR, InputError};
 
 const SECRET_FILE_BYTES: u64 = 1024 * 1024;
 const SECRETS_SNAPSHOT_ATTEMPTS: usize = 3;
@@ -71,7 +71,7 @@ fn insert_variable(
     suffix: &str,
     value: Zeroizing<String>,
     source: VariableSource,
-) -> Result<(), Error> {
+) -> Result<(), InputError> {
     let name_key = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
     let variable = Variable {
@@ -81,7 +81,7 @@ fn insert_variable(
         source,
     };
     match variables.insert(name_key, variable) {
-        Some(other) => Err(Error::AmbiguousName {
+        Some(other) => Err(InputError::AmbiguousName {
             name: name.to_owned(),
             other: other.original_name,
         }),
@@ -92,7 +92,7 @@ fn insert_variable(
 pub(super) fn collect_variables(
     secrets_dir: Option<&Path>,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Result<Variables, Error> {
+) -> Result<Variables, InputError> {
     let mut variables = match secrets_dir {
         Some(dir) => read_secrets_dir(dir)?,
         None => Variables::new(),
@@ -101,7 +101,7 @@ pub(super) fn collect_variables(
     for (name, child) in &variables {
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = name.get(..end).and_then(|prefix| variables.get(prefix)) {
-                return Err(Error::OverlappingVariables {
+                return Err(InputError::OverlappingVariables {
                     parent: parent.original_name.clone(),
                     child: child.original_name.clone(),
                 });
@@ -113,7 +113,7 @@ pub(super) fn collect_variables(
 
 fn read_environment(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Result<Variables, Error> {
+) -> Result<Variables, InputError> {
     let mut variables = Variables::new();
     for (key, value) in environment {
         let name = key.to_string_lossy();
@@ -121,12 +121,12 @@ fn read_environment(
             continue;
         };
         if !is_variable_suffix(suffix) {
-            return Err(Error::MalformedEnvName {
+            return Err(InputError::MalformedEnvName {
                 name: name.into_owned(),
             });
         }
         let Ok(value) = value.into_string() else {
-            return Err(Error::NonUnicodeEnvValue {
+            return Err(InputError::NonUnicodeEnvValue {
                 name: name.into_owned(),
             });
         };
@@ -141,7 +141,7 @@ fn read_environment(
     Ok(variables)
 }
 
-fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
+fn read_secrets_dir(dir: &Path) -> Result<Variables, InputError> {
     if let Some(generation) = projected_generation(dir)? {
         return read_projected_secrets(dir, generation);
     }
@@ -153,7 +153,7 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
     }
 }
 
-fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
+fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, InputError> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
         let active = generation.take();
@@ -166,7 +166,8 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
         let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
             && matches!(
                 &variables,
-                Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
+                Err(InputError::ReadSecretsDir { error, .. }
+                    | InputError::ReadSecret { error, .. })
                     if error.kind() == io::ErrorKind::NotFound
             );
         if current == active && !retry_not_found {
@@ -175,7 +176,7 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
         generation = current;
     }
 
-    Err(Error::ReadSecretsDir {
+    Err(InputError::ReadSecretsDir {
         path: dir.to_owned(),
         error: io::Error::new(
             io::ErrorKind::Interrupted,
@@ -188,14 +189,14 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission checks the volume publication link"
 )]
-fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
+fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, InputError> {
     let link = dir.join("..data");
     match fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.is_symlink() => {}
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(Error::ReadSecretsDir {
+            return Err(InputError::ReadSecretsDir {
                 path: dir.to_owned(),
                 error,
             });
@@ -212,7 +213,7 @@ fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
             return Ok(None);
         }
         Err(error) => {
-            return Err(Error::ReadSecretsDir {
+            return Err(InputError::ReadSecretsDir {
                 path: dir.to_owned(),
                 error,
             });
@@ -232,8 +233,8 @@ fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission enumerates the selected secrets directory"
 )]
-fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, Error> {
-    let unreadable = |error| Error::ReadSecretsDir {
+fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, InputError> {
+    let unreadable = |error| InputError::ReadSecretsDir {
         path: reported_dir.to_owned(),
         error,
     };
@@ -247,11 +248,11 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
         };
         let reported_path = reported_dir.join(&file_name);
         if !is_variable_suffix(suffix) {
-            return Err(Error::MalformedSecretName {
+            return Err(InputError::MalformedSecretName {
                 path: reported_path,
             });
         }
-        let value = read_secret_file(&entry.path()).map_err(|error| Error::ReadSecret {
+        let value = read_secret_file(&entry.path()).map_err(|error| InputError::ReadSecret {
             path: reported_path,
             error,
         })?;

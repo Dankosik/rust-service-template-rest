@@ -21,8 +21,8 @@ pub(super) fn prepare(
         return Ok(None);
     };
     let retention = config
-        .http_idempotency
-        .required_retention(config.postgres.is_some())?;
+        .http_idempotency()
+        .required_retention(config.postgres().is_some())?;
     let pool = postgres_pool.ok_or(infra_idempotency_store::StartupError::Unavailable)?;
     let store = Store::new(pool.clone(), retention).map_err(|error| {
         ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
