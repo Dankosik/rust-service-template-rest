@@ -53,35 +53,16 @@ pub(crate) fn boolean<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    struct BoolVisitor;
-
-    impl serde::de::Visitor<'_> for BoolVisitor {
-        type Value = bool;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a boolean")
-        }
-
-        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(value)
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            match value.trim() {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                _ => Err(E::invalid_value(Unexpected::Str(value), &self)),
-            }
-        }
-    }
-
-    deserializer.deserialize_any(BoolVisitor)
+    const EXPECTED: &str = "a boolean";
+    serde_untagged::UntaggedEnumVisitor::new()
+        .expecting(EXPECTED)
+        .bool(Ok)
+        .string(|text| {
+            text.trim()
+                .parse()
+                .map_err(|_| serde::de::Error::invalid_value(Unexpected::Str(text), &EXPECTED))
+        })
+        .deserialize(deserializer)
 }
 
 #[allow(dead_code, reason = "only optional profiles use optional booleans")]

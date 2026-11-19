@@ -23,6 +23,9 @@ futures-util = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std"] }
 infra-postgres = { workspace = true }
 json-payload = { workspace = true }
+# template:begin outbox:jobs-outbox-dependencies
+memchr = { workspace = true, features = ["std"] }
+# template:end outbox:jobs-outbox-dependencies
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 parking_lot = { workspace = true }

@@ -102,6 +102,10 @@ async-nats = { version = "=0.50.0", default-features = false }
 nkeys = { version = "0.4.5", default-features = false }
 percent-encoding = { version = "2.3.2", default-features = false }
 # template:end messaging:workspace-messaging-client
+# template:begin outbox:workspace-outbox-dependencies
+memchr = { version = "2.8.3", default-features = false }
+simdutf8 = { version = "0.1.5", default-features = false }
+# template:end outbox:workspace-outbox-dependencies
 # template:begin cache:workspace-cache-client
 pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
@@ -164,6 +168,7 @@ utoipa-axum = { version = "0.3.0", default-features = false }
 config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
+serde-untagged = { version = "0.1.9", default-features = false }
 serde_json = { version = "1", default-features = false }
 serde_path_to_error = { version = "0.1.20", default-features = false }
 serde_html_form = { version = "0.2.8", default-features = false }
