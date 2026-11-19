@@ -132,8 +132,8 @@ pub fn parse_timeout(value: &[u8]) -> Option<Duration> {
         return None;
     }
     let amount: u128 = std::str::from_utf8(digits).ok()?.parse().ok()?;
-    let (_, per_unit) = TIMEOUT_UNITS.into_iter().find(|&(code, _)| code == unit)?;
-    Some(Duration::from_nanos_u128(amount * per_unit))
+    let (_, nanos_per_unit) = TIMEOUT_UNITS.into_iter().find(|&(code, _)| code == unit)?;
+    Some(Duration::from_nanos_u128(amount * nanos_per_unit))
 }
 
 #[must_use]
@@ -141,11 +141,11 @@ pub fn encode_timeout(remaining: Duration, wire: &mut [u8; MAX_TIMEOUT_DIGITS + 
     let nanos = remaining.min(WIRE_TIMEOUT_MAX).as_nanos();
     let (unit, amount) = TIMEOUT_UNITS
         .into_iter()
-        .map(|(unit, per_unit)| (unit, nanos / per_unit))
+        .map(|(unit, nanos_per_unit)| (unit, nanos / nanos_per_unit))
         .find(|&(_, amount)| amount <= u128::from(MAX_TIMEOUT_VALUE))
         .unwrap_or_else(|| {
-            let (unit, per_unit) = TIMEOUT_UNITS[TIMEOUT_UNITS.len() - 1];
-            (unit, nanos / per_unit)
+            let (unit, nanos_per_unit) = TIMEOUT_UNITS[TIMEOUT_UNITS.len() - 1];
+            (unit, nanos / nanos_per_unit)
         });
     let mut buffer = std::fmt::NumBuffer::new();
     let digits = amount.format_into(&mut buffer);
