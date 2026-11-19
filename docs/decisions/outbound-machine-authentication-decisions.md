@@ -21,6 +21,13 @@ constraints, and reopen conditions.
 
 ## Authorization-server fit and deferred specs
 
+The service-token cache keeps its short exclusive lock. In the outbound call
+comparison (evidence commit `546723f`), a read/write lock reduced caller CPU
+in all four 64-caller pairs before refresh, but the active-refresh results
+varied and p99 did not improve consistently. Reopen if a deployment profile
+shows sustained contention on this lock at its actual concurrency and refresh
+mix.
+
 - **Keycloak** is a self-hostable Apache-2.0 provider covering `private_key_jwt`, client credentials, and GA standard token exchange V2. Configure a confidential client with Signed JWT, service accounts, and standard token exchange. `act` delegation remains preview upstream.
 - **Deferred until platform/compliance requires:** DPoP (RFC 9449), mTLS-bound tokens (RFC 8705) / SPIFFE / workload-identity federation (Railway issues no workload token), IETF Transaction Tokens draft, and JWK private-key input.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->

@@ -1,7 +1,7 @@
 # Technical Design: reduce work per authenticated outbound call
 
 status: ready  
-Basis: [intent](../intent.md), [specification](../spec.md), [Definition result](../definition-result.md), [source review inventory](../research/review.md), and [comparison and teardown](comparison.md). The repository source parent is `d101ce385552e29267d6e8ed42f50163582a30ad`.
+Basis: [intent](../intent.md), [specification](../spec.md), [source review inventory](../research/review.md), and [comparison and teardown](comparison.md). The repository source parent is `d101ce385552e29267d6e8ed42f50163582a30ad`. See the [measured results and dispositions](../evidence/comparison-results.md).
 
 ## Obligation trace
 
