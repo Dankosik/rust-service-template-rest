@@ -2,9 +2,9 @@
 
 Use installed subagent, skill, Goal, and worktree controls as native authority;
 callable tool fields outrank public prose. Custom subagents exist in the
-Antigravity App and CLI; the IDE has no custom-subagent carrier, so an IDE
-session runs the ledger in-session and reports delegated units as a carrier
-gap.
+Antigravity App and CLI; the IDE has no custom-subagent carrier, so report a
+full-ledger capability gap on the IDE surface instead of shrinking the ledger
+workflow (a fixed inline unit or Direct Work still runs in-session).
 
 ## Native Map
 
@@ -33,7 +33,9 @@ gap.
   is killed) when [Agent Harness](../agent-harness.md) selects isolation;
   otherwise `inherit`.
 - Independent review uses a fresh `reviewer-agent` on `inherit`, never a woken
-  idle reviewer.
+  idle reviewer (for a bounded delta recheck after repair, spawn a fresh
+  `reviewer-agent` scoped strictly to the repair delta under
+  [Review](../spec-first-workflow/shared/review.md#lifecycle)).
 - `/goal` only for genuinely long-running or resumable work; it changes stop
   behavior, not permissions, and does not wait for running subagents.
 - Swarm, Boost, Teamwork, and Dynamic Workflows are separate control planes;

@@ -9,6 +9,7 @@ Select the smallest non-direct execution path and current decision owner. If
 | --- | --- |
 | `Direct Work` | Single-owner local execution under `AGENTS.md` with no workflow artifacts or ledger. |
 | `Unit` | One coherent repository deliverable and its acceptance criteria inside Planning or Implementation. A ledger task is a persisted `Unit`. |
+| `Seam` | Public boundary (API, CLI, trait, schema, or entry point) where behavior is observed without reaching into private internals; tests live at seams. |
 | `Acceptance-Unit Lead` | Session or subagent actor owning one assigned `Unit`. |
 | `Delivery Owner` | The Lead assigned final validation: it proves the assembled `Candidate` and reports the Completion Result. |
 | `Candidate` | The tree state under work: assembled once every `Unit`'s `Implemented` change is integrated and its writers have joined, fixed while validation or review reads it. |
