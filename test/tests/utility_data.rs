@@ -88,12 +88,10 @@ struct NameRequest {
     name: String,
 }
 
-fn validate_name(input: &NameRequest) -> Result<(), Box<Problem>> {
+fn validate_name(input: &NameRequest) -> Result<(), Problem> {
     input.validate().map_err(|_| {
-        Box::new(
-            Problem::new(Code::UnprocessableContent)
-                .invalid_param("/name", "length must be between 1 and 4 characters"),
-        )
+        Problem::new(Code::UnprocessableContent)
+            .invalid_param("/name", "length must be between 1 and 4 characters")
     })
 }
 

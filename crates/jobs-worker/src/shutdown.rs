@@ -409,10 +409,11 @@ async fn close_health(server: Option<Server>, budget: Duration) -> Outcome {
             Outcome::Graceful
         }
         Ok(Drained::TimedOut {
-            remaining_connections,
+            remaining_at_deadline,
+            ..
         }) => {
             tracing::warn!(
-                remaining = remaining_connections,
+                remaining = remaining_at_deadline,
                 "health listener outlived its close budget"
             );
             Outcome::Degraded

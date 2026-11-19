@@ -75,7 +75,7 @@ macro_rules! created_json_response {
     };
 }
 
-pub use compose::route;
+pub use compose::{CommandHandler, FromCommand, FromCommandPart, route};
 pub use declaration::CompositionError;
 pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalMode};
 pub use infra_postgres::BudgetedTx as Tx;

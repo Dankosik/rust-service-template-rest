@@ -112,7 +112,7 @@ pub(crate) enum WorkerError {
     ConsumerStopped(#[source] infra_messaging::ConsumerError),
     // template:end messaging:worker-bootstrap-messaging-errors
     #[error(transparent)]
-    Server(#[from] infra_http_transport::ServerError),
+    Server(#[from] infra_http_transport::BindError),
     #[error(transparent)]
     HttpContract(#[from] infra_http::FinalizeError),
     #[error("startup admission: {0}")]

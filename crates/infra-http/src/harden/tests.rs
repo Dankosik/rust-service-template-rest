@@ -74,7 +74,8 @@ async fn request_deadline_is_observable_without_restarting_the_budget() {
     };
     let started = tokio::time::Instant::now();
     let expected = started + options.request_timeout;
-    let handler_1 = move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
+    let handler_1 = move |deadline: crate::RequestDeadline, context: crate::RequestContext| async move {
+        assert_eq!(context.deadline(), Some(deadline));
         assert_eq!(deadline.at(), expected);
         assert_eq!(
             deadline.attempt_end(),
