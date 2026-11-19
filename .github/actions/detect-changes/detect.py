@@ -22,7 +22,8 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "crates/**", "test/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
         "rustfmt.toml", "clippy.toml", "vendor/**", ".cargo/**", ".config/nextest.toml",
         ".sqlx/**", "env/config/**", "quality/architecture.json",
-        "scripts/checks/architecture.py", "scripts/checks/vendor.py", "scripts/lib.py",
+        "scripts/checks/architecture.py", "scripts/checks/vendor.py",
+        "scripts/checks/rust_selection.py", "scripts/checks/test_budget.py", "scripts/lib.py",
         "justfile", "mise.toml", "mise.lock", ".mise/**",
     ),
     "deps": (

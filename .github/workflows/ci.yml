@@ -162,16 +162,46 @@ jobs:
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache_save_post: true
       - run: cargo fetch --locked
+      - name: Fetch PR comparison base
+        if: github.event_name == 'pull_request' && needs.changes.outputs.base_sha != ''
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+        run: git fetch --no-tags --depth=1 origin "${BASE_SHA}"
       - name: Format, lint, test, and architecture
+        id: rust_quality
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          POST_MERGE: ${{ needs.changes.outputs.post_merge }}
+          DEPS_CHANGED: ${{ needs.changes.outputs.deps }}
+          CI_RUST_SELECTION: ${{ vars.CI_RUST_SELECTION }}
         run: |
           set -euo pipefail
           just fmt-check
-          just lint
-          just test
+          if [[ "${POST_MERGE}" == true || "${DEPS_CHANGED}" == true || "${GITHUB_EVENT_NAME}" != pull_request || -z "${BASE_SHA}" ]]; then
+            plan_args=(--all)
+          else
+            plan_args=(--base "${BASE_SHA}")
+          fi
+          plan_json=$(python3 -m scripts.checks.rust_selection plan "${plan_args[@]}" --summary)
+          service_tested=$(python3 -c '
+          import json, sys
+          from scripts import lib
+          plan = json.loads(sys.stdin.read())
+          service_pkg, _ = lib.read_service_meta()
+          print("true" if plan["mode"] == "full" or service_pkg in plan["packages"] else "false")
+          ' <<<"${plan_json}")
+          echo "service_tested=${service_tested}" >>"${GITHUB_OUTPUT}"
+          python3 -m scripts.checks.rust_selection lint "${plan_args[@]}"
+          python3 -m scripts.checks.rust_selection test "${plan_args[@]}"
           just unused-deps
           just architecture-check
           just vendor-drift
           just typos
+      - name: Advisory test-line growth budget
+        if: github.event_name == 'pull_request' && needs.changes.outputs.base_sha != ''
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+        run: python3 -m scripts.checks.test_budget --base "${BASE_SHA}" --summary
       - name: Profiling features
         if: needs.changes.outputs.profiling == 'true' || needs.changes.outputs.post_merge == 'true'
         run: just profiling-check
@@ -180,7 +210,15 @@ jobs:
         run: just native-transport
       - name: OpenAPI contract
         if: needs.changes.outputs.openapi == 'true'
-        run: just openapi-lint
+        env:
+          SERVICE_TESTED: ${{ steps.rust_quality.outputs.service_tested }}
+        run: |
+          set -euo pipefail
+          if [[ "${SERVICE_TESTED}" == true ]]; then
+            just openapi-lint
+          else
+            just openapi-check
+          fi
       - name: OpenAPI breaking compatibility
         if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
         env:

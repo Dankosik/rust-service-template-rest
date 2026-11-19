@@ -275,6 +275,24 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
         self.assertEqual(len(profiles), len(set(profiles)), f"duplicate profiles in template-matrix shards: {profiles}")
         self.assertEqual(set(profiles), set(template_check.CANONICAL_PROFILES))
 
+    def test_live_workspace_rust_selection_backtest(self) -> None:
+        from scripts.checks import rust_selection
+
+        cache_plan = rust_selection.plan_selection(ROOT, ["crates/infra-cache/src/namespace.rs"])
+        self.assertEqual(cache_plan.mode, "selected")
+        self.assertEqual(cache_plan.packages, ("infra-cache", "service"))
+        self.assertEqual(cache_plan.lint_features, ("infra-cache/integration",))
+
+        openapi_plan = rust_selection.plan_selection(ROOT, ["api/openapi/service.yaml"])
+        self.assertEqual(openapi_plan.mode, "selected")
+        self.assertEqual(openapi_plan.packages, ("service",))
+
+        obs_plan = rust_selection.plan_selection(ROOT, ["crates/infra-telemetry/src/logging.rs"])
+        self.assertEqual(obs_plan.mode, "selected")
+        self.assertIn("infra-telemetry", obs_plan.packages)
+        self.assertIn("service", obs_plan.packages)
+        self.assertNotIn("infra-cache", obs_plan.packages)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,10 @@ and `Cargo.toml` documents `[profile.dev]` and `[profile.release]` settings.
 
 ## Local iteration and worktrees
 
-- Run one failing test directly via `cargo test -p <crate> --locked <test>` and
+- Run one failing test directly via `cargo test -p <crate> --locked <test>`,
+  or check only the crates affected by your branch via `just lint-changed` and
+  `just test-changed` (fail-closed fallback to `--workspace` on manifest/global
+  edits or `CI_RUST_SELECTION=full`), and
   avoid `--release` unless measuring or building final images (fat single-CGU
   LTO takes minutes). For local variable inspection in a debugger, point
   `CARGO_TARGET_DIR` at a separate directory with `CARGO_PROFILE_DEV_DEBUG=full`
@@ -55,7 +58,7 @@ and `Cargo.toml` documents `[profile.dev]` and `[profile.release]` settings.
 ## Rejected options
 
 - **Cranelift codegen:** Requires nightly; toolchain is pinned stable.
-- **`mold` / `wild` / macOS `lld`:** Linux-only or no measured gain over Xcode's parallel linker.
+- **`mold` / `wild` / macOS `lld`:** Linux `x86_64-unknown-linux-gnu` already defaults to `rust-lld` on Rust 1.100, and macOS Xcode's parallel linker shows no measured gain from replacement.
 - **Shared `CARGO_TARGET_DIR`:** Lock contention and cache corruption ([cargo#16804][cargo-16804]).
 - **`cargo-hakari`:** Feature unification not measured as a bottleneck.
 - **Remote `sccache` in image builds / external remote builders:** Image builds hold no credentials, and Railway already builds natively for free.

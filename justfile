@@ -37,6 +37,19 @@ test-package pkg *args:
     cargo nextest run --no-tests=pass --test-threads="{{nextest_threads}}" --locked -p "$1" "${@:2}"
     cargo test --doc -p "$1" --no-fail-fast --locked
 
+# Run tests only for crates affected since base (fail-closed fallback to workspace)
+[positional-arguments]
+test-changed base=base_ref *args:
+    python3 -m scripts.checks.rust_selection test --base "$1" --working-tree --allow-empty -- "${@:2}"
+
+# Run Clippy and rustdoc only for crates affected since base
+lint-changed base=base_ref:
+    python3 -m scripts.checks.rust_selection lint --base "{{base}}" --working-tree --allow-empty
+
+# Report net test-line growth since base against the advisory PR budget
+test-budget base=base_ref:
+    python3 -m scripts.checks.test_budget --base "{{base}}" --working-tree
+
 # Format every crate
 fmt:
     cargo --locked fmt --all
