@@ -531,9 +531,9 @@ mod tests {
         assert_eq!(metadata.label, "example");
         assert!(serde_json::from_str::<super::JsonObject<Metadata<'_>>>(r#"["example"]"#).is_err());
     }
-    // template:begin oidc-jwt:authn-claims-jwt-test-imports
     use std::time::Duration;
 
+    // template:begin oidc-jwt:authn-claims-jwt-test-imports
     use super::validate_jwt_claims;
     use crate::TokenProfile;
     // template:end oidc-jwt:authn-claims-jwt-test-imports
