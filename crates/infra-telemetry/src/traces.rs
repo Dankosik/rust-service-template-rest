@@ -18,6 +18,8 @@ use parking_lot::Mutex;
 use secrecy::SecretString;
 use uuid::Uuid;
 
+use crate::metrics::static_counter_key;
+
 const TRACE_EXPORT_SDK_RESULT_SPANS_METRIC: &str =
     "telemetry_trace_exporter_sdk_result_spans_total";
 
@@ -413,11 +415,23 @@ impl SdkFailure {
         }
     }
 
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::Timeout => "timeout",
-            Self::AlreadyShutdown => "already_shutdown",
-            Self::Internal => "internal_failure",
+            Self::Timeout => static_counter_key!(
+                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                "outcome" => "error",
+                "error_type" => "timeout",
+            ),
+            Self::AlreadyShutdown => static_counter_key!(
+                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                "outcome" => "error",
+                "error_type" => "already_shutdown",
+            ),
+            Self::Internal => static_counter_key!(
+                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                "outcome" => "error",
+                "error_type" => "internal_failure",
+            ),
         }
     }
 }
@@ -442,25 +456,22 @@ struct ObservedExporter<E> {
 
 impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        static METADATA: metrics::Metadata<'static> =
+            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
         let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
-        match &result {
-            Ok(()) => {
-                metrics::counter!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok")
-                    .increment(spans);
-            }
+        let key = match &result {
+            Ok(()) => static_counter_key!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
             Err(error) => {
                 let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
-                metrics::counter!(
-                    TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                    "outcome" => "error",
-                    "error_type" => failure.label()
-                )
-                .increment(spans);
+                failure.metric_key()
             }
-        }
+        };
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA))
+            .increment(spans);
         result
     }
 

@@ -49,15 +49,15 @@ thread_local! {
 pub(super) struct FormatLayer {
     output: Output,
     format: LoggingFormat,
-    dispatch: OnceLock<WeakDispatch>,
+    trace_dispatch: Option<OnceLock<WeakDispatch>>,
 }
 
 impl FormatLayer {
-    pub(super) fn new(output: Output, format: LoggingFormat) -> Self {
+    pub(super) fn new(output: Output, format: LoggingFormat, trace_context: bool) -> Self {
         Self {
             output,
             format,
-            dispatch: OnceLock::new(),
+            trace_dispatch: trace_context.then(OnceLock::new),
         }
     }
 }
@@ -302,20 +302,20 @@ impl Scratch {
         line.append(tail);
     }
 
-    fn compact_into(&self, cache: &mut SpanFields) -> bool {
+    fn compact_into(&self, cache: &mut SpanFields, dedup_field_count: usize) -> bool {
         if self.values.failed {
             return false;
         }
         cache.values.rewind(0);
         cache.fields.clear();
-        let captured = self.fields.as_slice();
-        for (index, field) in captured.iter().enumerate() {
-            if captured[index + 1..]
+        let (captured, unchanged) = self.fields.split_at(dedup_field_count);
+        let unique = captured.iter().enumerate().filter_map(|(index, field)| {
+            (!captured[index + 1..]
                 .iter()
-                .any(|next| next.key == field.key)
-            {
-                continue;
-            }
+                .any(|next| next.key == field.key))
+            .then_some(field)
+        });
+        for field in unique.chain(unchanged) {
             if cache.fields.is_full() {
                 return false;
             }
@@ -343,7 +343,7 @@ impl Scratch {
                 self.copy(*field, cache.values.as_slice());
             }
         }
-        self.compact_into(cache)
+        self.compact_into(cache, delta_field_count)
     }
 }
 
@@ -356,24 +356,25 @@ impl<const INLINE: usize> fmt::Write for Quoted<'_, INLINE> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let mut rest = text;
         loop {
-            let plain = rest.bytes().position(needs_escape).unwrap_or(rest.len());
-            let (run, tail) = rest.split_at(plain);
-            if run.len() >= self.values.room() {
-                let fits = run.floor_char_boundary(self.values.room().saturating_sub(1));
-                self.values.append(&run.as_bytes()[..fits]);
+            let room = self.values.room().saturating_sub(1);
+            let bytes = rest.as_bytes();
+            let prefix = &bytes[..bytes.len().min(room)];
+            let Some(plain) = prefix.iter().copied().position(needs_escape) else {
+                if bytes.len() <= room {
+                    self.values.append(bytes);
+                    return Ok(());
+                }
+                self.values.append(&bytes[..rest.floor_char_boundary(room)]);
                 return self.stop();
-            }
-            self.values.append(run.as_bytes());
-            let Some(&byte) = tail.as_bytes().first() else {
-                return Ok(());
             };
+            self.values.append(&bytes[..plain]);
             let mut unit = [0; 6];
-            let escaped = escape(byte, &mut unit);
+            let escaped = escape(bytes[plain], &mut unit);
             if escaped.len() >= self.values.room() {
                 return self.stop();
             }
             self.values.append(escaped);
-            rest = tail.get(1..).unwrap_or("");
+            rest = &rest[plain + 1..];
         }
     }
 }
@@ -548,7 +549,12 @@ impl FormatLayer {
     }
 
     fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes) {
-        let Some(dispatch) = self.dispatch.get().and_then(WeakDispatch::upgrade) else {
+        let Some(dispatch) = self
+            .trace_dispatch
+            .as_ref()
+            .and_then(OnceLock::get)
+            .and_then(WeakDispatch::upgrade)
+        else {
             return;
         };
         let Some(context) = tracing_opentelemetry::get_otel_context(id, &dispatch) else {
@@ -580,7 +586,9 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_register_dispatch(&self, subscriber: &Dispatch) {
-        let _ = self.dispatch.set(subscriber.downgrade());
+        if let Some(dispatch) = &self.trace_dispatch {
+            let _ = dispatch.set(subscriber.downgrade());
+        }
     }
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
@@ -602,7 +610,7 @@ where
             fields: ArrayVec::new(),
             _slot: slot,
         };
-        if !scratch.compact_into(&mut cache) {
+        if !scratch.compact_into(&mut cache, scratch.fields.len()) {
             self.output.record_drop(DropReason::SpanCapacity);
             return;
         }
@@ -650,9 +658,9 @@ where
 fn write_record_header(line: &mut Bytes, metadata: &tracing::Metadata<'_>, format: LoggingFormat) {
     match format {
         LoggingFormat::Json => {
-            line.append(b"{\"level\":");
-            line.append_json(metadata.level().as_str());
-            line.append(b",\"target\":");
+            line.append(b"{\"level\":\"");
+            line.append(metadata.level().as_str().as_bytes());
+            line.append(b"\",\"target\":");
             line.append_json(metadata.target());
             line.append(b",\"timestamp\":\"");
             write_timestamp(line);
@@ -765,8 +773,13 @@ fn write_hex_field<const N: usize>(
     bytes: &[u8; N],
     format: LoggingFormat,
 ) {
-    write_key(line, key, format);
-    line.append(b"\"");
+    let (separator, assign) = match format {
+        LoggingFormat::Json => (b",\"", b"\":\""),
+        LoggingFormat::Text => (b" \"", b"\"=\""),
+    };
+    line.append(separator);
+    line.append(key.as_bytes());
+    line.append(assign);
     line.append(
         const_hex::Buffer::<N, false>::new()
             .format(bytes)

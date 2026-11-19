@@ -9,7 +9,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 fn capture(format: LoggingFormat, emit: impl FnOnce()) -> (String, LogSnapshot) {
     let buffer = Buffer::default();
     let (output, guard) = output::start(buffer.clone()).expect("writer starts");
-    let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format)));
+    let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format, false)));
     tracing::dispatcher::with_default(&dispatch, emit);
     let result = guard.shutdown(Instant::now() + Duration::from_secs(2));
     let LoggerShutdown::Completed(snapshot) = result else {
@@ -77,9 +77,11 @@ fn is_marked(line: &str, format: LoggingFormat) -> bool {
 #[test]
 fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
-        let wide = "é\n".repeat(20_000);
+        let escaped = "é\n".repeat(20_000);
+        let plain = "😀".repeat(20_000);
         let (records, snapshot) = capture(format, || {
-            payload(&wide);
+            payload(&escaped);
+            payload(&plain);
             tracing::info!(truncated = false, "own_field_cannot_spoof_the_marker");
         });
         assert!(
@@ -87,14 +89,16 @@ fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
             "{snapshot:?}"
         );
         let lines: Vec<_> = records.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].len() < 16_384 && is_marked(lines[0], format));
-        assert!(!lines[1].contains("truncated"), "{}", lines[1]);
-        if matches!(format, LoggingFormat::Json) {
-            let json: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
-            let kept = json["payload"].as_str().expect("a string");
-            assert!(kept.len() > 10_000 && wide.starts_with(kept));
+        assert_eq!(lines.len(), 3);
+        for (line, original) in lines[..2].iter().zip([&escaped, &plain]) {
+            assert!(line.len() < 16_384 && is_marked(line, format));
+            if matches!(format, LoggingFormat::Json) {
+                let json: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+                let kept = json["payload"].as_str().expect("a string");
+                assert!(kept.len() > 10_000 && original.starts_with(kept));
+            }
         }
+        assert!(!lines[2].contains("truncated"), "{}", lines[2]);
     }
 }
 
@@ -436,7 +440,7 @@ fn callback_capacity(format: LoggingFormat) {
 
     let buffer = Buffer::default();
     let (output, guard) = output::start(buffer.clone()).expect("writer starts");
-    let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format)));
+    let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format, false)));
     let (entered, observed) = mpsc::sync_channel(32);
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let mut workers = Vec::new();

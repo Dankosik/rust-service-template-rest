@@ -170,11 +170,13 @@ async fn activation_and_reads_reuse_the_original_sample_and_expiry() {
     prepared.ensure_fresh().await.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     let _refresher = prepared.activate().unwrap();
+    assert!(reader.is_ready());
     for _ in 0..10 {
         assert_eq!(reader.verdict(), Ok(()));
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     tokio::time::advance(Duration::from_nanos(1)).await;
+    assert!(!reader.is_ready());
     std::assert_matches!(reader.verdict(), Err(NotReady::Stale { .. }));
 }
 
