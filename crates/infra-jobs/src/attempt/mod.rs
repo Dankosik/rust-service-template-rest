@@ -419,16 +419,12 @@ impl AttemptRun<'_> {
                 RECORD_RETRY_INTERVAL,
                 self.supervisor_deadline,
             );
-            if within(
+            within(
                 &self.shared.lifecycle.cleanup,
                 self.supervisor_deadline,
                 tokio::time::sleep_until(until),
             )
-            .await
-            .is_none()
-            {
-                return None;
-            }
+            .await?;
         }
     }
 
