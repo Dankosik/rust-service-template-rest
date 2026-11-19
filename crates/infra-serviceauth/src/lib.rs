@@ -84,10 +84,11 @@ impl JwtType {
     pub fn parse(value: &str) -> Result<Self, InvalidJwtType> {
         let subtype = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
         let bytes = subtype.as_bytes();
-        let restricted = |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(byte);
+        let is_subtype_byte =
+            |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(byte);
         if (1..=127).contains(&bytes.len())
             && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
-            && bytes.iter().all(restricted)
+            && bytes.iter().all(is_subtype_byte)
         {
             Ok(Self(Arc::from(subtype.to_ascii_lowercase())))
         } else {

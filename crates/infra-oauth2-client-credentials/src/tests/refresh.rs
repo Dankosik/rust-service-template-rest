@@ -425,7 +425,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         .await
         .unwrap();
     fixture.token_received().await;
-    let refresh = service_tokens.service_request().lock().await;
+    let refresh = service_tokens.fetch_lock().lock().await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
@@ -492,12 +492,10 @@ async fn refreshes_without_a_cacheable_replacement_keep_the_token_and_back_off()
         fixture.token_received().await;
         advance(Duration::from_secs(4)).await;
         gate.add_permits(1);
-        let refresh = tokio::time::timeout(
-            Duration::from_secs(2),
-            service_tokens.service_request().lock(),
-        )
-        .await
-        .unwrap();
+        let refresh =
+            tokio::time::timeout(Duration::from_secs(2), service_tokens.fetch_lock().lock())
+                .await
+                .unwrap();
         drop(refresh);
 
         advance((refresh_requested + quiet_until).saturating_duration_since(Instant::now())).await;
@@ -672,12 +670,9 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
     advance(Duration::from_secs(34)).await;
     fixture.send(&client).await.unwrap();
     fixture.token_received().await;
-    let refresh = tokio::time::timeout(
-        Duration::from_secs(2),
-        service_tokens.service_request().lock(),
-    )
-    .await
-    .unwrap();
+    let refresh = tokio::time::timeout(Duration::from_secs(2), service_tokens.fetch_lock().lock())
+        .await
+        .unwrap();
     drop(refresh);
     assert_eq!(fixture.token_request_count(), 3);
     assert!(

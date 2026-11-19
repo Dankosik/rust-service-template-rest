@@ -59,7 +59,7 @@ struct RegistrationState {
 }
 
 impl RegistrationState {
-    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
         if let Some(error) = deadline.stopped_error() {
             return Err(error);
         }
@@ -137,13 +137,13 @@ struct ServiceState {
     target: ServiceTokenTarget,
     resource_origin: http::Uri,
     cached: Mutex<Cached>,
-    service_request: tokio::sync::Mutex<()>,
+    fetch_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
 pub(crate) struct Cached {
     pub(crate) service: Option<ServiceToken>,
-    failure: Option<CompletedFailure>,
+    failure: Option<CachedFailure>,
     pub(crate) refresh_pending: bool,
 }
 
@@ -153,7 +153,7 @@ pub(crate) struct ServiceToken {
 }
 
 impl Cached {
-    fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
+    fn cached_failure(&self, now: Instant) -> Option<AcquisitionError> {
         self.failure
             .as_ref()
             .filter(|failure| now < failure.until)
@@ -168,7 +168,7 @@ impl Cached {
     }
 }
 
-struct CompletedFailure {
+struct CachedFailure {
     error: AcquisitionError,
     until: Instant,
 }
@@ -218,7 +218,7 @@ impl Registration {
             target,
             resource_origin,
             cached: Mutex::default(),
-            service_request: tokio::sync::Mutex::new(()),
+            fetch_lock: tokio::sync::Mutex::new(()),
         });
         let (refresh_requests, requests) = mpsc::channel(1);
         let (owner_release, owner_gone) = oneshot::channel();
@@ -279,10 +279,10 @@ impl<Subject> TokenSource<Subject> {
         }
     }
 
-    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
         match self {
-            Self::Service(service) => service.check_admission(deadline),
-            Self::Exchange(exchange, _) => exchange.registration().check_admission(deadline),
+            Self::Service(service) => service.check_active(deadline),
+            Self::Exchange(exchange, _) => exchange.registration().check_active(deadline),
         }
     }
 }
@@ -293,7 +293,7 @@ impl TokenSource {
         subject: RequestSubject,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<TokenSource<OnBehalfOf>, AdmissionRefusal> {
-        self.check_admission(deadline)
+        self.check_active(deadline)
             .map_err(AdmissionRefusal::Acquisition)?;
         match (self, subject) {
             (_, RequestSubject::AuthorizationConflict) => {
@@ -322,7 +322,7 @@ impl TokenSource<OnBehalfOf> {
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        self.check_admission(deadline)?;
+        self.check_active(deadline)?;
         let mut registration_closed = self.registration().closed.clone();
         let acquisition = async {
             match self {
@@ -338,7 +338,7 @@ impl TokenSource<OnBehalfOf> {
             _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
             result = acquisition => result,
         };
-        self.check_admission(deadline)?;
+        self.check_active(deadline)?;
         let acquired = acquired?;
         acquired.check_expiry(Instant::now())?;
         Ok(acquired)
@@ -346,8 +346,8 @@ impl TokenSource<OnBehalfOf> {
 }
 
 impl ServiceTokens {
-    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        self.0.inner.registration.check_admission(deadline)?;
+    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+        self.0.inner.registration.check_active(deadline)?;
         if self.0.refresh_requests.is_closed() {
             return Err(AcquisitionError::Unavailable);
         }
@@ -358,7 +358,7 @@ impl ServiceTokens {
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        self.check_admission(deadline)?;
+        self.check_active(deadline)?;
         let now = Instant::now();
         if let Some(token) = self.reuse_service_token_and_schedule_refresh(now) {
             return Ok(token);
@@ -371,16 +371,15 @@ impl ServiceTokens {
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let inner = &self.0.inner;
-        let _service_request =
-            tokio::time::timeout_at(deadline.cutoff, inner.service_request.lock())
-                .await
-                .map_err(|_| deadline.expiry_error)?;
-        self.check_admission(deadline)?;
+        let _fetch_guard = tokio::time::timeout_at(deadline.cutoff, inner.fetch_lock.lock())
+            .await
+            .map_err(|_| deadline.expiry_error)?;
+        self.check_active(deadline)?;
         let now = Instant::now();
         if let Some(token) = self.reuse_service_token_and_schedule_refresh(now) {
             return Ok(token);
         }
-        if let Some(error) = inner.completed_failure(now) {
+        if let Some(error) = inner.cached_failure(now) {
             return Err(error);
         }
         let context = deadline.fetch_context(now);
@@ -389,7 +388,7 @@ impl ServiceTokens {
             .endpoint
             .fetch_service_token(&inner.target, &context)
             .await;
-        self.check_admission(deadline)?;
+        self.check_active(deadline)?;
         match result.map_err(timeout_as_unavailable) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
@@ -413,7 +412,7 @@ impl ServiceTokens {
     }
 
     fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
-        if cached.refresh_pending || cached.completed_failure(now).is_some() {
+        if cached.refresh_pending || cached.cached_failure(now).is_some() {
             return;
         }
         cached.defer_refresh(now);
@@ -432,8 +431,8 @@ impl ServiceTokens {
     }
 
     #[cfg(test)]
-    pub(crate) fn service_request(&self) -> &tokio::sync::Mutex<()> {
-        &self.0.inner.service_request
+    pub(crate) fn fetch_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.0.inner.fetch_lock
     }
 }
 
@@ -442,15 +441,15 @@ impl ServiceState {
         self.cached.lock()
     }
 
-    fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
-        self.cached().completed_failure(now)
+    fn cached_failure(&self, now: Instant) -> Option<AcquisitionError> {
+        self.cached().cached_failure(now)
     }
 
     fn remember_failure(&self, error: AcquisitionError) {
         if !is_cacheable_failure(error) {
             return;
         }
-        self.cached().failure = Some(CompletedFailure {
+        self.cached().failure = Some(CachedFailure {
             error,
             until: Instant::now() + FAILURE_WINDOW,
         });
@@ -471,13 +470,13 @@ impl ServiceState {
     }
 
     async fn refresh_ahead(&self, request: RefreshRequest) {
-        let Ok(_service_request) =
-            tokio::time::timeout_at(request.deadline, self.service_request.lock()).await
+        let Ok(_fetch_guard) =
+            tokio::time::timeout_at(request.deadline, self.fetch_lock.lock()).await
         else {
             return;
         };
         let now = Instant::now();
-        if now >= request.deadline || self.completed_failure(now).is_some() {
+        if now >= request.deadline || self.cached_failure(now).is_some() {
             return;
         }
         if !self.cached().service.as_ref().is_some_and(|service| {

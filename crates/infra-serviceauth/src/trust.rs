@@ -167,6 +167,19 @@ impl fmt::Debug for TrustRegistry {
     }
 }
 
+fn drain_map<'de, A: de::MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
+    while map
+        .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+        .is_some()
+    {}
+    Ok(())
+}
+
+fn drain_seq<'de, A: de::SeqAccess<'de>>(seq: &mut A) -> Result<(), A::Error> {
+    while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
 enum Entries {
     Unique(IndexMap<String, DuplicateCheckedJson, foldhash::quality::RandomState>),
     RepeatedCaller(String),
@@ -181,23 +194,20 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut state = Entries::Unique(IndexMap::default());
+                let mut entries = IndexMap::default();
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
-                    let repeated = match &mut state {
-                        Entries::Unique(entries) => match entries.entry(name) {
-                            Entry::Vacant(entry) => {
-                                entry.insert(value);
-                                None
-                            }
-                            Entry::Occupied(entry) => Some(entry.key().clone()),
-                        },
-                        Entries::RepeatedCaller(_) => None,
-                    };
-                    if let Some(repeated) = repeated {
-                        state = Entries::RepeatedCaller(repeated);
+                    match entries.entry(name) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(value);
+                        }
+                        Entry::Occupied(entry) => {
+                            let (repeated, _) = entry.swap_remove_entry();
+                            drain_map(&mut map)?;
+                            return Ok(Entries::RepeatedCaller(repeated));
+                        }
                     }
                 }
-                Ok(state)
+                Ok(Entries::Unique(entries))
             }
         }
         deserializer.deserialize_map(Visitor)
@@ -236,36 +246,30 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                 Ok(DuplicateCheckedJson::Value(serde_json::Value::Null))
             }
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut unique_items = Some(Vec::new());
+                let mut items = Vec::new();
                 while let Some(child) = seq.next_element()? {
-                    match (&mut unique_items, child) {
-                        (Some(items), DuplicateCheckedJson::Value(value)) => items.push(value),
-                        (_, DuplicateCheckedJson::DuplicateMember) => unique_items = None,
-                        (None, _) => {}
-                    }
+                    let DuplicateCheckedJson::Value(value) = child else {
+                        drain_seq(&mut seq)?;
+                        return Ok(DuplicateCheckedJson::DuplicateMember);
+                    };
+                    items.push(value);
                 }
-                Ok(match unique_items {
-                    Some(items) => DuplicateCheckedJson::Value(serde_json::Value::Array(items)),
-                    None => DuplicateCheckedJson::DuplicateMember,
-                })
+                Ok(DuplicateCheckedJson::Value(serde_json::Value::Array(items)))
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut unique_members = Some(serde_json::Map::new());
+                let mut members = serde_json::Map::new();
                 while let Some((name, child)) = map.next_entry()? {
-                    if let (Some(members), DuplicateCheckedJson::Value(value)) =
-                        (&mut unique_members, child)
+                    if let DuplicateCheckedJson::Value(value) = child
                         && members.insert(name, value).is_none()
                     {
                         continue;
                     }
-                    unique_members = None;
+                    drain_map(&mut map)?;
+                    return Ok(DuplicateCheckedJson::DuplicateMember);
                 }
-                Ok(match unique_members {
-                    Some(members) => {
-                        DuplicateCheckedJson::Value(serde_json::Value::Object(members))
-                    }
-                    None => DuplicateCheckedJson::DuplicateMember,
-                })
+                Ok(DuplicateCheckedJson::Value(serde_json::Value::Object(
+                    members,
+                )))
             }
         }
         deserializer.deserialize_any(Visitor)
