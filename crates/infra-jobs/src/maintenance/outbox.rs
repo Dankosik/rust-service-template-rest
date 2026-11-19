@@ -74,41 +74,41 @@ async fn read(shared: &Shared) -> Result<OutboxSample, OperationError> {
             sqlx::query_as!(
                 OutboxSample,
                 r#"
-                WITH ordered_candidates AS MATERIALIZED (
-                    SELECT created_at, predecessor_job_id
-                    FROM background_jobs
-                    WHERE kind = 'publish_domain_event'
-                      AND state = 'pending' AND predecessor_job_id IS NOT NULL
-                    ORDER BY created_at
-                    LIMIT ($1::bigint + 1)
-                ), oldest_blocked AS (
-                    SELECT candidate.created_at
-                    FROM ordered_candidates AS candidate
-                    CROSS JOIN LATERAL (
-                        SELECT 1 FROM background_jobs AS predecessor
-                        WHERE predecessor.id = candidate.predecessor_job_id
-                          AND predecessor.state <> 'completed'
-                        LIMIT 1
-                    ) AS blocker
-                    ORDER BY candidate.created_at
-                    LIMIT 1
-                )
-                SELECT
-                    GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - (
-                        SELECT created_at
+                    WITH ordered_candidates AS MATERIALIZED (
+                        SELECT created_at, predecessor_job_id
                         FROM background_jobs
-                        WHERE kind = 'publish_domain_event' AND state <> 'completed'
+                        WHERE kind = 'publish_domain_event'
+                          AND state = 'pending' AND predecessor_job_id IS NOT NULL
                         ORDER BY created_at
+                        LIMIT ($1::bigint + 1)
+                    ), oldest_blocked AS (
+                        SELECT candidate.created_at
+                        FROM ordered_candidates AS candidate
+                        CROSS JOIN LATERAL (
+                            SELECT 1 FROM background_jobs AS predecessor
+                            WHERE predecessor.id = candidate.predecessor_job_id
+                              AND predecessor.state <> 'completed'
+                            LIMIT 1
+                        ) AS blocker
+                        ORDER BY candidate.created_at
                         LIMIT 1
-                    )))::double precision AS "oldest_unconfirmed_age!",
-                    COALESCE(
-                        (SELECT GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - created_at))
-                         FROM oldest_blocked),
-                        CASE WHEN (SELECT count(*) FROM ordered_candidates) > $1
-                             THEN 'NaN'::double precision ELSE 0 END
-                    )::double precision AS "oldest_blocked_age!",
-                    EXTRACT(EPOCH FROM statement_timestamp())::double precision AS "observed_at!"
-                "#,
+                    )
+                    SELECT
+                        GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - (
+                            SELECT created_at
+                            FROM background_jobs
+                            WHERE kind = 'publish_domain_event' AND state <> 'completed'
+                            ORDER BY created_at
+                            LIMIT 1
+                        )))::double precision AS "oldest_unconfirmed_age!",
+                        COALESCE(
+                            (SELECT GREATEST(0, EXTRACT(EPOCH FROM statement_timestamp() - created_at))
+                             FROM oldest_blocked),
+                            CASE WHEN (SELECT count(*) FROM ordered_candidates) > $1
+                                 THEN 'NaN'::double precision ELSE 0 END
+                        )::double precision AS "oldest_blocked_age!",
+                        EXTRACT(EPOCH FROM statement_timestamp())::double precision AS "observed_at!"
+                    "#,
                 ORDERED_SAMPLE_CAP,
             )
             .fetch_one(&mut *tx),
