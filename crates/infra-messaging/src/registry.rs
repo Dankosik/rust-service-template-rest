@@ -2,7 +2,6 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
 use futures_util::FutureExt as _;
@@ -13,14 +12,14 @@ use serde::de::DeserializeOwned;
 
 use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::HandlerError;
-use crate::wire::{InboundEnvelope, valid_subject};
+use crate::wire::{InboundEnvelopeRef, valid_subject};
 
 type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
 type ErasedHandler = Arc<
     dyn Fn(
-            String,
+            &str,
             time::UtcDateTime,
-            Bytes,
+            &[u8],
             OperationContext,
         ) -> Result<HandlerFuture, serde_json::Error>
         + Send
@@ -143,6 +142,21 @@ impl<T: EventPayload + Serialize> PublicationRoute<T> {
             self.max_payload_bytes,
         )
     }
+
+    // template:begin outbox:messaging-publication-route-prepare-outbox
+    pub(crate) fn prepare_outbox(
+        &self,
+        event: &Event<T>,
+        make_bound_id: impl FnOnce() -> String,
+    ) -> Result<crate::PreparedEvent, crate::EnvelopeError> {
+        crate::PreparedEvent::prepare_outbox_with_valid_subject(
+            self.route.subject.clone(),
+            event,
+            self.max_payload_bytes,
+            make_bound_id,
+        )
+    }
+    // template:end outbox:messaging-publication-route-prepare-outbox
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -292,9 +306,9 @@ impl Registry {
             });
         }
         entry.handler = Some(Arc::new(move |id, occurred_at, encoded, context| {
-            let payload = serde_json::from_slice::<T>(&encoded)?;
+            let payload = serde_json::from_slice::<T>(encoded)?;
             let event = Event {
-                id,
+                id: id.to_owned(),
                 occurred_at,
                 payload,
             };
@@ -348,13 +362,13 @@ impl Registry {
     pub(crate) async fn dispatch(
         &self,
         subject: &str,
-        envelope: InboundEnvelope,
+        envelope: InboundEnvelopeRef<'_>,
         context: OperationContext,
     ) -> Result<(), DispatchError> {
         let routes: &HashMap<RouteKey<'_>, RegisteredRoute> = &self.routes;
         let handler = routes
             .get(&RouteKey {
-                event_type: &envelope.event_type,
+                event_type: envelope.event_type,
                 schema_version: envelope.schema_version,
             })
             .filter(|entry| entry.subject.as_str() == subject)
@@ -516,7 +530,7 @@ mod tests {
         subject: &str,
         event_type: &str,
         schema: &str,
-        payload: &'static str,
+        payload: &str,
     ) -> Result<(), DispatchError> {
         let mut headers = async_nats::HeaderMap::new();
         headers.insert(crate::wire::header_name::MESSAGE_ID, "event-1");
@@ -525,8 +539,7 @@ mod tests {
         headers.insert(crate::wire::header_name::CREATED_AT, "2026-09-29T10:00:00Z");
         headers.insert(crate::wire::header_name::NATS_MSG_ID, "event-1");
         let envelope =
-            crate::wire::decode_envelope(subject, &headers, Bytes::from_static(payload.as_bytes()))
-                .unwrap();
+            crate::wire::decode_envelope_ref(subject, &headers, payload.as_bytes()).unwrap();
         registry()
             .dispatch(subject, envelope, OperationContext::unbounded())
             .await

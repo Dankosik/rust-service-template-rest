@@ -7,14 +7,15 @@ use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
 use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::{EnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
-use crate::prepared::PreparedEvent;
-use crate::wire::{encode_prepared, validate_header_bytes};
+use crate::prepared::{PreparedEvent, Publication};
+use crate::wire::{encode_publication, validate_header_bytes};
 
 outcome_label! {
     enum PublishOutcome {
@@ -61,31 +62,38 @@ impl Producer {
         event: &PreparedEvent,
         context: &OperationContext,
     ) -> Result<PublishAck, PublishError> {
-        self.publish_after_admission(event, context, std::future::ready(Ok(())))
-            .await
+        self.publish_after_admission(
+            &event.publication(),
+            context.deadline(),
+            context.cancellation(),
+            std::future::ready(Ok(())),
+        )
+        .await
     }
 
     pub(crate) async fn publish_after_admission(
         &self,
-        event: &PreparedEvent,
-        context: &OperationContext,
+        event: &Publication<'_>,
+        deadline: Option<Deadline>,
+        cancel: &CancellationToken,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
+        let subject = event.subject.as_str();
         let span = tracing::info_span!(
             "messaging_publish",
-            otel.name = format!("publish {}", event.subject()),
+            otel.name = format!("publish {subject}"),
             otel.kind = "producer",
             messaging.system.name = "nats",
             messaging.operation.type = "send",
             messaging.operation.name = "publish",
-            messaging.destination.name = event.subject(),
+            messaging.destination.name = subject,
             outcome = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
         let result = self
-            .send_prepared(event, &span, context, admission)
+            .send(event, &span, deadline, cancel, admission)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -98,7 +106,7 @@ impl Producer {
         if let Err(error) = &result {
             span.in_scope(|| {
                 tracing::warn!(
-                    subject = event.subject(),
+                    subject,
                     outcome = label,
                     reason = %error,
                     "messaging_publish_failed"
@@ -112,11 +120,12 @@ impl Producer {
         result
     }
 
-    async fn send_prepared(
+    async fn send(
         &self,
-        event: &PreparedEvent,
+        event: &Publication<'_>,
         span: &tracing::Span,
-        context: &OperationContext,
+        deadline: Option<Deadline>,
+        cancel: &CancellationToken,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
@@ -131,44 +140,43 @@ impl Producer {
         admission.await?;
         send_publication(
             &self.shared,
-            event.subject_handle().clone(),
+            event.subject.clone(),
             message,
-            context,
+            deadline,
+            cancel,
         )
         .await
     }
 }
 
 fn publish_message(
-    event: &PreparedEvent,
+    event: &Publication<'_>,
     span: &tracing::Span,
     expected_stream: &str,
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishRejection> {
-    if event.payload().len() > max_payload_bytes {
+    if event.payload.len() > max_payload_bytes {
         return Err(EnvelopeError::PayloadTooLarge.into());
     }
-    let mut headers = encode_prepared(event)?;
+    let mut headers = encode_publication(event)?;
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
     validate_header_bytes(&headers)?;
     Ok(PublishMessage::build()
         .headers(headers)
-        .payload(event.payload().clone()))
+        .payload(event.payload.clone()))
 }
 
 pub(crate) async fn send_publication(
     shared: &Shared,
     subject: impl ToSubject,
     message: PublishMessage,
-    context: &OperationContext,
+    deadline: Option<Deadline>,
+    cancel: &CancellationToken,
 ) -> Result<PublishAck, PublishError> {
     let local = Deadline::after(BROKER_OPERATION_BUDGET);
-    let context = OperationContext::new(
-        Some(context.effective_deadline(local)),
-        context.cancellation().clone(),
-    );
-    if context.stopped().is_some() {
+    let deadline = deadline.map_or(local, |parent| parent.earlier(local));
+    if deadline.expired() || cancel.is_cancelled() {
         return Err(PublishRejection::ContextStopped.into());
     }
     let exchange = async {
@@ -187,7 +195,8 @@ pub(crate) async fn send_publication(
     };
     let result = tokio::select! {
         biased;
-        _ = context.wait_stopped() => Err(PublishError::Ambiguous),
+        () = deadline.wait() => Err(PublishError::Ambiguous),
+        () = cancel.cancelled() => Err(PublishError::Ambiguous),
         result = exchange => result,
     };
     if matches!(
@@ -315,6 +324,7 @@ mod tests {
             .unwrap()
             .prepare(&event)
             .expect("null fits four payload bytes");
+        let publication = prepared.publication();
         let fixed = concat!(
             "NATS/1.0\r\n",
             "Message-Id: event-1\r\n",
@@ -326,9 +336,9 @@ mod tests {
             "\r\n",
         );
         let stream = "s".repeat(8192 - fixed.len());
-        assert!(publish_message(&prepared, &tracing::Span::none(), &stream, 4).is_ok());
+        assert!(publish_message(&publication, &tracing::Span::none(), &stream, 4).is_ok());
         std::assert_matches!(
-            publish_message(&prepared, &tracing::Span::none(), &(stream + "s"), 4),
+            publish_message(&publication, &tracing::Span::none(), &(stream + "s"), 4),
             Err(PublishRejection::InvalidEnvelope(
                 EnvelopeError::HeadersTooLarge
             ))

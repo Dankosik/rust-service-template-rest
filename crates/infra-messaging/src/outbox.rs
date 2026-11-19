@@ -1,18 +1,21 @@
 use std::time::Duration;
 
+use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Admission, KIND as OUTBOX_KIND};
 use infra_jobs::{Handler, Job, JobError, JobKind, Kinds, Policy};
 use infra_postgres::{Tx, TxMode};
-use operation_context::{Deadline, OperationContext};
+use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
-use uuid::NonNilUuid;
+use uuid::{NonNilUuid, fmt::Simple};
 
 use crate::error::{PublishError, PublishRejection};
-use crate::prepared::{PreparedEvent, PreparedEventParts, payload_depth_allowed};
+use crate::prepared::{
+    PreparedEvent, Publication, payload_depth_allowed, validate_reconstructed_envelope,
+};
 use crate::{EnvelopeError, OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
@@ -68,12 +71,24 @@ impl<T: EventPayload> PublicationRoute<T> {
 
 impl<T: EventPayload + Serialize> OutboxRoute<T> {
     pub fn prepare(&self, event: &Event<T>) -> Result<PreparedEvent, EnvelopeError> {
-        let mut prepared = self.publication.prepare(event)?;
-        let prefix = format!("outbox-v1-{}-", self.publisher_id.get().simple());
-        let id =
-            crate::wire::prefixed_digest_hex(&prefix, &Sha256::digest(event.id.as_bytes()).into());
-        prepared.bind_outbox_id(id);
-        Ok(prepared)
+        self.publication.prepare_outbox(event, || {
+            let prefix = "outbox-v1-";
+            let digest: [u8; 32] = Sha256::digest(event.id.as_bytes()).into();
+            let mut hex = const_hex::Buffer::<32>::new();
+            let digest = hex.format(&digest);
+            let mut publisher = [0; Simple::LENGTH];
+            let publisher = self
+                .publisher_id
+                .get()
+                .simple()
+                .encode_lower(&mut publisher);
+            let mut id = String::with_capacity(prefix.len() + publisher.len() + 1 + digest.len());
+            id.push_str(prefix);
+            id.push_str(publisher);
+            id.push('-');
+            id.push_str(digest);
+            id
+        })
     }
 }
 
@@ -198,16 +213,23 @@ impl PreparedEvent {
 impl Handler<PublishDomainEvent> for OutboxProducer {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
         let Self(producer) = self;
-        let event = job.payload().to_prepared().map_err(JobError::permanent)?;
+        let stored = job.payload();
+        let (occurred_at, payload) = stored.validate().map_err(JobError::permanent)?;
+        let subject = Subject::from(stored.subject.as_str());
+        let event = Publication {
+            subject: &subject,
+            message_id: &stored.message_id,
+            publication_id: &stored.publication_id,
+            event_type: &stored.event_type,
+            schema_version: stored.schema_version,
+            occurred_at,
+            payload,
+        };
         let deadline = crate::budget::within_operation_budget(job.deadline());
-        let context = OperationContext::new(Some(Deadline::at(deadline)), job.cancellation());
-        let admission = crate::topology::recheck_outbox_source(
-            &producer.shared,
-            deadline,
-            context.cancellation(),
-        );
+        let cancel = job.cancellation();
+        let admission = crate::topology::recheck_outbox_source(&producer.shared, deadline, &cancel);
         producer
-            .publish_after_admission(&event, &context, admission)
+            .publish_after_admission(&event, Some(Deadline::at(deadline)), &cancel, admission)
             .await
             .map(|_| ())
             .map_err(publication_job_error)
@@ -313,10 +335,7 @@ impl PublishDomainEvent {
             payload: Ok(Bytes::new()),
         }
     }
-}
-
-impl PublishDomainEvent {
-    fn to_prepared(&self) -> Result<PreparedEvent, &'static str> {
+    fn validate(&self) -> Result<(OffsetDateTime, &Bytes), &'static str> {
         if self.format_version != FORMAT_VERSION {
             return Err("outbox_format_unsupported");
         }
@@ -325,23 +344,23 @@ impl PublishDomainEvent {
             .map_err(|_| "outbox_timestamp_invalid")?;
         let payload = self
             .payload
-            .clone()
+            .as_ref()
             .map_err(|InvalidBase64| "outbox_base64_invalid")?;
-        let json = simdutf8::compat::from_utf8(&payload).map_err(|_| "outbox_json_invalid")?;
-        if !payload_depth_allowed(&payload) {
+        let json = simdutf8::compat::from_utf8(payload).map_err(|_| "outbox_json_invalid")?;
+        if !payload_depth_allowed(payload) {
             return Err("outbox_payload_too_deep");
         }
         serde_json::from_str::<serde::de::IgnoredAny>(json).map_err(|_| "outbox_json_invalid")?;
-        PreparedEvent::from_parts(PreparedEventParts {
-            subject: self.subject.clone(),
-            message_id: self.message_id.clone(),
-            publication_id: self.publication_id.clone(),
-            event_type: self.event_type.clone(),
-            schema_version: self.schema_version,
+        validate_reconstructed_envelope(
+            &self.subject,
+            &self.message_id,
+            &self.publication_id,
+            &self.event_type,
+            self.schema_version,
             occurred_at,
-            payload,
-        })
-        .map_err(|_| "outbox_envelope_invalid")
+        )
+        .map_err(|_| "outbox_envelope_invalid")?;
+        Ok((occurred_at, payload))
     }
 }
 
@@ -413,13 +432,12 @@ mod tests {
             "eyJlc2NhcGVkIjoiXFxcXHUwMDAwIiwibiI6MS4wfQ=="
         );
         let stored: PublishDomainEvent = serde_json::from_slice(&encoded).unwrap();
-        let restored = stored
-            .to_prepared()
-            .expect("stored immutable intent is valid");
-        assert_eq!(restored.payload(), event.payload());
-        assert_eq!(restored.subject(), event.subject());
-        assert_eq!(restored.message_id(), event.message_id());
-        assert_eq!(restored.publication_id(), event.publication_id());
+        let (occurred_at, payload) = stored.validate().expect("stored immutable intent is valid");
+        assert_eq!(payload, event.payload());
+        assert_eq!(occurred_at, event.occurred_at());
+        assert_eq!(stored.subject, event.subject());
+        assert_eq!(stored.message_id, event.message_id());
+        assert_eq!(stored.publication_id, event.publication_id());
     }
 
     #[test]
@@ -433,7 +451,7 @@ mod tests {
         corrupt["payload_base64"] = serde_json::Value::String("not-base64".to_owned());
         let stored: PublishDomainEvent =
             serde_json::from_value(corrupt).expect("corrupt base64 still decodes as an outbox job");
-        std::assert_matches!(stored.to_prepared(), Err("outbox_base64_invalid"));
+        std::assert_matches!(stored.validate(), Err("outbox_base64_invalid"));
 
         let mut non_string = baseline;
         non_string["payload_base64"] = serde_json::Value::Null;
@@ -447,13 +465,11 @@ mod tests {
         let event = parts.event();
 
         let encoded = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
-        let restored = serde_json::from_slice::<PublishDomainEvent>(&encoded)
-            .unwrap()
-            .to_prepared()
-            .expect("stored redrive intent is valid");
+        let stored = serde_json::from_slice::<PublishDomainEvent>(&encoded).unwrap();
+        stored.validate().expect("stored redrive intent is valid");
 
-        assert_eq!(restored.message_id(), "logical-id");
-        assert_eq!(restored.publication_id(), "redrive-8e51b5a19b7924ce");
+        assert_eq!(stored.message_id, "logical-id");
+        assert_eq!(stored.publication_id, "redrive-8e51b5a19b7924ce");
     }
 
     #[test]

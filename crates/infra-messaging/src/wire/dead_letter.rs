@@ -5,9 +5,9 @@ use time::OffsetDateTime;
 
 use super::{
     CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES, HEADER_PREAMBLE_BYTES, MESSAGE_ID,
-    SHA256_HEX_LEN, checked_header_line_bytes, format_timestamp, header_line_bytes, header_name,
-    header_value, is_zero_time, parse_schema, parse_timestamp, prefixed_digest_hex,
-    required_header, valid_subject, validate_outbound_identity,
+    RFC3339_UTC_MAX_BYTES, SHA256_HEX_LEN, checked_header_line_bytes, format_timestamp_bytes,
+    header_line_bytes, header_name, header_value, is_zero_time, parse_schema, parse_timestamp,
+    prefixed_digest_hex, required_header, valid_subject, validate_outbound_identity,
 };
 use crate::error::EnvelopeError;
 use enum_map::EnumMap;
@@ -196,14 +196,15 @@ fn record_id(
     stored_at: OffsetDateTime,
     publication_id: &str,
 ) -> Result<String, EnvelopeError> {
-    let stored_at = format_timestamp(stored_at)?;
+    let mut timestamp = [0; RFC3339_UTC_MAX_BYTES];
+    let stored_at = format_timestamp_bytes(stored_at, &mut timestamp)?;
     let mut sequence = std::fmt::NumBuffer::new();
     let mut hash = Sha256::new();
     hash.update(stream.as_bytes());
     hash.update([0]);
     hash.update(stream_sequence.format_into(&mut sequence).as_bytes());
     hash.update([0]);
-    hash.update(stored_at.as_bytes());
+    hash.update(stored_at);
     hash.update([0]);
     hash.update(publication_id.as_bytes());
     Ok(prefixed_digest_hex(prefix, &hash.finalize().into()))
