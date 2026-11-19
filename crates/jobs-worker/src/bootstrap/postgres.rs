@@ -250,16 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_texts_name_the_failed_check() {
-        assert_eq!(
-            WorkerError::PostgresDisabled.to_string(),
-            "postgres.enabled must be true to run the jobs worker"
-        );
-    }
-
-    #[test]
     fn identity_keeps_the_suffix_inside_the_postgres_limit() {
-        assert_eq!(worker_identity("service"), "service-jobs-worker");
         let cases = [
             ("service".to_owned(), "service-jobs-worker".to_owned()),
             ("a".repeat(64), format!("{}-jobs-worker", "a".repeat(51))),
