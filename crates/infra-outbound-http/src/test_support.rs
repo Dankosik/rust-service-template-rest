@@ -93,9 +93,12 @@ pub(crate) fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
         .filter(|line| {
             line.starts_with("http_client_request_duration_seconds_count")
                 && required_labels.iter().all(|label| line.contains(label))
-                && line.ends_with(" 1")
         })
-        .count()
+        .map(|line| {
+            let (_, count) = line.rsplit_once(' ').expect("histogram sample value");
+            count.parse::<usize>().expect("integer histogram count")
+        })
+        .sum()
 }
 
 #[derive(Clone, Default)]
