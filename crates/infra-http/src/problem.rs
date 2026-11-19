@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -176,12 +177,17 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let mut response = (
-            http_status(self.code),
-            [(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE))],
-            axum::Json(&self),
-        )
-            .into_response();
+        let response = axum::Json(&self).into_response();
+        self.attach_to(response)
+    }
+}
+
+impl Problem {
+    fn attach_to(self, mut response: Response) -> Response {
+        *response.status_mut() = http_status(self.code);
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE));
         if let Some(after) = self.retry_after {
             response
                 .headers_mut()
@@ -192,13 +198,19 @@ impl IntoResponse for Problem {
     }
 }
 
-pub(crate) fn complete_problem(response: &mut Response, request_id: &str) {
+pub(crate) fn pending_problem(problem: Problem) -> Response {
+    problem.attach_to(Response::new(Body::empty()))
+}
+
+pub(crate) fn complete_problem(response: &mut Response, request_id: &HeaderValue) {
     let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
         return;
     };
-    problem.request_id = Some(CompactString::from(request_id));
-    let body = axum::Json(&*problem).into_response().into_body();
-    *response.body_mut() = body;
+    let Ok(id) = request_id.to_str() else {
+        return;
+    };
+    problem.request_id = Some(CompactString::from(id));
+    *response.body_mut() = axum::Json(&*problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
 }
 
@@ -209,7 +221,8 @@ fn retry_after_value(after: Duration) -> HeaderValue {
         .as_secs()
         .checked_add(u64::from(after.subsec_nanos() != 0));
     match seconds {
-        Some(seconds) => HeaderValue::from(seconds.max(1)),
+        Some(0 | 1) => HeaderValue::from_static("1"),
+        Some(seconds) => HeaderValue::from(seconds),
         None => HeaderValue::from_static(U64_MAX_PLUS_ONE_SECS),
     }
 }
