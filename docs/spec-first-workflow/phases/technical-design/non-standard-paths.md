@@ -27,7 +27,8 @@ Design](../technical-design.md) from step 1.
 ## No-Open-Decisions Exit
 
 Triggered from [Technical Design](../technical-design.md#steps) step 1 when zero
-open forks apply:
+open forks, zero unpinned `Open to Technical Design:` identifiers, and no
+non-trivial `rollout.md` apply:
 
 1. Create no new `design.md`. Submit inline **forced-owner evidence** to 1
    fresh `reviewer-agent` running [Technical Design
@@ -43,12 +44,12 @@ open forks apply:
    `owner: Technical Design`, `result: <reviewed forced-owner evidence +
    carried CONCERNS>`, `review: <locator or inline result>`, `next_owner:
    Planning`), and stop.
-3. On `FAIL`: verify citations/witnesses and handle refuted findings under
-   [Review Lifecycle](../../shared/review.md#lifecycle); use a bounded delta
-   recheck when only handoff metadata was incomplete; on confirmed
-   `PHASE_DEFECT` exposing an open fork (`reopen_owner: Technical Design`),
-   enter steps 2–6 with a **fresh** review on the drafted design; on confirmed
-   `UPSTREAM_GAP`, take [Blocked Exit](#blocked-exit).
+3. On `FAIL`: handle findings under [Review
+   Lifecycle](../../shared/review.md#lifecycle); use a bounded delta recheck
+   when only handoff metadata was incomplete; on confirmed `PHASE_DEFECT`
+   exposing an open fork (`reopen_owner: Technical Design`), enter steps 2–6
+   with a **fresh** review on the drafted design; on confirmed `UPSTREAM_GAP`,
+   take [Blocked Exit](#blocked-exit).
 
 ## Blocked Exit
 

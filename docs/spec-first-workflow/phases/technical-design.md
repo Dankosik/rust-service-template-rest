@@ -115,7 +115,8 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      `Reopen if` / `integration-first`.
 
 3. **Persist draft artifact(s).** Write `specs/<task>/design/design.md` at
-   `status: draft` (removing resolved `Blocked decisions`) per [Design
+   `status: draft` (carrying any still-unresolved `spec.md` `Carried concerns`
+   and removing resolved `Blocked decisions`) per [Design
    V1](../interfaces/design-v1.md) via [Artifacts](../shared/artifacts.md), and
    `specs/<task>/rollout.md` at `status: draft` when [Release
    Closure](../rubrics/release-closure.md) needs a non-trivial sequence. Delete
@@ -157,8 +158,8 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      Topology](technical-design-review.md#review-topology).
    - **Default (1 reviewer):** all other designs (all applicable checks under
      [Review Topology](technical-design-review.md#review-topology)).
-   - **On `FAIL`:** verify citations/witnesses and handle refuted findings
-     under [Review Lifecycle](../shared/review.md#lifecycle):
+   - **On `FAIL`:** handle findings under [Review
+     Lifecycle](../shared/review.md#lifecycle):
      - *Confirmed `PHASE_DEFECT`:* repair in place, rerun affected step 4
        checks, and re-run every failed or invalidated axis (an Axis 1 repair
        altering seams, types, or handoff surfaces invalidates Axis 2; an Axis 2
@@ -172,9 +173,9 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
      `adjudicator-agent`), or [Blocked
      Exit](technical-design/non-standard-paths.md#blocked-exit) returns.
 
-6. **Finalize and hand off.** Record bounded `CONCERNS` and unresolved `spec.md`
-   `Carried concerns` in `design.md`, flip `status: ready` in `design/design.md`
-   (and `rollout.md` when present), emit [Transition Result
+6. **Finalize and hand off.** Append any bounded `CONCERNS` returned by review
+   to `Carried concerns` in `design.md`, flip `status: ready` in
+   `design/design.md` (and `rollout.md` when present), emit [Transition Result
    V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
    Technical Design`, `result: specs/<task>/design/design.md`, `review:
    <locator or inline result>`, `next_owner: Planning`), and stop.

@@ -53,11 +53,10 @@ Library Selection](../../backend-library-selection.md).
      `Open to Technical Design:` identifier);
    - `Grounding and planning handoff` violates [Design
      V1](../interfaces/design-v1.md) or [Task Packet
-     V1](../interfaces/task-packet-v1.md#field-rules) (`Shared mutated
-     surfaces` uses prose instead of narrow canonical paths, omits a surface
-     already evident from cited anchors, omits `same-release` vs
-     `multi-release` for `expand -> migrate -> contract`, or requests
-     `shared-contract` without `≥2` lock-disjoint parallel consumers);
+     V1](../interfaces/task-packet-v1.md#field-rules) (including non-canonical
+     paths or omitted surfaces already evident from cited anchors, missing
+     `same-release` vs `multi-release` on `expand -> migrate -> contract`, or
+     unqualified `shared-contract`);
    - residual `Blocked decisions` remain in a `draft`, or `design/` prescribes
      function bodies, private `.rs` trees, task slicing, or test cases,
      fixtures, proving layers, commands, or unmandated live gates.
@@ -78,11 +77,11 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    `Reopen if`, resurrected `intent.md` `Rejected` option without reopening
    Intake, altered behavior, terminology collision, or leaked `Non-goal`.
 3. **Simplicity, deletion test, steelman `D<n>` & durable docs** *(split by
-   subject across axes; both consult `docs/decisions/` and
+   subject across axes; both consult `intent.md`, `docs/decisions/`, and
    `docs/backend-library-selection.md` for their subject and `FAIL` on a
    strawman `D<n>`, missing decisive constraint or objective `Reopen if`, or
-   reversing a rejected choice without meeting its reopen condition or an
-   explicit user request)*:
+   reversing a rejected choice without meeting its reopen condition, reopening
+   Intake, or an explicit user request)*:
    - **3a — System mechanisms & contract docs:** try to delete or collapse
      every added system mechanism, queue, cache, worker, fallback, or config
      key onto an existing owner unless forced by `spec.md`. `FAIL` on
@@ -127,12 +126,10 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    concrete witness.
 6. **Rollout, mixed-version & required-input closure** *(deployable, worker,
    contract, schema, config, trust material, or managed dependency changes).*
-   Attack rolling-deploy mixed-version overlap across `crates/migrate`,
-   `crates/service`, and `crates/jobs-worker`—lock-safe DDL **and** serialized
-   payload compatibility, `same-release` vs `multi-release` `expand -> migrate
-   -> contract` alignment, rollback/roll-forward safety, external input
-   ownership, and [Release Closure](../rubrics/release-closure.md) (`rollout.md`
-   when non-trivial).
+   Attack [Rollout And Mixed-Version
+   Compatibility](technical-design/system-design.md#rollout-and-mixed-version-compatibility),
+   rollback/roll-forward safety, external input ownership, and [Release
+   Closure](../rubrics/release-closure.md) (`rollout.md` when non-trivial).
 
 ## No-Open-Decisions Result
 
