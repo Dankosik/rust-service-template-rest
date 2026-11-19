@@ -2,10 +2,8 @@
 
 Read-only review adapter for a fixed Definition candidate (`spec.md` at `status:
 draft` or an inline already-satisfied no-delta package). Return [Review Result
-V1](../interfaces/review-result-v1.md) with anchored findings, classification
-(`PHASE_DEFECT`, `UPSTREAM_GAP`, or `CONCERN`), and smallest owner
-(`Specification`, `Intake`, or external policy owner). Report findings without
-rewriting `spec.md` or inventing product decisions.
+V1](../interfaces/review-result-v1.md) without rewriting `spec.md` or inventing
+product decisions.
 
 For an already-satisfied no-delta package, jump to [Already-Satisfied
 No-Delta](#already-satisfied-no-delta).
@@ -83,11 +81,8 @@ checks only)**:
    Probes](specification/behavioral-probes.md). `FAIL` on:
    - baseline claim contradicting primary code, or verified false premise in
      `intent.md` (`UPSTREAM_GAP`, `reopen_owner: Intake`);
-   - uncited codebase interaction missed by `spec.md` across Probes #1–#6
-     (caller, consumer, optional profile, persisted/in-flight state,
-     mixed-version overlap, middleware precedence, race, replay/promise trap,
-     authz/trust boundary, or startup/degrade rule), or generic filler in
-     `Preserved guarantees`;
+   - uncited codebase interaction missed by `spec.md` across Probes #1–#6, or
+     generic filler in `Preserved guarantees`;
    - reversing/adopting a rejected `docs/decisions/` choice without meeting its
      reopen condition or explicit user request, or omitting a required `Durable
      contract update` (`Domain Vocabulary`, `Production Contract`, or
@@ -114,25 +109,24 @@ no external observer can distinguish them**.
    implementations both satisfying `spec.md` yet yielding **materially different
    external outcomes** (status/code, persisted state, side effect, error
    recoverability, authz/privacy exposure, compatibility, or success signal)
-   without an explicit `Open to Technical Design:` invariant. Check vocabulary
-   consistency (`Terminology` + `not <confused sense>`), missing table cells or
-   unanchored table rules outside `R<n>`, and [Research](research.md) quantity
-   labels on numeric bounds.
+   without an explicit `Open to Technical Design:` invariant. Check breaking
+   changes are placed in `Behavior delta` (not `Preserved guarantees`),
+   vocabulary consistency (`Terminology` + `not <confused sense>`), missing
+   table cells or unanchored table rules outside `R<n>`, and
+   [Research](research.md) quantity labels on numeric bounds.
 6. **Mechanism leak & deletion test.** Apply the deletion test to every inferred
    clause. `FAIL` on leaked mechanisms, crate/file placement, task slicing,
    invented unfixed internal/operator identifier spellings left open by
    `intent.md` and `api/` (owned by Technical Design's [Pinned shared
-   identifiers](../interfaces/design-v1.md)), breaking changes misplaced inside
-   `Preserved guarantees`, or clauses excluding a contract-valid design without
-   protecting an accepted external guarantee.
+   identifiers](../interfaces/design-v1.md)), or clauses excluding a
+   contract-valid design without protecting an accepted external guarantee.
 
 ## Already-Satisfied No-Delta
 
 Independently verify every functional, operational, quantitative, and technical
-`intent.md` obligation and `Success signal` against primary sources (`api/`,
-code, migrations, config, `scripts/template/profiles.json`, callers), recording
-inspected locators in `evidence_boundary`. Return **`PASS | FAIL` only** (never
-`CONCERNS`):
+`intent.md` obligation and `Success signal` against Axis 1's primary sources
+and callers, recording inspected locators in `evidence_boundary`. Return
+**`PASS | FAIL` only** (never `CONCERNS`):
 
 - `PASS`: primary evidence proves zero delta remains across all affected
   surfaces and callers.
@@ -145,7 +139,7 @@ inspected locators in `evidence_boundary`. Return **`PASS | FAIL` only** (never
 | Disposition | Bar |
 | --- | --- |
 | Blocking (`FAIL`) | Surviving witnessed check with anchor, classification (`PHASE_DEFECT` or `UPSTREAM_GAP`), and smallest owner (`Specification`, `Intake`, or external policy owner). |
-| Bounded (`CONCERNS`) | Strictly a bounded downstream proof or external risk over closed behavior—never behavioral ambiguity (`FAIL`); return `CONCERN` with **risk, downstream owner, and closing action**. |
+| Bounded (`CONCERNS`) | Strictly a bounded downstream proof or external risk over closed behavior—never behavioral ambiguity (`FAIL`); return `CONCERN` per [Review Result V1](../interfaces/review-result-v1.md). |
 | Non-blocking (never blocks `PASS`) | Downstream Technical Design choices, equivalent phrasing with no external divergence, or speculative scenarios outside `intent.md` and affected surfaces. |
 
 Return `PASS` when every assigned check clears with per-check proof of attack

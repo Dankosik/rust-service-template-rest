@@ -5,11 +5,11 @@ Load from [Specification](../specification.md) only when triggered.
 ## Reopen Or Resume From Blocked
 
 Read existing `specs/<task>/spec.md` alongside `intent.md`. Reconcile only
-invalidated clauses under [Artifacts](../../shared/artifacts.md), keep surviving
-`R<n>`/`G<n>` IDs stable (retire deleted IDs instead of renumbering), re-verify
-any prior `Carried concerns` (dropping resolved or superseded items), and drop
-every resolved `B<n>` entry before either writing `status: draft` in step 3 or
-updating `Blocked decisions` for newly uncovered child forks. Continue
+invalidated clauses under [Artifacts](../../shared/artifacts.md), preserve ID
+stability and re-verify prior `Carried concerns` per [Specification
+V1](../../interfaces/spec-v1.md#field-rules), and drop every resolved `B<n>`
+entry before either writing `status: draft` in step 3 or updating `Blocked
+decisions` for newly uncovered child forks. Continue
 [Specification](../specification.md) from step 1.
 
 ## Wrong Premise In Intent
@@ -34,10 +34,10 @@ or technical work remains.
    Review](../specification-review.md#already-satisfied-no-delta) under
    [Review](../../shared/review.md).
 3. Handle the verdict (`PASS | FAIL` only):
-   - **`PASS`** *(or zero surviving blockers after `adjudicator-agent` closure
-     under [Review Lifecycle](../../shared/review.md#lifecycle))*: remove any
-     superseded `specs/<task>/spec.md` and `specs/<task>/workflow-plan.md`
-     under [Artifacts](../../shared/artifacts.md), and return [Transition Result
+   - **`PASS`** *(or review closure under [Review
+     Lifecycle](../../shared/review.md#lifecycle))*: remove any superseded
+     `specs/<task>/spec.md` and `specs/<task>/workflow-plan.md` under
+     [Artifacts](../../shared/artifacts.md), and return [Transition Result
      V1](../../shared/transition.md#transition-result-v1) (`status: ready`,
      `owner: Definition`, `result: <evidence>`, `next_owner: none`).
    - **`FAIL`:** verify citations and handle any refuted finding under [Review
@@ -48,14 +48,12 @@ or technical work remains.
 
 ## Behavior-Preserving Change
 
-After [Specification](../specification.md) step 1 primary-source grounding
-confirms functional behavior stays unchanged while an operational, quantitative,
-or internal technical goal remains, run [Specification](../specification.md)
-steps 2–6: put quantitative/operational targets in `Behavior delta`, or write
-`None — behavior-preserving change` when only `G<n>` and a `Downstream handoff`
-(`Technical Design` or `Planning`) apply. Evaluate step 4 adversarial dry-runs
-strictly over observable outcomes (`R<n>` + `G<n>`), excluding non-behavioral
-goals routed to `Downstream handoff`.
+After [Specification](../specification.md) step 1 confirms this mode, run steps
+2–6: record any quantitative/operational targets in `Behavior delta` (otherwise
+use [Specification V1](../../interfaces/spec-v1.md#field-rules)'s
+behavior-preserving marker alongside `G<n>` and `Downstream handoff`). Evaluate
+step 4 adversarial dry-runs strictly over observable outcomes (`R<n>` + `G<n>`),
+excluding non-behavioral goals routed to `Downstream handoff`.
 
 ## Blocked Frontier
 
@@ -64,10 +62,9 @@ undelegated requester- or policy-owned fork: finish all independent branches of
 step 2 to collect the full **independent frontier**, frame each root `B<n>` in
 requester behavior and consequences (worded so `"yes"` accepts the
 recommendation when supported), and attach any already-known dependent child
-fork under its parent `B<n>` as `Follow-up if <option>` (for Intake to hold back
-from Round 1 and ask immediately only if the requester chooses that branch).
-Save resolved rules and `Blocked decisions` in `spec.md` at `status: blocked`,
-and return [Transition Result
+fork under its parent `B<n>` per [Specification
+V1](../../interfaces/spec-v1.md). Save resolved rules and `Blocked decisions` in
+`spec.md` at `status: blocked`, and return [Transition Result
 V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
 `owner: Definition`, `result: specs/<task>/spec.md`, `review: none`,
 `reopen_owner: Intake` or external policy owner) without review.
