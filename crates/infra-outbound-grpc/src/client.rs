@@ -217,50 +217,29 @@ impl Client {
         if caller_timeout.is_none() {
             request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
         }
-        let (opening_before_parent, lifetime_before_parent) =
-            self.timeout.deadlines(started_at, caller_timeout);
-        let (has_parent, parent_deadline, cancellation) =
-            match request.extensions().get::<OperationContext>() {
-                Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
-                None => (false, None, tokio_util::sync::CancellationToken::new()),
-            };
-        let opening = OperationContext::new(
-            earliest(Some(opening_before_parent), parent_deadline),
-            cancellation.clone(),
+        let contexts = derive_call_contexts(
+            self.timeout,
+            started_at,
+            caller_timeout,
+            request.extensions().get::<OperationContext>(),
         );
-        let lifetime = OperationContext::new(
-            earliest(lifetime_before_parent, parent_deadline),
-            cancellation.clone(),
-        );
-        let watch_stop = has_parent || lifetime.deadline().is_some();
         let call = crate::observe::Call::start(self.series, &request, self.destination.as_ref());
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        if let Err(reason) = opening.check() {
-            return Err(call.refuse(client_stopped(reason)));
-        }
-        let permit = if let Some(openings) = &self.openings {
-            let Ok(permit) = Arc::clone(openings).try_acquire_owned() else {
-                let status = opening.stopped().map_or_else(
-                    || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
-                    client_stopped,
-                );
-                return Err(call.refuse(status));
-            };
-            Some(permit)
-        } else {
-            None
+        let permit = match acquire_opening_permit(self.openings.as_ref(), &contexts.opening) {
+            Ok(permit) => permit,
+            Err(status) => return Err(call.refuse(status)),
         };
         Ok(PreparedCall {
             channel: self.channel.clone(),
             request,
-            opening,
-            lifetime,
-            watch_stop,
+            opening: contexts.opening,
+            lifetime: contexts.lifetime,
+            watch_stop: contexts.watch_stop,
             call,
-            cancel_on_drop: cancellation.drop_guard(),
+            cancel_on_drop: contexts.cancel_on_drop,
             permit,
         })
     }
@@ -391,7 +370,7 @@ impl PreparedCall {
                 watch_stop,
                 guards: ClientGuards {
                     upload_guard,
-                    cancel_on_drop: Some(cancel_on_drop),
+                    cancel_on_drop,
                 },
                 on_status,
             },
@@ -437,12 +416,7 @@ impl Service<http::Uri> for GrpcConnector {
             };
             tokio::time::timeout(CONNECT_TIMEOUT, dial)
                 .await
-                .unwrap_or_else(|elapsed| {
-                    Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        elapsed,
-                    )))
-                })
+                .map_err(|elapsed| std::io::Error::new(std::io::ErrorKind::TimedOut, elapsed))?
         })
     }
 }
@@ -463,11 +437,7 @@ fn parse_destination(
     match (security, parts.scheme) {
         (ClientSecurity::Plaintext, OriginScheme::Http) => Ok((uri, origin, None)),
         (ClientSecurity::Tls(material), OriginScheme::Https) => {
-            let trimmed_host = parts
-                .host
-                .strip_prefix('[')
-                .and_then(|inner| inner.strip_suffix(']'))
-                .unwrap_or(parts.host);
+            let trimmed_host = crate::protocol::unbracket_host(parts.host);
             let server_name = rustls::pki_types::ServerName::try_from(trimmed_host)
                 .map_err(|_| ClientError::InvalidDestination)?
                 .to_owned();
@@ -479,6 +449,61 @@ fn parse_destination(
             Err(ClientError::DestinationSecurityMismatch)
         }
     }
+}
+
+struct CallContexts {
+    opening: OperationContext,
+    lifetime: OperationContext,
+    watch_stop: bool,
+    cancel_on_drop: DropGuard,
+}
+
+fn derive_call_contexts(
+    timeout: ClientTimeout,
+    started_at: Instant,
+    caller_timeout: Option<Duration>,
+    parent: Option<&OperationContext>,
+) -> CallContexts {
+    let (opening_before_parent, lifetime_before_parent) =
+        timeout.deadlines(started_at, caller_timeout);
+    let (has_parent, parent_deadline, cancellation) = match parent {
+        Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
+        None => (false, None, tokio_util::sync::CancellationToken::new()),
+    };
+    let opening = OperationContext::new(
+        earliest(Some(opening_before_parent), parent_deadline),
+        cancellation.clone(),
+    );
+    let lifetime = OperationContext::new(
+        earliest(lifetime_before_parent, parent_deadline),
+        cancellation.clone(),
+    );
+    let watch_stop = has_parent || lifetime.deadline().is_some();
+    CallContexts {
+        opening,
+        lifetime,
+        watch_stop,
+        cancel_on_drop: cancellation.drop_guard(),
+    }
+}
+
+fn acquire_opening_permit(
+    openings: Option<&Arc<Semaphore>>,
+    opening: &OperationContext,
+) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
+    opening.check().map_err(client_stopped)?;
+    let Some(openings) = openings else {
+        return Ok(None);
+    };
+    Arc::clone(openings)
+        .try_acquire_owned()
+        .map(Some)
+        .map_err(|_| {
+            opening.stopped().map_or_else(
+                || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
+                client_stopped,
+            )
+        })
 }
 
 fn earliest(left: Option<Deadline>, right: Option<Deadline>) -> Option<Deadline> {

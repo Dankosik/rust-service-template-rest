@@ -10,7 +10,7 @@ use operation_context::OperationContext;
 use serde::Deserialize;
 
 use crate::Failure;
-use crate::call::stopped_status;
+use crate::call::check_open;
 use crate::router::reject_with_budget;
 use crate::status::internal_status;
 
@@ -106,9 +106,7 @@ pub(crate) async fn authenticate(
     context: &OperationContext,
     mut request: Request,
 ) -> Result<Request, Response> {
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
+    check_open(context)?;
     let result = {
         let authorization = request
             .headers()
@@ -119,9 +117,7 @@ pub(crate) async fn authenticate(
             .authenticate_presented_with_context(authorization, Transport::Grpc, context)
             .await
     };
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
+    check_open(context)?;
     let (principal, token) = match result {
         Ok(presentation) => presentation,
         Err(failure) => {
@@ -140,15 +136,12 @@ pub(crate) async fn authenticate(
         response.extensions_mut().insert(InsufficientScope);
         return Err(response);
     }
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
-    let delegation = requirement
-        .delegate
-        .then(|| token.into_delegation_credential());
+    check_open(context)?;
     request.headers_mut().remove(AUTHORIZATION);
-    if let Some(credential) = delegation {
-        request.extensions_mut().insert(credential);
+    if requirement.delegate {
+        request
+            .extensions_mut()
+            .insert(token.into_delegation_credential());
     }
     request
         .extensions_mut()

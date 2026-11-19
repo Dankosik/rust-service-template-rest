@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::Request;
 use axum::response::Response;
-use foldhash::HashMap;
+use foldhash::{HashMap, HashSet};
 use http::header::AUTHORIZATION;
 pub use infra_serviceauth::Caller;
 use infra_serviceauth::{ServiceName, Verifier};
@@ -10,7 +10,7 @@ use operation_context::OperationContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::Failure;
-use crate::call::stopped_status;
+use crate::call::check_open;
 use crate::router::reject_with_budget;
 use crate::status::internal_status;
 
@@ -27,7 +27,7 @@ pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
     extensions.remove::<Caller>();
 }
 
-pub(crate) type CallerRules = HashMap<String, Box<[ServiceName]>>;
+pub(crate) type CallerRules = HashMap<String, HashSet<ServiceName>>;
 
 #[expect(
     clippy::result_large_err,
@@ -39,9 +39,7 @@ pub(crate) async fn admit_caller(
     context: &OperationContext,
     mut request: Request,
 ) -> Result<Request, Response> {
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
+    check_open(context)?;
     let result = {
         let authorization = request
             .headers()
@@ -50,9 +48,7 @@ pub(crate) async fn admit_caller(
             .map(http::HeaderValue::as_bytes);
         verifier.authenticate(authorization)
     };
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
+    check_open(context)?;
     let caller = match result {
         Ok(caller) => caller,
         Err(failure) => {
@@ -72,9 +68,7 @@ pub(crate) async fn admit_caller(
             .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return Err(reject_with_budget(context, request, status).await);
     }
-    if let Some(reason) = context.stopped() {
-        return Err(stopped_status(reason).into_http());
-    }
+    check_open(context)?;
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert::<Caller>(caller);
@@ -125,7 +119,7 @@ mod tests {
         let mut rules = HashMap::default();
         rules.insert(
             METHOD.to_owned(),
-            Box::from([ServiceName::parse("orders").unwrap()]),
+            HashSet::from_iter([ServiceName::parse("orders").unwrap()]),
         );
         let now = now_secs();
         let sign = |key: &TestKey, name: &str| {

@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, OnceLock};
 
-use foldhash::{HashMap, HashSet};
+use foldhash::HashMap;
 use prost::Message as _;
 use tonic::server::NamedService as _;
 use tonic::service::LayerExt as _;
@@ -95,7 +95,7 @@ pub struct Services {
     pub(crate) listener_layer: Option<ListenerLayer>,
     pub(crate) routes: tonic::service::RoutesBuilder,
     pub(crate) names: BTreeSet<&'static str>,
-    described: HashMap<String, Vec<(String, CallType)>>,
+    described: HashMap<String, BTreeMap<String, CallType>>,
     descriptor_sets: Vec<&'static [u8]>,
     pub(crate) reflection: bool,
     // template:begin authn:grpc-services-scopes-field
@@ -104,11 +104,6 @@ pub struct Services {
     // template:begin service-auth:grpc-services-callers-field
     pub(crate) caller_rules: crate::service_auth::CallerRules,
     // template:end service-auth:grpc-services-callers-field
-}
-
-fn same_methods(previous: &[(String, CallType)], incoming: &[(String, CallType)]) -> bool {
-    previous == incoming
-        || previous.iter().collect::<HashSet<_>>() == incoming.iter().collect::<HashSet<_>>()
 }
 
 impl Services {
@@ -142,7 +137,8 @@ impl Services {
     ) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
             .map_err(Error::DecodeDescriptorSet)?;
-        let mut pending_descriptions: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
+        let mut pending_descriptions: HashMap<String, BTreeMap<String, CallType>> =
+            HashMap::default();
         for file in set.file {
             let package = file.package.as_deref().unwrap_or_default();
             for service in file.service {
@@ -152,7 +148,7 @@ impl Services {
                 } else {
                     format!("{package}.{name}")
                 };
-                let methods: Vec<_> = service
+                let methods: BTreeMap<_, _> = service
                     .method
                     .into_iter()
                     .map(|method| {
@@ -165,7 +161,7 @@ impl Services {
                     .get(&name)
                     .or_else(|| self.described.get(&name))
                 {
-                    Some(previous) if !same_methods(previous, &methods) => {
+                    Some(previous) if previous != &methods => {
                         return Err(Error::ConflictingServiceDescription(name));
                     }
                     Some(_) => {}
@@ -259,7 +255,7 @@ impl Services {
                 && self
                     .described
                     .get(rpc.service)
-                    .is_some_and(|methods| methods.iter().any(|(known, _)| known == rpc.method))
+                    .is_some_and(|methods| methods.contains_key(rpc.method))
         })
     }
 
@@ -357,7 +353,7 @@ impl Services {
         if self.caller_rules.contains_key(path) {
             return Err(Error::DuplicateCallerRule(path.to_owned()));
         }
-        let mut names: Vec<infra_serviceauth::ServiceName> = Vec::with_capacity(callers.len());
+        let mut names = foldhash::HashSet::with_capacity(callers.len());
         for caller in callers {
             let name = infra_serviceauth::ServiceName::parse(caller).map_err(|source| {
                 Error::InvalidCallerRule {
@@ -365,13 +361,11 @@ impl Services {
                     source,
                 }
             })?;
-            if names.contains(&name) {
+            if !names.insert(name) {
                 return Err(Error::DuplicateCallerName(path.to_owned()));
             }
-            names.push(name);
         }
-        self.caller_rules
-            .insert(path.to_owned(), names.into_boxed_slice());
+        self.caller_rules.insert(path.to_owned(), names);
         Ok(())
     }
 
@@ -395,10 +389,10 @@ mod tests {
             .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
             .unwrap();
         let echo = &services.described["example.v1.EchoService"];
-        assert!(echo.contains(&("Unary".to_owned(), CallType::Unary)));
-        assert!(echo.contains(&("ClientStream".to_owned(), CallType::ClientStream)));
-        assert!(echo.contains(&("ServerStream".to_owned(), CallType::ServerStream)));
-        assert!(echo.contains(&("BidiStream".to_owned(), CallType::BidiStream)));
+        assert_eq!(echo.get("Unary"), Some(&CallType::Unary));
+        assert_eq!(echo.get("ClientStream"), Some(&CallType::ClientStream));
+        assert_eq!(echo.get("ServerStream"), Some(&CallType::ServerStream));
+        assert_eq!(echo.get("BidiStream"), Some(&CallType::BidiStream));
     }
 
     // template:begin authn:grpc-services-test-reflection-scopes

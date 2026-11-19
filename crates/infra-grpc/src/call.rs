@@ -36,6 +36,16 @@ pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the call returns"
+)]
+pub(crate) fn check_open(context: &OperationContext) -> Result<(), axum::response::Response> {
+    context
+        .check()
+        .map_err(|reason| stopped_status(reason).into_http())
+}
+
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
     tonic::Status::from_header_map(headers)
@@ -168,6 +178,39 @@ impl<B: Body> ServerState<B> {
                 *self = stage;
                 Poll::Ready(None)
             }
+        }
+    }
+}
+
+impl<B> ServerState<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
+        let Self::Active(active) = self else {
+            return (self.pop_terminal(), None);
+        };
+        if active.deadline.is_some_and(Deadline::expired) {
+            return self.cut_off(&deadline_status());
+        }
+        register_waker(&mut active.waker, cx.waker());
+        let inner = {
+            let _entered = active.call.span().enter();
+            let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                Pin::new(&mut active.body).poll_frame(cx)
+            }))
+        };
+        match inner {
+            Ok(_) if self.is_expired() => self.cut_off(&deadline_status()),
+            Ok(polled) => {
+                let finalizer = self.close_if_terminal(&polled);
+                (polled, finalizer)
+            }
+            Err(_panic) => self.cut_off(&internal_status()),
         }
     }
 }
@@ -327,34 +370,7 @@ where
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
         let this = self.get_mut();
         this.poll_stop_watcher(cx);
-        let mut state = this.state.lock();
-        let (polled, finalizer) = if state.is_expired() {
-            state.cut_off(&deadline_status())
-        } else {
-            let ServerState::Active(active) = &mut *state else {
-                return state.pop_terminal();
-            };
-            register_waker(&mut active.waker, cx.waker());
-            let inner = {
-                let _entered = active.call.span().enter();
-                let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
-                std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Pin::new(&mut active.body).poll_frame(cx)
-                }))
-            };
-            match inner {
-                Ok(polled) => {
-                    if state.is_expired() {
-                        state.cut_off(&deadline_status())
-                    } else {
-                        let finalizer = state.close_if_terminal(&polled);
-                        (polled, finalizer)
-                    }
-                }
-                Err(_panic) => state.cut_off(&internal_status()),
-            }
-        };
-        drop(state);
+        let (polled, finalizer) = this.state.lock().poll_next(cx);
         if let Some(finalizer) = finalizer {
             this.stop_watcher = None;
             finalizer.emit();
