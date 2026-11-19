@@ -98,11 +98,8 @@ impl<E: From<TxError>> TxModeExt<E> for () {
         Ok(())
     }
 
-    fn check_before_commit(
-        &mut self,
-        _: &mut TransactionObservation,
-    ) -> impl Future<Output = Result<(), E>> + Send {
-        async { Ok(()) }
+    async fn check_before_commit(&mut self, _: &mut TransactionObservation) -> Result<(), E> {
+        Ok(())
     }
 }
 
@@ -123,17 +120,15 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
         Ok(())
     }
 
-    fn check_before_commit(
+    async fn check_before_commit(
         &mut self,
         observation: &mut TransactionObservation,
-    ) -> impl Future<Output = Result<(), E>> + Send {
-        async move {
-            if self.remaining_ms().await.is_none() {
-                observation.end(TransactionOutcome::RolledBack);
-                return Err(OperationDeadlineElapsed.into());
-            }
-            Ok(())
+    ) -> Result<(), E> {
+        if self.remaining_ms().await.is_none() {
+            observation.end(TransactionOutcome::RolledBack);
+            return Err(OperationDeadlineElapsed.into());
         }
+        Ok(())
     }
 }
 
