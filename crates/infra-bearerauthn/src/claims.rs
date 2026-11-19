@@ -610,7 +610,7 @@ mod tests {
 
     fn verify_registered_claims(
         policy: &ClaimPolicy,
-        extra: serde_json::Value,
+        extra: &serde_json::Value,
     ) -> Result<u64, VerificationReason> {
         let mut claims = serde_json::json!({
             "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
@@ -703,7 +703,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                verify_registered_claims(&single_audience, extra.clone()),
+                verify_registered_claims(&single_audience, &extra),
                 expected,
                 "{extra}"
             );
@@ -726,7 +726,10 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                verify_registered_claims(&multiple_audiences, serde_json::json!({"aud": audience})),
+                verify_registered_claims(
+                    &multiple_audiences,
+                    &serde_json::json!({"aud": audience})
+                ),
                 expected,
                 "{audience}"
             );
