@@ -178,12 +178,10 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
-        let sent = {
-            let open = self.shared.closed.read();
-            open.is_some().then(|| self.sender.try_send(record))
-        };
-        match sent {
+        let open = self.shared.closed.read();
+        match open.is_some().then(|| self.sender.try_send(record)) {
             Some(Ok(())) => {
+                drop(open);
                 if self.sender.len() >= DEEP_QUEUE_RECORDS {
                     self.writer.unpark();
                 }
@@ -751,8 +749,9 @@ mod tests {
         gate.entered
             .recv_timeout(TEST_TIMEOUT)
             .expect("writer entered sink");
-        for _ in 0..512 {
-            output.submit(record(b"queued\n"));
+        let queued = numbered(QUEUE_RECORDS);
+        for line in &queued {
+            output.submit(record(line.as_bytes()));
         }
         guard.begin_shutdown();
         output.submit(record(b"terminal\n"));
@@ -765,6 +764,10 @@ mod tests {
         assert_eq!(reasons, LoggerShutdownReasons::DROPPED);
         assert_eq!(snapshot.dropped.into_array(), [1, 0, 0, 0, 0, 0]);
         assert!(gate.destroyed.load(Ordering::SeqCst));
+        assert_eq!(
+            *gate.bytes.lock().expect("test output mutex"),
+            format!("first\n{}", queued.concat()).as_bytes()
+        );
     }
 
     #[test]
