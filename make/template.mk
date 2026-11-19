@@ -187,8 +187,12 @@ native-transport-regressions: ## Run locked serial native transport regressions
 	$(VALIDATION_LOCK) env CARGO_TARGET_DIR="$${CARGO_TARGET_DIR:-$(CURDIR)/target}" python3 scripts/checks/native_transport.py
 
 INTEGRATION_SUITE ?= retained
+INTEGRATION_COMPILE = @echo "No retained integration suites to compile."
+# template:begin container-integration:make-compile-runner
+INTEGRATION_COMPILE = bash scripts/profiles/integration.sh --compile-$(INTEGRATION_SUITE)
+# template:end container-integration:make-compile-runner
 integration-compile: ## Compile retained integration suites without running them (INTEGRATION_SUITE=retained|services)
-	@if [ -f scripts/profiles/integration.sh ]; then bash scripts/profiles/integration.sh --compile-$(INTEGRATION_SUITE); fi
+	$(INTEGRATION_COMPILE)
 
 # template:begin messaging:make-messaging-profile
 INTEGRATION_LINT_FEATURES += --features infra-messaging/integration
@@ -484,8 +488,13 @@ install-hooks: ## Run `make verify` before every push from this clone; `git push
 	chmod +x "$$hook"; \
 	echo "install-hooks: $$hook runs make verify before each push"
 
+VERIFY_TEST_MODULES := scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py
+# template:begin profile-runner-tests:make-verify-tests
+VERIFY_TEST_MODULES += scripts/tests/test_profile_runners.py
+# template:end profile-runner-tests:make-verify-tests
+
 verify-check: ## Self-test of the verification router, checks, and image scripts
-	python3 -m unittest scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py $(wildcard scripts/tests/test_profile_runners.py)
+	python3 -m unittest $(VERIFY_TEST_MODULES)
 	@if test -f make/source.mk; then python3 scripts/template/matrix.py --self-test && bash scripts/template/check_init.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier

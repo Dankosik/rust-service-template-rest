@@ -282,6 +282,7 @@ _PROFILE_SECTION_ORDER = (
     "service-test-tempfile",
     "integration",
     "container-integration",
+    "profile-runner-tests",
     "outbox",
     "cache",
     "object-storage",
@@ -524,14 +525,10 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         or inputs.object_storage == "s3"
     ):
         selected.add("integration")
-    if (
-        inputs.database == "postgres"
-        or inputs.messaging == "nats-jetstream"
-        or inputs.cache == "redis"
-        or inputs.object_storage == "s3"
-        or inputs.outbound_auth == "oauth2-client-credentials"
-    ):
+    if "integration" in selected or inputs.outbound_auth == "oauth2-client-credentials":
         selected.add("container-integration")
+    if selected & {"grpc", "container-integration"}:
+        selected.add("profile-runner-tests")
     if inputs.webhooks == "durable" or inputs.inbound_webhooks == "standard-webhooks":
         selected.add("webhooks-common")
     if inputs.webhooks == "durable":

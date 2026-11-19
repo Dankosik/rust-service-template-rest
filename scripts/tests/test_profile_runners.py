@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
+# template:begin container-integration:imports-http
 import http.server
+import threading
+# template:end container-integration:imports-http
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 
@@ -57,7 +59,7 @@ class ProfileRunners(unittest.TestCase):
             check=False,
         )
 
-    @unittest.skipUnless((ROOT / "scripts/profiles/grpc_check.sh").is_file(), "gRPC profile removed")
+    # template:begin grpc:grpc-runner-test
     def test_grpc_base_absence_requires_a_readable_tree(self) -> None:
         shutil.copy(ROOT / "scripts/profiles/grpc_check.sh", self.root / "scripts/profiles/grpc_check.sh")
         (self.root / "scripts/profiles/grpc_generate.sh").write_text('mkdir -p "$1"\n', encoding="utf-8")
@@ -101,8 +103,9 @@ class ProfileRunners(unittest.TestCase):
         result = self.run_profile_script("grpc_check.sh", GRPC_BASE_REF="HEAD", BUF="buf")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("first addition", result.stdout)
+    # template:end grpc:grpc-runner-test
 
-    @unittest.skipUnless((ROOT / "scripts/profiles/integration.sh").is_file(), "integration runner removed")
+    # template:begin container-integration:integration-runner-tests
     def test_database_proof_requires_profile_only_for_owned_fixtures(self) -> None:
         shutil.copy(ROOT / "scripts/profiles/integration.sh", self.root / "scripts/profiles/integration.sh")
         (self.root / "crates/infra-postgres").mkdir(parents=True)
@@ -148,7 +151,6 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
                 self.assertEqual("cargo" in recorded, success)
                 self.assertEqual("compose up -d --wait nats" in recorded, nats)
 
-    @unittest.skipUnless((ROOT / "scripts/profiles/integration.sh").is_file(), "integration runner removed")
     def test_compile_retained_and_docker_refusal_modes(self) -> None:
         shutil.copy(ROOT / "scripts/profiles/integration.sh", self.root / "scripts/profiles/integration.sh")
         self.executable(self.root / "bin/cargo", 'printf "%s\\n" "$*" >> cargo-calls')
@@ -190,7 +192,6 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
         bad_compile_url = self.run_profile_script("integration.sh", "messaging", NATS_URL="compile-only")
         self.assertEqual(bad_compile_url.returncode, 2)
 
-    @unittest.skipUnless((ROOT / "scripts/profiles/integration.sh").is_file(), "integration runner removed")
     def test_oauth_wait_http_ready_ignores_proxy_and_stops_when_container_exits(self) -> None:
         shutil.copy(ROOT / "scripts/profiles/integration.sh", self.root / "scripts/profiles/integration.sh")
         (self.root / "crates/infra-oauth2-client-credentials").mkdir(parents=True, exist_ok=True)
@@ -228,6 +229,7 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
         )
         dead = self.run_profile_script("integration.sh", "oauth")
         self.assertEqual(dead.returncode, 1)
+    # template:end container-integration:integration-runner-tests
 
 
 if __name__ == "__main__":

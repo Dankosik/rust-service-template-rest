@@ -15,6 +15,10 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+PROFILE_SELF_TEST = "scripts/tests/test_profile_runners.py"
+SYNC_SCRIPT = "scripts/template/sync.py"
+MANIFEST = "template-owned.paths"
+
 
 def _clean_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
@@ -45,14 +49,15 @@ def commit_paths(repo: Path, message: str, *paths: str) -> None:
 
 
 def sync(source: Path, target: Path, mode: str, instructions_only: bool = False, *, runner: Path | None = None) -> subprocess.CompletedProcess[str]:
+    cwd = target if runner == target else source
     args = [
         sys.executable, "-B", "-E",
-        os.fspath((runner or source) / "scripts/template/sync.py"),
-        mode, "--from", os.fspath(source), "--repo", os.fspath(target),
+        os.fspath((runner or source) / SYNC_SCRIPT),
+        mode, "--from", os.fspath(source), "--repo", "." if cwd == target else os.fspath(target),
     ]
     if instructions_only:
         args.append("--instructions-only")
-    return run(args, cwd=source)
+    return run(args, cwd=cwd)
 
 
 def tree_state(root: Path) -> str:
@@ -166,6 +171,8 @@ def initialize(
     http_idempotency: str | None = None,
     *,
     database: str = "none",
+    agent_harness: str = "claude",
+    outbound_auth: str | None = None,
     jobs: str | None = None,
     webhooks: str | None = None,
     inbound_webhooks: str | None = None,
@@ -174,12 +181,14 @@ def initialize(
         sys.executable, "-B", "-E", os.fspath(source / "scripts/template/init.py"), "--repo", os.fspath(target),
         "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
         "--description", "Canary API", "--codeowner", "@example/platform", "--database", database,
-        "--agent-harness", "claude",
+        "--agent-harness", agent_harness,
     ]
     if authn is not None:
         command.extend(("--authn", authn))
     if outbound_http is not None:
         command.extend(("--outbound-http", outbound_http))
+    if outbound_auth is not None:
+        command.extend(("--outbound-auth", outbound_auth))
     if http_idempotency is not None:
         command.extend(("--http-idempotency", http_idempotency))
     if jobs is not None:
@@ -189,6 +198,191 @@ def initialize(
     if inbound_webhooks is not None:
         command.extend(("--inbound-webhooks", inbound_webhooks))
     return run(command, cwd=source)
+
+
+def require_result(result: subprocess.CompletedProcess[str], code: int | None, message: str = "") -> str:
+    output = result.stdout + result.stderr
+    expected = result.returncode != 0 if code is None else result.returncode == code
+    if not expected or message not in output:
+        raise AssertionError(f"{result.args}: expected code {code} and {message!r}, got {result.returncode}\n{output}")
+    return result.stdout
+
+
+def git(repo: Path, *args: str) -> str:
+    return require_result(run(["git", *args], cwd=repo), 0)
+
+
+def make_sync(source: Path, target: Path, mode: str, *, instructions_only: bool = False) -> subprocess.CompletedProcess[str]:
+    return run([
+        "make", "template-sync", f"TEMPLATE_SOURCE={source}", f"SYNC_MODE={mode}",
+        f"SYNC_FLAGS={'--instructions-only' if instructions_only else ''}",
+    ], cwd=target)
+
+
+def changed_paths(target: Path) -> set[str]:
+    tracked = git(target, "diff", "--no-renames", "--name-only", "-z", "HEAD").split("\0")
+    untracked = git(target, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    return set(filter(None, tracked + untracked))
+
+
+def assert_profile_self_test(target: Path, *, delivered: bool) -> None:
+    test_path = target / PROFILE_SELF_TEST
+    test_ok = test_path.is_file() if delivered else not test_path.exists()
+    owned = PROFILE_SELF_TEST in (target / MANIFEST).read_text(encoding="utf-8").splitlines()
+    if test_path.is_symlink() or not test_ok or owned != delivered:
+        raise AssertionError(f"{target.name}: expected {PROFILE_SELF_TEST} delivery={delivered} in the worktree and manifest")
+
+
+def assert_unchanged(target: Path, expected: dict[str, str]) -> None:
+    for relative, checksum in expected.items():
+        path = target / relative
+        if path.is_symlink() or not path.is_file() or digest(path) != checksum:
+            raise AssertionError(f"{target.name}: sync changed protected file {relative}")
+
+
+def prepare_service_extensions(target: Path, *, custom_ci: bool) -> dict[str, str]:
+    ci_mode = "github-actions" if custom_ci else "none"
+    service_make = target / "make/service.mk"
+    service_make.write_text(
+        service_make.read_text(encoding="utf-8")
+        + f"\nREPOSITORY_CI := {ci_mode}\ncanary-local-ci:\n\t@printf '%s\\n' '$(REPOSITORY_CI)'\n",
+        encoding="utf-8",
+    )
+    extensions = {
+        ".railway/canary.toml": 'profile = "canary"\n',
+        "scripts/service/canary.sh": "#!/bin/sh\nexit 0\n",
+        ".agents/skills/canary-local/.service-owned": "",
+        ".agents/skills/canary-local/SKILL.md": "---\nname: canary-local\ndescription: Local sync canary skill.\n---\n",
+    }
+    if custom_ci:
+        extensions[".github/workflows/canary-local.yml"] = (
+            "name: Local workflow\non: [push]\njobs:\n  verify:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/checkout@v4\n      - run: make verify-check\n"
+        )
+        integration = target / "scripts/profiles/integration.sh"
+        extensions["scripts/profiles/integration.sh"] = integration.read_text(encoding="utf-8") + "\n# local CI profile\n"
+    for relative, contents in extensions.items():
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    settings_path = ".claude/settings.json"
+    settings = json.loads((target / settings_path).read_text(encoding="utf-8"))
+    settings["env"]["CANARY_LOCAL_SETTING"] = "keep"
+    (target / settings_path).write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return {path: digest(target / path) for path in (*extensions, "make/service.mk", "template.lock", settings_path)}
+
+
+def adopt_from_previous(source: Path, target: Path, previous: Path, *, custom_ci: bool) -> dict[str, str]:
+    label = target.name
+    protected = prepare_service_extensions(target, custom_ci=custom_ci)
+    if digest(target / SYNC_SCRIPT) != digest(previous / SYNC_SCRIPT):
+        raise AssertionError(f"{label}: expected the previous revision's installed sync client")
+    assert_profile_self_test(target, delivered=True)
+    instructions = target / "AGENTS.md"
+    instructions.write_bytes(instructions.read_bytes() + b"\nCommitted legacy canary instructions drift.\n")
+    commit(target, "retain service-local extensions and create instruction drift")
+
+    owned = "scripts/verify/runner.py"
+    tooling = target / owned
+    tooling.write_bytes(tooling.read_bytes() + b"\n# legacy canary drift\n")
+    non_instruction_paths = {path: digest(target / path) for path in (*protected, MANIFEST, PROFILE_SELF_TEST, SYNC_SCRIPT, owned)}
+    require_result(make_sync(source, target, "--check", instructions_only=True), None, "template sync: drift AGENTS.md")
+    require_result(make_sync(source, target, "--apply", instructions_only=True), 0, "mode=instructions-only applied")
+    assert_unchanged(target, non_instruction_paths)
+    commit_paths(target, "adopt instructions only", *sorted(changed_paths(target) - {owned}))
+    require_result(make_sync(source, target, "--check", instructions_only=True), 0, "mode=instructions-only parity")
+
+    before = tree_state(target)
+    require_result(sync(source, target, "--check", runner=target), 2, f"dirty selected target path: {owned}")
+    if tree_state(target) != before:
+        raise AssertionError(f"{label}: dirty-target refusal changed the worktree")
+    commit_paths(target, "commit legacy portable drift", owned)
+    head = git(target, "rev-parse", "HEAD").strip()
+    before = tree_state(target)
+    drift = require_result(sync(source, target, "--check", runner=target), 1, f"template sync: drift {owned}")
+    require_result(make_sync(source, target, "--check"), None, f"template sync: drift {owned}")
+    planned = {line.removeprefix("template sync: drift ") for line in drift.splitlines()}
+    if tree_state(target) != before:
+        raise AssertionError(f"{label}: check for committed drift changed the worktree")
+
+    if not custom_ci:
+        if PROFILE_SELF_TEST not in planned:
+            raise AssertionError(f"{label}: the retired profile self-test was absent from the announced plan")
+        excludes = Path(git(target, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+        with excludes.open("ab") as stream:
+            excludes_size = stream.tell()
+            stream.write(f"\n/{PROFILE_SELF_TEST}\n".encode())
+        require_result(sync(source, target, "--apply", runner=target), 2, f"ignored destination overlaps selected sync path: {PROFILE_SELF_TEST}")
+        with excludes.open("r+b") as stream:
+            stream.truncate(excludes_size)
+        if tree_state(target) != before:
+            raise AssertionError(f"{label}: ignored collision changed the worktree")
+
+    require_result(make_sync(source, target, "--apply"), 0, "mode=full applied")
+    changed = changed_paths(target)
+    if owned not in changed or changed - planned or git(target, "diff", "--cached", "--name-only"):
+        raise AssertionError(f"{label}: full apply did not leave only the announced paths uncommitted")
+    if git(target, "rev-parse", "HEAD").strip() != head or digest(tooling) != digest(source / owned):
+        raise AssertionError(f"{label}: full sync failed to replace {owned} while leaving HEAD unchanged")
+    assert_profile_self_test(target, delivered=custom_ci)
+    assert_profile_output(source, target, "none", "bounded" if custom_ci else "none")
+    assert_unchanged(target, protected)
+    require_result(run(["make", "canary-local-ci"], cwd=target), 0, "github-actions\n" if custom_ci else "none\n")
+    commit(target, "adopt portable tooling from the new source")
+    if digest(target / SYNC_SCRIPT) != digest(source / SYNC_SCRIPT):
+        raise AssertionError(f"{label}: the installed client differs from the new source")
+    require_result(make_sync(source, target, "--check"), 0, "mode=full parity")
+    require_result(sync(source, target, "--check", runner=target), 0, "mode=full parity")
+    print(f"template sync canary: {label} previous client and installed parity pass")
+    return protected
+
+
+def check_previous(source: Path, previous_revision: str) -> None:
+    revision = git(source, "rev-parse", "--verify", "--end-of-options", f"{previous_revision}^{{commit}}").strip()
+    with tempfile.TemporaryDirectory(prefix="template-sync-previous-") as temporary:
+        work = Path(temporary)
+        previous = work / "previous"
+        clone(source, previous)
+        git(previous, "checkout", "--detach", revision)
+
+        minimal = work / "no-ci"
+        clone(previous, minimal)
+        require_result(initialize(previous, minimal, None, agent_harness="all"), 0)
+        commit(minimal, "initialize the previous minimal installation")
+        compatible = work / "compatible-initialized-source"
+        clone(minimal, compatible)
+        markerless = work / "previous-markerless-source"
+        clone(compatible, markerless)
+        git(markerless, "rm", "--", "template.lock")
+        commit(markerless, "freeze the previous markerless portable layout")
+
+        custom = work / "custom-ci"
+        clone(previous, custom)
+        require_result(initialize(previous, custom, None, outbound_auth="oauth2-client-credentials"), 0)
+        adopt_from_previous(source, custom, previous, custom_ci=True)
+        protected = adopt_from_previous(source, minimal, previous, custom_ci=False)
+
+        before = tree_state(minimal)
+        require_result(sync(custom, minimal, "--apply", runner=minimal), 2, "initialized sync source has different capability profiles")
+        if tree_state(minimal) != before:
+            raise AssertionError("initialized source with different capabilities changed the target")
+
+        for old_source in (markerless, compatible):
+            require_result(sync(old_source, minimal, "--apply", runner=minimal), 0, "mode=full applied")
+            assert_profile_self_test(minimal, delivered=True)
+            if digest(minimal / PROFILE_SELF_TEST) != digest(old_source / PROFILE_SELF_TEST):
+                raise AssertionError(f"{old_source.name}: full sync failed to restore the previous profile self-test")
+            assert_profile_output(source, minimal, "none", "none")
+            assert_unchanged(minimal, protected)
+            commit(minimal, f"adopt {old_source.name}")
+            require_result(sync(old_source, minimal, "--check", runner=minimal), 0, "mode=full parity")
+            require_result(make_sync(source, minimal, "--apply"), 0, "mode=full applied")
+            assert_profile_self_test(minimal, delivered=False)
+            assert_unchanged(minimal, protected)
+            commit(minimal, "return to the new portable source")
+            require_result(sync(source, minimal, "--check", runner=minimal), 0, "mode=full parity")
+            print(f"template sync canary: {old_source.name} rollback and re-adoption pass")
 
 
 def check(source: Path) -> None:
@@ -445,8 +639,13 @@ def check(source: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--previous-revision", help="run the installed-client compatibility canary against this Git revision")
     args = parser.parse_args()
-    check(args.source.resolve())
+    source = args.source.resolve()
+    if args.previous_revision:
+        check_previous(source, args.previous_revision)
+    else:
+        check(source)
     return 0
 
 

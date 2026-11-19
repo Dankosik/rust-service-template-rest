@@ -581,7 +581,58 @@ def _image_inputs_checker(source: Path):
     return _IMAGE_INPUTS_CHECKERS[source]
 
 
-def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
+def _check_profile_runner_tests(tree: Path, profiles: dict[str, str], grpc: int, integrations: int) -> None:
+    relative = "scripts/tests/test_profile_runners.py"
+    module = tree / relative
+    retained = bool(grpc or integrations)
+    _emit("profile-runner-plan", profiles=profiles, grpc_cases=grpc, integration_cases=integrations)
+    manifest = (tree / "template-owned.paths").read_text(encoding="utf-8").splitlines()
+    if module.is_file() != retained or (relative in manifest) != retained:
+        raise AssertionError(f"profile test module or ownership disagrees with {profiles}")
+    if retained:
+        module.rename(module.with_suffix(".held"))
+    plan = subprocess.check_output(["make", "-n", "verify-check"], cwd=tree, text=True)
+    if (relative in plan.split()) != retained:
+        raise AssertionError(f"verify-check must name each applicable module even when missing: {plan}")
+    if retained:
+        module.with_suffix(".held").rename(module)
+    if not integrations:
+        output = subprocess.check_output(["make", "integration-compile"], cwd=tree, text=True)
+        if "No retained integration suites" not in output:
+            raise AssertionError(f"empty integration selection has no explanation: {output}")
+    completed = []
+    if retained:
+        command = [sys.executable, "-B", "-m", "unittest", "-v", relative]
+        result = subprocess.run(command, cwd=tree, capture_output=True, text=True)
+        completed = re.findall(r"^(test_\w+) .* \.\.\. ok$", result.stderr, re.M)
+        if result.returncode or "skipped=" in result.stderr:
+            raise AssertionError(f"profile runner verification for {profiles} passed {len(completed)} cases:\n{result.stderr}")
+        if grpc and integrations:
+            runners = [tree / "scripts/profiles" / name for name in ("grpc_check.sh", "integration.sh")]
+            for runner in runners:
+                runner.rename(runner.with_suffix(".held"))
+            missing = subprocess.run(command, cwd=tree, capture_output=True, text=True)
+            if (
+                not missing.returncode or "skipped=" in missing.stderr
+                or not all(runner.name in missing.stderr for runner in runners)
+            ):
+                raise AssertionError(f"missing applicable runners must fail their tests: {missing.stderr}")
+            compile_missing = subprocess.run(["make", "integration-compile"], cwd=tree, capture_output=True, text=True)
+            if not compile_missing.returncode or "integration.sh" not in compile_missing.stderr:
+                raise AssertionError("integration-compile accepted a missing applicable runner")
+            for runner in runners:
+                runner.with_suffix(".held").rename(runner)
+    grpc_done = sum(name.startswith("test_grpc_") for name in completed)
+    integrations_done = len(completed) - grpc_done
+    if (grpc_done, integrations_done) != (grpc, integrations):
+        raise AssertionError(f"expected {grpc}/{integrations} gRPC/integration tests for {profiles}, passed {completed}")
+    _emit("profile-runner-tests", profiles=profiles, grpc_applicable=bool(grpc), grpc_passed=grpc_done,
+          integration_applicable=bool(integrations), integration_passed=integrations_done)
+
+
+def _project(
+    source: Path, candidate: str, initializer, inputs, destination: Path, *, runner_cases: tuple[int, int] | None = None,
+) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
     source_crates = _declared_crates(destination)
     profiles = initializer._profile_data(destination)
@@ -627,6 +678,8 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         "crates/shared-rules/src/rfc7515.rs",
         "crates/shared-rules/src/secret_file.rs",
     ))
+    if runner_cases is not None:
+        _check_profile_runner_tests(destination, inputs.profiles(), *runner_cases)
     return nodes
 
 
@@ -653,7 +706,8 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
             outbound_auth="oauth2-client-credentials",
         )
         with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
-            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree",
+                             runner_cases=(0, 3) if index == 1 else None)
         _assert_profile_output(initializer, nodes, "outbound-auth", outbound_paths)
         _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
         if database == "postgres":
@@ -675,13 +729,14 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
         )
 
 
-def _check_messaging_without_jobs(source: Path, candidate: str, initializer, work: Path) -> None:
+def _check_messaging_without_jobs(source: Path, candidate: str, initializer, work: Path, database: str) -> None:
     inputs = _inputs(
-        initializer, "postgres", "none", "none", "none", "none", "none", "none",
+        initializer, database, "none", "none", "none", "none", "none", "none",
         "core", messaging="nats-jetstream",
     )
     with tempfile.TemporaryDirectory(prefix="messaging-without-jobs-", dir=work) as selection:
-        nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+        nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree",
+                         runner_cases=(0, 3) if database == "none" else None)
     _assert_no_jobs_output(initializer, nodes, _jobs_output_paths(source, initializer))
     worker_paths = frozenset(
         relative.rstrip("/") for relative in initializer._profile_data(source).removals["worker"]
@@ -737,7 +792,8 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
             "core", outbound_auth=outbound_auth, grpc="enabled", messaging=messaging, outbox=outbox,
         )
         with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
-            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree",
+                             runner_cases={1: (1, 0), 4: (1, 3)}.get(index))
         _assert_profile_output(initializer, nodes, "grpc", grpc_paths)
         _assert_messaging_output(initializer, nodes, messaging=messaging == "nats-jetstream", outbox=outbox == "postgres")
         if outbound_auth == "oauth2-client-credentials":
@@ -785,7 +841,8 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             "core", outbound_auth=outbound_auth, grpc=grpc, messaging=messaging, outbox=outbox, cache="redis",
         )
         with tempfile.TemporaryDirectory(prefix=f"cache-{index}-", dir=work) as selection:
-            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree",
+                             runner_cases=(0, 3) if index == 1 else None)
         _assert_profile_output(initializer, nodes, "cache", cache_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
         _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
@@ -860,9 +917,10 @@ def _project_selection(
         ),
         dir=work,
     ) as selection:
-        nodes = _project(
-            source, candidate, initializer, inputs, Path(selection) / "tree"
-        )
+        runner_cases = None
+        if all(value == "none" for value in (authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks)):
+            runner_cases = (0, 3 if database == "postgres" else 0)
+        nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree", runner_cases=runner_cases)
     manifest = nodes.get("test/Cargo.toml")
     dev = {}
     if manifest is not None:
@@ -1031,7 +1089,8 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
             object_storage="s3",
         )
         with tempfile.TemporaryDirectory(prefix=f"object-storage-{index}-", dir=work) as selection:
-            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
+            nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree",
+                             runner_cases=(0, 3) if index == 1 else None)
         _assert_profile_output(initializer, nodes, "object-storage", object_storage_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
         _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
@@ -1281,7 +1340,8 @@ def check(source: Path) -> None:
                     raise initializer.Refusal(refusal)
         _check_harness_projections(source, candidate, initializer, work, exclusions)
         _check_oauth_projections(source, candidate, initializer, work)
-        _check_messaging_without_jobs(source, candidate, initializer, work)
+        for database in DATABASES:
+            _check_messaging_without_jobs(source, candidate, initializer, work, database)
         _check_grpc_projections(source, candidate, initializer, work)
         _check_cache_projections(source, candidate, initializer, work)
         _check_object_storage_projections(source, candidate, initializer, work)
