@@ -7,13 +7,18 @@ use prost::Message as _;
 use tonic::server::NamedService as _;
 use tonic::service::LayerExt as _;
 use tonic_reflection::pb::{v1, v1alpha};
-use tower::util::{BoxCloneSyncServiceLayer, MapRequestLayer};
+use tower::util::{BoxCloneSyncService, BoxCloneSyncServiceLayer, MapRequestLayer};
 use tower::{Layer, Service};
 
-use crate::Error;
 use crate::health::HealthServer;
 use crate::observe::MethodMetrics;
 use crate::protocol::{method_path, split_method_path};
+use crate::router::{Application, Authentication, BusinessAuth, ServerOptions};
+#[allow(
+    unused_imports,
+    reason = "optional auth profiles use PolicyKind when registering method policies"
+)]
+use crate::{Error, PolicyKind};
 
 mod reflection;
 
@@ -22,6 +27,11 @@ const REFLECTION_DESCRIPTORS: [&[u8]; 3] = [
     v1::FILE_DESCRIPTOR_SET,
     v1alpha::FILE_DESCRIPTOR_SET,
     tonic_health::pb::FILE_DESCRIPTOR_SET,
+];
+
+pub(crate) const REFLECTION_PATHS: [&str; 2] = [
+    "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+    "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,32 +88,133 @@ impl Methods {
     }
 }
 
-pub const REFLECTION_PATHS: [&str; 2] = [
-    "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
-    "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-];
+pub type ListenerService =
+    BoxCloneSyncService<axum::extract::Request, axum::response::Response, Infallible>;
 
 pub(crate) type ListenerLayer = BoxCloneSyncServiceLayer<
-    axum::Router,
+    ListenerService,
     axum::extract::Request,
     axum::response::Response,
     Infallible,
 >;
 
+pub(crate) struct BuiltServices {
+    pub(crate) routes: tonic::service::Routes,
+    pub(crate) listener_layers: Vec<ListenerLayer>,
+    pub(crate) names: BTreeSet<&'static str>,
+    pub(crate) methods: Arc<Methods>,
+    pub(crate) reflection: bool,
+    pub(crate) authentication: BusinessAuth,
+}
+
 #[derive(Debug, Default)]
 pub struct Services {
-    pub(crate) listener_layer: Option<ListenerLayer>,
-    pub(crate) routes: tonic::service::RoutesBuilder,
-    pub(crate) names: BTreeSet<&'static str>,
+    listener_layers: Vec<ListenerLayer>,
+    routes: tonic::service::RoutesBuilder,
+    names: BTreeSet<&'static str>,
     described: HashMap<String, BTreeMap<String, CallType>>,
     descriptor_sets: Vec<&'static [u8]>,
-    pub(crate) reflection: bool,
+    reflection: bool,
     // template:begin authn:grpc-services-scopes-field
-    pub(crate) scopes: crate::authn::Scopes,
+    scopes: crate::authn::Scopes,
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
-    pub(crate) caller_rules: crate::service_auth::CallerRules,
+    caller_rules: crate::service_auth::CallerRules,
     // template:end service-auth:grpc-services-callers-field
+}
+
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "optional auth profiles expose policy registration methods on this handle"
+)]
+pub struct ServiceRegistration<'a> {
+    services: &'a mut Services,
+    service_name: &'static str,
+}
+
+impl ServiceRegistration<'_> {
+    // template:begin authn:grpc-services-require-scopes
+    pub fn require_scopes(&mut self, method: &str, scopes: &[&str]) -> Result<&mut Self, Error> {
+        let path = method_path(self.service_name, method);
+        self.services.register_scopes(&path, scopes, false)?;
+        Ok(self)
+    }
+
+    pub fn require_scopes_for_delegation(
+        &mut self,
+        method: &str,
+        scopes: &[&str],
+    ) -> Result<&mut Self, Error> {
+        let path = method_path(self.service_name, method);
+        self.services.register_scopes(&path, scopes, true)?;
+        Ok(self)
+    }
+    // template:end authn:grpc-services-require-scopes
+
+    // template:begin service-auth:grpc-services-allow-callers
+    pub fn allow_callers(&mut self, method: &str, callers: &[&str]) -> Result<&mut Self, Error> {
+        let path = method_path(self.service_name, method);
+        self.services.register_caller_rule(&path, callers)?;
+        Ok(self)
+    }
+    // template:end service-auth:grpc-services-allow-callers
+}
+
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "optional auth profiles expose policy registration methods on this handle"
+)]
+pub struct ReflectionRegistration<'a> {
+    services: &'a mut Services,
+}
+
+impl ReflectionRegistration<'_> {
+    // template:begin authn:grpc-reflection-require-scopes
+    pub fn require_scopes(&mut self, scopes: &[&str]) -> Result<&mut Self, Error> {
+        self.register_scopes(scopes, false)
+    }
+
+    pub fn require_scopes_for_delegation(&mut self, scopes: &[&str]) -> Result<&mut Self, Error> {
+        self.register_scopes(scopes, true)
+    }
+
+    fn register_scopes(&mut self, scopes: &[&str], delegate: bool) -> Result<&mut Self, Error> {
+        for path in REFLECTION_PATHS {
+            if self.services.scopes.contains_key(path) {
+                return Err(Error::DuplicatePolicy {
+                    policy: PolicyKind::ScopeRequirement,
+                    path: path.to_owned(),
+                });
+            }
+            validate_scope_tokens(path, scopes)?;
+        }
+        for path in REFLECTION_PATHS {
+            self.services.register_scopes(path, scopes, delegate)?;
+        }
+        Ok(self)
+    }
+    // template:end authn:grpc-reflection-require-scopes
+
+    // template:begin service-auth:grpc-reflection-allow-callers
+    pub fn allow_callers(&mut self, callers: &[&str]) -> Result<&mut Self, Error> {
+        let mut parsed = Vec::with_capacity(REFLECTION_PATHS.len());
+        for path in REFLECTION_PATHS {
+            if self.services.caller_rules.contains_key(path) {
+                return Err(Error::DuplicatePolicy {
+                    policy: PolicyKind::CallerRule,
+                    path: path.to_owned(),
+                });
+            }
+            parsed.push((path, parse_caller_names(path, callers)?));
+        }
+        for (path, names) in parsed {
+            self.services.caller_rules.insert(path.to_owned(), names);
+        }
+        Ok(self)
+    }
+    // template:end service-auth:grpc-reflection-allow-callers
 }
 
 impl Services {
@@ -112,9 +223,9 @@ impl Services {
         Self::default()
     }
 
-    pub fn set_listener_layer<L>(&mut self, layer: L)
+    pub fn add_listener_layer<L>(&mut self, layer: L) -> &mut Self
     where
-        L: Layer<axum::Router> + Send + Sync + 'static,
+        L: Layer<ListenerService> + Send + Sync + 'static,
         L::Service: Service<axum::extract::Request, Response = axum::response::Response, Error = Infallible>
             + Clone
             + Send
@@ -122,7 +233,8 @@ impl Services {
             + 'static,
         <L::Service as Service<axum::extract::Request>>::Future: Send + 'static,
     {
-        self.listener_layer = Some(ListenerLayer::new(layer));
+        self.listener_layers.push(ListenerLayer::new(layer));
+        self
     }
 
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
@@ -175,7 +287,7 @@ impl Services {
         Ok(())
     }
 
-    pub fn add<S>(&mut self, service: S) -> Result<(), Error>
+    pub fn add<S>(&mut self, service: S) -> Result<ServiceRegistration<'_>, Error>
     where
         S: tower::Service<http::Request<tonic::body::Body>, Error = Infallible>
             + tonic::server::NamedService
@@ -196,14 +308,91 @@ impl Services {
             return Err(Error::DuplicateService(S::NAME));
         }
         self.routes.add_service(service);
-        Ok(())
+        Ok(ServiceRegistration {
+            services: self,
+            service_name: S::NAME,
+        })
     }
 
-    pub fn add_reflection(&mut self) -> Result<(), Error> {
+    pub fn add_reflection(&mut self) -> Result<ReflectionRegistration<'_>, Error> {
         if std::mem::replace(&mut self.reflection, true) {
             return Err(Error::DuplicateService(REFLECTION_SERVICE));
         }
-        Ok(())
+        Ok(ReflectionRegistration { services: self })
+    }
+
+    pub fn build(
+        self,
+        readiness: ::health::ReadinessReader,
+        authentication: Authentication,
+        options: ServerOptions,
+    ) -> Result<Application, Error> {
+        crate::router::build(self, readiness, authentication, options)
+    }
+
+    pub(crate) fn into_built(
+        mut self,
+        authentication: Authentication,
+    ) -> Result<BuiltServices, Error> {
+        if self.reflection {
+            self.attach_reflection()?;
+        }
+        self.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+        let methods = Arc::new(self.methods());
+        // template:begin service-auth:grpc-router-caller-rules
+        if matches!(authentication, Authentication::ServiceTokens(_)) {
+            self.validate_caller_rules()?;
+        } else if !self.caller_rules.is_empty() {
+            return Err(Error::CallerRulesRequireServiceTokens);
+        }
+        // template:end service-auth:grpc-router-caller-rules
+        // template:begin authn:grpc-router-authenticate
+        if matches!(authentication, Authentication::None) {
+            return Err(Error::UnauthenticatedBusinessCalls);
+        }
+        if matches!(authentication, Authentication::Bearer(_)) {
+            self.prepare_scope_requirements()?;
+        } else if self
+            .scopes
+            .values()
+            .any(|rule| rule.delegate || !rule.scopes.is_empty())
+        {
+            return Err(Error::ScopesWithServiceTokens);
+        }
+        // template:end authn:grpc-router-authenticate
+        let Self {
+            listener_layers,
+            routes,
+            names,
+            reflection,
+            // template:begin authn:grpc-router-bearer-destructure
+            scopes,
+            // template:end authn:grpc-router-bearer-destructure
+            // template:begin service-auth:grpc-router-caller-destructure
+            caller_rules,
+            // template:end service-auth:grpc-router-caller-destructure
+            ..
+        } = self;
+        let authentication = match authentication {
+            Authentication::None => BusinessAuth::None,
+            // template:begin authn:grpc-router-bearer-init
+            Authentication::Bearer(verifier) => BusinessAuth::Bearer { verifier, scopes },
+            // template:end authn:grpc-router-bearer-init
+            // template:begin service-auth:grpc-router-caller-init
+            Authentication::ServiceTokens(verifier) => BusinessAuth::ServiceTokens {
+                verifier,
+                caller_rules,
+            },
+            // template:end service-auth:grpc-router-caller-init
+        };
+        Ok(BuiltServices {
+            routes: routes.routes(),
+            listener_layers,
+            names,
+            methods,
+            reflection,
+            authentication,
+        })
     }
 
     pub(crate) fn attach_reflection(&mut self) -> Result<(), Error> {
@@ -239,7 +428,29 @@ impl Services {
             .map_err(Error::BuildReflectionV1Alpha)?;
         let layer = MapRequestLayer::new(reflection::stop_request_body_on_cancellation);
         self.add(layer.named_layer(v1))?;
-        self.add(layer.named_layer(v1alpha))
+        self.add(layer.named_layer(v1alpha))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_ingress_parts(
+        mut self,
+    ) -> (
+        axum::Router,
+        Vec<ListenerLayer>,
+        BTreeSet<&'static str>,
+        Arc<Methods>,
+    ) {
+        self.attach_reflection().unwrap();
+        self.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .unwrap();
+        let methods = Arc::new(self.methods());
+        (
+            self.routes.routes().into_axum_router(),
+            self.listener_layers,
+            self.names,
+            methods,
+        )
     }
 
     #[allow(
@@ -290,19 +501,7 @@ impl Services {
             .find(|path| !has_rule(path))
     }
 
-    // template:begin authn:grpc-services-require-scopes
-    pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
-        self.register_scopes(path, scopes, false)
-    }
-
-    pub fn require_scopes_for_delegation(
-        &mut self,
-        path: &str,
-        scopes: &[&str],
-    ) -> Result<(), Error> {
-        self.register_scopes(path, scopes, true)
-    }
-
+    // template:begin authn:grpc-services-scope-helpers
     fn register_scopes(
         &mut self,
         path: &str,
@@ -310,20 +509,18 @@ impl Services {
         delegate: bool,
     ) -> Result<(), Error> {
         if !self.is_registered_method(path) {
-            return Err(Error::UnregisteredMethodPath(path.to_owned()));
-        }
-        if self.scopes.contains_key(path) {
-            return Err(Error::DuplicateScopeRequirement(path.to_owned()));
-        }
-        if let Some(index) = scopes
-            .iter()
-            .position(|scope| !shared_rules::rfc6749::is_scope_token(scope))
-        {
-            return Err(Error::InvalidScopeToken {
+            return Err(Error::UnregisteredMethod {
+                policy: PolicyKind::ScopeRequirement,
                 path: path.to_owned(),
-                index,
             });
         }
+        if self.scopes.contains_key(path) {
+            return Err(Error::DuplicatePolicy {
+                policy: PolicyKind::ScopeRequirement,
+                path: path.to_owned(),
+            });
+        }
+        validate_scope_tokens(path, scopes)?;
         let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
         self.scopes.insert(
             path.to_owned(),
@@ -332,54 +529,91 @@ impl Services {
         Ok(())
     }
 
-    pub(crate) fn prepare_scope_requirements(&mut self) -> Result<(), Error> {
+    fn prepare_scope_requirements(&mut self) -> Result<(), Error> {
         if self.reflection {
             for path in REFLECTION_PATHS {
                 self.scopes.entry(path.to_owned()).or_default();
             }
         }
         if let Some(path) = self.first_method_without(|path| self.scopes.contains_key(path)) {
-            return Err(Error::MissingScopeRequirement(path));
+            return Err(Error::MissingPolicy {
+                policy: PolicyKind::ScopeRequirement,
+                path,
+            });
         }
         Ok(())
     }
-    // template:end authn:grpc-services-require-scopes
+    // template:end authn:grpc-services-scope-helpers
 
-    // template:begin service-auth:grpc-services-allow-callers
-    pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
+    // template:begin service-auth:grpc-services-caller-helpers
+    fn register_caller_rule(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
         if !self.is_registered_method(path) {
-            return Err(Error::UnregisteredCallerRule(path.to_owned()));
+            return Err(Error::UnregisteredMethod {
+                policy: PolicyKind::CallerRule,
+                path: path.to_owned(),
+            });
         }
         if self.caller_rules.contains_key(path) {
-            return Err(Error::DuplicateCallerRule(path.to_owned()));
+            return Err(Error::DuplicatePolicy {
+                policy: PolicyKind::CallerRule,
+                path: path.to_owned(),
+            });
         }
-        let mut names = foldhash::HashSet::with_capacity_and_hasher(
-            callers.len(),
-            foldhash::fast::RandomState::default(),
-        );
-        for caller in callers {
-            let name = infra_serviceauth::ServiceName::parse(caller).map_err(|source| {
-                Error::InvalidCallerRule {
-                    path: path.to_owned(),
-                    source,
-                }
-            })?;
-            if !names.insert(name) {
-                return Err(Error::DuplicateCallerName(path.to_owned()));
-            }
-        }
+        let names = parse_caller_names(path, callers)?;
         self.caller_rules.insert(path.to_owned(), names);
         Ok(())
     }
 
-    pub(crate) fn validate_caller_rules(&self) -> Result<(), Error> {
+    fn validate_caller_rules(&self) -> Result<(), Error> {
         if let Some(path) = self.first_method_without(|path| self.caller_rules.contains_key(path)) {
-            return Err(Error::MissingCallerRule(path));
+            return Err(Error::MissingPolicy {
+                policy: PolicyKind::CallerRule,
+                path,
+            });
         }
         Ok(())
     }
-    // template:end service-auth:grpc-services-allow-callers
+    // template:end service-auth:grpc-services-caller-helpers
 }
+
+// template:begin authn:grpc-services-validate-scope-tokens
+fn validate_scope_tokens(path: &str, scopes: &[&str]) -> Result<(), Error> {
+    if let Some(index) = scopes
+        .iter()
+        .position(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+    {
+        return Err(Error::InvalidScopeToken {
+            path: path.to_owned(),
+            index,
+        });
+    }
+    Ok(())
+}
+// template:end authn:grpc-services-validate-scope-tokens
+
+// template:begin service-auth:grpc-services-parse-caller-names
+fn parse_caller_names(
+    path: &str,
+    callers: &[&str],
+) -> Result<foldhash::HashSet<infra_serviceauth::ServiceName>, Error> {
+    let mut names = foldhash::HashSet::with_capacity_and_hasher(
+        callers.len(),
+        foldhash::fast::RandomState::default(),
+    );
+    for caller in callers {
+        let name = infra_serviceauth::ServiceName::parse(caller).map_err(|source| {
+            Error::InvalidCallerRule {
+                path: path.to_owned(),
+                source,
+            }
+        })?;
+        if !names.insert(name) {
+            return Err(Error::DuplicateCallerName(path.to_owned()));
+        }
+    }
+    Ok(names)
+}
+// template:end service-auth:grpc-services-parse-caller-names
 
 #[cfg(test)]
 mod tests {
@@ -400,26 +634,20 @@ mod tests {
 
     // template:begin authn:grpc-services-test-reflection-scopes
     #[test]
-    fn reflection_scope_rules_require_registration_and_an_exact_rpc_path() {
+    fn reflection_scope_rules_apply_to_both_reflection_versions_and_reject_duplicates() {
         let mut services = Services::new();
-        let paths = [
-            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
-            "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
-        ];
-        for path in paths {
-            std::assert_matches!(
-                services.require_scopes(path, &["reflection.read"]),
-                Err(Error::UnregisteredMethodPath(rejected)) if rejected == path
-            );
-        }
-        services.add_reflection().unwrap();
-        for path in paths {
-            services.require_scopes(path, &["reflection.read"]).unwrap();
-        }
-        let unknown = "/grpc.reflection.v1.ServerReflection/Unknown";
+        let mut reflection = services.add_reflection().unwrap();
         std::assert_matches!(
-            services.require_scopes(unknown, &["reflection.read"]),
-            Err(Error::UnregisteredMethodPath(rejected)) if rejected == unknown
+            reflection.require_scopes(&["bad scope"]),
+            Err(Error::InvalidScopeToken { path, index: 0 }) if path == REFLECTION_PATHS[0]
+        );
+        reflection.require_scopes(&["reflection.read"]).unwrap();
+        std::assert_matches!(
+            reflection.require_scopes(&["reflection.read"]),
+            Err(Error::DuplicatePolicy {
+                policy: PolicyKind::ScopeRequirement,
+                path,
+            }) if path == REFLECTION_PATHS[0]
         );
     }
     // template:end authn:grpc-services-test-reflection-scopes

@@ -41,6 +41,7 @@ infra-http-transport = { path = "crates/infra-http-transport" }
 service-failure = { path = "crates/service-failure" }
 # template:begin grpc:workspace-grpc-crates
 infra-grpc = { path = "crates/infra-grpc" }
+infra-grpc-core = { path = "crates/infra-grpc-core" }
 infra-outbound-grpc = { path = "crates/infra-outbound-grpc" }
 grpc-contracts = { path = "crates/grpc-contracts" }
 # template:end grpc:workspace-grpc-crates

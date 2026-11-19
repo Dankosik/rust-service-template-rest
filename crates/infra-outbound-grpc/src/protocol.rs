@@ -1,28 +1,13 @@
-use std::time::Duration;
+use http::StatusCode;
 
-use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use shared_rules::grpc::{MAX_TIMEOUT_DIGITS, TIMEOUT_HEADER, encode_timeout, parse_timeout};
-
-pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static(TIMEOUT_HEADER);
+pub(crate) use infra_grpc_core::protocol::{
+    GRPC_TIMEOUT, STATUS_HEADERS, grpc_timeout, header_status_code, set_grpc_timeout,
+};
 
 pub(crate) fn unbracket_host(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
         .unwrap_or(host)
-}
-
-#[must_use]
-pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
-    headers
-        .get(GRPC_TIMEOUT)
-        .and_then(|value| parse_timeout(value.as_bytes()))
-}
-
-pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
-    let mut wire = [0_u8; MAX_TIMEOUT_DIGITS + 1];
-    if let Ok(value) = HeaderValue::from_bytes(encode_timeout(remaining, &mut wire)) {
-        headers.insert(GRPC_TIMEOUT, value);
-    }
 }
 
 pub(crate) fn grpc_code_from_http_status(status: StatusCode) -> Option<tonic::Code> {
@@ -40,27 +25,9 @@ pub(crate) fn grpc_code_from_http_status(status: StatusCode) -> Option<tonic::Co
     }
 }
 
-pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    headers
-        .get(tonic::Status::GRPC_STATUS)
-        .map(|value| tonic::Code::from_bytes(value.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timeout_header_round_trips_and_rejects_non_grammar_values() {
-        let mut headers = HeaderMap::new();
-        assert_eq!(grpc_timeout(&headers), None);
-        set_grpc_timeout(&mut headers, Duration::from_millis(250));
-        assert_eq!(grpc_timeout(&headers), Some(Duration::from_millis(250)));
-        set_grpc_timeout(&mut headers, Duration::MAX);
-        assert_eq!(headers[GRPC_TIMEOUT], "99999999H");
-        headers.insert(GRPC_TIMEOUT, HeaderValue::from_static("+5S"));
-        assert_eq!(grpc_timeout(&headers), None);
-    }
 
     #[test]
     fn http_status_codes_follow_grpc_mappings() {
