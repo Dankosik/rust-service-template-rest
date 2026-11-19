@@ -216,7 +216,7 @@ pub(crate) fn run_refresh_worker(
     cancel: CancellationToken,
     jwks_max_age: Duration,
 ) -> impl Future<Output = ()> {
-    let lifetime = store.worker_lost.clone().drop_guard();
+    let worker_lost_guard = store.worker_lost.clone().drop_guard();
     let next_period = move || refresh_period().min(jwks_max_age / 2);
     let mut next_refresh = Instant::now() + next_period();
     async move {
@@ -241,7 +241,7 @@ pub(crate) fn run_refresh_worker(
             }
         }
         store.stop();
-        lifetime.disarm();
+        worker_lost_guard.disarm();
     }
 }
 
