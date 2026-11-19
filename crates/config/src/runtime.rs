@@ -6,6 +6,7 @@ use crate::validate::{Violations, int_range};
 
 const MAX_WORKER_THREADS: usize = 512;
 
+#[serde_with::serde_as]
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct RuntimeConfig {
@@ -15,7 +16,7 @@ pub struct RuntimeConfig {
     /// Explicit counts must be between 1 and 512.
     /// `APP__RUNTIME__WORKER_THREADS` is the override channel;
     /// `TOKIO_WORKER_THREADS` is not read.
-    #[serde(deserialize_with = "crate::de::optional_unsigned_count")]
+    #[serde_as(as = "Option<crate::de::StrictCount>")]
     pub worker_threads: Option<NonZeroUsize>,
 }
 

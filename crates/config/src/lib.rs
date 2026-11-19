@@ -245,7 +245,7 @@ impl ConfigInput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, derive_more::Deref)]
 pub struct Config(ServiceSections);
 
 impl Config {
@@ -266,14 +266,6 @@ fn finite_http_connection_caps(http: &HttpListenerConfig, metrics: &MetricsConfi
     http.max_connections.map_or(0, |cap| {
         u64::from(cap.get()) * (1 + u64::from(metrics.addr.is_some()))
     })
-}
-
-impl std::ops::Deref for Config {
-    type Target = ServiceSections;
-
-    fn deref(&self) -> &ServiceSections {
-        &self.0
-    }
 }
 
 #[derive(Clone, Debug)]

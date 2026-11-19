@@ -11,8 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    JwtAlgorithm,
-    jwks::{JwksSource, KeySet, KeySetFailure},
+    jwks::{AllowedAlgorithms, JwksSource, KeySet, KeySetFailure},
     provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
 
@@ -212,7 +211,7 @@ pub(crate) fn run_refresh_worker(
     store: Arc<KeyStore>,
     provider: ProviderClient,
     source: JwksSource,
-    algorithms: Vec<JwtAlgorithm>,
+    algorithms: AllowedAlgorithms,
     cancel: CancellationToken,
     jwks_max_age: Duration,
 ) -> impl Future<Output = ()> {
@@ -235,7 +234,7 @@ pub(crate) fn run_refresh_worker(
                 let replacement = tokio::select! {
                     biased;
                     () = cancel.cancelled() => break 'worker,
-                    replacement = source.fetch(&provider, &algorithms, Instant::now() + PROVIDER_TIMEOUT) => replacement,
+                    replacement = source.fetch(&provider, algorithms, Instant::now() + PROVIDER_TIMEOUT) => replacement,
                 };
                 store.finish(ticket, replacement);
             }
@@ -362,7 +361,7 @@ mod tests {
             store.clone(),
             provider,
             super::JwksSource::Configured(endpoint),
-            vec![crate::JwtAlgorithm::Rs256],
+            crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
             cancel.clone(),
             Duration::from_hours(1),
         ));
@@ -435,7 +434,7 @@ mod tests {
             super::JwksSource::Configured(
                 crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
             ),
-            vec![crate::JwtAlgorithm::Rs256],
+            crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
             cancel.clone(),
             jwks_max_age,
         )

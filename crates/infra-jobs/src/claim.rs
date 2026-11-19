@@ -401,10 +401,11 @@ fn dispatch_outcomes(
     for outcome in outcomes {
         match outcome {
             ClaimOutcome::Exhausted {
+                registered,
                 attempt,
                 error_summary,
             } => {
-                attempt::record_exhausted(&attempt, &error_summary);
+                attempt::record_exhausted(registered.metrics(), &attempt, &error_summary);
             }
             ClaimOutcome::Running {
                 job,
@@ -465,6 +466,7 @@ enum ClaimOutcome {
         queue_wait_seconds: f64,
     },
     Exhausted {
+        registered: Arc<Registered>,
         attempt: AttemptId,
         error_summary: String,
     },
@@ -497,6 +499,7 @@ impl ClaimRow {
         };
         if self.exhausted {
             return Ok(ClaimOutcome::Exhausted {
+                registered: Arc::clone(registered),
                 attempt,
                 error_summary: self.error_summary.unwrap_or_default(),
             });

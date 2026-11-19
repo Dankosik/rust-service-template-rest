@@ -248,34 +248,40 @@ pub(crate) fn validate_reconstructed_envelope(
     crate::wire::validate_outbound_created_at(occurred_at)
 }
 
-pub(crate) fn payload_depth_allowed(bytes: &[u8]) -> bool {
-    enum ScanState {
-        Value,
-        String,
-        Escape,
-    }
+pub(crate) fn payload_depth_allowed(mut bytes: &[u8]) -> bool {
+    use bstr::ByteSlice as _;
 
     let mut depth = 0_usize;
-    let mut state = ScanState::Value;
-    for &byte in bytes {
-        match state {
-            ScanState::Escape => state = ScanState::String,
-            ScanState::String => match byte {
-                b'\\' => state = ScanState::Escape,
-                b'"' => state = ScanState::Value,
-                _ => {}
-            },
-            ScanState::Value => match byte {
-                b'"' => state = ScanState::String,
-                b'[' | b'{' => {
-                    depth += 1;
-                    if depth > MAX_PAYLOAD_JSON_DEPTH {
-                        return false;
+    while let Some((&byte, rest)) = bytes.split_first() {
+        match byte {
+            b'"' => {
+                bytes = rest;
+                loop {
+                    let Some(offset) = bytes.find_byteset(b"\"\\") else {
+                        return true;
+                    };
+                    let escaped = bytes[offset] == b'\\';
+                    let Some(after) = bytes.get(offset + 1 + usize::from(escaped)..) else {
+                        return true;
+                    };
+                    bytes = after;
+                    if !escaped {
+                        break;
                     }
                 }
-                b']' | b'}' => depth = depth.saturating_sub(1),
-                _ => {}
-            },
+            }
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_PAYLOAD_JSON_DEPTH {
+                    return false;
+                }
+                bytes = rest;
+            }
+            b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                bytes = rest;
+            }
+            _ => bytes = rest,
         }
     }
     true

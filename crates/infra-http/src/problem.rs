@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use bytes::{BufMut as _, BytesMut};
 use compact_str::CompactString;
 use serde::Serialize;
 pub use service_failure::Code;
@@ -210,7 +211,15 @@ pub(crate) fn complete_problem(response: &mut Response, request_id: &HeaderValue
         return;
     };
     problem.request_id = Some(CompactString::from(id));
-    *response.body_mut() = axum::Json(&*problem).into_response().into_body();
+    let mut writer = BytesMut::with_capacity(128).writer();
+    let Ok(()) = serde_json::to_writer(&mut writer, &*problem) else {
+        tracing::error!(
+            code = problem.code.as_str(),
+            "http_problem_serialization_failed"
+        );
+        return;
+    };
+    *response.body_mut() = Body::from(writer.into_inner().freeze());
     response.headers_mut().remove(CONTENT_LENGTH);
 }
 

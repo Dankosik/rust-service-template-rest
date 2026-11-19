@@ -15,18 +15,21 @@ workspace = true
 test-support = ["infra-outbound-http/test-support"]
 # template:begin outbound-auth-grpc:oauth-grpc-feature
 default = ["grpc"]
-grpc = ["dep:infra-outbound-grpc", "dep:tonic", "dep:tower"]
+grpc = ["dep:futures-util", "dep:infra-outbound-grpc", "dep:tonic", "dep:tower"]
 # template:end outbound-auth-grpc:oauth-grpc-feature
 # The Keycloak suite runs only through the explicit integration owner
 # (scripts/profiles/integration.sh oauth).
 integration = []
 
 [dependencies]
+arc-swap = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
+enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 operation-context = { workspace = true }
 parking_lot = { workspace = true }
 # template:begin outbound-auth-grpc:oauth-grpc-dependencies
+futures-util = { workspace = true, optional = true }
 infra-outbound-grpc = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }

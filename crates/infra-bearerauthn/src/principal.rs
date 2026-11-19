@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use compact_str::CompactString;
+
 use crate::claims::Scopes;
 
 #[derive(Clone, derive_more::Debug)]
@@ -10,7 +12,7 @@ pub struct Principal {
 }
 
 pub(crate) struct Identity {
-    pub(crate) issuer: String,
+    pub(crate) issuer: Arc<str>,
     pub(crate) identifiers: Identifiers,
     pub(crate) scopes: Scopes,
     pub(crate) payload: String,
@@ -19,10 +21,10 @@ pub(crate) struct Identity {
 
 pub(crate) enum Identifiers {
     Subject {
-        subject: String,
-        client_id: Option<String>,
+        subject: CompactString,
+        client_id: Option<CompactString>,
     },
-    ClientOnly(String),
+    ClientOnly(CompactString),
 }
 
 impl Principal {
@@ -105,12 +107,12 @@ impl Principal {
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("Actor([REDACTED])")]
 pub struct Actor {
-    subject: String,
-    client_id: Option<String>,
+    subject: CompactString,
+    client_id: Option<CompactString>,
 }
 
 impl Actor {
-    pub(crate) fn new(subject: String, client_id: Option<String>) -> Self {
+    pub(crate) fn new(subject: CompactString, client_id: Option<CompactString>) -> Self {
         Self { subject, client_id }
     }
 

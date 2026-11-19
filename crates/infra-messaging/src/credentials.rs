@@ -3,8 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use secrecy::{ExposeSecret as _, SecretString};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 const CREDENTIALS_FILE_MAX_BYTES: usize = 1024 * 1024;
 const CHALLENGES_METRIC: &str = "messaging_credentials_file_challenges_total";
@@ -55,7 +56,7 @@ impl CredentialsFileError {
 #[debug("CredentialsFile {{ .. }}")]
 pub(crate) struct CredentialsFile {
     path: Arc<Path>,
-    last_jwt: Arc<Mutex<String>>,
+    last_jwt_digest: Arc<Mutex<[u8; 32]>>,
     reading: Arc<Semaphore>,
 }
 
@@ -64,9 +65,10 @@ impl CredentialsFile {
         let path: Arc<Path> = Arc::from(path);
         let reading = Arc::new(Semaphore::new(1));
         let (jwt, _) = read(&path, &reading).await?;
+        let digest = Sha256::digest(jwt.as_bytes()).into();
         Ok(Self {
             path,
-            last_jwt: Arc::new(Mutex::new(jwt)),
+            last_jwt_digest: Arc::new(Mutex::new(digest)),
             reading,
         })
     }
@@ -76,7 +78,7 @@ impl CredentialsFile {
         nonce: &[u8],
     ) -> Result<async_nats::Auth, CredentialsFileError> {
         let credentials = read(&self.path, &self.reading).await;
-        let (jwt, key) = credentials.inspect_err(|error| {
+        let (mut jwt, key) = credentials.inspect_err(|error| {
             error.observe_challenge_failure();
             tracing::warn!(
                 error.type = error.error_type(),
@@ -88,11 +90,12 @@ impl CredentialsFile {
             .sign(nonce)
             .map_err(|_| CredentialsFileError::Malformed)
             .inspect_err(|error| error.observe_challenge_failure())?;
+        let digest: [u8; 32] = Sha256::digest(jwt.as_bytes()).into();
         let jwt_changed = {
-            let mut previous = self.last_jwt.lock();
-            let changed = *previous != jwt;
+            let mut previous = self.last_jwt_digest.lock();
+            let changed = *previous != digest;
             if changed {
-                previous.clone_from(&jwt);
+                *previous = digest;
             }
             changed
         };
@@ -100,7 +103,7 @@ impl CredentialsFile {
             tracing::info!("messaging_credentials_reloaded");
         }
         let mut auth = async_nats::Auth::new();
-        auth.jwt = Some(jwt);
+        auth.jwt = Some(std::mem::take(&mut *jwt));
         auth.signature = Some(signature);
         metrics::counter!(CHALLENGES_METRIC, "outcome" => "prepared", "reason" => "none")
             .increment(1);
@@ -111,7 +114,7 @@ impl CredentialsFile {
 async fn read(
     path: &Arc<Path>,
     reading: &Arc<Semaphore>,
-) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
+) -> Result<(Zeroizing<String>, nkeys::KeyPair), CredentialsFileError> {
     let permit = reading
         .clone()
         .try_acquire_owned()
@@ -124,7 +127,10 @@ async fn read(
     .await
     .map_err(|_| CredentialsFileError::Unreadable(std::io::ErrorKind::Other))?
     .map_err(|error| CredentialsFileError::Unreadable(error.kind()))?;
-    parse(content.expose_secret())
+    let text = std::str::from_utf8(&content)
+        .map_err(|_| CredentialsFileError::Unreadable(io::ErrorKind::InvalidData))?;
+    let (jwt, key) = parse(text)?;
+    Ok((Zeroizing::new(jwt), key))
 }
 
 #[expect(
@@ -132,7 +138,7 @@ async fn read(
     clippy::disallowed_types,
     reason = "the blocking worker validates and reads the same open descriptor"
 )]
-fn read_file(path: &Path) -> io::Result<SecretString> {
+fn read_file(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -141,16 +147,21 @@ fn read_file(path: &Path) -> io::Result<SecretString> {
         options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let content = SecretString::from(io::read_to_string(
-        file.take(CREDENTIALS_FILE_MAX_BYTES as u64 + 1),
-    )?);
-    if content.expose_secret().len() > CREDENTIALS_FILE_MAX_BYTES {
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(CREDENTIALS_FILE_MAX_BYTES)
+        .min(CREDENTIALS_FILE_MAX_BYTES)
+        .saturating_add(1);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    file.take(CREDENTIALS_FILE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > CREDENTIALS_FILE_MAX_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    Ok(content)
+    Ok(bytes)
 }
 
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {

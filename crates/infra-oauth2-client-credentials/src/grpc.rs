@@ -4,6 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use futures_util::future::Either;
 use http::{Request, Response};
 use infra_outbound_grpc::{Client, PreparedCall};
 use operation_context::OperationContext;
@@ -18,6 +19,7 @@ use crate::{
 };
 
 type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
+type CallFuture = Either<std::future::Ready<Result<Response<Body>, Status>>, RpcFuture>;
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
@@ -131,15 +133,17 @@ async fn send_admitted(
 impl Service<Request<Body>> for AuthenticatedClient {
     type Response = Response<Body>;
     type Error = Status;
-    type Future = RpcFuture;
+    type Future = CallFuture;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        self.begin_call(request)
-            .unwrap_or_else(|status| Box::pin(std::future::ready(Err(status))))
+        match self.begin_call(request) {
+            Ok(future) => Either::Right(future),
+            Err(status) => Either::Left(std::future::ready(Err(status))),
+        }
     }
 }
 

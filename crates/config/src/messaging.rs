@@ -7,7 +7,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::app::local_development_only;
-use crate::de::{StrictString, blank_as_none, blank_secret_as_none};
+use crate::de::{BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictString};
 use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
@@ -25,79 +25,69 @@ const DEFAULT_MAX_PAYLOAD: ByteSize = ByteSize::kib(256);
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
-#[derive(derive_more::Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(derive_more::Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct MessagingInput {
-    #[serde(deserialize_with = "url_list")]
+    #[serde_as(as = "UrlList")]
     #[debug("{} servers", urls.len())]
     urls: Vec<String>,
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
     /// a platform that rotates it: the client reads the file again for every
     /// connection. Its target must be a regular file of at most 1 MiB.
     /// Missing, empty, or whitespace-only is unset (`None`).
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     credentials_file: Option<PathBuf>,
     /// Optional PEM root CA path for the operator-selected broker. Missing,
     /// empty, or whitespace-only is unset (`None`).
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     root_ca_path: Option<PathBuf>,
     /// Permit `nats://` with `app.allow_insecure_development`.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     allow_plaintext: bool,
     /// Perform TLS before INFO; every configured URL must use `tls://`.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     tls_first: bool,
     /// The operator declares the private network the broker trust boundary,
     /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
     /// in every environment. Credentials stay required unless the separate
     /// development exception for unauthenticated connections is enabled.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     trusted_network: bool,
     /// Permit a connection without credentials with `app.allow_insecure_development`.
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     allow_unauthenticated: bool,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     source_stream: Option<String>,
+    #[educe(Default(expression = DEFAULT_MAX_PAYLOAD))]
     max_payload_bytes: ByteSize,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     consumer_durable: Option<String>,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     consumer_filter_subject: Option<String>,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     dlq_subject: Option<String>,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default(expression = NonZeroU32::MIN))]
     consumer_concurrency: NonZeroU32,
-}
-
-impl Default for MessagingInput {
-    fn default() -> Self {
-        let defaults = MessagingConfig::default();
-        Self {
-            urls: defaults.urls,
-            credentials: None,
-            credentials_file: None,
-            root_ca_path: defaults.root_ca_path,
-            allow_plaintext: defaults.allow_plaintext,
-            tls_first: defaults.tls_first,
-            trusted_network: defaults.trusted_network,
-            allow_unauthenticated: defaults.allow_unauthenticated,
-            source_stream: defaults.source_stream,
-            max_payload_bytes: defaults.max_payload_bytes,
-            consumer_durable: defaults.consumer_durable,
-            consumer_filter_subject: defaults.consumer_filter_subject,
-            dlq_subject: defaults.dlq_subject,
-            consumer_concurrency: defaults.consumer_concurrency,
-        }
-    }
 }
 
 #[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
-#[derive(Clone, derive_more::Debug)]
+#[derive(Clone, derive_more::Debug, educe::Educe)]
+#[educe(Default)]
 pub struct MessagingConfig {
     #[debug("{} servers", urls.len())]
     pub urls: Vec<String>,
@@ -108,31 +98,13 @@ pub struct MessagingConfig {
     pub trusted_network: bool,
     pub allow_unauthenticated: bool,
     pub source_stream: Option<String>,
+    #[educe(Default(expression = DEFAULT_MAX_PAYLOAD))]
     pub max_payload_bytes: ByteSize,
     pub consumer_durable: Option<String>,
     pub consumer_filter_subject: Option<String>,
     pub dlq_subject: Option<String>,
+    #[educe(Default(expression = NonZeroU32::MIN))]
     pub consumer_concurrency: NonZeroU32,
-}
-
-impl Default for MessagingConfig {
-    fn default() -> Self {
-        Self {
-            urls: Vec::new(),
-            credentials: None,
-            root_ca_path: None,
-            allow_plaintext: false,
-            tls_first: false,
-            trusted_network: false,
-            allow_unauthenticated: false,
-            source_stream: None,
-            max_payload_bytes: DEFAULT_MAX_PAYLOAD,
-            consumer_durable: None,
-            consumer_filter_subject: None,
-            dlq_subject: None,
-            consumer_concurrency: NonZeroU32::MIN,
-        }
-    }
 }
 
 impl MessagingInput {
@@ -335,27 +307,32 @@ pub struct ConsumerKeys<'a> {
     pub dlq_subject: &'a str,
 }
 
-fn url_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input {
-        Text(StrictString),
-        List(Vec<StrictString>),
-    }
+struct UrlList;
 
-    let input = Input::deserialize(deserializer).map_err(|_| {
-        serde::de::Error::invalid_value(
-            serde::de::Unexpected::Other("a non-string value"),
-            &"a list of strings or a comma-separated string",
-        )
-    })?;
-    Ok(match input {
-        Input::Text(value) => value.0.split(',').map(ToOwned::to_owned).collect(),
-        Input::List(urls) => urls.into_iter().map(|url| url.0).collect(),
-    })
+impl<'de> serde_with::DeserializeAs<'de, Vec<String>> for UrlList {
+    fn deserialize_as<D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[serde_with::serde_as]
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Text(#[serde_as(as = "StrictString")] String),
+            List(#[serde_as(as = "Vec<StrictString>")] Vec<String>),
+        }
+
+        let input = Input::deserialize(deserializer).map_err(|_| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Other("a non-string value"),
+                &"a list of strings or a comma-separated string",
+            )
+        })?;
+        Ok(match input {
+            Input::Text(value) => value.split(',').map(ToOwned::to_owned).collect(),
+            Input::List(urls) => urls,
+        })
+    }
 }
 
 #[cfg(test)]

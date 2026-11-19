@@ -33,11 +33,7 @@ pub(super) fn caller_identity(
 }
 
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
-    let value = values.into_iter().exactly_one().ok()?;
-    let value = str::from_utf8(value)
-        .ok()?
-        .trim_matches([' ', '\t'])
-        .as_bytes();
+    let value = trim_ows(values.into_iter().exactly_one().ok()?);
     let decoded = if value.first() == Some(&b'"') {
         let item = sfv::Parser::new(value)
             .parse_item::<sfv::BareItemFromInput<'_>>()
@@ -57,6 +53,16 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
     (1..=MAX_DECODED_KEY_BYTES)
         .contains(&decoded.len())
         .then_some(decoded)
+}
+
+fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+    while let [b' ' | b'\t', rest @ ..] = bytes {
+        bytes = rest;
+    }
+    while let [rest @ .., b' ' | b'\t'] = bytes {
+        bytes = rest;
+    }
+    bytes
 }
 
 pub(super) fn request_fingerprint(
@@ -169,6 +175,14 @@ mod tests {
         std::assert_matches!(
             decode_key([b" \ta/b=\t".as_slice()]),
             Some(Cow::Borrowed(b"a/b="))
+        );
+        std::assert_matches!(
+            decode_key([b" \t\"same\"\t ".as_slice()]),
+            Some(Cow::Borrowed(b"same"))
+        );
+        std::assert_matches!(
+            decode_key([b"\"same\";a=1".as_slice()]),
+            Some(Cow::Borrowed(b"same"))
         );
         std::assert_matches!(
             decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]),

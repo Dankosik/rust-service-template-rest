@@ -6,7 +6,9 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
-use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::de::{
+    BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictDuration, StrictEnum,
+};
 use crate::load::{Error, MigrationLoadError};
 use crate::observability::{ObservabilityFields, OtelFields, validate_service_name};
 use crate::validate::{Rejected, Violations, duration_range, int_range, required};
@@ -26,6 +28,7 @@ pub enum PostgresSessionBudgets {
     Server,
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct PostgresFields<
@@ -35,12 +38,13 @@ pub(crate) struct PostgresFields<
     Notifications,
     MigrationDsn = IgnoredAny,
 > {
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     dsn: Option<SecretString>,
     /// Optional direct connection URL, including credentials, for the migrator.
     migration_dsn: MigrationDsn,
@@ -49,7 +53,8 @@ pub(crate) struct PostgresFields<
     /// password. The DSN then carries no password, and the running service
     /// follows the file. Its target must be a regular file of at most 16 KiB.
     /// Missing, empty, or whitespace-only is unset (`None`), the default.
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
     session_budgets: Session,
     /// Upper bound on pooled connections. Size it from the database's
@@ -65,53 +70,52 @@ pub(crate) struct PostgresFields<
     migration_deadline: Deadline,
 }
 
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(transparent)]
 pub(crate) struct MaxConnectionsInput(
-    #[serde(deserialize_with = "crate::de::unsigned_count")] NonZeroU32,
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default(expression = const { NonZeroU32::new(4).expect("4 is nonzero") }))]
+    NonZeroU32,
 );
 
-impl Default for MaxConnectionsInput {
-    fn default() -> Self {
-        Self(const { NonZeroU32::new(4).expect("4 is nonzero") })
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(transparent)]
-struct MigrationDeadline(#[serde(deserialize_with = "crate::de::duration")] Duration);
+struct MigrationDeadline(
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = Duration::from_mins(5)))]
+    Duration,
+);
 
-impl Default for MigrationDeadline {
-    fn default() -> Self {
-        Self(Duration::from_mins(5))
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(transparent)]
-pub(crate) struct Notifications(#[serde(deserialize_with = "crate::de::boolean")] bool);
+pub(crate) struct Notifications(
+    #[serde_as(as = "StrictBool")]
+    #[educe(Default = true)]
+    bool,
+);
 
-impl Default for Notifications {
-    fn default() -> Self {
-        Self(true)
-    }
-}
+#[serde_with::serde_as]
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+struct MigrationDsnInput(#[serde_as(as = "BlankSecretAsNone")] Option<SecretString>);
 
 pub(crate) type PostgresInput = PostgresFields<
-    crate::de::StrictEnum<PostgresSessionBudgets>,
+    StrictEnum<PostgresSessionBudgets>,
     MaxConnectionsInput,
     IgnoredAny,
     Notifications,
 >;
 type MigrationPostgresInput =
-    PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny, Option<SecretString>>;
+    PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny, MigrationDsnInput>;
 // template:begin jobs:postgres-operator-input
-pub(crate) type OperatorPostgresInput = PostgresFields<
-    crate::de::StrictEnum<PostgresSessionBudgets>,
-    IgnoredAny,
-    IgnoredAny,
-    IgnoredAny,
->;
+pub(crate) type OperatorPostgresInput =
+    PostgresFields<StrictEnum<PostgresSessionBudgets>, IgnoredAny, IgnoredAny, IgnoredAny>;
 // template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]
@@ -202,7 +206,7 @@ impl MigrationPostgresInput {
             self.migration_deadline.0,
             Duration::from_secs(1)..=Duration::from_hours(24),
         ));
-        let (dsn, password_file) = match self.migration_dsn {
+        let (dsn, password_file) = match self.migration_dsn.0 {
             Some(dsn) => (Some(dsn), None),
             None => (self.dsn, self.password_file),
         };

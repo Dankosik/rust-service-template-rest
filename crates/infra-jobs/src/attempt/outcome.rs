@@ -1,5 +1,4 @@
-use std::borrow::Cow;
-
+use compact_str::{CompactString, format_compact};
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
@@ -20,18 +19,18 @@ const RETRY_JITTER_SPAN_DIVISOR: i64 = 5;
 pub(super) enum Transition {
     Complete(Completion),
     Retry {
-        summary: Cow<'static, str>,
+        summary: CompactString,
         base_micros: i64,
         floor_micros: i64,
         cause: RetryCause,
     },
     Fail {
         reason: FailureReason,
-        summary: Cow<'static, str>,
+        summary: CompactString,
     },
     Snooze {
         delay_micros: i64,
-        summary: Cow<'static, str>,
+        summary: CompactString,
     },
     Release,
 }
@@ -318,23 +317,23 @@ pub(super) fn map_outcome(
         },
         HandlerOutcome::Panic => retry_or_exhaust(
             exhausted,
-            Cow::Borrowed("handler panicked"),
+            CompactString::const_new("handler panicked"),
             RetryCause::Failure,
             0,
         ),
         HandlerOutcome::PayloadDecode(error) => retry_or_exhaust(
             exhausted,
-            Cow::Owned(payload_summary(attempt.kind, &error)),
+            payload_summary(attempt.kind, &error),
             RetryCause::Failure,
             0,
         ),
         HandlerOutcome::Timeout => retry_or_exhaust(
             retry_budget_spent,
-            Cow::Owned(format!(
+            format_compact!(
                 "attempt timed out after {}",
                 jiff::fmt::friendly::SpanPrinter::new()
                     .unsigned_duration_to_string(&policy.timeout)
-            )),
+            ),
             RetryCause::Timeout,
             0,
         ),
@@ -358,25 +357,25 @@ fn retry_base_micros(number: u16, is_outbox: bool) -> i64 {
     base_seconds * 1_000_000
 }
 
-fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
+fn payload_summary(kind: &str, error: &serde_json::Error) -> CompactString {
     let category = match error.classify() {
         serde_json::error::Category::Io => "io",
         serde_json::error::Category::Syntax => "syntax",
         serde_json::error::Category::Data => "data",
         serde_json::error::Category::Eof => "eof",
     };
-    format!(
+    format_compact!(
         "payload does not decode as {kind}: {category} error at line {} column {}",
         error.line(),
         error.column()
     )
 }
 
-fn sanitize_summary(text: Cow<'static, str>) -> Cow<'static, str> {
+fn sanitize_summary(text: CompactString) -> CompactString {
     if text.len() <= MAX_ERROR_SUMMARY_BYTES && !text.chars().any(char::is_control) {
         return text;
     }
-    let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
+    let mut sanitized = CompactString::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
         let ch = if ch.is_control() { ' ' } else { ch };
         if sanitized.len() + ch.len_utf8() > MAX_ERROR_SUMMARY_BYTES {
@@ -384,7 +383,7 @@ fn sanitize_summary(text: Cow<'static, str>) -> Cow<'static, str> {
         }
         sanitized.push(ch);
     }
-    Cow::Owned(sanitized)
+    sanitized
 }
 #[cfg(test)]
 mod tests {
@@ -409,8 +408,8 @@ mod tests {
         let error = sqlx::Error::Protocol("private driver detail".to_owned());
         std::assert_matches!(
             outcome(HandlerOutcome::Error(error.into()), 1),
-            Transition::Retry { summary: Cow::Owned(ref summary), .. }
-                if summary == "postgres protocol"
+            Transition::Retry { ref summary, .. }
+                if summary == "postgres protocol" && !summary.is_heap_allocated()
         );
     }
 
@@ -424,8 +423,8 @@ mod tests {
             outcome(HandlerOutcome::Error(JobError::retryable("fail")), 25),
             Transition::Fail {
                 reason: FailureReason::Exhausted,
-                summary: Cow::Borrowed("fail"),
-            }
+                ref summary,
+            } if summary == "fail" && !summary.is_heap_allocated()
         );
         std::assert_matches!(
             outcome(
@@ -438,8 +437,8 @@ mod tests {
                 base_micros,
                 cause: RetryCause::Failure,
                 floor_micros: 2_000_001,
-                summary: Cow::Borrowed("at least"),
-            } if base_micros == 1_000_000
+                ref summary,
+            } if base_micros == 1_000_000 && summary == "at least" && !summary.is_heap_allocated()
         );
         std::assert_matches!(
             outcome(
@@ -472,8 +471,8 @@ mod tests {
             ),
             Transition::Snooze {
                 delay_micros: 10_000_000,
-                summary: Cow::Borrowed("pool timed out"),
-            }
+                ref summary,
+            } if summary == "pool timed out" && !summary.is_heap_allocated()
         );
         std::assert_matches!(
             outcome(HandlerOutcome::Panic, 1),
@@ -481,7 +480,7 @@ mod tests {
                 ref summary,
                 cause: RetryCause::Failure,
                 ..
-            } if summary == "handler panicked"
+            } if summary == "handler panicked" && !summary.is_heap_allocated()
         );
         std::assert_matches!(
             outcome(HandlerOutcome::Timeout, 1),
@@ -494,8 +493,8 @@ mod tests {
             outcome(HandlerOutcome::Error(JobError::permanent("stop")), 1),
             Transition::Fail {
                 reason: FailureReason::Permanent,
-                summary: Cow::Borrowed("stop"),
-            }
+                ref summary,
+            } if summary == "stop" && !summary.is_heap_allocated()
         );
     }
 
@@ -547,7 +546,7 @@ mod tests {
     #[test]
     fn the_write_view_carries_each_statement_binding() {
         let retry = Transition::Retry {
-            summary: Cow::Borrowed("retry me"),
+            summary: CompactString::const_new("retry me"),
             base_micros: 81_000_000,
             floor_micros: 2_000_000,
             cause: RetryCause::Failure,
@@ -562,7 +561,7 @@ mod tests {
         );
         let snooze = Transition::Snooze {
             delay_micros: 7,
-            summary: Cow::Borrowed(""),
+            summary: CompactString::const_new(""),
         };
         std::assert_matches!(
             write_of(&snooze),
@@ -570,7 +569,7 @@ mod tests {
         );
         let fail = Transition::Fail {
             reason: FailureReason::Exhausted,
-            summary: Cow::Borrowed("done"),
+            summary: CompactString::const_new("done"),
         };
         std::assert_matches!(
             write_of(&fail),
@@ -599,26 +598,29 @@ mod tests {
 
     #[test]
     fn summaries_sanitize_controls_and_preserve_utf8_without_payload_disclosure() {
-        assert_eq!(sanitize_summary(Cow::Borrowed("a\nb\0c")), "a b c");
-        assert_eq!(sanitize_summary(Cow::Borrowed("")), "");
         assert_eq!(
-            sanitize_summary(Cow::Owned("x".repeat(1024))),
+            sanitize_summary(CompactString::const_new("a\nb\0c")),
+            "a b c"
+        );
+        assert_eq!(sanitize_summary(CompactString::const_new("")), "");
+        assert_eq!(
+            sanitize_summary(CompactString::from("x".repeat(1024))),
             "x".repeat(1024)
         );
         assert_eq!(
-            sanitize_summary(Cow::Owned("x".repeat(65_536))),
+            sanitize_summary(CompactString::from("x".repeat(65_536))),
             "x".repeat(1024)
         );
         assert_eq!(
-            sanitize_summary(Cow::Owned("\u{0085}".repeat(1023) + "é")),
+            sanitize_summary(CompactString::from("\u{0085}".repeat(1023) + "é")),
             " ".repeat(1023)
         );
         assert_eq!(
-            sanitize_summary(Cow::Owned("é".repeat(512) + "tail")),
+            sanitize_summary(CompactString::from("é".repeat(512) + "tail")),
             "é".repeat(512)
         );
         assert_eq!(
-            sanitize_summary(Cow::Owned("a".repeat(1023) + "é")),
+            sanitize_summary(CompactString::from("a".repeat(1023) + "é")),
             "a".repeat(1023)
         );
         let error = serde_json::from_str::<u32>("\"secret\"").unwrap_err();

@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
+use zeroize::Zeroizing;
 
 use crate::app::BuildInfo;
 use crate::secret_policy::first_secret_key;
@@ -109,13 +110,7 @@ pub enum Error {
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
-    Validate(ValidationErrors),
-}
-
-impl From<ValidationErrors> for Error {
-    fn from(errors: ValidationErrors) -> Self {
-        Self::Validate(errors)
-    }
+    Validate(#[from] ValidationErrors),
 }
 
 pub fn load(
@@ -271,7 +266,10 @@ fn merge_inputs<T: DeserializeOwned>(
     }
     let mut variable_sources = Vec::with_capacity(variables.len());
     for variable in variables.into_values() {
-        let value = config::Value::new(Some(&variable.source.as_str().to_owned()), variable.value);
+        let value = config::Value::new(
+            Some(&variable.source.as_str().to_owned()),
+            variable.value.as_str(),
+        );
         builder = builder
             .set_override(&variable.key, value)
             .map_err(|error| Error::Merge(error.to_string()))?;
@@ -405,10 +403,12 @@ fn from_toml_value(uri: Option<&String>, value: &toml::Value) -> config::Value {
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
 fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
-    let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
-        path: path.to_owned(),
-        error,
-    })?;
+    let text = Zeroizing::new(
+        std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
+            path: path.to_owned(),
+            error,
+        })?,
+    );
     let table: toml::Table = toml::from_str(&text).map_err(|error| {
         let message = match error.span() {
             Some(span) => format!("invalid TOML at byte {}", span.start),

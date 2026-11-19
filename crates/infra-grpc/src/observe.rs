@@ -3,6 +3,7 @@ use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::services::{CallType, Method};
+use enum_map::EnumMap;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use shared_rules::grpc::{
     ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, HANDLING_SECONDS_BUCKETS, RPC_METHOD_ATTR,
@@ -46,7 +47,7 @@ pub(crate) struct MethodMetrics {
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
     handled: [OnceLock<metrics::Counter>; STATUS_CODE_COUNT],
-    failed: [OnceLock<metrics::Counter>; service_failure::Code::ALL.len()],
+    failed: EnumMap<service_failure::Code, OnceLock<metrics::Counter>>,
 }
 
 impl MethodMetrics {
@@ -67,7 +68,7 @@ impl MethodMetrics {
             handling_seconds: metrics::histogram!(SERVER_HANDLING_METRIC, labels.clone()),
             base_labels: labels.into_boxed_slice(),
             handled: std::array::from_fn(|_| OnceLock::new()),
-            failed: std::array::from_fn(|_| OnceLock::new()),
+            failed: EnumMap::default(),
         }
     }
 
@@ -88,7 +89,7 @@ impl MethodMetrics {
     }
 
     fn record_failure(&self, failure: service_failure::Code) {
-        self.failed[failure as usize]
+        self.failed[failure]
             .get_or_init(|| {
                 let mut labels = self.base_labels.to_vec();
                 labels.push(metrics::Label::new("failure_code", failure.as_str()));
@@ -98,12 +99,29 @@ impl MethodMetrics {
     }
 }
 
-pub(crate) struct Call {
+struct CallInner {
     metrics: Arc<MethodMetrics>,
     span: tracing::Span,
     started_at: Instant,
-    completed: bool,
 }
+
+impl CallInner {
+    fn emit(&self, code: tonic::Code) {
+        let span_code = status_code_names(code as usize).span;
+        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
+        if otel_http::grpc::status_is_error(code as u16, true) {
+            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
+            self.span.set_status(SpanStatus::error(""));
+        }
+        self.metrics.record_handled(code, self.started_at.elapsed());
+    }
+
+    fn cancel(self) {
+        self.emit(tonic::Code::Cancelled);
+    }
+}
+
+pub(crate) struct Call(DropGuard<CallInner, fn(CallInner)>);
 
 impl Call {
     pub(crate) fn start(method: &Method, path: &str) -> Self {
@@ -115,51 +133,35 @@ impl Call {
         );
         let span = open_server_span(path, &metrics);
         metrics.started.increment(1);
-        Self {
-            metrics,
-            span,
-            started_at,
-            completed: false,
-        }
+        Self(DropGuard::new(
+            CallInner {
+                metrics,
+                span,
+                started_at,
+            },
+            CallInner::cancel,
+        ))
     }
 
-    pub(crate) const fn span(&self) -> &tracing::Span {
-        &self.span
+    pub(crate) fn span(&self) -> &tracing::Span {
+        &self.0.span
     }
 
     // template:begin authn:grpc-observe-scope-refusal
     pub(crate) fn record_insufficient_scope(&self) {
-        self.span
+        self.0
+            .span
             .set_attribute("authz.reason", "insufficient_scope");
     }
     // template:end authn:grpc-observe-scope-refusal
 
     pub(crate) fn record_failure(&self, failure: service_failure::Code) {
-        self.span.set_attribute("failure.code", failure.as_str());
-        self.metrics.record_failure(failure);
+        self.0.span.set_attribute("failure.code", failure.as_str());
+        self.0.metrics.record_failure(failure);
     }
 
-    pub(crate) fn finish(mut self, code: tonic::Code) {
-        self.emit(code);
-        self.completed = true;
-    }
-
-    fn emit(&self, code: tonic::Code) {
-        let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
-        if otel_http::grpc::status_is_error(code as u16, true) {
-            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
-            self.span.set_status(SpanStatus::error(""));
-        }
-        self.metrics.record_handled(code, self.started_at.elapsed());
-    }
-}
-
-impl Drop for Call {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.emit(tonic::Code::Cancelled);
-        }
+    pub(crate) fn finish(self, code: tonic::Code) {
+        DropGuard::dismiss(self.0).emit(code);
     }
 }
 

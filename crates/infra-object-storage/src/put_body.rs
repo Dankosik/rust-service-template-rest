@@ -7,8 +7,6 @@ use std::task::{Context, Poll};
 use aws_sdk_s3::primitives::ByteStream;
 use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
-use http_body_util::BodyExt;
-use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
 
 use crate::error::UploadFailure;
@@ -185,9 +183,9 @@ enum PhaseStep {
 }
 
 impl ExactLengthPhase {
-    fn advance(&mut self, polled: Option<Result<Frame<Bytes>, BoxError>>) -> PhaseStep {
+    fn advance<E: Into<BoxError>>(&mut self, polled: Option<Result<Frame<Bytes>, E>>) -> PhaseStep {
         match polled {
-            Some(Err(error)) => PhaseStep::Yield(Err(error)),
+            Some(Err(error)) => PhaseStep::Yield(Err(error.into())),
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(data) => self.on_data(data),
                 Err(trailers) => self.finish_data(Some(trailers)),
@@ -222,49 +220,44 @@ impl ExactLengthPhase {
     }
 }
 
-struct ExactLength {
-    inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
-    phase: ExactLengthPhase,
-    mismatch: Arc<AtomicBool>,
+pin_project_lite::pin_project! {
+    struct ExactLength<B> {
+        #[pin]
+        inner: SyncWrapper<B>,
+        phase: ExactLengthPhase,
+        mismatch: Arc<AtomicBool>,
+    }
 }
 
-impl ExactLength {
-    fn wrap_with_mismatch_flag<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
-    where
-        B: Body<Data = Bytes, Error = E> + Send + 'static,
-        E: Into<BoxError> + 'static,
-    {
+impl<B> ExactLength<B> {
+    fn wrap_with_mismatch_flag(len: u64, body: B) -> (Self, Arc<AtomicBool>) {
         let mismatch = Arc::new(AtomicBool::new(false));
         let phase = ExactLengthPhase::Streaming(ByteProgress::new(len));
         let body = Self {
-            inner: SyncWrapper::new(UnsyncBoxBody::new(body.map_err(Into::into))),
+            inner: SyncWrapper::new(body),
             phase,
             mismatch: Arc::clone(&mismatch),
         };
         (body, mismatch)
     }
-
-    fn refuse(&mut self) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        self.mismatch.store(true, Ordering::Release);
-        self.phase = ExactLengthPhase::Draining {
-            held: None,
-            trailers: None,
-        };
-        Poll::Ready(Some(Err(Box::new(LengthMismatch))))
-    }
 }
 
-impl Body for ExactLength {
+impl<B, E> Body for ExactLength<B>
+where
+    B: Body<Data = Bytes, Error = E>,
+    E: Into<BoxError>,
+{
     type Data = Bytes;
     type Error = BoxError;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        let mut this = self.project();
         let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
-            if let ExactLengthPhase::Draining { held, trailers } = &mut self.phase {
+            if let ExactLengthPhase::Draining { held, trailers } = this.phase {
                 if let Some(data) = held.take() {
                     return Poll::Ready(Some(Ok(Frame::data(data))));
                 }
@@ -275,11 +268,18 @@ impl Body for ExactLength {
                 return Poll::Pending;
             }
             polls_remaining -= 1;
-            let polled = std::task::ready!(Pin::new(self.inner.get_mut()).poll_frame(context));
-            match self.phase.advance(polled) {
+            let polled = std::task::ready!(this.inner.as_mut().get_pin_mut().poll_frame(context));
+            match this.phase.advance(polled) {
                 PhaseStep::Continue => {}
                 PhaseStep::Yield(item) => return Poll::Ready(Some(item)),
-                PhaseStep::Mismatch => return self.refuse(),
+                PhaseStep::Mismatch => {
+                    this.mismatch.store(true, Ordering::Release);
+                    *this.phase = ExactLengthPhase::Draining {
+                        held: None,
+                        trailers: None,
+                    };
+                    return Poll::Ready(Some(Err(Box::new(LengthMismatch))));
+                }
             }
         }
     }
@@ -327,12 +327,13 @@ mod tests {
         let frames =
             chunks.map(|chunk| Ok::<_, Infallible>(Frame::data(Bytes::from_static(chunk))));
         let body = StreamBody::new(stream::iter(frames));
-        let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
+        let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
+        let mut body = std::pin::pin!(body);
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
         let mut sent = 0;
         while sent < len {
-            match Pin::new(&mut body).poll_frame(&mut context) {
+            match body.as_mut().poll_frame(&mut context) {
                 Poll::Ready(Some(Ok(frame))) => {
                     sent += frame.data_ref().map_or(0, |data| data.len() as u64);
                 }
@@ -405,13 +406,14 @@ mod tests {
                 empty_tail: true,
                 polls: Arc::clone(&polls),
             };
-            let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
+            let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
+            let mut body = std::pin::pin!(body);
             let wake = Arc::new(WakeFlag::default());
             let waker = Waker::from(Arc::clone(&wake));
             let mut context = Context::from_waker(&waker);
             for _ in 0..3 {
                 polls.store(0, Ordering::Relaxed);
-                assert!(Pin::new(&mut body).poll_frame(&mut context).is_pending());
+                assert!(body.as_mut().poll_frame(&mut context).is_pending());
                 assert_eq!(polls.load(Ordering::Relaxed), SOURCE_POLLS_PER_YIELD);
                 assert!(wake.0.swap(false, Ordering::Relaxed));
                 assert_eq!(body.size_hint().exact(), Some(len));
@@ -466,7 +468,8 @@ mod tests {
                 empty_tail: false,
                 polls: Arc::clone(&polls),
             };
-            let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
+            let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
+            let mut body = std::pin::pin!(body);
             let wake = Arc::new(WakeFlag::default());
             let waker = Waker::from(Arc::clone(&wake));
             let mut context = Context::from_waker(&waker);
@@ -476,7 +479,7 @@ mod tests {
             let mut completed = false;
             for _ in 0..10 {
                 polls.store(0, Ordering::Relaxed);
-                match Pin::new(&mut body).poll_frame(&mut context) {
+                match body.as_mut().poll_frame(&mut context) {
                     Poll::Pending => {
                         if polls.load(Ordering::Relaxed) == SOURCE_POLLS_PER_YIELD {
                             assert!(wake.0.swap(false, Ordering::Relaxed));

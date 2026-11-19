@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use enum_map::{Enum, EnumMap};
 use metrics::Unit;
 use sqlx::postgres::PgPool;
 
@@ -122,9 +123,7 @@ pub struct MaintenanceObserver {
     oldest: metrics::Gauge,
     last_attempt_success: metrics::Gauge,
     clock_valid: metrics::Gauge,
-    successes: metrics::Counter,
-    failures: metrics::Counter,
-    cancellations: metrics::Counter,
+    observations: EnumMap<AttemptOutcome, metrics::Counter>,
     previous_clock: MaintenanceClock,
     failing: bool,
 }
@@ -179,7 +178,13 @@ impl MaintenanceObserver {
         describe_observer();
         let label = population.label();
         let gauge = |name| metrics::gauge!(name, "population" => label);
-        let observations = |outcome: AttemptOutcome| metrics::counter!(OBSERVATIONS_METRIC, "population" => label, "outcome" => outcome.label());
+        let observations = EnumMap::from_fn(|outcome: AttemptOutcome| {
+            metrics::counter!(
+                OBSERVATIONS_METRIC,
+                "population" => label,
+                "outcome" => outcome.label()
+            )
+        });
         let previous_clock = MaintenanceClock::now();
         gauge(OBSERVER_STARTED_METRIC).set(previous_clock.wall.unwrap_or(0.0));
         let this = Self {
@@ -191,9 +196,7 @@ impl MaintenanceObserver {
             oldest: gauge(OLDEST_METRIC),
             last_attempt_success: gauge(LAST_ATTEMPT_SUCCESS_METRIC),
             clock_valid: gauge(CLOCK_VALID_METRIC),
-            successes: observations(AttemptOutcome::Succeeded),
-            failures: observations(AttemptOutcome::Failed),
-            cancellations: observations(AttemptOutcome::Cancelled),
+            observations,
             previous_clock,
             failing: false,
         };
@@ -204,9 +207,9 @@ impl MaintenanceObserver {
         this.oldest.set(f64::NAN);
         this.last_attempt_success.set(0.0);
         this.clock_valid.set(0.0);
-        this.successes.increment(0);
-        this.failures.increment(0);
-        this.cancellations.increment(0);
+        for counter in this.observations.values() {
+            counter.increment(0);
+        }
         if let MaintenancePopulation::Cleanup(cleanup) = population {
             metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
                 .increment(0);
@@ -234,17 +237,9 @@ impl MaintenanceObserver {
         }
     }
 
-    const fn observations(&self, outcome: AttemptOutcome) -> &metrics::Counter {
-        match outcome {
-            AttemptOutcome::Succeeded => &self.successes,
-            AttemptOutcome::Failed => &self.failures,
-            AttemptOutcome::Cancelled => &self.cancellations,
-        }
-    }
-
     fn record_unsuccessful(&mut self, outcome: UnsuccessfulOutcome) {
         self.last_attempt_success.set(0.0);
-        self.observations(outcome.attempt_outcome()).increment(1);
+        self.observations[outcome.attempt_outcome()].increment(1);
         if !self.failing {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -263,7 +258,7 @@ impl Drop for MaintenanceObserver {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 enum AttemptOutcome {
     Succeeded,
     Failed,
@@ -354,7 +349,7 @@ impl MaintenanceAttempt<'_> {
         self.observer.last_success.set(received_at);
         self.observer.last_attempt_success.set(1.0);
         self.outcome = AttemptOutcome::Succeeded;
-        self.observer.observations(self.outcome).increment(1);
+        self.observer.observations[self.outcome].increment(1);
         if self.observer.failing {
             tracing::info!(
                 target: LOG_TARGET,

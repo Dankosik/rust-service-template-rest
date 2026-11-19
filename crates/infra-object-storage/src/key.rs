@@ -1,8 +1,7 @@
-use std::fmt;
-
 const MAX_KEY_BYTES: usize = 1024;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::Debug)]
+#[debug("ObjectKey {{ len: {} }}", _0.len())]
 pub struct ObjectKey(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,15 +32,6 @@ impl ObjectKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Debug for ObjectKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ObjectKey")
-            .field("len", &self.0.len())
-            .finish()
     }
 }
 

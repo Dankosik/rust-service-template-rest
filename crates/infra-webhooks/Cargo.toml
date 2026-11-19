@@ -22,6 +22,7 @@ aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nas
 base64 = { workspace = true, features = ["std"] }
 derive_more = { workspace = true, features = ["debug"] }
 bytes = { workspace = true, features = ["std"] }
+compact_str = { workspace = true, features = ["serde"] }
 foldhash = { workspace = true, features = ["std"] }
 http = { workspace = true, features = ["std"] }
 infra-jobs = { workspace = true }
@@ -34,6 +35,7 @@ tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 enum-map = { workspace = true, features = ["derive"] }
 # template:begin webhooks:webhooks-outbound-dependencies
+arrayvec = { workspace = true }
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
@@ -41,11 +43,13 @@ shared-rules = { workspace = true }
 url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 http-body-util = { workspace = true }
 infra-http = { workspace = true }
 parking_lot = { workspace = true }
+smallvec = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
 tokio = { workspace = true, features = ["time"] }

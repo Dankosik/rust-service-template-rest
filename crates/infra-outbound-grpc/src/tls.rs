@@ -1,5 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
+use parking_lot::Mutex;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use rustls::server::ParsedCertificate;
@@ -18,13 +19,37 @@ pub(crate) fn client_tls_config(
     Ok(Arc::new(build_client_tls_config(material)?))
 }
 
-fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
-    static DEFAULT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    if let Some(config) = DEFAULT_CONFIG.get() {
-        return Ok(Arc::clone(config));
+struct FallibleOnce<T> {
+    value: OnceLock<T>,
+    init: Mutex<()>,
+}
+
+impl<T> FallibleOnce<T> {
+    const fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+            init: Mutex::new(()),
+        }
     }
-    let config = build_client_tls_config(&ClientTlsMaterial::default())?;
-    Ok(Arc::clone(DEFAULT_CONFIG.get_or_init(|| Arc::new(config))))
+
+    fn get_or_try_init<E>(&self, init: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+        if let Some(value) = self.value.get() {
+            return Ok(value);
+        }
+        let _guard = self.init.lock();
+        if let Some(value) = self.value.get() {
+            return Ok(value);
+        }
+        let value = init()?;
+        Ok(self.value.get_or_init(|| value))
+    }
+}
+
+fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
+    static DEFAULT_CONFIG: FallibleOnce<Arc<ClientConfig>> = FallibleOnce::new();
+    DEFAULT_CONFIG
+        .get_or_try_init(|| build_client_tls_config(&ClientTlsMaterial::default()).map(Arc::new))
+        .map(Arc::clone)
 }
 
 fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig, ClientError> {
@@ -55,15 +80,14 @@ fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig,
 }
 
 fn platform_verifier() -> Result<Arc<Verifier>, ClientError> {
-    static PLATFORM_VERIFIER: OnceLock<Arc<Verifier>> = OnceLock::new();
-    if let Some(verifier) = PLATFORM_VERIFIER.get() {
-        return Ok(Arc::clone(verifier));
-    }
-    let verifier =
-        Verifier::new(crypto_provider()).map_err(|_| ClientError::ClientVerifierSetup)?;
-    Ok(Arc::clone(
-        PLATFORM_VERIFIER.get_or_init(|| Arc::new(verifier)),
-    ))
+    static PLATFORM_VERIFIER: FallibleOnce<Arc<Verifier>> = FallibleOnce::new();
+    PLATFORM_VERIFIER
+        .get_or_try_init(|| {
+            Verifier::new(crypto_provider())
+                .map(Arc::new)
+                .map_err(|_| ClientError::ClientVerifierSetup)
+        })
+        .map(Arc::clone)
 }
 
 fn crypto_provider() -> Arc<CryptoProvider> {
@@ -143,6 +167,63 @@ mod tests {
             },
             SecretString::from(other_key.serialize_pem()),
         )
+    }
+
+    #[test]
+    fn fallible_once_retries_errors_and_serializes_concurrent_init() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        let cell = FallibleOnce::new();
+        let attempts = AtomicUsize::new(0);
+        assert_eq!(
+            cell.get_or_try_init(|| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err::<usize, &'static str>("transient")
+            }),
+            Err("transient")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let cell_ref = &cell;
+        let attempts_ref = &attempts;
+        std::thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                *cell_ref
+                    .get_or_try_init(|| -> Result<usize, &'static str> {
+                        let count = attempts_ref.fetch_add(1, Ordering::SeqCst);
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(count)
+                    })
+                    .unwrap()
+            });
+            entered_rx.recv().unwrap();
+            let second = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                let value = *cell_ref
+                    .get_or_try_init(|| -> Result<usize, &'static str> {
+                        Ok(attempts_ref.fetch_add(1, Ordering::SeqCst))
+                    })
+                    .unwrap();
+                second_tx.send(value).unwrap();
+                value
+            });
+            started_rx.recv().unwrap();
+            for _ in 0..16 {
+                std::thread::yield_now();
+            }
+            assert!(second_rx.try_recv().is_err());
+            release_tx.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), 1);
+            assert_eq!(second.join().unwrap(), 1);
+            assert_eq!(second_rx.recv().unwrap(), 1);
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[test]

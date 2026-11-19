@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, Either};
 use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use tonic::body::Body;
@@ -49,7 +49,10 @@ impl ServiceTokenClient {
 impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Response = http::Response<Body>;
     type Error = tonic::Status;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = Either<
+        std::future::Ready<Result<Self::Response, Self::Error>>,
+        BoxFuture<'static, Result<Self::Response, Self::Error>>,
+    >;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -58,10 +61,10 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
         let prepared = match self.prepare(request) {
             Ok(prepared) => prepared,
-            Err(status) => return Box::pin(std::future::ready(Err(status))),
+            Err(status) => return Either::Left(std::future::ready(Err(status))),
         };
         let tokens = self.tokens.clone();
-        Box::pin(prepared.send_inner(
+        Either::Right(Box::pin(prepared.send_inner(
             move |headers| {
                 let authorization = tokens.authorization().map_err(|error| {
                     let mut status = tonic::Status::unavailable("service token unavailable");
@@ -74,7 +77,7 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
                 Ok(())
             },
             None,
-        ))
+        )))
     }
 }
 

@@ -1,21 +1,19 @@
 use std::convert::Infallible;
-use std::fmt;
 use std::mem::DropGuard;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{
-    AttemptError, Attempted, Digest, RequestFingerprint, ScopeKey, Store,
-};
+use enum_map::{Enum, EnumMap};
+use infra_idempotency_store::{AttemptError, Attempted, RequestFingerprint, ScopeKey, Store};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
 
 use super::compose::wiring_failure;
 use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
-use super::{REPLAYED_HEADER, REPLAYED_VALUE, Tx};
+use super::{REPLAYED_HEADER_NAME, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
@@ -31,7 +29,7 @@ const ATTEMPT_TIMEOUT_DETAIL: &str = concat!(
     "reconcile the outcome before attempting the operation again",
 );
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Enum, PartialEq, Eq)]
 pub(super) enum Outcome {
     InvalidKey,
     Unavailable,
@@ -48,10 +46,7 @@ pub(super) enum Outcome {
 }
 
 impl Outcome {
-    pub(super) fn record(self) {
-        static METADATA: Metadata<'static> =
-            Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
-
+    fn key(self) -> &'static Key {
         macro_rules! outcomes {
             ($($variant:ident => $label:literal),* $(,)?) => {
                 match self {
@@ -63,7 +58,7 @@ impl Outcome {
                 }
             };
         }
-        let key = outcomes!(
+        outcomes!(
             InvalidKey => "invalid_key",
             Unavailable => "unavailable",
             InProgress => "in_progress",
@@ -76,9 +71,41 @@ impl Outcome {
             Unstorable => "unstorable",
             NotStored => "not_stored",
             Abandoned => "abandoned",
-        );
-        let counter = metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA));
-        counter.increment(1);
+        )
+    }
+}
+
+pub(super) struct RouteState {
+    pub(super) operation_id: Box<str>,
+    pub(super) fingerprint_headers: Box<[HeaderName]>,
+    pub(super) rules_link: HeaderValue,
+    outcomes: EnumMap<Outcome, OnceLock<metrics::Counter>>,
+}
+
+impl RouteState {
+    pub(super) fn new(
+        operation_id: String,
+        fingerprint_headers: Vec<HeaderName>,
+        rules_link: HeaderValue,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into_boxed_str(),
+            fingerprint_headers: fingerprint_headers.into_boxed_slice(),
+            rules_link,
+            outcomes: EnumMap::default(),
+        }
+    }
+
+    pub(super) fn record(&self, outcome: Outcome) {
+        static METADATA: Metadata<'static> =
+            Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
+        self.outcomes[outcome]
+            .get_or_init(|| {
+                metrics::with_recorder(|recorder| {
+                    recorder.register_counter(outcome.key(), &METADATA)
+                })
+            })
+            .increment(1);
     }
 }
 
@@ -86,8 +113,7 @@ pub(super) struct Attempt {
     pub(super) store: Store,
     pub(super) scope: ScopeKey,
     pub(super) fingerprint: RequestFingerprint,
-    pub(super) operation_id: Arc<str>,
-    pub(super) rules_link: HeaderValue,
+    pub(super) route: Arc<RouteState>,
     pub(super) deadline: RequestDeadline,
 }
 
@@ -124,11 +150,10 @@ impl Attempt {
             store,
             scope,
             fingerprint,
-            operation_id,
-            rules_link,
+            route,
             deadline,
         } = self;
-        let guard = DropGuard::new((), |()| Outcome::Abandoned.record());
+        let guard = DropGuard::new(&route, |route| route.record(Outcome::Abandoned));
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
@@ -158,15 +183,15 @@ impl Attempt {
                 result
             }
         };
-        map_attempted(attempted, &scope, &operation_id, rules_link)
-            .settle(deadline.at(), guard)
+        map_attempted(attempted, &scope, &route)
+            .settle(deadline.at(), &route, guard)
             .await
     }
 }
 
 fn command_timeout() -> Response {
     Problem::new(Code::GatewayTimeout)
-        .detail(ATTEMPT_TIMEOUT_DETAIL)
+        .detail_static(ATTEMPT_TIMEOUT_DETAIL)
         .into_response()
 }
 
@@ -194,28 +219,21 @@ impl From<Infallible> for TerminalProblem {
     }
 }
 
-#[derive(thiserror::Error)]
+#[derive(derive_more::Debug, derive_more::From, thiserror::Error)]
 pub enum Rollback<T = Infallible> {
+    #[debug("{self}")]
     #[error("operation refused")]
     Refused(Box<Response>),
+    #[debug("{self}")]
     #[error("terminal business refusal")]
     Terminal(T),
+    #[from(SqlError)]
+    #[debug("{self}")]
     #[error("database")]
     Database(SqlError),
+    #[debug("{self}")]
     #[error(transparent)]
     Unstorable(#[from] ReplayError),
-}
-
-impl<T> fmt::Debug for Rollback<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
-}
-
-impl<T> From<SqlError> for Rollback<T> {
-    fn from(error: SqlError) -> Self {
-        Self::Database(error)
-    }
 }
 
 impl<T> Rollback<T> {
@@ -248,12 +266,17 @@ impl Answer {
         }
     }
 
-    async fn settle(self, deadline: Instant, guard: DropGuard<(), impl FnOnce(())>) -> Response {
+    async fn settle<'a>(
+        self,
+        deadline: Instant,
+        route: &RouteState,
+        guard: DropGuard<&'a Arc<RouteState>, impl FnOnce(&'a Arc<RouteState>)>,
+    ) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
             return std::future::pending().await;
         }
         DropGuard::dismiss(guard);
-        self.outcome.record();
+        route.record(self.outcome);
         self.response
     }
 }
@@ -273,9 +296,9 @@ impl From<ReplayError> for AttemptRollback {
 fn map_attempted(
     attempted: Result<Attempted<AttemptRollback>, AttemptError>,
     scope: &ScopeKey,
-    operation_id: &str,
-    rules_link: HeaderValue,
+    route: &RouteState,
 ) -> Answer {
+    let operation_id = &route.operation_id;
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
         Ok(Attempted::RolledBack(AttemptRollback::Refused(response))) => {
@@ -304,13 +327,14 @@ fn map_attempted(
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
         Ok(Attempted::Mismatch) => {
-            Answer::boundary_problem(key_mismatch(rules_link), Outcome::KeyMismatch)
+            Answer::boundary_problem(key_mismatch(route.rules_link.clone()), Outcome::KeyMismatch)
         }
         Ok(Attempted::Replay(record)) => {
             let mut response = response_from_record(record);
-            response
-                .headers_mut()
-                .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
+            response.headers_mut().insert(
+                REPLAYED_HEADER_NAME,
+                HeaderValue::from_static(REPLAYED_VALUE),
+            );
             Answer::operation_response(response, Outcome::Replayed)
         }
         Ok(Attempted::InProgress) => {
@@ -337,7 +361,7 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
         }
         AttemptError::Integrity => {
             tracing::error!(
-                scope_digest = %ScopeDigest(scope.digest()),
+                scope_digest = %const_hex::display(scope.digest()),
                 operation = operation_id,
                 failure = "store_undecodable",
                 "http_idempotency_integrity_failed"
@@ -351,13 +375,13 @@ fn sanitize_refusal(mut response: Response, operation_id: &str) -> Response {
     if !(response.status().is_client_error() || response.status().is_server_error()) {
         return wiring_failure(operation_id, "invalid_refusal_status");
     }
-    response.headers_mut().remove(REPLAYED_HEADER);
+    response.headers_mut().remove(&REPLAYED_HEADER_NAME);
     response
 }
 
 fn unavailable() -> Response {
     Problem::new(Code::IdempotencyUnavailable)
-        .detail(UNAVAILABLE_DETAIL)
+        .detail_static(UNAVAILABLE_DETAIL)
         .retry_after(RETRY_AFTER_HINT)
         .into_response()
 }
@@ -365,41 +389,40 @@ fn unavailable() -> Response {
 fn key_mismatch(rules_link: HeaderValue) -> Response {
     (
         [(axum::http::header::LINK, rules_link)],
-        Problem::new(Code::IdempotencyKeyMismatch).detail(KEY_MISMATCH_DETAIL),
+        Problem::new(Code::IdempotencyKeyMismatch).detail_static(KEY_MISMATCH_DETAIL),
     )
         .into_response()
 }
 
 fn in_progress(scope: &ScopeKey, operation_id: &str) -> Response {
     tracing::info!(
-        scope_digest = %ScopeDigest(scope.digest()),
+        scope_digest = %const_hex::display(scope.digest()),
         operation = operation_id,
         "http_idempotency_in_progress"
     );
     Problem::new(Code::IdempotencyRequestInProgress)
-        .detail(IN_PROGRESS_DETAIL)
+        .detail_static(IN_PROGRESS_DETAIL)
         .retry_after(RETRY_AFTER_HINT)
         .into_response()
 }
 
-struct ScopeDigest<'a>(&'a Digest);
-
-impl fmt::Display for ScopeDigest<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(const_hex::Buffer::<32>::new().format(self.0))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use axum::http::StatusCode;
     use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
     use super::*;
     use crate::test_support::body_json;
 
     fn rules_link() -> HeaderValue {
         HeaderValue::from_static("<https://docs.example/retry>; rel=\"describedby\"")
+    }
+
+    fn route_state() -> RouteState {
+        RouteState::new("test".to_owned(), Vec::new(), rules_link())
     }
 
     fn scope() -> ScopeKey {
@@ -440,8 +463,7 @@ mod tests {
                     .expect("retention fits PostgreSQL"),
                 scope: scope(),
                 fingerprint: RequestFingerprint::from_bytes([9; 32]),
-                operation_id: "test".into(),
-                rules_link: rules_link(),
+                route: Arc::new(route_state()),
                 deadline: RequestDeadline::from_deadline(
                     operation_context::Deadline::new(origin, budget),
                     budget,
@@ -462,7 +484,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_internal_store_failure_is_a_sanitized_500() {
-        let answer = map_attempted(Err(AttemptError::Internal), &scope(), "test", rules_link());
+        let route = route_state();
+        let answer = map_attempted(Err(AttemptError::Internal), &scope(), &route);
         assert_eq!(answer.outcome, Outcome::Internal);
         assert_eq!(answer.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
@@ -476,6 +499,7 @@ mod tests {
 
     #[test]
     fn a_rollback_cannot_claim_success_or_replay() {
+        let route = route_state();
         for (status, expected) in [
             (StatusCode::CONTINUE, StatusCode::INTERNAL_SERVER_ERROR),
             (StatusCode::CREATED, StatusCode::INTERNAL_SERVER_ERROR),
@@ -491,16 +515,62 @@ mod tests {
             ),
         ] {
             let rollback = AttemptRollback::Refused(Box::new(
-                (status, [(REPLAYED_HEADER, "true")]).into_response(),
+                (status, [(REPLAYED_HEADER_NAME, "true")]).into_response(),
             ));
-            let answer = map_attempted(
-                Ok(Attempted::RolledBack(rollback)),
-                &scope(),
-                "test",
-                rules_link(),
-            );
+            let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
             assert_eq!(answer.response.status(), expected);
-            assert!(!answer.response.headers().contains_key(REPLAYED_HEADER));
+            assert!(
+                !answer
+                    .response
+                    .headers()
+                    .contains_key(&REPLAYED_HEADER_NAME)
+            );
         }
+    }
+
+    #[test]
+    fn rollback_debug_and_database_from_preserve_bounds_and_source_privacy() {
+        struct OpaqueTerminal;
+
+        let terminal: Rollback<OpaqueTerminal> = Rollback::Terminal(OpaqueTerminal);
+        assert_eq!(format!("{terminal:?}"), "terminal business refusal");
+        assert!(terminal.source().is_none());
+
+        let database: Rollback<OpaqueTerminal> = Rollback::from(SqlError::RowNotFound);
+        assert_eq!(format!("{database:?}"), "database");
+        assert!(database.source().is_none());
+    }
+
+    #[test]
+    fn route_states_keep_scoped_outcome_recorders_isolated() {
+        let first_recorder = DebuggingRecorder::new();
+        let first_snapshot = first_recorder.snapshotter();
+        let first_route = route_state();
+        metrics::with_local_recorder(&first_recorder, || {
+            first_route.record(Outcome::Executed);
+            first_route.record(Outcome::Executed);
+        });
+
+        let second_recorder = DebuggingRecorder::new();
+        let second_snapshot = second_recorder.snapshotter();
+        let second_route = route_state();
+        metrics::with_local_recorder(&second_recorder, || {
+            second_route.record(Outcome::Executed);
+        });
+
+        let count = |snapshot: &metrics_util::debugging::Snapshotter| {
+            snapshot
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find_map(|(key, _, _, value)| {
+                    (key.key().name() == HTTP_IDEMPOTENCY_OUTCOMES_METRIC).then_some(match value {
+                        DebugValue::Counter(count) => count,
+                        _ => 0,
+                    })
+                })
+        };
+        assert_eq!(count(&first_snapshot), Some(2));
+        assert_eq!(count(&second_snapshot), Some(1));
     }
 }

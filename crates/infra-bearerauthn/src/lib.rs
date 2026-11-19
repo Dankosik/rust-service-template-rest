@@ -64,15 +64,24 @@ pub use principal::{Actor, ClaimAccessError, Principal};
 pub use provider::{EndpointUrl, HISTOGRAMS, IssuerUrl, ProviderFailure};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum, thiserror::Error)]
+#[error("{}", self.as_str())]
 pub enum Failure {
-    #[error("bearer authentication is required")]
     Missing,
-    #[error("bearer authentication is malformed")]
     Malformed,
-    #[error("bearer authentication is invalid")]
     Invalid,
-    #[error("bearer authentication is unavailable")]
     Unavailable,
+}
+
+impl Failure {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "bearer authentication is required",
+            Self::Malformed => "bearer authentication is malformed",
+            Self::Invalid => "bearer authentication is invalid",
+            Self::Unavailable => "bearer authentication is unavailable",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

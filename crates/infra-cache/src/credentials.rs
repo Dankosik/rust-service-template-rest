@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 use tokio_util::task::TaskTracker;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::CacheError;
 
@@ -76,7 +76,7 @@ impl PasswordFile {
     clippy::disallowed_types,
     reason = "blocking workers must read from the same descriptor they validated as a regular file"
 )]
-pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+fn read_regular_file_into(path: &Path, max_bytes: usize, bytes: &mut Vec<u8>) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -86,23 +86,45 @@ pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec
         options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(ErrorKind::InvalidInput.into());
     }
-    let mut bytes = Vec::new();
-    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(max_bytes)
+        .min(max_bytes)
+        .saturating_add(1);
+    bytes.reserve_exact(capacity);
+    file.take(max_bytes as u64 + 1).read_to_end(bytes)?;
     if bytes.len() > max_bytes {
         return Err(ErrorKind::InvalidData.into());
     }
+    Ok(())
+}
+
+pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    read_regular_file_into(path, max_bytes, &mut bytes)?;
     Ok(bytes)
 }
 
-fn read_password_file(path: &Path) -> Result<String, ErrorKind> {
-    let bytes = read_regular_file(path, MAX_PASSWORD_FILE_BYTES).map_err(|error| error.kind())?;
-    String::from_utf8(bytes).map_err(|_| ErrorKind::InvalidData)
+pub(crate) fn read_secret_file(path: &Path, max_bytes: usize) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    read_regular_file_into(path, max_bytes, &mut bytes)?;
+    Ok(bytes)
 }
 
-fn password_from(content: String) -> Option<Zeroizing<String>> {
-    Some(Zeroizing::new(shared_rules::secret_file::value(content)))
-        .filter(|password| !password.is_empty())
+fn read_password_file(path: &Path) -> Result<Zeroizing<String>, ErrorKind> {
+    let mut bytes =
+        read_secret_file(path, MAX_PASSWORD_FILE_BYTES).map_err(|error| error.kind())?;
+    let raw = std::mem::take(&mut *bytes);
+    String::from_utf8(raw).map(Zeroizing::new).map_err(|error| {
+        error.into_bytes().zeroize();
+        ErrorKind::InvalidData
+    })
+}
+
+fn password_from(mut content: Zeroizing<String>) -> Option<Zeroizing<String>> {
+    let trimmed = shared_rules::secret_file::value(std::mem::take(&mut *content));
+    Some(Zeroizing::new(trimmed)).filter(|password| !password.is_empty())
 }

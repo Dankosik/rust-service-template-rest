@@ -1,10 +1,11 @@
 mod completion;
 mod outcome;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use enum_map::{Enum, EnumMap};
 use futures_util::FutureExt as _;
 use metrics::Unit;
 use tokio::time::Instant;
@@ -21,7 +22,7 @@ use crate::state::FailureReason;
 use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{
-    HandlerOutcome, Transition, WritePlan, Written, map_outcome, send_outcome, write_of,
+    HandlerOutcome, RetryCause, Transition, WritePlan, Written, map_outcome, send_outcome, write_of,
 };
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
@@ -73,17 +74,64 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Enum)]
+enum AttemptOutcome {
+    Completed,
+    Timeout,
+    Retry,
+    Snoozed,
+    Cancelled,
+    Permanent,
+    Exhausted,
+}
+
+impl AttemptOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => Transition::COMPLETED_LABEL,
+            Self::Timeout => "timeout",
+            Self::Retry => "retry",
+            Self::Snoozed => "snoozed",
+            Self::Cancelled => "cancelled",
+            Self::Permanent => FailureReason::Permanent.as_str(),
+            Self::Exhausted => FailureReason::Exhausted.as_str(),
+        }
+    }
+
+    const fn of_retry(cause: RetryCause) -> Self {
+        match cause {
+            RetryCause::Failure => Self::Retry,
+            RetryCause::Timeout => Self::Timeout,
+        }
+    }
+
+    const fn of_failure(reason: FailureReason) -> Self {
+        match reason {
+            FailureReason::Permanent => Self::Permanent,
+            FailureReason::Exhausted => Self::Exhausted,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Enum)]
 enum Persistence {
-    Acknowledged(Written),
+    Applied,
+    Unchanged,
     Unknown,
 }
 
 impl Persistence {
+    const fn acknowledged(written: Written) -> Self {
+        match written {
+            Written::Applied => Self::Applied,
+            Written::Unchanged => Self::Unchanged,
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
-            Self::Acknowledged(Written::Applied) => "applied",
-            Self::Acknowledged(Written::Unchanged) => "unchanged",
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
             Self::Unknown => "unknown",
         }
     }
@@ -98,20 +146,41 @@ fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics:
 }
 
 pub(crate) struct KindMetrics {
-    completed: metrics::Counter,
+    kind: &'static str,
+    attempts: EnumMap<AttemptOutcome, OnceLock<metrics::Counter>>,
+    persistence: EnumMap<Persistence, OnceLock<metrics::Counter>>,
+    last_terminal_attempt_timestamp: OnceLock<metrics::Gauge>,
     duration: metrics::Histogram,
-    applied: metrics::Counter,
     pub(crate) queue_wait: metrics::Histogram,
 }
 
 impl KindMetrics {
     pub(crate) fn new(kind: &'static str) -> Self {
-        Self {
-            completed: attempts_counter(kind, Transition::COMPLETED_LABEL),
+        let metrics = Self {
+            kind,
+            attempts: EnumMap::default(),
+            persistence: EnumMap::default(),
+            last_terminal_attempt_timestamp: OnceLock::new(),
             duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
-            applied: persistence_counter(kind, Persistence::Acknowledged(Written::Applied)),
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
-        }
+        };
+        metrics.attempt(AttemptOutcome::Completed);
+        metrics.persistence(Persistence::Applied);
+        metrics
+    }
+
+    fn attempt(&self, outcome: AttemptOutcome) -> &metrics::Counter {
+        self.attempts[outcome].get_or_init(|| attempts_counter(self.kind, outcome.label()))
+    }
+
+    fn persistence(&self, disposition: Persistence) -> &metrics::Counter {
+        self.persistence[disposition].get_or_init(|| persistence_counter(self.kind, disposition))
+    }
+
+    fn last_terminal_attempt_timestamp(&self) -> &metrics::Gauge {
+        self.last_terminal_attempt_timestamp.get_or_init(
+            || metrics::gauge!(LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC, "kind" => self.kind),
+        )
     }
 }
 
@@ -171,38 +240,48 @@ pub(crate) struct ClaimFence {
     pub(crate) token: uuid::Uuid,
 }
 
-pub(crate) fn record_exhausted(attempt: &AttemptId, summary: &str) {
-    observe_terminal_failure(attempt, FailureReason::Exhausted, summary);
+pub(crate) fn record_exhausted(handles: &KindMetrics, attempt: &AttemptId, summary: &str) {
+    observe_terminal_failure(handles, attempt, FailureReason::Exhausted, summary);
 }
 
 fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
     let outcome = transition.label();
     match transition {
         Transition::Complete(_) => {
-            handles.completed.increment(1);
+            handles.attempt(AttemptOutcome::Completed).increment(1);
             tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
-            attempts_counter(attempt.kind, outcome).increment(1);
+            handles.attempt(AttemptOutcome::Snoozed).increment(1);
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_finished");
         }
         Transition::Release => {
-            attempts_counter(attempt.kind, outcome).increment(1);
+            handles.attempt(AttemptOutcome::Cancelled).increment(1);
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_finished");
         }
-        Transition::Retry { summary, .. } => {
-            attempts_counter(attempt.kind, outcome).increment(1);
+        Transition::Retry { summary, cause, .. } => {
+            handles
+                .attempt(AttemptOutcome::of_retry(*cause))
+                .increment(1);
             log_attempt_failed(attempt, outcome, summary);
         }
         Transition::Fail { .. } => {}
     }
 }
 
-fn observe_terminal_failure(attempt: &AttemptId, reason: FailureReason, summary: &str) {
+fn observe_terminal_failure(
+    handles: &KindMetrics,
+    attempt: &AttemptId,
+    reason: FailureReason,
+    summary: &str,
+) {
     let outcome = reason.as_str();
-    attempts_counter(attempt.kind, outcome).increment(1);
+    handles
+        .attempt(AttemptOutcome::of_failure(reason))
+        .increment(1);
     if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        metrics::gauge!(LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC, "kind" => attempt.kind)
+        handles
+            .last_terminal_attempt_timestamp()
             .set(timestamp.as_secs_f64());
     }
     tracing::warn!(
@@ -325,7 +404,7 @@ impl AttemptRun<'_> {
         }
         if let Transition::Fail { reason, summary } = &transition {
             if written == Some(Written::Applied) {
-                observe_terminal_failure(&self.attempt, *reason, summary);
+                observe_terminal_failure(handles, &self.attempt, *reason, summary);
             } else {
                 log_attempt_failed(&self.attempt, transition.label(), summary);
             }
@@ -447,11 +526,8 @@ impl AttemptRun<'_> {
 
     fn observe_acknowledged(&self, handles: &KindMetrics, operation: Operation, written: Written) {
         observe_recovery(self.group, operation);
-        let persistence = Persistence::Acknowledged(written);
-        match written {
-            Written::Applied => handles.applied.increment(1),
-            Written::Unchanged => persistence_counter(self.attempt.kind, persistence).increment(1),
-        }
+        let persistence = Persistence::acknowledged(written);
+        handles.persistence(persistence).increment(1);
         tracing::debug!(
             job.id = %self.attempt.job_id,
             job.kind = self.attempt.kind,
@@ -474,7 +550,10 @@ impl AttemptRun<'_> {
             .counters
             .uncertain
             .fetch_add(1, Ordering::Relaxed);
-        persistence_counter(self.attempt.kind, Persistence::Unknown).increment(1);
+        self.registered
+            .metrics()
+            .persistence(Persistence::Unknown)
+            .increment(1);
         tracing::warn!(
             job.id = %self.attempt.job_id,
             job.kind = self.attempt.kind,

@@ -1,5 +1,9 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
+use enum_map::EnumMap;
 use operation_context::Stopped;
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
@@ -79,11 +83,60 @@ impl ProviderFailure {
             Self::Transfer => ProviderReason::Transfer,
         }
     }
+}
 
-    pub(crate) const fn label(self) -> &'static str {
-        self.reason().label()
+#[derive(Clone, Copy, enum_map::Enum)]
+enum Operation {
+    // template:begin oidc-jwt:authn-provider-jwt-operations
+    Discovery,
+    Jwks,
+    // template:end oidc-jwt:authn-provider-jwt-operations
+    // template:begin oidc-introspection:authn-provider-introspection-operation
+    Introspection,
+    // template:end oidc-introspection:authn-provider-introspection-operation
+}
+
+impl Operation {
+    const fn label(self) -> &'static str {
+        match self {
+            // template:begin oidc-jwt:authn-provider-jwt-operation-labels
+            Self::Discovery => "discovery",
+            Self::Jwks => "jwks",
+            // template:end oidc-jwt:authn-provider-jwt-operation-labels
+            // template:begin oidc-introspection:authn-provider-introspection-operation-label
+            Self::Introspection => "introspection",
+            // template:end oidc-introspection:authn-provider-introspection-operation-label
+        }
     }
 }
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum Outcome {
+    Success,
+    Failure(ProviderReason),
+    CallerDeadline,
+    Cancelled,
+}
+
+impl Outcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure(reason) => reason.label(),
+            Self::CallerDeadline => "caller_deadline",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    const fn error_label(self) -> Option<&'static str> {
+        match self {
+            Self::Success => None,
+            Self::Failure(_) | Self::CallerDeadline | Self::Cancelled => Some(self.label()),
+        }
+    }
+}
+
+type OperationHistograms = EnumMap<Operation, EnumMap<Outcome, OnceLock<metrics::Histogram>>>;
 
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("IssuerUrl([REDACTED])")]
@@ -159,6 +212,7 @@ const fn invalid_url() -> PreparationError {
 #[derive(Clone)]
 pub(crate) struct ProviderClient {
     client: reqwest::Client,
+    histograms: Arc<OperationHistograms>,
 }
 
 impl ProviderClient {
@@ -174,7 +228,14 @@ impl ProviderClient {
             metrics::Unit::Seconds,
             "Authentication provider exchange duration by operation and closed outcome"
         );
-        builder.build().map(|client| Self { client })
+        builder.build().map(|client| Self {
+            client,
+            histograms: Arc::new(EnumMap::default()),
+        })
+    }
+
+    fn exchange(&self, operation: Operation, method: &'static str, url: &Url) -> Exchange<'_> {
+        Exchange::start(&self.histograms, operation, method, url)
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
@@ -184,7 +245,7 @@ impl ProviderClient {
         document: Document,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        Exchange::start(document.operation(), "GET", url)
+        self.exchange(document.operation(), "GET", url)
             .run(
                 self.client.get(url.clone()),
                 ExchangeMode::Document { deadline },
@@ -202,14 +263,15 @@ impl ProviderClient {
         form: &[(&str, &str)],
         caller_stop: CallerStop<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let client_id = form_encode(client_id);
-        let client_secret = form_encode(client_secret);
-        let request = self
-            .client
-            .post(url.clone())
-            .basic_auth(&client_id, Some(&client_secret))
-            .form(form);
-        Exchange::start("introspection", "POST", url)
+        let request = {
+            let client_id = form_encode(client_id);
+            let client_secret = zeroize::Zeroizing::new(form_encode(client_secret));
+            self.client
+                .post(url.clone())
+                .basic_auth(&client_id, Some(client_secret.as_str()))
+                .form(form)
+        };
+        self.exchange(Operation::Introspection, "POST", url)
             .run(request, ExchangeMode::Introspection { caller_stop })
             .await
     }
@@ -218,7 +280,9 @@ impl ProviderClient {
 
 // template:begin oidc-introspection:authn-provider-form-encode
 fn form_encode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    let mut encoded = String::with_capacity(value.len().saturating_mul(3));
+    encoded.extend(url::form_urlencoded::byte_serialize(value.as_bytes()));
+    encoded
 }
 // template:end oidc-introspection:authn-provider-form-encode
 
@@ -230,10 +294,10 @@ pub(crate) enum Document {
 }
 
 impl Document {
-    const fn operation(self) -> &'static str {
+    const fn operation(self) -> Operation {
         match self {
-            Self::Discovery => "discovery",
-            Self::Jwks => "jwks",
+            Self::Discovery => Operation::Discovery,
+            Self::Jwks => Operation::Jwks,
         }
     }
 }
@@ -256,14 +320,20 @@ enum ExchangeMode<'a> {
 
 pub(crate) type CallerStop<'a> = &'a (dyn Fn() -> Option<Stopped> + Sync);
 
-struct Exchange {
-    operation: &'static str,
+struct Exchange<'a> {
+    histograms: &'a OperationHistograms,
+    operation: Operation,
     started: Instant,
     span: tracing::Span,
 }
 
-impl Exchange {
-    fn start(operation: &'static str, method: &'static str, url: &Url) -> Self {
+impl<'a> Exchange<'a> {
+    fn start(
+        histograms: &'a OperationHistograms,
+        operation: Operation,
+        method: &'static str,
+        url: &Url,
+    ) -> Self {
         let span = tracing::info_span!(
             "authn_provider",
             otel.name = method,
@@ -271,12 +341,13 @@ impl Exchange {
             http.request.method = method,
             server.address = url.host_str().unwrap_or_default(),
             server.port = url.port_or_known_default().unwrap_or_default(),
-            authn.operation = operation,
+            authn.operation = operation.label(),
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
         Self {
+            histograms,
             operation,
             started: Instant::now(),
             span,
@@ -293,11 +364,10 @@ impl Exchange {
             ExchangeMode::Document { deadline } => (None, false, deadline),
         };
         let guard = std::mem::DropGuard::new(self, |exchange| {
-            exchange.record(Some(
-                caller_stop
-                    .and_then(|stopped| stopped())
-                    .map_or("cancelled", stopped_label),
-            ));
+            let outcome = caller_stop
+                .and_then(|stopped| stopped())
+                .map_or(Outcome::Cancelled, stopped_outcome);
+            exchange.record(outcome);
         });
         let response_body =
             receive(request, require_json_content_type, &guard.span).instrument(guard.span.clone());
@@ -307,30 +377,38 @@ impl Exchange {
                 .await
                 .unwrap_or(Err(ProviderFailure::Timeout)),
         };
-        std::mem::DropGuard::dismiss(guard)
-            .record(result.as_ref().err().copied().map(ProviderFailure::label));
+        let outcome = result
+            .as_ref()
+            .err()
+            .copied()
+            .map_or(Outcome::Success, |failure| {
+                Outcome::Failure(failure.reason())
+            });
+        std::mem::DropGuard::dismiss(guard).record(outcome);
         result
     }
 
-    fn record(&self, failure: Option<&'static str>) {
-        if let Some(failure) = failure {
-            self.span.record("error.type", failure);
+    fn record(&self, outcome: Outcome) {
+        if let Some(error) = outcome.error_label() {
+            self.span.record("error.type", error);
             self.span.record("otel.status_code", "ERROR");
         }
-        let outcome = failure.unwrap_or("success");
-        metrics::histogram!(
-            REQUEST_DURATION_METRIC,
-            "operation" => self.operation,
-            "outcome" => outcome
-        )
-        .record(self.started.elapsed());
+        self.histograms[self.operation][outcome]
+            .get_or_init(|| {
+                metrics::histogram!(
+                    REQUEST_DURATION_METRIC,
+                    "operation" => self.operation.label(),
+                    "outcome" => outcome.label()
+                )
+            })
+            .record(self.started.elapsed());
     }
 }
 
-const fn stopped_label(stopped: Stopped) -> &'static str {
+const fn stopped_outcome(stopped: Stopped) -> Outcome {
     match stopped {
-        Stopped::Deadline => "caller_deadline",
-        Stopped::Cancelled => "cancelled",
+        Stopped::Deadline => Outcome::CallerDeadline,
+        Stopped::Cancelled => Outcome::Cancelled,
     }
 }
 
@@ -505,11 +583,15 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, Exchange, ExchangeMode, IssuerUrl, ProviderClient, ProviderFailure,
+        EndpointUrl, ExchangeMode, IssuerUrl, Operation, ProviderClient, ProviderFailure,
         client_builder, fixture_acceptor, new_fixture_client,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
+
+    fn test_operation() -> Operation {
+        <Operation as enum_map::Enum>::from_usize(0)
+    }
 
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
@@ -685,7 +767,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(2500),
-            Exchange::start("discovery", "GET", &url).run(
+            client.exchange(test_operation(), "GET", &url).run(
                 client.client.get(url.clone()),
                 ExchangeMode::Document { deadline: None },
             ),
@@ -697,7 +779,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(2500));
 
         tokio::time::resume();
-        let body = Exchange::start("discovery", "GET", &url)
+        let body = client
+            .exchange(test_operation(), "GET", &url)
             .run(
                 client.client.get(url.clone()),
                 ExchangeMode::Document { deadline: None },
@@ -744,7 +827,8 @@ mod tests {
         .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
-            Exchange::start("jwks", "GET", &url)
+            old_client
+                .exchange(test_operation(), "GET", &url)
                 .run(
                     old_client.client.get(url.clone()),
                     ExchangeMode::Document { deadline: None }
@@ -754,7 +838,8 @@ mod tests {
             b"{}"
         );
         assert_eq!(
-            Exchange::start("jwks", "GET", &url)
+            old_client
+                .exchange(test_operation(), "GET", &url)
                 .run(
                     old_client.client.get(url.clone()),
                     ExchangeMode::Document { deadline: None }
@@ -770,7 +855,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Exchange::start("jwks", "GET", &url)
+            rebuilt_client
+                .exchange(test_operation(), "GET", &url)
                 .run(
                     rebuilt_client.client.get(url.clone()),
                     ExchangeMode::Document { deadline: None }
@@ -793,9 +879,11 @@ mod tests {
         .into_bytes();
         let (address, root, server) = tls_server(response, false).await;
         let url = fixture_url(address);
-        let result = Exchange::start("discovery", "GET", &url)
+        let client = fixture_client(address, &root);
+        let result = client
+            .exchange(test_operation(), "GET", &url)
             .run(
-                fixture_client(address, &root).client.get(url.clone()),
+                client.client.get(url.clone()),
                 ExchangeMode::Document { deadline: None },
             )
             .await;
@@ -951,10 +1039,17 @@ mod tests {
         });
         let client = fixture_client(address, &root);
         let url = fixture_url(address);
-        let request = client.client.get(url.clone());
-        let exchange = Exchange::start("discovery", "GET", &url);
-        let pending =
-            tokio::spawn(exchange.run(request, ExchangeMode::Document { deadline: None }));
+        let pending = tokio::spawn({
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                let request = client.client.get(url.clone());
+                client
+                    .exchange(test_operation(), "GET", &url)
+                    .run(request, ExchangeMode::Document { deadline: None })
+                    .await
+            }
+        });
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -968,7 +1063,8 @@ mod tests {
         assert_eq!(result, Err(ProviderFailure::Timeout));
         tokio::time::resume();
 
-        let body = Exchange::start("discovery", "GET", &url)
+        let body = client
+            .exchange(test_operation(), "GET", &url)
             .run(
                 client.client.get(url.clone()),
                 ExchangeMode::Document { deadline: None },

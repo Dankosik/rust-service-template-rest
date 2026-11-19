@@ -178,7 +178,7 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
     )
     .await;
     assert!(expired.unwrap_err().is::<crate::OperationDeadlineElapsed>());
-    drop(TransactionObservation::start(Span::none()));
+    drop(TransactionObservation::start(Span::none(), None));
     let scrape = recorder.handle().render();
     for line in [
         "db_client_connection_wait_time_seconds_count{db_client_connection_pool_name=\"postgres\"} 2",
@@ -189,6 +189,128 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
     }
     assert_eq!(scrape.matches("_count{").count(), 3, "{scrape}");
     assert!(!scrape.contains("pw"), "{scrape}");
+}
+
+struct CountingRecorder {
+    inner: DebuggingRecorder,
+    wait_registrations: std::sync::atomic::AtomicUsize,
+    duration_registrations: std::sync::atomic::AtomicUsize,
+}
+
+impl metrics::Recorder for CountingRecorder {
+    fn describe_counter(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.inner.describe_counter(key, unit, description);
+    }
+
+    fn describe_gauge(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.inner.describe_gauge(key, unit, description);
+    }
+
+    fn describe_histogram(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        self.inner.describe_histogram(key, unit, description);
+    }
+
+    fn register_counter(&self, key: &Key, metadata: &metrics::Metadata<'_>) -> metrics::Counter {
+        self.inner.register_counter(key, metadata)
+    }
+
+    fn register_gauge(&self, key: &Key, metadata: &metrics::Metadata<'_>) -> metrics::Gauge {
+        self.inner.register_gauge(key, metadata)
+    }
+
+    fn register_histogram(
+        &self,
+        key: &Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        use std::sync::atomic::Ordering;
+
+        match key.name() {
+            CONNECTION_WAIT_METRIC => {
+                self.wait_registrations.fetch_add(1, Ordering::Relaxed);
+            }
+            TRANSACTION_DURATION_METRIC => {
+                self.duration_registrations.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        self.inner.register_histogram(key, metadata)
+    }
+}
+
+#[tokio::test]
+async fn a_prepared_pool_records_wait_and_outcome_through_cached_metrics() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let recorder = CountingRecorder {
+        inner: DebuggingRecorder::new(),
+        wait_registrations: AtomicUsize::new(0),
+        duration_registrations: AtomicUsize::new(0),
+    };
+    let snapshotter = recorder.inner.snapshotter();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let dsn =
+        Dsn::admit_with_environment("postgres://app:pw@127.0.0.1:1/app?sslmode=disable", |_| {
+            false
+        })
+        .expect("the dsn is admitted");
+    let pool = crate::prepare_pool(
+        &dsn,
+        &crate::PoolOptions {
+            max_connections: std::num::NonZeroU32::MIN,
+            application_name: "svc",
+            default_isolation: crate::Isolation::ServerDefault,
+            session_settings_source: crate::SessionSettingsSource::Startup,
+            wait_order: crate::WaitOrder::Arrival,
+        },
+    );
+    assert!(crate::pool::pool_metrics(&pool).is_some());
+    for _ in 0..2 {
+        let expired: Result<(), Box<dyn std::error::Error>> = crate::in_tx_with_deadline(
+            &pool,
+            tokio::time::Instant::now(),
+            crate::TxOptions::default(),
+            async |_tx| Ok(()),
+        )
+        .await;
+        assert!(expired.unwrap_err().is::<crate::OperationDeadlineElapsed>());
+    }
+    assert_eq!(recorder.wait_registrations.load(Ordering::Relaxed), 1);
+    assert_eq!(recorder.duration_registrations.load(Ordering::Relaxed), 1);
+    let snapshot = snapshotter.snapshot().into_hashmap();
+    let wait = Key::from_parts(
+        CONNECTION_WAIT_METRIC,
+        &[("db.client.connection.pool.name", "postgres")],
+    );
+    let duration = Key::from_parts(
+        TRANSACTION_DURATION_METRIC,
+        &[("outcome", "acquire_failed")],
+    );
+    assert_eq!(
+        crate::test_metrics::histogram_len(&snapshot, &wait),
+        Some(2),
+        "{snapshot:?}"
+    );
+    assert_eq!(
+        crate::test_metrics::histogram_len(&snapshot, &duration),
+        Some(2),
+        "{snapshot:?}"
+    );
 }
 
 #[tokio::test]

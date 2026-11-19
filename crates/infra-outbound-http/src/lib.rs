@@ -258,18 +258,16 @@ pub struct PreparedRequest<'a> {
 }
 
 impl PreparedRequest<'_> {
-    #[must_use]
-    pub const fn deadline(&self) -> Option<Deadline> {
-        self.context.deadline()
-    }
+    delegate::delegate! {
+        to self.context {
+            #[must_use]
+            pub const fn deadline(&self) -> Option<Deadline>;
 
-    #[must_use]
-    pub fn stopped(&self) -> Option<Stopped> {
-        self.context.stopped()
-    }
+            #[must_use]
+            pub fn stopped(&self) -> Option<Stopped>;
 
-    pub async fn wait_stopped(&self) -> Stopped {
-        self.context.wait_stopped().await
+            pub async fn wait_stopped(&self) -> Stopped;
+        }
     }
 
     #[must_use]
@@ -369,18 +367,59 @@ async fn buffer_response(
     }
 
     let (parts, body) = response.into_parts();
+    let buffered = collect_bounded_body(body, limit, context).await?;
+    Ok(Response::from_parts(parts, buffered))
+}
+
+async fn collect_bounded_body<B>(
+    body: B,
+    limit: usize,
+    context: &RequestContext,
+) -> Result<Bytes, Error>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
+    enum Buffered {
+        Empty,
+        Single(Bytes),
+        Multi(Vec<u8>),
+    }
+
     let mut body = Limited::new(body, limit);
-    let mut collected = Vec::new();
+    let mut buffered = Buffered::Empty;
     loop {
         context.check()?;
         let Some(frame) = body.frame().await else {
             break;
         };
-        if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
-            append_with_capacity_cap(&mut collected, &data, limit);
+        if let Ok(data) = frame.map_err(map_body_error)?.into_data()
+            && !data.is_empty()
+        {
+            match &mut buffered {
+                Buffered::Empty => buffered = Buffered::Single(data),
+                Buffered::Single(first) => {
+                    let mut collected = Vec::new();
+                    let target = first
+                        .len()
+                        .saturating_add(data.len())
+                        .max(first.len().saturating_mul(2).min(limit));
+                    collected.reserve_exact(target);
+                    collected.extend_from_slice(first);
+                    collected.extend_from_slice(&data);
+                    buffered = Buffered::Multi(collected);
+                }
+                Buffered::Multi(collected) => {
+                    append_with_capacity_cap(collected, &data, limit);
+                }
+            }
         }
     }
-    Ok(Response::from_parts(parts, Bytes::from(collected)))
+    Ok(match buffered {
+        Buffered::Empty => Bytes::new(),
+        Buffered::Single(single) => single,
+        Buffered::Multi(collected) => Bytes::from(collected),
+    })
 }
 
 impl From<Stopped> for Error {

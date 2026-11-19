@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 use bytes::Bytes;
+use enum_map::EnumMap;
 use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
@@ -32,6 +33,7 @@ pub(crate) struct TokenEndpoint {
     http: Client,
     signer: Signer,
     permits: Semaphore,
+    acquisitions: EnumMap<GrantKind, EnumMap<AcquisitionOutcome, OnceLock<metrics::Counter>>>,
 }
 
 impl TokenEndpoint {
@@ -54,6 +56,7 @@ impl TokenEndpoint {
             http,
             signer,
             permits: Semaphore::new(permits),
+            acquisitions: EnumMap::default(),
         })
     }
 
@@ -87,25 +90,35 @@ impl TokenEndpoint {
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
         let check = || context.check().map_err(AcquisitionError::from);
-        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant_label| {
+        let metric = std::mem::DropGuard::new(grant.kind(), |grant_kind| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
-            record_acquisition(grant_label, error.label());
+            self.record_acquisition(grant_kind, AcquisitionOutcome::Error(error));
         });
         let result = match check() {
             Ok(()) => self.request_token(grant, started, context).await,
             Err(error) => Err(error),
         };
         let result = check().and(result);
-        let grant_label = std::mem::DropGuard::dismiss(metric);
-        record_acquisition(
-            grant_label,
-            result
-                .as_ref()
-                .err()
-                .copied()
-                .map_or("success", AcquisitionError::label),
-        );
+        let grant_kind = std::mem::DropGuard::dismiss(metric);
+        let outcome = result
+            .as_ref()
+            .err()
+            .copied()
+            .map_or(AcquisitionOutcome::Success, AcquisitionOutcome::Error);
+        self.record_acquisition(grant_kind, outcome);
         result
+    }
+
+    fn record_acquisition(&self, grant: GrantKind, outcome: AcquisitionOutcome) {
+        self.acquisitions[grant][outcome]
+            .get_or_init(|| {
+                metrics::counter!(
+                    ACQUISITIONS_TOTAL,
+                    "grant" => grant.label(),
+                    "outcome" => outcome.label(),
+                )
+            })
+            .increment(1);
     }
 
     async fn request_token(
@@ -127,10 +140,15 @@ impl TokenEndpoint {
     fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
         let body = {
             let assertion = self.signer.sign()?;
-            let mut form = Serializer::new(String::new());
+            let signer_fields = self.signer.form_fields(&assertion);
+            let capacity = signer_fields
+                .iter()
+                .fold(grant.max_encoded_len(), |total, &(key, value)| {
+                    total.saturating_add(max_form_pair_len(key, value))
+                });
+            let mut form = Serializer::new(String::with_capacity(capacity));
             grant.append_fields(&mut form);
-            form.extend_pairs(self.signer.form_fields(&assertion))
-                .finish()
+            form.extend_pairs(signer_fields).finish()
         };
         Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -138,6 +156,42 @@ impl TokenEndpoint {
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)
     }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum GrantKind {
+    ClientCredentials,
+    TokenExchange,
+}
+
+impl GrantKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ClientCredentials => "client_credentials",
+            Self::TokenExchange => "token_exchange",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum AcquisitionOutcome {
+    Success,
+    Error(AcquisitionError),
+}
+
+impl AcquisitionOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error(error) => error.label(),
+        }
+    }
+}
+
+fn max_form_pair_len(key: &str, value: &str) -> usize {
+    key.len()
+        .saturating_add(value.len().saturating_mul(3))
+        .saturating_add(2)
 }
 
 #[derive(Clone, Copy)]
@@ -150,6 +204,43 @@ enum Grant<'a> {
 }
 
 impl Grant<'_> {
+    fn max_encoded_len(self) -> usize {
+        match self {
+            Self::ClientCredentials(target) => {
+                max_form_pair_len("grant_type", GRANT_CLIENT_CREDENTIALS).saturating_add(
+                    target
+                        .scope
+                        .as_deref()
+                        .map_or(0, |scope| max_form_pair_len("scope", scope)),
+                )
+            }
+            Self::TokenExchange { subject, target } => {
+                max_form_pair_len("grant_type", GRANT_TOKEN_EXCHANGE)
+                    .saturating_add(max_form_pair_len("subject_token", subject.expose_secret()))
+                    .saturating_add(max_form_pair_len(
+                        "subject_token_type",
+                        TOKEN_TYPE_ACCESS_TOKEN,
+                    ))
+                    .saturating_add(max_form_pair_len(
+                        "requested_token_type",
+                        TOKEN_TYPE_ACCESS_TOKEN,
+                    ))
+                    .saturating_add(
+                        target
+                            .scope
+                            .as_deref()
+                            .map_or(0, |scope| max_form_pair_len("scope", scope)),
+                    )
+                    .saturating_add(
+                        target
+                            .audience
+                            .as_deref()
+                            .map_or(0, |audience| max_form_pair_len("audience", audience)),
+                    )
+            }
+        }
+    }
+
     fn append_fields(self, form: &mut Serializer<'_, String>) {
         match self {
             Self::ClientCredentials(target) => form
@@ -170,10 +261,10 @@ impl Grant<'_> {
         };
     }
 
-    fn metric_label(self) -> &'static str {
+    const fn kind(self) -> GrantKind {
         match self {
-            Self::ClientCredentials(_) => "client_credentials",
-            Self::TokenExchange { .. } => "token_exchange",
+            Self::ClientCredentials(_) => GrantKind::ClientCredentials,
+            Self::TokenExchange { .. } => GrantKind::TokenExchange,
         }
     }
 
@@ -255,13 +346,4 @@ fn token_from_response(
         return Err(AcquisitionError::InvalidResponse);
     }
     Token::bearer(&response.access_token, started, response.expires_in)
-}
-
-fn record_acquisition(grant: &'static str, outcome: &'static str) {
-    metrics::counter!(
-        ACQUISITIONS_TOTAL,
-        "grant" => grant,
-        "outcome" => outcome,
-    )
-    .increment(1);
 }

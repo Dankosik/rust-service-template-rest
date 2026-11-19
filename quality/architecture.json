@@ -55,6 +55,7 @@
           "crates/infra-outbound-http/Cargo.toml",
           "crates/infra-postgres/Cargo.toml",
           "crates/infra-serviceauth/Cargo.toml",
+          "crates/infra-telemetry/Cargo.toml",
           "crates/infra-webhooks/Cargo.toml"
         ]
       }

@@ -94,6 +94,46 @@ fn the_migration_override_supplies_its_own_endpoint_and_credentials() {
 }
 
 #[rstest::rstest]
+#[case::empty("")]
+#[case::whitespace("   ")]
+fn blank_migration_dsn_falls_back_to_runtime_dsn_and_password_file(#[case] blank: &str) {
+    let options = LoadOptions::default();
+    let shared = "postgres://api@pool:6432/app?sslmode=verify-full";
+    let password_file = "/run/secrets/api-password";
+    let migration = load_migration_from(
+        &options,
+        BUILD,
+        env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__DSN", shared),
+            ("APP__POSTGRES__PASSWORD_FILE", password_file),
+            ("APP__POSTGRES__MIGRATION_DSN", blank),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(migration.postgres().dsn.expose_secret(), shared);
+    assert_eq!(
+        migration.postgres().password_file.as_deref(),
+        Some(std::path::Path::new(password_file))
+    );
+}
+
+#[rstest::rstest]
+#[case::integer(config::Value::from(123_i64))]
+#[case::boolean(config::Value::from(true))]
+#[case::array(config::Value::from(vec!["postgres://localhost/app"]))]
+fn migration_dsn_rejects_non_string_config_scalars(#[case] value: config::Value) {
+    let err = config::Config::builder()
+        .set_override("migration_dsn", value)
+        .unwrap()
+        .build()
+        .unwrap()
+        .try_deserialize::<MigrationPostgresInput>()
+        .unwrap_err();
+    assert!(err.to_string().contains("expected a string"), "{err}");
+}
+
+#[rstest::rstest]
 #[case::disabled(false)]
 #[case::enabled(true)]
 fn pool_size_is_bounded(#[case] enabled: bool) {

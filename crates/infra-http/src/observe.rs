@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, Version};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
@@ -29,7 +29,7 @@ use crate::body::{BodyEnd, on_body_end};
 use crate::harden::AdmissionShed;
 use crate::probes::ProbeRoutes;
 use crate::problem::{Code, Problem};
-use infra_http_transport::ConnectionInfo;
+use infra_http_transport::{ConnectionInfo, TRACEPARENT, TRACESTATE};
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
 
@@ -72,8 +72,6 @@ pub(crate) fn describe() {
 }
 
 const UNMATCHED_ROUTE: &str = "<unmatched>";
-const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
-const TRACESTATE: HeaderName = HeaderName::from_static("tracestate");
 
 #[derive(Debug)]
 pub(crate) struct Observer {
@@ -120,7 +118,15 @@ pub(crate) async fn observe(
         request.method(),
         route.unwrap_or(UNMATCHED_ROUTE),
     );
-    let span = make_span(version, method, route, request_id_text, scheme);
+    let cached_route = route.and_then(|route| observer.series.cached_route(route));
+    let span = make_span(
+        version,
+        method,
+        route,
+        cached_route,
+        request_id_text,
+        scheme,
+    );
     let mut trace_context =
         TraceContext::admit(request.headers_mut(), observer.trust_trace_context, &span);
     observer.series.active_gauge(method, scheme).increment(1);
@@ -370,6 +376,7 @@ fn make_span(
     version: Version,
     method: MethodSlot,
     route: Option<&str>,
+    cached_route: Option<Arc<str>>,
     request_id: Option<&str>,
     scheme: Scheme,
 ) -> tracing::Span {
@@ -386,7 +393,11 @@ fn make_span(
     );
     span.set_attribute("http.request.method", method.as_str());
     if let Some(route) = route {
-        span.set_attribute("http.route", route.to_owned());
+        let value = cached_route.map_or_else(
+            || opentelemetry::StringValue::from(route.to_owned()),
+            opentelemetry::StringValue::from,
+        );
+        span.set_attribute("http.route", value);
     }
     span.set_attribute("network.protocol.version", otel_http::http_flavor(version));
     span.set_attribute("url.scheme", scheme.as_str());
@@ -486,7 +497,7 @@ type RouteDurations = HashMap<DurationLabels, Histogram>;
 
 #[derive(Clone, Debug, Default)]
 struct DurationSeries {
-    matched: HashMap<Box<str>, RouteDurations>,
+    matched: HashMap<Arc<str>, RouteDurations>,
     unmatched: RouteDurations,
 }
 
@@ -499,9 +510,9 @@ impl DurationSeries {
         route_durations.get(key)
     }
 
-    fn insert(&mut self, route: Option<&str>, key: DurationLabels, histogram: Histogram) {
+    fn insert(&mut self, route: Option<Arc<str>>, key: DurationLabels, histogram: Histogram) {
         let route_durations = match route {
-            Some(route) => self.matched.entry(route.into()).or_default(),
+            Some(route) => self.matched.entry(route).or_default(),
             None => &mut self.unmatched,
         };
         route_durations.insert(key, histogram);
@@ -516,6 +527,14 @@ struct Series {
 }
 
 impl Series {
+    fn cached_route(&self, route: &str) -> Option<Arc<str>> {
+        self.durations
+            .load()
+            .matched
+            .get_key_value(route)
+            .map(|(cached, _)| Arc::clone(cached))
+    }
+
     fn active_gauge(&self, method: MethodSlot, scheme: Scheme) -> &Gauge {
         self.active[method][scheme].get_or_init(|| {
             metrics::gauge!(
@@ -539,15 +558,21 @@ impl Series {
             histogram.record(seconds);
             return;
         }
-        let histogram = duration_histogram(route, key);
+        let cached_route = route.map(|route| {
+            current.matched.get_key_value(route).map_or_else(
+                || Arc::<str>::from(route),
+                |(existing, _)| Arc::clone(existing),
+            )
+        });
+        let histogram = duration_histogram(cached_route.clone(), key);
         let mut next = (*current).clone();
-        next.insert(route, key, histogram.clone());
+        next.insert(cached_route, key, histogram.clone());
         self.durations.store(Arc::new(next));
         histogram.record(seconds);
     }
 }
 
-fn duration_histogram(route: Option<&str>, key: DurationLabels) -> Histogram {
+fn duration_histogram(route: Option<Arc<str>>, key: DurationLabels) -> Histogram {
     let mut labels = Vec::with_capacity(5);
     labels.push(Label::new("http_request_method", key.method.as_str()));
     labels.push(Label::new("url_scheme", key.scheme.as_str()));
@@ -558,10 +583,7 @@ fn duration_histogram(route: Option<&str>, key: DurationLabels) -> Histogram {
         ));
     }
     if let Some(route) = route {
-        labels.push(Label::new(
-            "http_route",
-            SharedString::from(Arc::<str>::from(route)),
-        ));
+        labels.push(Label::new("http_route", SharedString::from(route)));
     }
     if let Some(error_type) = key.error_type {
         labels.push(Label::new("error_type", error_type));
@@ -652,6 +674,16 @@ mod tests {
                 );
             }
         });
+        let cached = series
+            .cached_route("/items/{id}")
+            .expect("matched route is cached");
+        assert_eq!(&*cached, "/items/{id}");
+        assert!(Arc::ptr_eq(
+            &cached,
+            &series
+                .cached_route("/items/{id}")
+                .expect("cached route stays stable")
+        ));
         let mut samples: Vec<_> = snapshotter
             .snapshot()
             .into_vec()

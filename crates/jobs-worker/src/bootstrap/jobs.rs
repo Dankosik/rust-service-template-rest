@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
+use itertools::Itertools as _;
 use service_config::{ValidationError, WorkerConfig};
 
 use super::WorkerError;
@@ -16,7 +17,7 @@ pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError
 }
 
 pub(super) fn kind_names(kinds: Option<&Kinds>) -> String {
-    kinds.map_or_default(|kinds| kinds.names().collect::<Vec<_>>().join(","))
+    kinds.map_or_default(|kinds| kinds.names().join(","))
 }
 
 pub(super) fn validate_pool_capacity(

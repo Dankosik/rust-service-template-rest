@@ -146,7 +146,7 @@ impl From<&infra_outbound_http::Error> for TransportFailure {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum, thiserror::Error)]
 pub enum AcquisitionError {
     #[error("OAuth2 acquisition deadline elapsed")]
     Timeout,
@@ -205,7 +205,7 @@ impl From<TransportFailure> for AcquisitionError {
 }
 
 /// RFC 6749 §5.2, RFC 8693 §2.2.2
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, enum_map::Enum)]
 #[serde(field_identifier, rename_all = "snake_case")]
 pub enum Rejection {
     InvalidRequest,

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use enum_map::{Enum, EnumMap};
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
     MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, in_observation_tx, in_tx,
@@ -101,13 +102,11 @@ async fn delete_batch(primary_group: &WorkerGroup) -> Result<u64, OperationError
 pub(crate) async fn run_sampling(
     primary_group: &WorkerGroup,
     kinds: &[&'static str],
+    gauges: SampleGauges,
     cancel: CancellationToken,
 ) {
-    let _reset = std::mem::DropGuard::new(kinds, |kinds| {
-        for &kind in kinds {
-            reset_kind_metrics(kind);
-        }
-        invalidate_sample();
+    let reset = std::mem::DropGuard::new(gauges, |gauges| {
+        gauges.reset();
         // template:begin outbox:jobs-maintenance-outbox-reset
         if outbox::is_registered(kinds) {
             outbox::reset_metrics();
@@ -116,14 +115,18 @@ pub(crate) async fn run_sampling(
     });
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
-            run_kind_sampling(primary_group, kinds),
+            run_kind_sampling(primary_group, kinds, &reset),
             run_population_sampling(primary_group),
         );
     }))
     .await;
 }
 
-async fn run_kind_sampling(primary_group: &WorkerGroup, kinds: &[&str]) -> ! {
+async fn run_kind_sampling(
+    primary_group: &WorkerGroup,
+    kinds: &[&str],
+    gauges: &SampleGauges,
+) -> ! {
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -135,7 +138,7 @@ async fn run_kind_sampling(primary_group: &WorkerGroup, kinds: &[&str]) -> ! {
         // template:end outbox:jobs-maintenance-outbox-sampler
         match sample_once(primary_group, kinds).await {
             Ok(sample) => {
-                publish_sample(&sample);
+                gauges.publish(&sample);
                 observe_recovery(primary_group, Operation::Sample);
             }
             Err(error) => {
@@ -215,7 +218,7 @@ async fn read_population(
     .await
 }
 
-pub(crate) fn init_metrics(kinds: &[&'static str]) {
+pub(crate) fn init_metrics(kinds: &[&'static str]) -> SampleGauges {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
         Unit::Count,
@@ -236,23 +239,14 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
         Unit::Seconds,
         "Database Unix timestamp of the last successful jobs observation."
     );
-    for &kind in kinds {
-        reset_kind_metrics(kind);
-    }
-    invalidate_sample();
+    let gauges = SampleGauges::new(kinds);
+    gauges.reset();
     // template:begin outbox:jobs-maintenance-outbox-init
     if outbox::is_registered(kinds) {
         outbox::init_metrics();
     }
     // template:end outbox:jobs-maintenance-outbox-init
-}
-
-fn reset_kind_metrics(kind: &'static str) {
-    publish_kind(kind, KindQueueMetrics::default());
-}
-
-fn invalidate_sample() {
-    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
+    gauges
 }
 
 async fn sample_once(
@@ -394,26 +388,85 @@ fn decode_sample(rows: Vec<SampleRow>) -> Result<Sample, OperationError> {
     Ok(Sample { rows, observed_at })
 }
 
-fn publish_sample(sample: &Sample) {
-    for row in &sample.rows {
-        publish_kind(&row.kind, row.queue_metrics());
-    }
-    metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
+#[derive(Clone, Copy, Enum)]
+enum LiveState {
+    Available,
+    Scheduled,
+    Running,
 }
 
-fn publish_kind(kind: &str, queue_metrics: KindQueueMetrics) {
-    for (state, count) in [
-        ("available", queue_metrics.available),
-        ("scheduled", queue_metrics.scheduled),
-        ("running", queue_metrics.running),
-    ] {
-        metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.to_owned(), "state" => state)
-            .set(gauge_count(count));
+impl LiveState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Scheduled => "scheduled",
+            Self::Running => "running",
+        }
     }
-    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned())
-        .set(gauge_count(queue_metrics.failed));
-    metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind.to_owned())
-        .set(queue_metrics.oldest_available_seconds);
+}
+
+struct KindGauges {
+    live: EnumMap<LiveState, metrics::Gauge>,
+    failed: metrics::Gauge,
+    oldest_available_age: metrics::Gauge,
+}
+
+impl KindGauges {
+    fn new(kind: &'static str) -> Self {
+        Self {
+            live: EnumMap::from_fn(
+                |state: LiveState| metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state.label()),
+            ),
+            failed: metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind),
+            oldest_available_age: metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind),
+        }
+    }
+
+    fn publish(&self, queue_metrics: KindQueueMetrics) {
+        self.live[LiveState::Available].set(gauge_count(queue_metrics.available));
+        self.live[LiveState::Scheduled].set(gauge_count(queue_metrics.scheduled));
+        self.live[LiveState::Running].set(gauge_count(queue_metrics.running));
+        self.failed.set(gauge_count(queue_metrics.failed));
+        self.oldest_available_age
+            .set(queue_metrics.oldest_available_seconds);
+    }
+
+    fn reset(&self) {
+        self.publish(KindQueueMetrics::default());
+    }
+}
+
+pub(crate) struct SampleGauges {
+    by_kind: foldhash::HashMap<&'static str, KindGauges>,
+    observation_timestamp: metrics::Gauge,
+}
+
+impl SampleGauges {
+    fn new(kinds: &[&'static str]) -> Self {
+        Self {
+            by_kind: kinds
+                .iter()
+                .map(|&kind| (kind, KindGauges::new(kind)))
+                .collect(),
+            observation_timestamp: metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC),
+        }
+    }
+
+    fn publish(&self, sample: &Sample) {
+        for row in &sample.rows {
+            if let Some(gauges) = self.by_kind.get(row.kind.as_str()) {
+                gauges.publish(row.queue_metrics());
+            }
+        }
+        self.observation_timestamp.set(sample.observed_at);
+    }
+
+    fn reset(&self) {
+        for gauges in self.by_kind.values() {
+            gauges.reset();
+        }
+        self.observation_timestamp.set(0.0);
+    }
 }
 
 #[expect(

@@ -26,40 +26,24 @@ impl VerifiedPrincipal {
         extensions.get::<Principal>().cloned().map(Self)
     }
 
-    #[must_use]
-    pub fn issuer(&self) -> &str {
-        self.0.issuer()
-    }
-
-    #[must_use]
-    pub fn subject(&self) -> Option<&str> {
-        self.0.subject()
-    }
-
-    #[must_use]
-    pub fn client_id(&self) -> Option<&str> {
-        self.0.client_id()
-    }
-
-    #[must_use]
-    pub fn scopes(&self) -> &[String] {
-        self.0.scopes()
-    }
-
-    pub fn claims<'a, T: serde::Deserialize<'a>>(
-        &'a self,
-    ) -> Result<T, infra_bearerauthn::ClaimAccessError> {
-        self.0.claims()
-    }
-
-    #[must_use]
-    pub fn expires_at(&self) -> u64 {
-        self.0.expires_at()
-    }
-
-    #[must_use]
-    pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
-        self.0.actor()
+    delegate::delegate! {
+        to self.0 {
+            #[must_use]
+            pub fn issuer(&self) -> &str;
+            #[must_use]
+            pub fn subject(&self) -> Option<&str>;
+            #[must_use]
+            pub fn client_id(&self) -> Option<&str>;
+            #[must_use]
+            pub fn scopes(&self) -> &[String];
+            pub fn claims<'a, T: serde::Deserialize<'a>>(
+                &'a self,
+            ) -> Result<T, infra_bearerauthn::ClaimAccessError>;
+            #[must_use]
+            pub fn expires_at(&self) -> u64;
+            #[must_use]
+            pub fn actor(&self) -> Option<&infra_bearerauthn::Actor>;
+        }
     }
 }
 
@@ -199,7 +183,7 @@ pub(super) struct InsufficientScope;
 
 fn insufficient_scope_response() -> Response {
     let mut response = Problem::new(Code::Forbidden)
-        .detail(INSUFFICIENT_SCOPE_DETAIL)
+        .detail_static(INSUFFICIENT_SCOPE_DETAIL)
         .into_response();
     response.extensions_mut().insert(InsufficientScope);
     response.headers_mut().insert(
@@ -228,7 +212,7 @@ fn failure_response(failure: Failure) -> Response {
         Failure::Unavailable => (Code::AuthenticationUnavailable, None),
     };
     let mut response = Problem::new(code)
-        .detail(failure.to_string())
+        .detail_static(failure.as_str())
         .into_response();
     if let Some(challenge) = challenge {
         response.headers_mut().insert(
@@ -297,5 +281,18 @@ mod tests {
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
         let problem = body_json(response).await;
         assert_eq!(problem["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn failure_responses_match_the_canonical_failure_details() {
+        for failure in [
+            Failure::Missing,
+            Failure::Malformed,
+            Failure::Invalid,
+            Failure::Unavailable,
+        ] {
+            let problem = body_json(failure_response(failure)).await;
+            assert_eq!(problem["detail"], failure.to_string());
+        }
     }
 }

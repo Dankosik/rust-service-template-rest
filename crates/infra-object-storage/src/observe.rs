@@ -96,23 +96,21 @@ impl Histograms {
     }
 }
 
+#[derive(derive_more::Debug)]
 pub(crate) struct OperationGuard {
+    #[debug(skip)]
     started: Instant,
     operation: Operation,
+    #[debug(skip)]
     span: Span,
+    #[debug(skip)]
     histograms: std::sync::Arc<Histograms>,
+    #[debug(skip)]
     request_id: Option<CompactString>,
+    #[debug(skip)]
     extended_request_id: Option<CompactString>,
+    #[debug(skip)]
     finalized: bool,
-}
-
-impl std::fmt::Debug for OperationGuard {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OperationGuard")
-            .field("operation", &self.operation)
-            .finish_non_exhaustive()
-    }
 }
 
 impl OperationGuard {

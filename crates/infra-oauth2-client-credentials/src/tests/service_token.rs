@@ -190,7 +190,7 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
         .send(&client)
         .await
         .expect("available dependency establishes useful work");
-    *service_tokens.lock_cached() = Cached::default();
+    service_tokens.clear_cached();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
     fixture.drive_until_token_received(leader.as_mut()).await;

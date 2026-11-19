@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use compact_str::{CompactString, format_compact};
 use futures_util::future::BoxFuture;
 use infra_postgres::{Tx, observed};
 use operation_context::{Deadline, OperationContext};
@@ -143,7 +144,7 @@ pub(crate) enum Disposition {
 #[error("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
-    pub(crate) summary: Cow<'static, str>,
+    pub(crate) summary: CompactString,
 }
 
 impl JobError {
@@ -151,7 +152,7 @@ impl JobError {
     pub const fn retryable(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Retry,
-            summary: Cow::Borrowed(reason),
+            summary: CompactString::const_new(reason),
         }
     }
 
@@ -159,7 +160,7 @@ impl JobError {
     pub const fn permanent(reason: &'static str) -> Self {
         Self {
             disposition: Disposition::Permanent,
-            summary: Cow::Borrowed(reason),
+            summary: CompactString::const_new(reason),
         }
     }
 
@@ -172,7 +173,7 @@ impl JobError {
         let floor_micros = whole_micros + i64::from(has_fraction);
         Ok(Self {
             disposition: Disposition::RetryAfterAtLeast { floor_micros },
-            summary: Cow::Borrowed(reason),
+            summary: CompactString::const_new(reason),
         })
     }
 
@@ -181,7 +182,7 @@ impl JobError {
             disposition: Disposition::Snooze {
                 delay_micros: checked_delay_micros(delay)?,
             },
-            summary: Cow::Borrowed(""),
+            summary: CompactString::const_new(""),
         })
     }
 
@@ -191,7 +192,7 @@ impl JobError {
             disposition: Disposition::Snooze {
                 delay_micros: UNAVAILABLE_DELAY_MICROS,
             },
-            summary: Cow::Borrowed(reason),
+            summary: CompactString::const_new(reason),
         }
     }
 
@@ -205,7 +206,7 @@ impl JobError {
             .unwrap_or_else(|| Cow::Borrowed(infra_postgres::failure_cause(error)));
         Self {
             disposition: Disposition::Retry,
-            summary: Cow::Owned(format!("{context} {diagnostic}")),
+            summary: format_compact!("{context} {diagnostic}"),
         }
     }
 }

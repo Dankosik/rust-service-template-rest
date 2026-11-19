@@ -16,10 +16,13 @@ default = []
 test-support = []
 
 [dependencies]
+compact_str = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 operation-context = { workspace = true }
+smallvec = { workspace = true }
+zeroize = { workspace = true, features = ["alloc"] }
 # template:begin oidc-jwt:authn-jwt-dependency
 arc-swap = { workspace = true }
 base64 = { workspace = true, features = ["alloc"] }

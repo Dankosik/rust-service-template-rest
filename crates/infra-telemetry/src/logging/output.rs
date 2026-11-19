@@ -29,7 +29,7 @@ pub(super) fn on_writer_thread() -> bool {
     WRITER_CONTEXT.try_with(Cell::get).unwrap_or(false)
 }
 
-pub(super) type Record = Box<[u8]>;
+pub(super) type Record = Vec<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum DropReason {
@@ -941,7 +941,7 @@ mod tests {
         for line in &lines {
             let mut bytes = padded.to_vec();
             bytes.extend_from_slice(line.as_bytes());
-            output.submit(bytes.into());
+            output.submit(bytes);
         }
         assert_eq!(guard.snapshot().dropped.into_array(), [0; 6]);
         release.send(()).expect("resume sink");

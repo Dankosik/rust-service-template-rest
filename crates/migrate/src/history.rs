@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use foldhash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use infra_postgres::{failure_cause, observed, sqlstate};
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
@@ -146,18 +147,19 @@ pub(crate) fn pending<'m>(
         .iter()
         .filter(|migration| !migration.migration_type.is_down_migration())
         .collect();
-    if let Some([_, duplicate]) = embedded
-        .array_windows()
-        .find(|[earlier, later]| earlier.version == later.version)
-    {
-        return Err(PendingError::DuplicateVersion(duplicate.version));
+    let mut by_version = HashMap::with_capacity(embedded.len());
+    let mut newest = None;
+    for &migration in &embedded {
+        if by_version.insert(migration.version, migration).is_some() {
+            return Err(PendingError::DuplicateVersion(migration.version));
+        }
+        newest = Some(newest.map_or(migration.version, |current: i64| {
+            current.max(migration.version)
+        }));
     }
-    let newest = embedded.iter().map(|migration| migration.version).max();
+    let mut applied_versions = HashSet::with_capacity(history.len());
     for applied in history {
-        match embedded
-            .iter()
-            .find(|migration| migration.version == applied.version)
-        {
+        match by_version.get(&applied.version) {
             Some(migration) if migration.checksum != applied.checksum => {
                 return Err(PendingError::ChecksumMismatch(applied.version));
             }
@@ -166,14 +168,11 @@ pub(crate) fn pending<'m>(
             }
             _ => {}
         }
+        applied_versions.insert(applied.version);
     }
     Ok(embedded
         .into_iter()
-        .filter(|migration| {
-            !history
-                .iter()
-                .any(|applied| applied.version == migration.version)
-        })
+        .filter(|migration| !applied_versions.contains(&migration.version))
         .collect())
 }
 
@@ -259,6 +258,24 @@ mod tests {
             migration(duplicate, "first", MigrationType::Simple, false),
             migration(duplicate, "second", MigrationType::Simple, false),
         ]);
+        std::assert_matches!(
+            pending(&migrator, &[]),
+            Err(PendingError::DuplicateVersion(version)) if version == duplicate
+        );
+    }
+
+    #[test]
+    fn non_adjacent_duplicate_versions_are_refused() {
+        let duplicate = 20_260_926_120_000;
+        let middle = 20_260_926_130_000;
+        let migrator = Migrator {
+            migrations: Cow::Owned(vec![
+                migration(duplicate, "first", MigrationType::Simple, false),
+                migration(middle, "middle", MigrationType::Simple, false),
+                migration(duplicate, "second", MigrationType::Simple, false),
+            ]),
+            ..Migrator::DEFAULT
+        };
         std::assert_matches!(
             pending(&migrator, &[]),
             Err(PendingError::DuplicateVersion(version)) if version == duplicate

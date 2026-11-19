@@ -1,21 +1,51 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use axum::body::{Body, Bytes};
-use futures_util::stream;
-use http_body_util::StreamBody;
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use infra_object_storage::{
     Download, MutationError, MutationFailure, ObjectKey, ObjectStorage, ObjectStorageError, PutBody,
 };
 
+use crate::context::BodyReadTracker;
 use crate::problem::{body_too_large, sanitized_problem};
 use crate::{Code, Problem, RequestContext, ResponseContext};
+
+struct TrackedBody {
+    body: Body,
+    tracker: BodyReadTracker,
+}
+
+impl HttpBody for TrackedBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = &mut *self;
+        this.tracker
+            .poll_with(|| Pin::new(&mut this.body).poll_frame(cx))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
 
 impl RequestContext {
     #[must_use]
     pub fn upload_body(&self, length: u64, body: Body) -> PutBody {
-        let frames = stream::unfold((self.clone(), body), |(context, mut body)| async move {
-            let frame = context.read_body_frame(&mut body).await?;
-            Some((frame, (context, body)))
-        });
-        self.observe_put(PutBody::stream(length, StreamBody::new(frames)))
+        let tracked = TrackedBody {
+            body,
+            tracker: BodyReadTracker::new(Some(self)),
+        };
+        self.observe_put(PutBody::stream(length, tracked))
     }
 
     #[must_use]

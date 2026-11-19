@@ -1,4 +1,3 @@
-use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::mem::DropGuard;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -795,8 +794,7 @@ async fn wait_for_close(drain: &CancellationToken, age_deadline: Option<Instant>
 
 fn jitter_age(age: Duration) -> Duration {
     const AGE_SPREAD_PERMILLE: u32 = 100;
-    let draw = RandomState::new().build_hasher().finish() % u64::from(2 * AGE_SPREAD_PERMILLE + 1);
-    let permille = 1000 - AGE_SPREAD_PERMILLE + u32::try_from(draw).unwrap_or(AGE_SPREAD_PERMILLE);
+    let permille = fastrand::u32(1000 - AGE_SPREAD_PERMILLE..=1000 + AGE_SPREAD_PERMILLE);
     age.checked_mul(permille)
         .map_or(age, |scaled| scaled / 1000)
 }

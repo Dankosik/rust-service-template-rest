@@ -1,20 +1,20 @@
-use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
 use crate::slots::{Queue, Slot, Slots};
 
+use arc_swap::ArcSwap;
 use futures_util::future::BoxFuture;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Postgres};
 use tokio::time::{Instant, timeout_at};
 
 use crate::dsn::Dsn;
-use crate::observe::{observe_acquisition, observed};
+use crate::observe::{PoolMetrics, observe_acquisition, observed};
 use crate::transaction::Isolation;
 
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -170,13 +170,17 @@ pub fn prepare_pool_with_notifications(
     pool
 }
 
+#[derive(Clone)]
 struct PoolPolicy {
     alive: Weak<()>,
     slots: Option<Arc<Slots>>,
     notifications: bool,
+    metrics: Arc<PoolMetrics>,
 }
 
-static POOL_POLICIES: RwLock<BTreeMap<usize, PoolPolicy>> = RwLock::new(BTreeMap::new());
+static POOL_POLICIES: LazyLock<ArcSwap<Vec<(usize, PoolPolicy)>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(Vec::new()));
+static POOL_POLICIES_WRITE: Mutex<()> = Mutex::new(());
 
 impl PoolPolicy {
     fn key(pool: &PgPool) -> usize {
@@ -189,30 +193,36 @@ impl PoolPolicy {
 
     fn register(pool: &PgPool, alive: Weak<()>, options: &PoolOptions<'_>, notifications: bool) {
         let key = Self::key(pool);
-        let mut policies = POOL_POLICIES.write();
-        policies.retain(|address, policy| *address != key && policy.is_live());
         let slots = match options.wait_order {
             WaitOrder::Arrival => None,
             WaitOrder::NewestOnceStanding => {
                 Some(Slots::new(options.max_connections.get() as usize))
             }
         };
-        if slots.is_some() || !notifications {
-            policies.insert(
-                key,
-                Self {
-                    alive,
-                    slots,
-                    notifications,
-                },
-            );
-        }
+        let entry = Self {
+            alive,
+            slots,
+            notifications,
+            metrics: Arc::new(PoolMetrics::default()),
+        };
+        let _write = POOL_POLICIES_WRITE.lock();
+        let current = POOL_POLICIES.load();
+        let mut next: Vec<(usize, Self)> = current
+            .iter()
+            .filter(|(address, policy)| *address != key && policy.is_live())
+            .cloned()
+            .collect();
+        next.push((key, entry));
+        POOL_POLICIES.store(Arc::new(next));
     }
 
     fn lookup<T>(pool: &PgPool, select: impl FnOnce(&Self) -> T) -> Option<T> {
-        POOL_POLICIES
-            .read()
-            .get(&Self::key(pool))
+        let key = Self::key(pool);
+        let policies = POOL_POLICIES.load();
+        policies
+            .iter()
+            .find(|(address, _)| *address == key)
+            .map(|(_, policy)| policy)
             .filter(|policy| policy.is_live())
             .map(select)
     }
@@ -221,6 +231,10 @@ impl PoolPolicy {
         Self::lookup(pool, |policy| (policy.slots.clone(), policy.notifications))
             .unwrap_or((None, true))
     }
+}
+
+pub(crate) fn pool_metrics(pool: &PgPool) -> Option<Arc<PoolMetrics>> {
+    PoolPolicy::lookup(pool, |entry| Arc::clone(&entry.metrics))
 }
 
 #[must_use]

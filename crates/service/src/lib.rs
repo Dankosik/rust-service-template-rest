@@ -32,6 +32,7 @@ type GrpcResourceRegistration = Box<
 // template:end grpc:service-registration-callbacks
 
 #[derive(derive_more::Debug)]
+#[derive_where::derive_where(Default)]
 #[debug("ServiceRegistration {{ .. }}")]
 pub struct ServiceRegistration<C = ()> {
     pub http_resource: Option<HttpResource<C>>,
@@ -53,17 +54,6 @@ impl<C> ServiceRegistration<C> {
             // template:begin grpc:service-http-resource-grpc-default
             grpc: None,
             // template:end grpc:service-http-resource-grpc-default
-        }
-    }
-}
-
-impl<C> Default for ServiceRegistration<C> {
-    fn default() -> Self {
-        Self {
-            http_resource: None,
-            // template:begin grpc:service-default-grpc-registration
-            grpc: None,
-            // template:end grpc:service-default-grpc-registration
         }
     }
 }

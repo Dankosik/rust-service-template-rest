@@ -12,4 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+enum-map = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["std"] }

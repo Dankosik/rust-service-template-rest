@@ -22,24 +22,28 @@ shared-rules = { workspace = true }
 infra-http-transport = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
-mime = { workspace = true }
+bytes = { workspace = true, features = ["std"] }
+derive-where = { workspace = true }
+mediatype = { workspace = true }
+pin-project-lite = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # template:begin authn:http-authn-dependency
+delegate = { workspace = true }
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin object-storage:http-object-storage-dependencies
-futures-util = { workspace = true, features = ["std"] }
 infra-object-storage = { workspace = true }
 # template:end object-storage:http-object-storage-dependencies
 # template:begin http-idempotency:http-idempotency-dependencies
-bytes = { workspace = true, features = ["std"] }
+const_format = { workspace = true }
 const-hex = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "from"] }
 infra-idempotency-store = { workspace = true }
 iri-string = { workspace = true }
 infra-postgres = { workspace = true }
 sha2 = { workspace = true }
-sfv = { workspace = true, features = ["parsed-types"] }
+sfv = { workspace = true }
 smallvec = { workspace = true, features = ["const_generics"] }
 # template:end http-idempotency:http-idempotency-dependencies
 arc-swap = { workspace = true }

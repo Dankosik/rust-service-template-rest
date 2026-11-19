@@ -49,37 +49,32 @@ pub(crate) fn local_development_only(
     Ok(())
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Default, Deserialize)]
 #[serde(transparent)]
-struct BlankAsNoneString(#[serde(deserialize_with = "crate::de::blank_as_none")] Option<String>);
+struct StrictStringInput(#[serde_as(as = "crate::de::StrictString")] String);
 
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Default, Deserialize)]
+#[serde(transparent)]
+struct BlankAsNoneString(#[serde_as(as = "crate::de::BlankAsNone")] Option<String>);
+
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default(bound(Version: Default, Commit: Default, InstanceId: Default)))]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct AppFields<Version, Commit, InstanceId> {
-    #[serde(deserialize_with = "crate::de::string")]
+    #[serde_as(as = "crate::de::StrictString")]
+    #[educe(Default(expression = "unspecified".to_owned()))]
     pub(crate) env: String,
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "crate::de::StrictBool")]
     pub(crate) allow_insecure_development: bool,
     version: Version,
     commit: Commit,
     instance_id: InstanceId,
 }
 
-impl<Version: Default, Commit: Default, InstanceId: Default> Default
-    for AppFields<Version, Commit, InstanceId>
-{
-    fn default() -> Self {
-        Self {
-            env: default_env(),
-            allow_insecure_development: false,
-            version: Version::default(),
-            commit: Commit::default(),
-            instance_id: InstanceId::default(),
-        }
-    }
-}
-
-type AppInput = AppFields<crate::de::StrictString, crate::de::StrictString, BlankAsNoneString>;
+type AppInput = AppFields<StrictStringInput, StrictStringInput, BlankAsNoneString>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(from = "AppInput")]
@@ -116,17 +111,12 @@ impl Default for AppConfig {
     }
 }
 
-fn default_env() -> String {
-    "unspecified".to_owned()
-}
-
 // template:begin postgres:migration-app-input
 pub(crate) fn deserialize_migration_app<'de, D>(deserializer: D) -> Result<AppConfig, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    type MigrationAppInput =
-        AppFields<crate::de::StrictString, crate::de::StrictString, serde::de::IgnoredAny>;
+    type MigrationAppInput = AppFields<StrictStringInput, StrictStringInput, serde::de::IgnoredAny>;
 
     let input = MigrationAppInput::deserialize(deserializer)?;
     Ok(AppConfig {

@@ -17,6 +17,7 @@ test-support = []
 
 [dependencies]
 derive_more = { workspace = true, features = ["debug"] }
+delegate = { workspace = true }
 futures-util = { workspace = true, features = ["alloc"] }
 operation-context = { workspace = true }
 http = { workspace = true }
@@ -26,7 +27,7 @@ hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12", "rustls-platform-verifier"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 metrics = { workspace = true }
-once_cell = { workspace = true, features = ["std"] }
+parking_lot = { workspace = true }
 rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }

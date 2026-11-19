@@ -939,3 +939,101 @@ async fn transport_source_redacts_request_and_response_content() {
     }
     server.await.expect("truncated fixture server succeeds");
 }
+
+#[tokio::test]
+async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_between_frames() {
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use hyper::body::{Body, Frame};
+
+    struct FrameBody {
+        frames: VecDeque<Frame<Bytes>>,
+        on_poll: Option<Box<dyn FnMut(usize) + Send>>,
+        polls: usize,
+    }
+
+    impl Body for FrameBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let poll_index = self.polls;
+            self.polls += 1;
+            if let Some(on_poll) = self.on_poll.as_mut() {
+                on_poll(poll_index);
+            }
+            Poll::Ready(self.frames.pop_front().map(Ok))
+        }
+    }
+
+    let context: crate::RequestContext = operation_context::OperationContext::unbounded().into();
+    let payload = Bytes::from(b"single-frame-payload".to_vec());
+    let expected_ptr = payload.as_ptr();
+    let single = FrameBody {
+        frames: VecDeque::from([
+            Frame::data(Bytes::new()),
+            Frame::data(payload),
+            Frame::data(Bytes::new()),
+            Frame::trailers(http::HeaderMap::new()),
+        ]),
+        on_poll: None,
+        polls: 0,
+    };
+    let buffered = crate::collect_bounded_body(single, 64, &context)
+        .await
+        .expect("single-frame body succeeds");
+    assert_eq!(buffered.as_ref(), b"single-frame-payload");
+    assert_eq!(buffered.as_ptr(), expected_ptr);
+
+    let multi = FrameBody {
+        frames: VecDeque::from([
+            Frame::data(Bytes::from_static(b"ab")),
+            Frame::data(Bytes::from_static(b"cd")),
+            Frame::data(Bytes::from_static(b"ef")),
+        ]),
+        on_poll: None,
+        polls: 0,
+    };
+    let concatenated = crate::collect_bounded_body(multi, 6, &context)
+        .await
+        .expect("multi-frame body at exact limit succeeds");
+    assert_eq!(concatenated.as_ref(), b"abcdef");
+
+    let over_limit = FrameBody {
+        frames: VecDeque::from([
+            Frame::data(Bytes::from_static(b"abcd")),
+            Frame::data(Bytes::from_static(b"efg")),
+        ]),
+        on_poll: None,
+        polls: 0,
+    };
+    std::assert_matches!(
+        crate::collect_bounded_body(over_limit, 6, &context).await,
+        Err(Error::ResponseBodyTooLarge)
+    );
+
+    let op = operation_context::OperationContext::unbounded();
+    let cancel = op.clone();
+    let cancelled_between_frames = FrameBody {
+        frames: VecDeque::from([
+            Frame::data(Bytes::from_static(b"first")),
+            Frame::data(Bytes::from_static(b"second")),
+        ]),
+        on_poll: Some(Box::new(move |poll_index| {
+            if poll_index == 0 {
+                cancel.cancel();
+            }
+        })),
+        polls: 0,
+    };
+    std::assert_matches!(
+        crate::collect_bounded_body(cancelled_between_frames, 64, &op.into()).await,
+        Err(Error::Cancelled)
+    );
+}

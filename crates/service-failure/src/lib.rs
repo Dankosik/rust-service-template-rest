@@ -2,7 +2,7 @@ use serde::ser::Serializer;
 
 macro_rules! codes {
     ($($variant:ident => $wire:literal,)+) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, enum_map::Enum)]
         pub enum Code {
             $(
                 $variant,

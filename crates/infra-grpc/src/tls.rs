@@ -7,10 +7,12 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::TlsMaterialError;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, derive_more::Debug)]
 pub struct ServerTlsMaterial<'a> {
+    #[debug(skip)]
     pub certificate_pem: &'a str,
     pub private_key_pem: &'a SecretString,
+    #[debug(skip)]
     pub client_ca_pem: Option<&'a str>,
 }
 
@@ -70,4 +72,26 @@ fn roots(input: &str) -> Result<RootCertStore, TlsMaterialError> {
             .map_err(|_| TlsMaterialError::InvalidCaCertificate)?;
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_tls_material_debug_omits_pem_material() {
+        let key = SecretString::from(
+            "-----BEGIN PRIVATE KEY-----\nsecret-key\n-----END PRIVATE KEY-----",
+        );
+        let material = ServerTlsMaterial {
+            certificate_pem: "-----BEGIN CERTIFICATE-----\ncert-body\n-----END CERTIFICATE-----",
+            private_key_pem: &key,
+            client_ca_pem: Some("-----BEGIN CERTIFICATE-----\nca-body\n-----END CERTIFICATE-----"),
+        };
+        let formatted = format!("{material:?}");
+        assert!(!formatted.contains("-----BEGIN"), "{formatted}");
+        assert!(!formatted.contains("cert-body"), "{formatted}");
+        assert!(!formatted.contains("secret-key"), "{formatted}");
+        assert!(!formatted.contains("ca-body"), "{formatted}");
+    }
 }

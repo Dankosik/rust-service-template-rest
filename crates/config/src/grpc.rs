@@ -1,4 +1,3 @@
-use std::fmt;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -6,7 +5,9 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::de::{
+    BlankAsNone, BlankSecretAsNone, ListenAddr, StrictBool, StrictCount, StrictDuration, StrictEnum,
+};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
@@ -21,54 +22,47 @@ pub enum GrpcSecurity {
     Tls,
 }
 
-#[derive(Deserialize)]
+#[serde_with::serde_as]
+#[derive(Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct GrpcInput {
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     pub(crate) enabled: bool,
-    #[serde(deserialize_with = "crate::de::boolean")]
+    #[serde_as(as = "StrictBool")]
     trust_trace_context: bool,
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
-    #[serde(default, deserialize_with = "crate::de::optional_listen_addr")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone<ListenAddr>")]
     addr: Option<SocketAddr>,
-    #[serde(default, deserialize_with = "crate::de::optional_string_enum")]
+    #[serde(default)]
+    #[serde_as(as = "Option<StrictEnum>")]
     security: Option<GrpcSecurity>,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     certificate: Option<String>,
-    #[serde(default, deserialize_with = "blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankSecretAsNone")]
     private_key: Option<SecretString>,
-    #[serde(default, deserialize_with = "blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNone")]
     client_ca: Option<String>,
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default(expression = DEFAULT_MAX_IN_FLIGHT))]
     max_in_flight: u32,
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
-    #[serde(deserialize_with = "crate::de::unsigned_count")]
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default(expression = DEFAULT_MAX_CONNECTIONS))]
     max_connections: u32,
-    #[serde(deserialize_with = "crate::de::duration")]
+    #[serde_as(as = "StrictDuration")]
+    #[educe(Default(expression = Duration::from_mins(30)))]
     max_connection_age: Duration,
-}
-
-impl Default for GrpcInput {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            trust_trace_context: false,
-            addr: None,
-            security: None,
-            certificate: None,
-            private_key: None,
-            client_ca: None,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
-            admission_wait: DEFAULT_ADMISSION_WAIT,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
-            max_connection_age: Duration::from_mins(30),
-        }
-    }
 }
 
 impl GrpcInput {
@@ -154,9 +148,11 @@ pub struct GrpcConfig {
     pub max_connection_age: Option<Duration>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub enum GrpcListenerSecurity {
+    #[debug("plaintext")]
     Plaintext,
+    #[debug("tls")]
     Tls(GrpcTlsMaterial),
 }
 
@@ -167,12 +163,6 @@ impl GrpcListenerSecurity {
             Self::Plaintext => "plaintext",
             Self::Tls(_) => "tls",
         }
-    }
-}
-
-impl fmt::Debug for GrpcListenerSecurity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.mode())
     }
 }
 

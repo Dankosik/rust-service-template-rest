@@ -1,5 +1,3 @@
-use std::fmt;
-
 use axum::body::Bytes;
 use axum::extract::{FromRequestParts as _, OriginalUri};
 use axum::http::header::CONTENT_TYPE;
@@ -13,18 +11,12 @@ use super::identity::request_fingerprint;
 use crate::Problem;
 use crate::extract::{Path, decode_json, decode_query, require_json_content_type};
 
+#[derive(derive_more::Debug)]
+#[debug("CommandInput {{ .. }}")]
 pub struct CommandInput {
     parts: Parts,
     body: Bytes,
     trailers: HeaderMap,
-}
-
-impl fmt::Debug for CommandInput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CommandInput")
-            .finish_non_exhaustive()
-    }
 }
 
 impl CommandInput {

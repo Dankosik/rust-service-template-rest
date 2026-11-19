@@ -22,18 +22,13 @@ pub enum LoggingFormat {
     Text,
 }
 
+#[derive(derive_more::Debug)]
 pub struct LoggingOptions<'a> {
+    #[debug(skip)]
     pub level: &'a str,
     pub format: LoggingFormat,
+    #[debug(skip)]
     pub tracer_provider: Option<&'a TracerProviderHandle>,
-}
-
-impl std::fmt::Debug for LoggingOptions<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoggingOptions")
-            .field("format", &self.format)
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -255,24 +250,14 @@ where
         Some(LevelFilter::TRACE)
     }
 
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        self.0.on_new_span(attrs, id, ctx);
-    }
-
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        self.0.on_record(id, values, ctx);
-    }
-
-    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        self.0.on_enter(id, ctx);
-    }
-
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        self.0.on_exit(id, ctx);
-    }
-
-    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
-        self.0.on_close(id, ctx);
+    delegate::delegate! {
+        to self.0 {
+            fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
+            fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>);
+            fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>);
+            fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>);
+            fn on_close(&self, id: span::Id, ctx: Context<'_, S>);
+        }
     }
 }
 

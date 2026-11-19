@@ -2,12 +2,15 @@ mod producer;
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     num::NonZeroU32,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use arrayvec::ArrayString;
 use bytes::Bytes;
+use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
@@ -174,8 +177,9 @@ impl Handler<Delivery> for Dispatcher {
         let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
             return Err(outcomes.fail(DeliveryFailure::ClockUnavailable));
         };
-        let message_id = job.id().to_string();
-        let Some(request) = endpoint.signed_request(delivery, message_id, timestamp) else {
+        let Some(request) = format_message_id(job.id())
+            .and_then(|message_id| endpoint.signed_request(delivery, &message_id, timestamp))
+        else {
             return Err(outcomes.fail(DeliveryFailure::InvalidPayload));
         };
         let response = endpoint
@@ -186,13 +190,19 @@ impl Handler<Delivery> for Dispatcher {
     }
 }
 
+fn format_message_id(job_id: infra_jobs::JobId) -> Option<ArrayString<36>> {
+    let mut message_id = ArrayString::new();
+    write!(message_id, "{job_id}").ok()?;
+    Some(message_id)
+}
+
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
     #[serde(skip_deserializing, default = "delivery_version")]
     version: u8,
-    endpoint_id: String,
-    content_type: String,
+    endpoint_id: CompactString,
+    content_type: CompactString,
     #[serde_as(as = "StreamingBase64")]
     body: Bytes,
 }
@@ -209,8 +219,8 @@ impl Delivery {
         }
         let len = infra_jobs::json_payload_len(&Self {
             version: delivery_version(),
-            endpoint_id: String::new(),
-            content_type: String::new(),
+            endpoint_id: CompactString::const_new(""),
+            content_type: CompactString::const_new(""),
             body: Bytes::new(),
         })?;
         Ok(*LEN.get_or_init(|| len))
@@ -451,7 +461,7 @@ impl Endpoint {
     fn signed_request(
         &self,
         delivery: &Delivery,
-        message_id: String,
+        message_id: &str,
         timestamp: i64,
     ) -> Option<Request<Bytes>> {
         let destination = self.destination.clone()?;
@@ -460,7 +470,7 @@ impl Endpoint {
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
             .ok()?;
         Request::post(destination)
-            .header(header::CONTENT_TYPE, &delivery.content_type)
+            .header(header::CONTENT_TYPE, delivery.content_type.as_str())
             .header(WEBHOOK_ID, message_id)
             .header(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp))
             .header(WEBHOOK_SIGNATURE, signatures)
@@ -530,22 +540,16 @@ mod tests {
         let destination = format!("{origin}{}", "a".repeat(65_534 - origin.len()));
         let delivery = super::Delivery {
             version: super::delivery_version(),
-            endpoint_id: "partner".to_owned(),
-            content_type: "application/json".to_owned(),
+            endpoint_id: "partner".into(),
+            content_type: "application/json".into(),
             body: bytes::Bytes::new(),
         };
 
         let endpoint = Endpoint::try_new(&destination, ring()).unwrap();
-        let request = endpoint
-            .signed_request(&delivery, "id".to_owned(), 0)
-            .unwrap();
+        let request = endpoint.signed_request(&delivery, "id", 0).unwrap();
         assert_eq!(request.uri().to_string(), destination);
         let endpoint = Endpoint::try_new(&format!("{destination}a"), ring()).unwrap();
-        assert!(
-            endpoint
-                .signed_request(&delivery, "id".to_owned(), 0)
-                .is_none()
-        );
+        assert!(endpoint.signed_request(&delivery, "id", 0).is_none());
     }
 
     #[test]
@@ -557,8 +561,8 @@ mod tests {
             let encoded = STANDARD.encode(&body);
             let delivery = super::Delivery {
                 version: super::delivery_version(),
-                endpoint_id: "partner".to_owned(),
-                content_type: "application/json".to_owned(),
+                endpoint_id: "partner".into(),
+                content_type: "application/json".into(),
                 body,
             };
             assert_eq!(

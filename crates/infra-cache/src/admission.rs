@@ -5,7 +5,7 @@ use redis::IntoConnectionInfo;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
 
-use crate::credentials::{PasswordFile, read_regular_file};
+use crate::credentials::{PasswordFile, read_regular_file, read_secret_file};
 use crate::dial::Tls;
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 
@@ -146,7 +146,7 @@ fn read_client_certificate(certificate: &ClientCertificate) -> Result<ClientIden
 
     let client_cert = read_regular_file(&certificate.cert_path, MAX_PEM_CHAIN_BYTES)
         .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
-    let client_key = read_regular_file(&certificate.key_path, MAX_PRIVATE_KEY_BYTES)
+    let client_key = read_secret_file(&certificate.key_path, MAX_PRIVATE_KEY_BYTES)
         .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
     let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
     let key =

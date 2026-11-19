@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
+use compact_str::CompactString;
 use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
@@ -15,6 +16,7 @@ use infra_postgres::{
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use smallvec::SmallVec;
 use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
@@ -339,13 +341,13 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
 pub struct Incoming {
     #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
-    endpoint_id: String,
+    endpoint_id: CompactString,
     #[debug("{:?}", "[REDACTED]")]
     #[serde_as(as = "StreamingBase64")]
     message_id: MessageId,
     #[debug("{:?}", content_type.is_some())]
     #[serde_as(as = "Option<StreamingBase64>")]
-    content_type: Option<Vec<u8>>,
+    content_type: Option<SmallVec<[u8; 32]>>,
     #[debug("{:?}", "[REDACTED]")]
     #[serde_as(as = "StreamingBase64")]
     body: Bytes,
@@ -360,9 +362,9 @@ impl Incoming {
     fn new(endpoint_id: &str, admitted: AdmittedBody<'_>, content_type: Option<&[u8]>) -> Self {
         Self {
             version: incoming_version(),
-            endpoint_id: endpoint_id.to_owned(),
+            endpoint_id: CompactString::from(endpoint_id),
             message_id: admitted.message_id,
-            content_type: content_type.map(ToOwned::to_owned),
+            content_type: content_type.map(SmallVec::from_slice),
             body: admitted.body.into_bytes(),
         }
     }

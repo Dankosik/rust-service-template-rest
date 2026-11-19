@@ -30,7 +30,9 @@ impl From<ObservabilityInput> for ObservabilityConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde_with::serde_as]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, educe::Educe)]
+#[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct MetricsConfig {
     /// Private Prometheus diagnostics listener. `:port` binds IPv4
@@ -38,16 +40,9 @@ pub struct MetricsConfig {
     /// deployment network policy must keep it private. Hostnames are
     /// refused; load does not look them up. Empty disables HTTP exposition
     /// and leaves liveness on the application listener only.
-    #[serde(deserialize_with = "crate::de::optional_listen_addr")]
+    #[serde_as(as = "crate::de::BlankAsNone<crate::de::ListenAddr>")]
+    #[educe(Default(expression = Some(SocketAddr::from(([0, 0, 0, 0], 9090)))))]
     pub addr: Option<SocketAddr>,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            addr: Some(SocketAddr::from(([0, 0, 0, 0], 9090))),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -62,20 +57,21 @@ pub enum TracesSampler {
     ParentBasedTraceIdRatio,
 }
 
-#[derive(Debug, Deserialize)]
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default)]
 #[serde(transparent)]
-struct TracesSamplerArgInput(#[serde(deserialize_with = "crate::de::ratio")] f64);
+struct TracesSamplerArgInput(
+    #[serde_as(as = "crate::de::StrictRatio")]
+    #[educe(Default = 0.10)]
+    f64,
+);
 
-impl Default for TracesSamplerArgInput {
-    fn default() -> Self {
-        Self(0.10)
-    }
-}
-
+#[serde_with::serde_as]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct OtelFields<Sampler, SamplerArg, Exporter> {
-    #[serde(deserialize_with = "crate::de::string")]
+    #[serde_as(as = "crate::de::StrictString")]
     pub(crate) service_name: String,
     traces_sampler: Sampler,
     traces_sampler_arg: SamplerArg,
@@ -134,6 +130,7 @@ impl Default for OtelConfig {
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Clone, derive_more::Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {
@@ -143,7 +140,8 @@ pub struct OtelExporterConfig {
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
     /// the exporter stays disabled when no credential is configured. Userinfo,
     /// query strings and fragments are rejected.
-    #[serde(default, deserialize_with = "crate::de::blank_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "crate::de::BlankAsNone")]
     #[debug(skip)]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`.
@@ -151,7 +149,8 @@ pub struct OtelExporterConfig {
     /// environment or via `--secrets-dir`.
     /// Requires an HTTPS endpoint in `otlp_endpoint`. Missing, empty, or
     /// whitespace-only is absent (`None`).
-    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
+    #[serde(default)]
+    #[serde_as(as = "crate::de::BlankSecretAsNone")]
     pub otlp_headers: Option<SecretString>,
 }
 
@@ -218,9 +217,10 @@ mod tests {
 
     #[test]
     fn sampler_names_follow_opentelemetry_spelling() {
+        #[serde_with::serde_as]
         #[derive(Deserialize)]
         struct Probe {
-            #[serde(deserialize_with = "crate::de::string_enum")]
+            #[serde_as(as = "crate::de::StrictEnum")]
             sampler: TracesSampler,
         }
         for (text, expected) in [

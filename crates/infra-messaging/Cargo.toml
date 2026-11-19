@@ -36,8 +36,11 @@ required-features = ["integration"]
 workspace = true
 
 [dependencies]
-derive-where = { workspace = true }
+arrayvec = { workspace = true, features = ["std"] }
+bstr = { workspace = true, features = ["std"] }
+compact_str = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
+derive-where = { workspace = true }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
 operation-context = { workspace = true }
@@ -78,6 +81,7 @@ tracing-opentelemetry = { workspace = true }
 # utoipa 6.0.0 names `crate::utoipa::Number` in schema fields that exist
 # without `macros`, so the library alone does not compile without it.
 utoipa = { workspace = true, features = ["macros"] }
+zeroize = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["fs"] }

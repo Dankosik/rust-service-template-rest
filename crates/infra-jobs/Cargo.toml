@@ -15,9 +15,12 @@ workspace = true
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
+backon = { workspace = true, features = ["std"] }
+compact_str = { workspace = true }
 operation-context = { workspace = true }
 derive_more = { workspace = true, features = ["debug", "display"] }
 enum-map = { workspace = true, features = ["derive"] }
+foldhash = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std"] }
