@@ -94,8 +94,8 @@ impl RequestContext {
     }
 }
 
-pub(crate) async fn read_request_bytes(request: Request) -> Result<Bytes, BytesRejection> {
-    let context = request.extensions().get::<RequestContext>().cloned();
+pub(crate) async fn read_request_bytes(mut request: Request) -> Result<Bytes, BytesRejection> {
+    let context = request.extensions_mut().remove::<RequestContext>();
     track_body_read(context.as_ref(), Bytes::from_request(request, &())).await
 }
 
@@ -228,9 +228,7 @@ pub(crate) async fn finish_response(mut request: Request, next: Next) -> Respons
     request.extensions_mut().insert(ResponseContext(context));
     let mut response = next.run(request).await;
     if let Some(id) = id {
-        if let Ok(text) = id.header_value().to_str() {
-            complete_problem(&mut response, text);
-        }
+        complete_problem(&mut response, id.header_value());
         response
             .headers_mut()
             .insert(REQUEST_ID_HEADER, id.header_value().clone());
@@ -241,10 +239,12 @@ pub(crate) async fn finish_response(mut request: Request, next: Next) -> Respons
 
 pub(crate) async fn enforce_request_budget(
     State(budget): State<Duration>,
-    response_context: ResponseContext,
     mut request: Request,
     next: Next,
 ) -> Response {
+    let Some(response_context) = request.extensions().get::<ResponseContext>() else {
+        return missing_extension::<ResponseContext>();
+    };
     let origin = request
         .extensions()
         .get::<Arrival>()
@@ -270,7 +270,7 @@ pub(crate) async fn enforce_request_budget(
     }
     // template:end request-budget:http-request-deadline-projection
     let stop = |reason| {
-        response_context.operation().cancel();
+        context.operation.cancel();
         context.stopped_response(reason, version)
     };
     let response = tokio::select! {
@@ -287,7 +287,7 @@ pub(crate) async fn enforce_request_budget(
 fn upload_timeout_response(version: Version) -> Response {
     // RFC 9110 §15.5.9
     let mut response = Problem::new(Code::RequestTimeout)
-        .detail("request body was not received within the request budget")
+        .detail_static("request body was not received within the request budget")
         .into_response();
     if version < Version::HTTP_2 {
         response
@@ -301,7 +301,7 @@ impl From<Stopped> for Problem {
     fn from(reason: Stopped) -> Self {
         match reason {
             Stopped::Deadline => Self::new(Code::GatewayTimeout)
-                .detail("request budget expired before a response could be committed"),
+                .detail_static("request budget expired before a response could be committed"),
             Stopped::Cancelled => Self::new(Code::ServiceUnavailable),
         }
     }

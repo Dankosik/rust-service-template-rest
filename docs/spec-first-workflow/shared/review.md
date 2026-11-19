@@ -15,19 +15,22 @@ At the final assembled delivery boundary (in both structured workflows and
 standalone Direct Work), select the disposition for the changed surface. Assign
 one fresh reviewer when full or structure-only review applies.
 
-- **Full final review**: Required when requested by the user, when changed
-  behavior affects authorization, money, data integrity, concurrency safety, or
-  hard-to-reverse migration, or when a material correctness question remains
-  uncertain. Cover unit-local invariants and cross-unit interactions within the
-  [Evidence Contract](evidence-contract.md#local-completion) proof boundary.
+- **Full final review**: Required for any multi-task ledger (≥2 planned code
+  tasks), when requested by the user, when changed behavior affects
+  authorization, money, data integrity, concurrency safety, or hard-to-reverse
+  migration, or when a material correctness question remains uncertain. Cover
+  unit-local invariants and cross-unit interactions within the [Evidence
+  Contract](evidence-contract.md#local-completion) proof boundary (using the
+  2-lens [Complementary
+  Panel](../phases/implementation-review.md#complementary-panel) when
+  triggered).
 - **Structure-only review**: Selected when full review is untriggered and the
   candidate adds a workspace crate, dependency or crate feature, trait or layer,
   custom general mechanism, config key, or fallback/shim/parallel path; route to
   [Structure-only review](../phases/implementation-review.md#structure-only-review).
-- **Direct completion**: When neither trigger fires, complete final validation
-  directly and record the disposition in the Completion result, closing all
-  blocking findings and rechecking only repaired deltas and invalidated
-  reasoning.
+- **Direct completion**: Single-task or inline candidate matching neither
+  trigger above; complete final validation directly and record the checked
+  trigger signals in the Completion result.
 
 ## Lifecycle
 
@@ -58,14 +61,15 @@ repair added against [Engineering](../../../AGENTS.md#engineering); a repair
 that closes its finding through an unjustified crate, dependency, layer,
 configuration key, or parallel path still fails.
 
-For Implementation, retain that reviewer across bounded repairs while findings
-close or new discriminating evidence advances the diagnosis. For repeated
-findings without new evidence, apply [Parent-Owned
-Recovery](transition.md#parent-owned-recovery)'s focused diagnosis and disposition;
-do not restart whole-unit review by rotating reviewers. Use fresh review when
-the original analysis is materially doubtful or the scope/freshness conditions
-below fail. Recheck count alone does not require replacement; every blocking
-finding still must close.
+For Implementation, batch verified findings per pass and allow at most **two
+bounded repair rounds** for the same anchored defect class on one candidate,
+retaining the reviewer for bounded delta rechecks when the adapter permits
+continuation (or using one fresh delta-scoped reviewer otherwise). If a second
+repair still leaves the defect unresolved or adds no discriminating evidence,
+stop cycling and apply [Parent-Owned
+Recovery](transition.md#parent-owned-recovery) (focused diagnosis,
+`adjudicator-agent`, or `Blocked`); every confirmed blocking defect still must
+close before `PASS`.
 
 For non-Implementation reviews, allow at most one bounded delta recheck per
 review result. If that still FAILs, one fresh reviewer inspects the repaired
@@ -92,8 +96,7 @@ The phase adapter owns lenses and threshold, while the artifact, ledger, or
 | Completed specification | [Specification Review](../phases/specification-review.md) |
 | Technical design (system and Rust architecture) | [Technical Design Review](../phases/technical-design-review.md) |
 | Planning result | [Task Review / Readiness](../phases/task-review-readiness.md) |
-| Single-unit final delivery or explicit standalone implementation review | [Implementation Review](../phases/implementation-review.md) |
-| Integrated implementation candidate | [Implementation Review](../phases/implementation-review.md#integrated-candidate) |
+| Implementation delivery (assembled ledger, single-unit, or standalone review) | [Implementation Review](../phases/implementation-review.md) |
 
 A phase-owned complementary panel replaces the default reviewer only when its
 trigger partitions one fixed candidate into named non-overlapping lenses and

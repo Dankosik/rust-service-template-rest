@@ -1,3 +1,4 @@
+use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::header::CONTENT_TYPE;
@@ -34,7 +35,7 @@ where
     type Rejection = Problem;
 
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        require_json_content_type(request.headers().get(CONTENT_TYPE)).map_err(|error| *error)?;
+        require_json_content_type(request.headers().get(CONTENT_TYPE))?;
         let bytes =
             read_request_bytes(request)
                 .await
@@ -43,39 +44,40 @@ where
                     StatusCode::BAD_REQUEST => body_unreadable(),
                     _ => wiring_failure("json"),
                 })?;
-        decode_json(&bytes).map(Self).map_err(|error| *error)
+        decode_json(&bytes).map(Self)
     }
 }
 
 pub(crate) fn is_json_media_type(value: &str) -> bool {
-    value.parse::<mime::Mime>().is_ok_and(|media_type| {
-        media_type.type_() == mime::APPLICATION
-            && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
-    })
+    value.eq_ignore_ascii_case("application/json")
+        || value.parse::<mime::Mime>().is_ok_and(|media_type| {
+            media_type.type_() == mime::APPLICATION
+                && (media_type.subtype() == mime::JSON || media_type.suffix() == Some(mime::JSON))
+        })
 }
 
-pub(crate) fn require_json_content_type(
-    content_type: Option<&HeaderValue>,
-) -> Result<(), Box<Problem>> {
+#[expect(
+    clippy::result_large_err,
+    reason = "the extractor returns Problem by value"
+)]
+pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
     let json = content_type
         .and_then(|value| value.to_str().ok())
         .is_some_and(is_json_media_type);
     if json {
         Ok(())
     } else {
-        Err(Box::new(
-            Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL),
-        ))
+        Err(Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL))
     }
 }
 
-pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Box<Problem>> {
+pub(crate) fn decode_json<T: DeserializeOwned, E: From<Problem>>(bytes: &[u8]) -> Result<T, E> {
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut input)
-        .map_err(|error| Box::new(json_problem(&error, bytes)))?;
+        .map_err(|error| json_problem(&error, bytes))?;
     input
         .end()
-        .map_err(|_| Box::new(Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)))?;
+        .map_err(|_| Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL))?;
     Ok(value)
 }
 
@@ -101,7 +103,7 @@ impl<T: Serialize> Json<T> {
         (
             status,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
-            body,
+            Body::from(body),
         )
             .into_response()
     }
@@ -152,13 +154,9 @@ where
         match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
             Ok(axum::extract::Path(TrackedPath(Err(issue)))) => {
-                let params = RawPathParams::from_request_parts(parts, state).await.ok();
-                Err(issue.problem(params.as_ref()))
+                Err(issue.problem(parts, state).await)
             }
-            Err(rejection) => {
-                let params = RawPathParams::from_request_parts(parts, state).await.ok();
-                Err(path_problem(&rejection, params.as_ref()))
-            }
+            Err(rejection) => Err(path_problem(&rejection, parts, state).await),
         }
     }
 }
@@ -181,13 +179,17 @@ fn query_problem(path: &serde_path_to_error::Path) -> Problem {
     with_param(
         Problem::new(Code::BadRequest).detail_static(QUERY_DETAIL),
         match path.iter().next() {
-            Some(Segment::Map { key }) => Some(format_compact!("query.{key}")),
+            Some(Segment::Map { key }) => param_name("query.", key),
             _ => None,
         },
     )
 }
 
-fn path_problem(rejection: &PathRejection, params: Option<&RawPathParams>) -> Problem {
+async fn path_problem<S: Send + Sync>(
+    rejection: &PathRejection,
+    parts: &mut Parts,
+    state: &S,
+) -> Problem {
     use axum::extract::path::ErrorKind;
 
     if rejection.status() != StatusCode::BAD_REQUEST {
@@ -196,19 +198,22 @@ fn path_problem(rejection: &PathRejection, params: Option<&RawPathParams>) -> Pr
     let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
         return invalid_path(None);
     };
-    let name = match failed.kind() {
+    let index = match failed.kind() {
         ErrorKind::ParseErrorAtKey { key, .. }
         | ErrorKind::InvalidUtf8InPathParam { key }
-        | ErrorKind::DeserializeError { key, .. } => Some(key.as_str()),
-        ErrorKind::ParseErrorAtIndex { index, .. } => params
-            .and_then(|params| params.iter().nth(*index))
-            .map(|(name, _)| name),
-        ErrorKind::ParseError { .. } => params
-            .and_then(|params| params.iter().exactly_one().ok())
-            .map(|(name, _)| name),
-        _ => None,
+        | ErrorKind::DeserializeError { key, .. } => return invalid_path(Some(key)),
+        ErrorKind::ParseErrorAtIndex { index, .. } => Some(*index),
+        ErrorKind::ParseError { .. } => None,
+        _ => return invalid_path(None),
     };
-    invalid_path(name)
+    let Ok(params) = RawPathParams::from_request_parts(parts, state).await else {
+        return invalid_path(None);
+    };
+    let param = match index {
+        Some(index) => params.iter().nth(index),
+        None => params.iter().exactly_one().ok(),
+    };
+    invalid_path(param.map(|(name, _)| name))
 }
 
 struct TrackedPath<T>(Result<T, PathIssue>);
@@ -222,20 +227,23 @@ enum PathIssue {
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let error = match serde_path_to_error::deserialize(deserializer) {
+        let mut track = serde_path_to_error::Track::new();
+        let error = match T::deserialize(serde_path_to_error::Deserializer::new(
+            deserializer,
+            &mut track,
+        )) {
             Ok(value) => return Ok(Self(Ok(value))),
             Err(error) => error,
         };
-        let message = error.inner().to_string();
-        match PathIssue::classify(error.path(), &message) {
+        match PathIssue::classify(track.path(), &error.to_string()) {
             Some(issue) => Ok(Self(Err(issue))),
-            None => Err(error.into_inner()),
+            None => Err(error),
         }
     }
 }
 
 impl PathIssue {
-    fn classify(path: &serde_path_to_error::Path, message: &str) -> Option<Self> {
+    fn classify(path: serde_path_to_error::Path, message: &str) -> Option<Self> {
         let mut segments = path.iter();
         match (segments.next(), segments.next()) {
             (None, _) => {
@@ -258,20 +266,21 @@ impl PathIssue {
         }
         message
             .starts_with("unknown variant `")
-            .then(|| Self::UnknownVariant(path.clone()))
+            .then_some(Self::UnknownVariant(path))
     }
 
-    fn problem(&self, params: Option<&RawPathParams>) -> Problem {
-        let Some(params) = params else {
+    async fn problem<S: Send + Sync>(&self, parts: &mut Parts, state: &S) -> Problem {
+        if matches!(self, Self::UnknownField) {
+            return wiring_failure("path");
+        }
+        let Ok(params) = RawPathParams::from_request_parts(parts, state).await else {
             return invalid_path(None);
         };
         match self {
             Self::MissingField(field) if !params.iter().any(|(name, _)| name == field.as_str()) => {
                 wiring_failure("path")
             }
-            Self::UnknownField => wiring_failure("path"),
             Self::DuplicateField if params.iter().nth(1).is_some() => wiring_failure("path"),
-            Self::MissingField(_) | Self::DuplicateField => invalid_path(None),
             Self::UnknownVariant(path) => {
                 let name = match path.iter().next() {
                     Some(Segment::Map { key }) => params
@@ -283,6 +292,7 @@ impl PathIssue {
                 };
                 invalid_path(name)
             }
+            _ => invalid_path(None),
         }
     }
 }
@@ -290,8 +300,12 @@ impl PathIssue {
 fn invalid_path(name: Option<&str>) -> Problem {
     with_param(
         Problem::new(Code::BadRequest).detail_static(PATH_DETAIL),
-        name.map(|name| format_compact!("path.{name}")),
+        name.and_then(|name| param_name("path.", name)),
     )
+}
+
+fn param_name(prefix: &str, name: &str) -> Option<CompactString> {
+    (name.len() <= MAX_PARAM_NAME_BYTES - prefix.len()).then(|| format_compact!("{prefix}{name}"))
 }
 
 fn wiring_failure(extractor: &'static str) -> Problem {
@@ -301,10 +315,8 @@ fn wiring_failure(extractor: &'static str) -> Problem {
 
 fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {
     match name {
-        Some(name) if name.len() <= MAX_PARAM_NAME_BYTES => {
-            problem.invalid_param(name, CompactString::const_new(SCHEMA_REASON))
-        }
-        _ => problem,
+        Some(name) => problem.invalid_param(name, CompactString::const_new(SCHEMA_REASON)),
+        None => problem,
     }
 }
 
@@ -317,9 +329,15 @@ fn body_pointer(path: &serde_path_to_error::Path) -> Option<CompactString> {
                 pointer.push_str(index.format_into(&mut std::fmt::NumBuffer::new()));
             }
             Segment::Map { key } | Segment::Enum { variant: key } => {
+                if key.len() > MAX_PARAM_NAME_BYTES.saturating_sub(pointer.len()) {
+                    return None;
+                }
                 pointer.push_str(&shared_rules::rfc6901::escape(key));
             }
             Segment::Unknown => return None,
+        }
+        if pointer.len() > MAX_PARAM_NAME_BYTES {
+            return None;
         }
     }
     (!pointer.is_empty()).then_some(pointer)
@@ -330,7 +348,6 @@ mod tests {
     use std::time::Duration;
 
     use axum::Router;
-    use axum::body::Body;
     use axum::http::{Method, Request as HttpRequest};
     use axum::routing::{get, post};
     use http_body_util::BodyExt;

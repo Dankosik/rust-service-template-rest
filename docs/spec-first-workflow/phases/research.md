@@ -4,18 +4,19 @@ Use when current or external evidence can change a named task decision. Own
 evidence closure and its downstream implications, leaving final behavior and
 mechanism choices to the requesting phase owner.
 
-Consume the exact question, affected decision and owner, live alternatives and
-falsifiers, authoritative-source boundary, applicable versions and freshness,
-and required downstream shape. Label quantities as measured, external limit,
-forecast, accepted target, or assumption.
+For a bounded inline lookup inside an active phase, fix the exact question,
+affected decision, and stop condition before searching. For delegated or
+standalone research, also pass live alternatives and falsifiers,
+authoritative-source boundary, applicable versions and freshness, and required
+downstream shape. Label quantities as measured, external limit, forecast,
+accepted target, or assumption.
 
-Fix the smallest falsifying evidence and stop condition before searching.
 Verify decision-changing claims against **primary sources**—repository code,
-`Cargo.toml`/`Cargo.lock`, `api/openapi.yaml`, migrations, official provider
-contracts, standards, and maintainer source outrank Markdown prose, comments,
-blog summaries, and `intent.md`'s description of current behavior. Test the
-leading implication against material counter-evidence and the strongest viable
-alternative, and record unavailable surfaces as unknown.
+`Cargo.toml`/`Cargo.lock`, committed contracts (`api/`), migrations, official
+provider contracts, standards, and maintainer source outrank Markdown prose,
+comments, blog summaries, and `intent.md`'s description of current behavior.
+Test the leading implication against material counter-evidence and the
+strongest viable alternative, and record unavailable surfaces as unknown.
 
 Load one matching branch by default:
 
@@ -30,8 +31,10 @@ Load one matching branch by default:
 
 The requesting phase owner chooses inline investigation or a fresh
 `evidence-agent` via [Read-Only Delegation](../shared/read-only-delegation.md)
-for read-heavy discovery. A lane already dispatched as `evidence-agent` runs
-the investigation directly and never spawns nested subagents.
+for bounded fact-gathering and read-heavy inventories, verifying
+decision-critical primary sources directly. A lane already dispatched as
+`evidence-agent` runs the investigation directly and never spawns nested
+subagents.
 
 Match output weight to downstream reuse:
 

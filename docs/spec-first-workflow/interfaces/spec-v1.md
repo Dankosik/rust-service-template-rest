@@ -1,20 +1,19 @@
 # Specification V1
 
 `specs/<task>/spec.md` is the reviewed behavioral contract for one structured
-task. It records what affected users, operators, and downstream systems can
-rely on—leaving mechanism and placement to Technical Design, slicing to
-Planning, and test implementation to Implementation.
+task: what external observers (users, callers, operators, and downstream
+systems) can rely on.
 
 ```markdown
 # Specification: <short observable outcome>
 
 status: draft | ready | blocked
 Basis: intent.md[, research/<topic>.md ...]
-Carried concerns: <bounded review CONCERNS carried downstream; omit when none>
+Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 ## Actors and surfaces
 
-- <actor or consumer> — <affected surface and primary repo locator>
+- <actor, consumer, or persisted/in-flight state> — <surface and primary locator>
 
 ## Current baseline
 
@@ -22,19 +21,19 @@ Carried concerns: <bounded review CONCERNS carried downstream; omit when none>
 
 ## Terminology
 
-- **<Term>:** <canonical meaning; omit section when code/contract nouns have no ambiguity>
+- **<Term>:** <canonical meaning; omit section when existing vocabulary is unambiguous>
 
 ## Behavior delta
 
 ### R1 — <short rule name>
 
-<Observable rule: trigger, target behavior, and boundary/failure/precedence/promise semantics where implementations could diverge.>
+<Observable rule, cross-cutting invariant, or labeled numeric target.>
 
-- **Falsifier:** <nearest feasible observable condition that disproves this rule>
+- **Falsifier:** <highest-boundary violation: trigger/state -> wrong external outcome instead of promised outcome>
 
 ## Preserved guarantees
 
-- **G1 — <short guarantee name>:** <unchanged guarantee, or authorized breaking change with what former callers observe — primary locator>
+- **G1 — <short guarantee name>:** <unchanged guarantee, or authorized breaking change with former-caller outcome and mixed-version expectation — primary locator>
 
 ## Non-goals
 
@@ -42,34 +41,53 @@ Carried concerns: <bounded review CONCERNS carried downstream; omit when none>
 
 ## Decisions, assumptions, and reopen triggers
 
-- **<Delegated decision | Bounded assumption>:** <choice within limits> — **Reopen if:** <objective condition or owner>
+- **Delegated decision:** <choice> over <strongest rejected alternative> because <constraint or evidence> — **Reopen if:** <objective condition or owner>
+- **Bounded assumption:** <assumption preserving requester meaning> — **Reopen if:** <objective condition or owner>
+- **Downstream handoff:** <non-behavioral `intent.md` item or technical preference> — **Owner:** `Technical Design` | `Planning`
+- **Durable contract update:** <`docs/repo-architecture.md#domain-vocabulary` or `docs/production-contract.md` update required in Implementation; omit when none>
+
+## Blocked decisions
+
+<Include only while `status: blocked`; remove once resolved.>
+
+- **B1 — <question in requester language>:** <primary evidence> | **Options & consequences:** <A vs B> | **Recommendation:** <choice and reason>
 ```
 
 ## Field Rules
 
-- **Lifecycle (`status`):** start at `draft`; flip to `ready` only after
-  [Specification Review](../phases/specification-review.md) permits handoff and
-  any bounded `CONCERNS` appear in `Carried concerns`. Use `blocked` when
-  preserving partial work alongside a `blocked` handoff to
-  [Intake](../phases/intake.md) or another upstream owner.
-- **Task-adaptive sections:** omit `Carried concerns`, `Terminology`,
-  `Current baseline` (pure greenfield), or `Decisions, assumptions, and reopen
-  triggers` when empty. Always keep `Actors and surfaces`, `Behavior delta`,
-  `Preserved guarantees` (write `None — verified greenfield surface` when no
-  existing consumers exist), and `Non-goals`.
-- **Addressable atomic rules (`R1`, `R2`, … and `G1`, `G2`, …):** give each
-  distinct obligation its own heading or bullet so Technical Design, Planning
-  (`Sources: spec.md#<rule-anchor>`), and Review can cite clauses without
-  splitting dense paragraphs.
-- **Format & links:** use prose by default; switch to a compact decision table,
-  state-transition table, decisive example, or exact wire/type fragment when
-  prose leaves ambiguity. Link unchanged code, `api/openapi.yaml`, migrations,
-  and `research/*.md` rather than copying them.
-- **Falsifier vs proof boundary:** name the highest observable boundary
-  (response, persisted outcome, exit code, log/metric signal) that disproves
-  the rule. Never prescribe unit tests, fixtures, proving layers, or commands,
-  and never promote a falsifier into a mandatory live gate
-  ([Evidence Contract](../shared/evidence-contract.md#design-proof)).
-- **Decisions & assumptions:** record every choice made within
-  [Intent](intent.md)'s delegated limits and every bounded assumption with a
-  concrete `Reopen if` trigger—never boilerplate ("if requirements change").
+- **Lifecycle (`status`) & ID stability:** start at `draft`; flip to `ready`
+  only after [Specification Review](../phases/specification-review.md) permits
+  handoff and any bounded `CONCERNS` appear in `Carried concerns`. Use
+  `blocked` with `Blocked decisions` when preserving partial work alongside a
+  blocked handoff to [Intake](../phases/intake.md) or an external policy owner.
+  When reopening a `ready` spec, keep surviving `R<n>` and `G<n>` IDs stable
+  (retire deleted IDs rather than renumbering downstream-cited anchors).
+- **Task-adaptive sections:** omit `Carried concerns`, `Terminology`, `Current
+  baseline` (pure greenfield), `Decisions, assumptions, and reopen triggers`,
+  or `Blocked decisions` when empty. Always keep `Actors and surfaces`,
+  `Behavior delta` (write `None — behavior-preserving change` only when zero
+  functional, operational, or quantitative behavior delta exists and only
+  `Preserved guarantees` and a non-behavioral `Downstream handoff` apply),
+  `Preserved guarantees` (`None — verified greenfield surface` when no existing
+  consumers or persisted state exist), and `Non-goals`.
+- **Addressable clauses & representation:** give each obligation its own `R<n>`
+  heading or `G<n>` bullet so downstream phases cite `spec.md#<rule-anchor>`
+  without copying prose. Use prose by default; switch to a compact decision
+  table, state-transition table, decisive boundary example, or exact wire/type
+  fragment whenever rules interact. Link unchanged code, committed contracts
+  (`api/`), migrations, and `research/*.md` instead of copying them.
+- **Falsifier at the highest observable boundary:** name a concrete black-box
+  violation at the highest external seam (HTTP/gRPC response, persisted state,
+  emitted event, exit code, boot failure, or operator signal)—never a test,
+  fixture, proving layer, command, or unmandated live gate ([Evidence
+  Contract](../shared/evidence-contract.md#design-proof) owns mandatory proof
+  expansion):
+  - *Observable:* `POST /orders` with a reused `Idempotency-Key` and different
+    body returns `200` or creates a second order instead of `409`
+    `idempotency_conflict`.
+  - *Wrong layer:* Unit test `test_idempotency_conflict` or
+    `make test-integration-db` fails.
+- **Triggers & quantities:** write objective `Reopen if` triggers (never
+  boilerplate like "if requirements change"). Label every numeric bound using
+  [Research](../phases/research.md)'s vocabulary: `measured`, `external limit`,
+  `forecast`, `accepted target`, or `assumption`.

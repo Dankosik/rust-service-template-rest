@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
+use crate::metrics::static_counter_key;
+
 macro_rules! sdk_events {
     ($($variant:ident => ($name:literal, $label:literal)),+ $(,)?) => {
         #[derive(Clone, Copy, Enum)]
@@ -16,8 +18,10 @@ macro_rules! sdk_events {
                 }
             }
 
-            const fn label(self) -> &'static str {
-                match self { $(Self::$variant => $label),+ }
+            fn metric_key(self) -> &'static metrics::Key {
+                match self {
+                    $(Self::$variant => static_counter_key!(DIAGNOSTICS_METRIC, "event" => $label)),+
+                }
             }
         }
     };
@@ -174,8 +178,11 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
+    static METADATA: metrics::Metadata<'static> =
+        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
     for (event, count) in &COUNTS {
-        metrics::counter!(DIAGNOSTICS_METRIC, "event" => event.label())
+        metrics::with_recorder(|recorder| recorder.register_counter(event.metric_key(), &METADATA))
             .absolute(count.load(Ordering::Relaxed));
     }
     if let Some(count) = DROPPED.get() {

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use shared_rules::oidc_jwt::REFRESH_COOLDOWN;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -85,8 +85,8 @@ impl KeyStore {
         })
     }
 
-    pub(crate) fn current(&self) -> Arc<KeySet> {
-        self.keys.load_full()
+    pub(crate) fn current(&self) -> Guard<Arc<KeySet>> {
+        self.keys.load()
     }
 
     fn newer_set(&self, checked: &Arc<KeySet>) -> Option<Arc<KeySet>> {
@@ -260,7 +260,7 @@ fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>)
 
 #[cfg(test)]
 mod tests {
-    use super::{KeySetFailure, KeyStore, SignatureRefresh, acquisition_timestamp};
+    use super::{Guard, KeySetFailure, KeyStore, SignatureRefresh, acquisition_timestamp};
     use crate::{
         jwks::{
             KeySet,
@@ -393,7 +393,8 @@ mod tests {
     fn spawn_refresh(store: &Arc<KeyStore>) -> tokio::task::JoinHandle<Option<bool>> {
         let store = Arc::clone(store);
         tokio::spawn(async move {
-            match store.refresh_for_signature_miss(&store.current()).await {
+            let checked = Guard::into_inner(store.current());
+            match store.refresh_for_signature_miss(&checked).await {
                 SignatureRefresh::NewerSet(keys) => Some(keys.has_kid("new")),
                 SignatureRefresh::NoNewerSet => None,
                 SignatureRefresh::WorkerLost => panic!("worker unexpectedly dropped"),
@@ -478,7 +479,7 @@ mod tests {
             poll_waiting_worker(worker.as_mut()).await;
             assert_eq!(store.state.borrow().requested_ticket, period * 2);
 
-            let checked = store.current();
+            let checked = Guard::into_inner(store.current());
             let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
             assert!(futures_util::poll!(unknown.as_mut()).is_pending());
             finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
@@ -605,7 +606,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_set_installed_after_the_token_was_checked_is_the_answer_without_a_fetch() {
         let store = KeyStore::new(key_set("old"));
-        let checked = store.current();
+        let checked = Guard::into_inner(store.current());
         store.expire_refresh_cooldown_for_test();
         let rotation = spawn_refresh(&store);
         tokio::task::yield_now().await;

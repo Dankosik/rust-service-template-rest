@@ -76,17 +76,33 @@ impl From<ProbeFailure> for NotReady {
     }
 }
 
-fn outcome_label(outcome: &Result<(), ProbeFailure>) -> &'static str {
-    match outcome {
-        Ok(()) => "ok",
-        Err(ProbeFailure::TimedOut { .. }) => "timed_out",
-        Err(ProbeFailure::Failed { .. }) => "failed",
-    }
-}
-
 const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
+
+fn outcome_metric_parts(
+    outcome: &Result<(), ProbeFailure>,
+) -> (&'static str, &'static metrics::Key) {
+    const OK: &str = "ok";
+    const TIMED_OUT: &str = "timed_out";
+    const FAILED: &str = "failed";
+    static OK_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts("outcome", OK)];
+    static TIMED_OUT_LABELS: [metrics::Label; 1] =
+        [metrics::Label::from_static_parts("outcome", TIMED_OUT)];
+    static FAILED_LABELS: [metrics::Label; 1] =
+        [metrics::Label::from_static_parts("outcome", FAILED)];
+    static OK_KEY: metrics::Key = metrics::Key::from_static_parts(CHECKS_METRIC, &OK_LABELS);
+    static TIMED_OUT_KEY: metrics::Key =
+        metrics::Key::from_static_parts(CHECKS_METRIC, &TIMED_OUT_LABELS);
+    static FAILED_KEY: metrics::Key =
+        metrics::Key::from_static_parts(CHECKS_METRIC, &FAILED_LABELS);
+
+    match outcome {
+        Ok(()) => (OK, &OK_KEY),
+        Err(ProbeFailure::TimedOut { .. }) => (TIMED_OUT, &TIMED_OUT_KEY),
+        Err(ProbeFailure::Failed { .. }) => (FAILED, &FAILED_KEY),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
@@ -235,10 +251,17 @@ impl State {
         Ok(check)
     }
 
-    fn ready_check(&self, now: Instant, stale_after: Duration) -> Option<&Check> {
-        self.fresh_check(now, stale_after)
-            .ok()
-            .filter(|check| check.verdict.is_ready())
+    fn readiness(&self, stale_after: Duration) -> (bool, Option<Instant>) {
+        let checked_at = match self {
+            Self::Evaluated(check) if check.verdict.is_ready() => check.checked_at,
+            _ => return (false, None),
+        };
+        let deadline = stale_at(checked_at, stale_after);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            (false, None)
+        } else {
+            (true, deadline)
+        }
     }
 
     fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
@@ -515,17 +538,25 @@ impl ReadinessRefresher {
 
 impl Readiness {
     async fn check_probes(&self) -> Result<(), ProbeFailure> {
+        static METADATA: metrics::Metadata<'static> =
+            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
         let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
-        let checks = self
-            .probes
-            .iter()
-            .map(|probe| check_probe(probe.as_ref(), deadline, budget));
-        let observed = join_all(checks)
-            .await
-            .into_iter()
-            .collect::<Result<(), _>>();
-        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
+        let observed = match self.probes.as_slice() {
+            [probe] => check_probe(probe.as_ref(), deadline, budget).await,
+            probes => {
+                let checks = probes
+                    .iter()
+                    .map(|probe| check_probe(probe.as_ref(), deadline, budget));
+                join_all(checks)
+                    .await
+                    .into_iter()
+                    .collect::<Result<(), _>>()
+            }
+        };
+        let (_, key) = outcome_metric_parts(&observed);
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA)).increment(1);
         observed
     }
 }
@@ -549,10 +580,11 @@ async fn check_probe(
             budget,
         }),
     };
+    let (outcome_label, _) = outcome_metric_parts(&outcome);
     metrics::counter!(
         PROBE_CHECKS_METRIC,
         "probe" => probe_name,
-        "outcome" => outcome_label(&outcome)
+        "outcome" => outcome_label
     )
     .increment(1);
     outcome
@@ -566,10 +598,8 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.rx
-            .borrow()
-            .ready_check(Instant::now(), self.stale_after)
-            .is_some()
+        let (ready, _) = self.rx.borrow().readiness(self.stale_after);
+        ready
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
@@ -588,15 +618,14 @@ impl ReadinessReader {
         loop {
             let stale_deadline = {
                 let state = self.rx.borrow_and_update();
-                let ready_check = state.ready_check(Instant::now(), self.stale_after);
-                let ready = ready_check.is_some();
+                let (ready, stale_deadline) = state.readiness(self.stale_after);
                 if ready != seen {
                     return Some(ready);
                 }
                 if matches!(*state, State::Draining) {
                     return None;
                 }
-                ready_check.and_then(|check| stale_at(check.checked_at, self.stale_after))
+                stale_deadline
             };
             match stale_deadline {
                 Some(deadline) => {

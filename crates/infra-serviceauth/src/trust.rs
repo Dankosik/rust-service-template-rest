@@ -69,6 +69,9 @@ impl TrustRegistry {
             }
         }
         callers.sort_keys();
+        for keys in callers.values_mut() {
+            keys.sort_unstable_by(|left, right| left.kid.as_str().cmp(right.kid.as_str()));
+        }
         Ok(Self { callers })
     }
 
@@ -393,7 +396,7 @@ mod tests {
         let rotated = TestKey::new("orders/production/2027-01");
         let billing = TestKey::new(orders.kid());
         let document = serde_json::json!({
-            "orders": {"keys": [orders.jwk(), rotated.jwk()], "note": "ignored"},
+            "orders": {"keys": [rotated.jwk(), orders.jwk()], "note": "ignored"},
             "billing": {"keys": [billing.jwk()]},
         })
         .to_string();

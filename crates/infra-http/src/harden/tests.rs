@@ -567,6 +567,10 @@ async fn a_request_is_shed_when_a_permit_frees_after_its_wait_budget() {
     let shed = waiting.await.unwrap();
     assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(shed.headers()[RETRY_AFTER], "1");
+    let request_id = shed.headers()[REQUEST_ID_HEADER].clone();
+    let problem = body_json(shed).await;
+    assert_eq!(problem["code"], "service_unavailable");
+    assert_eq!(problem["request_id"], request_id.to_str().unwrap());
     assert_eq!(started.load(Ordering::SeqCst), 1);
 }
 
@@ -681,7 +685,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     let app = routes
         .layer(middleware::from_fn_with_state(
             Arc::new(Admission {
-                permits: Arc::new(Semaphore::new(1)),
+                permits: Semaphore::new(1),
                 max_wait: patience,
                 probes: ProbeRoutes::default(),
             }),

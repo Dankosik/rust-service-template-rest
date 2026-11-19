@@ -54,9 +54,6 @@ where
     let rules_link = operation.rules_link;
     let handler =
         move |State(state): State<S>, mut request: Request| {
-            let operation_id = operation_id.clone();
-            let fingerprint_headers = fingerprint_headers.clone();
-            let rules_link = rules_link.clone();
             let prepare = prepare.clone();
             async move {
                 let delegation = request.extensions_mut().remove::<DelegationCredential>();
@@ -100,12 +97,11 @@ async fn capture_attempt(
     operation_id: Arc<str>,
     fingerprint_headers: &[HeaderName],
     rules_link: HeaderValue,
-    request: Request,
+    mut request: Request,
 ) -> Result<(CommandInput, VerifiedPrincipal, Attempt), Response> {
     let store = request
-        .extensions()
-        .get::<Store>()
-        .cloned()
+        .extensions_mut()
+        .remove::<Store>()
         .ok_or_else(|| wiring_failure(&operation_id, "store_missing"))?;
     let request = request.with_limited_body();
     let (parts, body) = request.into_parts();
