@@ -30,7 +30,7 @@ internals to Implementation.
      idioms, and baseline constraints are verified in primary sources.
 
 2. **Close observable behavior (WHAT).**
-   - Walk [Behavioral Probes](specification/behavioral-probes.md), loading
+   - Walk [Behavioral Probes](spec-and-design/behavioral-probes.md), loading
      `rust-api-contract`, `rust-security`, `rust-config`, `rust-reliability`,
      `rust-observability`, or `rust-performance` only for unresolved
      external-observer questions.
@@ -58,10 +58,10 @@ internals to Implementation.
 
      | Trigger | Load |
      | --- | --- |
-     | Runtime crossings, data/tx, truth, trust, failure/concurrency, budgets, config, signals, or rollout | [System Design](technical-design/system-design.md) + [System Probes](technical-design/system-probes.md) |
-     | Rust modules, deep seams, error/invariant ownership, workspace graph, or profiles | [Rust Architecture](technical-design/rust-architecture.md) |
-     | Qualifying one-way-door open fork with competing topologies or interfaces | [Design It Twice](technical-design/design-it-twice.md) |
-     | Non-trivial deploy, migration, worker, contract, or trust-material sequence | [Release Closure](../rubrics/release-closure.md) |
+     | Runtime crossings, data/tx, truth, trust, failure/concurrency, budgets, config, signals, or rollout | [System Design](spec-and-design/system-design.md) + [System Probes](spec-and-design/system-probes.md) |
+     | Rust modules, deep seams, error/invariant ownership, workspace graph, or profiles | [Rust Architecture](spec-and-design/rust-architecture.md) |
+     | Qualifying one-way-door open fork with competing topologies or interfaces | [Design It Twice](spec-and-design/design-it-twice.md) |
+     | Non-trivial deploy, migration, worker, contract, or trust-material sequence | [Release Closure](spec-and-design/release-closure.md) |
      | Decision-changing external contract or empirical runtime uncertainty | [Research](research.md) (persist `specs/<task>/research/<topic>.md` when reused) |
 
    - When both trigger, close **System Design before Rust Architecture** (revise
@@ -110,7 +110,7 @@ Omit empty optional sections; link unchanged code, `api/`, migrations, and
   - `### Flows, failure semantics & rollout` — entry-to-finality / crossing
     table, applicable System Probes #1–#7 contracts, deployment impact (`no
     deployment impact`, `standard single-step deploy`, or embedded [Release
-    Closure](../rubrics/release-closure.md) gates; state `same-release` vs
+    Closure](spec-and-design/release-closure.md) gates; state `same-release` vs
     `multi-release` for staged refactors).
   - `### Rust seams & ownership` — touched `<crate>::<module>` actions
     (`extend | add | replace | delete`), owned invariants,

@@ -109,24 +109,24 @@ ALLOWED_ROLE_KEYS = frozenset({
 })
 
 OUTPUT_SCHEMA_LINES = {
-    "lane-result-v1": (
+    "lane-result": (
         "Return fields: conclusion, evidence (primary locators, commands, and "
         "results), gaps (uncertainty, conflict, or missing owner, or none)."
     ),
-    "specialist-result-v1": (
+    "specialist-result": (
         "Return fields: recommendation (policy, constraint, proof obligation, "
         "or blocked), rejected_steelman (strongest simpler substitute and "
         "broken invariant, or none), consequences_and_proof, reopen_if; for "
         "Design It Twice, return "
-        "`docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`."
+        "`docs/spec-first-workflow/phases/spec-and-design/design-it-twice.md#candidate-proposal`."
     ),
-    "review-result-v1": (
+    "review-result": (
         "Return fields: candidate, verdict (PASS | CONCERNS | FAIL | NEEDS_PARENT | "
         "REVIEW_HANDOFF_INVALID), findings (anchored surviving findings grouped by "
         "axis, or none), evidence_boundary, reopen_owner (see "
         "`docs/spec-first-workflow/shared/review.md#review-result`)."
     ),
-    "delegated-result-v1": (
+    "delegated-result": (
         "Return fields: result, changed_paths, proof (checks actually run "
         "with their results, or none), candidate, gap."
     ),

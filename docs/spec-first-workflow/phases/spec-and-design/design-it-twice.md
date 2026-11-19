@@ -18,7 +18,7 @@ Triggered from [Spec And Design](../spec-and-design.md#steps) for a qualifying
    pressures** *(use 2 only for a strictly binary fork between two concrete
    mechanisms)*. Give every lane the identical neutral frame, read-only
    boundary, `Method:
-   docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`
+   docs/spec-first-workflow/phases/spec-and-design/design-it-twice.md#candidate-proposal`
    (plus matching domain skills), and **strictly its own pressure** (omit
    sibling pressures and any parent hypothesis). For a binary fork, name the two
    admissible mechanisms in the common constraints and let each lane develop its

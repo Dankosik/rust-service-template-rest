@@ -30,7 +30,7 @@ loading only the domain skills whose probes fire.
 
 Load `rust-delivery-platform` when delivery gates or profiles change. Record
 deployment impact (`no deployment impact`, `standard single-step deploy`, or
-embedded [Release Closure](../../rubrics/release-closure.md) gates in
+embedded [Release Closure](release-closure.md) gates in
 `spec.md` / `design.md`), covering rolling mixed-version overlap across
 `crates/migrate`, `crates/service`, and `crates/jobs-worker`: lock-safe DDL
 (`rust-sqlx`) **and** forward/backward compatibility of serialized rows/`JSONB`,

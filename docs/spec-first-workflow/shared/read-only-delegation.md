@@ -15,7 +15,7 @@ independent scrutiny challenges an assumption, or parallel scans save time.
 - **Match format to role:** `evidence-agent` and `adjudicator-agent` return
   [Lane Result](#lane-result); `specialist-agent` returns [Specialist
   Recommendation](#specialist-recommendation) for a domain question or
-  [Candidate Proposal](../phases/technical-design/design-it-twice.md#candidate-proposal)
+  [Candidate Proposal](../phases/spec-and-design/design-it-twice.md#candidate-proposal)
   for `Design It Twice`; `reviewer-agent` returns [Review
   Result](review.md#review-result).
 

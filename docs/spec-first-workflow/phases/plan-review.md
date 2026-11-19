@@ -40,12 +40,12 @@ locator>`. On a failing check give anchor, concrete witness, classification
    rollout gate, and durable doc update into the task packets and `Completion`.
    Attack the spec for malicious compliance, two-implementations external
    divergence, tautological falsifiers, and missed [Behavioral
-   Probes](specification/behavioral-probes.md).
+   Probes](spec-and-design/behavioral-probes.md).
 2. **Simplicity, compile reality & architecture:** apply the deletion test to
    every added mechanism, crate, module, trait, dependency, config key, and
    task. Verify `D<n>` steelmans, `S<n>` caller sketches, `Cargo.lock` APIs,
    `quality/architecture.json`, `template/profiles.json`, `docs/decisions/`
-   reopen rules, applicable [System Probes](technical-design/system-probes.md),
+   reopen rules, applicable [System Probes](spec-and-design/system-probes.md),
    and rollout/mixed-version safety against real code.
 3. **Slicing & falsifiable claims:** attack the task cut under [Task Shapes And
    Granularity](planning.md#task-shapes-and-granularity) (delete redundant

@@ -7,7 +7,7 @@ qwen_model = "fast"
 cursor_model = "grok-4.6[effort=low]"
 grok_model = "inherit"
 grok_effort = "low"
-output_schema = "lane-result-v1"
+output_schema = "lane-result"
 
 instructions = """
 Own one bounded read-heavy evidence question: locate primary sources, extract
