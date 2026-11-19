@@ -3,7 +3,7 @@ use std::time::Duration;
 use health::Probe;
 use infra_messaging::{
     Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
-    Registry as MessagingRegistry,
+    Registry as MessagingRegistry, TransportSecurity,
 };
 use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
@@ -121,6 +121,13 @@ fn messaging_options(
     consumer: Option<ConsumerOptions>,
 ) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;
+    let security = if messaging.tls_first {
+        TransportSecurity::TlsFirst
+    } else if messaging.plaintext_admitted() {
+        TransportSecurity::AllowPlaintext
+    } else {
+        TransportSecurity::Tls
+    };
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
@@ -129,8 +136,7 @@ fn messaging_options(
             MessagingCredentials::File(path) => Credentials::File(path.clone()),
         }),
         root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.plaintext_admitted(),
-        tls_first: messaging.tls_first,
+        security,
         source_stream: source_stream.to_owned(),
         max_payload_bytes: max_payload_bytes(config)?,
         consumer,

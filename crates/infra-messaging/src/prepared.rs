@@ -6,7 +6,7 @@ use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use serde::Serialize;
-use time::OffsetDateTime;
+use time::UtcDateTime;
 
 use crate::error::EnvelopeError;
 use crate::registry::route_key;
@@ -58,7 +58,7 @@ pub struct PreparedEvent {
     identity: EventIdentity,
     event_type: Cow<'static, str>,
     schema_version: u16,
-    occurred_at: OffsetDateTime,
+    occurred_at: UtcDateTime,
     payload: Bytes,
 }
 
@@ -69,7 +69,7 @@ pub(crate) struct PreparedEventParts {
     pub(crate) publication_id: String,
     pub(crate) event_type: String,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: Bytes,
 }
 
@@ -83,7 +83,7 @@ pub(crate) struct Publication<'a> {
     pub(crate) publication_id: &'a str,
     pub(crate) event_type: &'a str,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: &'a Bytes,
 }
 
@@ -133,7 +133,7 @@ impl PreparedEvent {
         if !payload_depth_allowed(&payload.bytes) {
             return Err(EnvelopeError::PayloadStructure);
         }
-        let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
+        let occurred_at = event.occurred_at;
         crate::wire::validate_outbound_identity(&event.id)?;
         let key = route_key::<T>();
         crate::wire::validate_outbound_created_at(occurred_at)?;
@@ -219,7 +219,7 @@ impl PreparedEvent {
         crate::wire::schema_label(self.schema_version)
     }
     #[must_use]
-    pub const fn occurred_at(&self) -> OffsetDateTime {
+    pub const fn occurred_at(&self) -> UtcDateTime {
         self.occurred_at
     }
     #[must_use]
@@ -234,7 +234,7 @@ pub(crate) fn validate_reconstructed_envelope(
     publication_id: &str,
     event_type: &str,
     schema_version: u16,
-    occurred_at: OffsetDateTime,
+    occurred_at: UtcDateTime,
 ) -> Result<(), EnvelopeError> {
     if !crate::wire::valid_subject(subject) {
         return Err(EnvelopeError::Subject);
@@ -337,7 +337,7 @@ mod tests {
     use domain_events::{Event, EventPayload};
     use serde::ser::{Error as _, SerializeSeq as _};
     use serde::{Serialize, Serializer};
-    use time::OffsetDateTime;
+    use time::UtcDateTime;
 
     use super::{PayloadWriter, PreparedEvent};
     use crate::{EnvelopeError, Registry, Route};
@@ -410,7 +410,7 @@ mod tests {
     fn event<T>(payload: T) -> Event<T> {
         Event {
             id: "event-id".to_owned(),
-            occurred_at: OffsetDateTime::UNIX_EPOCH.to_utc(),
+            occurred_at: UtcDateTime::UNIX_EPOCH,
             payload,
         }
     }
@@ -550,9 +550,8 @@ mod tests {
                 calls: Cell::new(0),
             });
             event.id.clear();
-            event.occurred_at = OffsetDateTime::from_unix_timestamp(-62_135_596_800)
-                .expect("Go zero time is representable")
-                .to_utc();
+            event.occurred_at = UtcDateTime::from_unix_timestamp(-62_135_596_800)
+                .expect("Go zero time is representable");
             assert_eq!(
                 prepare(subject, &event, limit).expect_err("invalid event"),
                 expected
@@ -654,9 +653,8 @@ mod tests {
                 event.id.clear();
             }
             if case.zero_time {
-                event.occurred_at = OffsetDateTime::from_unix_timestamp(-62_135_596_800)
-                    .expect("Go zero time is representable")
-                    .to_utc();
+                event.occurred_at = UtcDateTime::from_unix_timestamp(-62_135_596_800)
+                    .expect("Go zero time is representable");
             }
             let error = prepare(case.subject, &event, case.limit)
                 .expect_err("invalid event must be refused");

@@ -579,7 +579,7 @@ impl Consumer {
                     check_delivery_task_result(joined)?;
                     continue;
                 },
-                next = async { tokio::time::timeout_at(expires, messages.next()).await } => match next {
+                next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => message,
                     Ok(None) => return Ok(BatchEnd::Incomplete(BatchIncomplete::Closed)),
                     Ok(Some(Err(error))) => {

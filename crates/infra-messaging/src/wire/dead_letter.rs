@@ -196,6 +196,9 @@ fn record_id(
     stored_at: OffsetDateTime,
     publication_id: &str,
 ) -> Result<String, EnvelopeError> {
+    let stored_at = stored_at
+        .checked_to_utc()
+        .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
     let stored_at = format_timestamp_bytes(stored_at)?;
     let mut sequence = std::fmt::NumBuffer::new();
     let mut hash = Sha256::new();

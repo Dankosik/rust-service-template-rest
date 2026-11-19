@@ -11,8 +11,7 @@ use async_nats::jetstream::stream::{
     RetentionPolicy, StorageType, Stream,
 };
 // template:begin outbox:messaging-outbox-topology-imports
-use async_nats::jetstream::response::Response;
-use async_nats::jetstream::stream::{DiscardPolicy, Info, SubjectTransform};
+use async_nats::jetstream::stream::{DiscardPolicy, SubjectTransform};
 // template:end outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::{Context, ErrorCode};
 use sha2::{Digest as _, Sha256};
@@ -356,23 +355,13 @@ pub(crate) async fn recheck_outbox_source(
 ) -> Result<(), crate::PublishError> {
     use crate::PublishRejection;
 
-    let source = bounded_operation(deadline, cancel, async {
-        let subject = format!("STREAM.INFO.{}", shared.source_stream);
-        let response: Response<Info> = shared
-            .jetstream
-            .request(subject, &())
-            .await
-            .map_err(|error| report_topology_failure("get_stream", Some("source"), &error, None))?;
-        match response {
-            Response::Ok(info) => Ok(info),
-            Response::Err { error } => Err(report_topology_failure(
-                "get_stream",
-                Some("source"),
-                &error,
-                Some(&error),
-            )),
-        }
-    })
+    let source = get_stream(
+        &shared.jetstream,
+        &shared.source_stream,
+        "source",
+        deadline,
+        cancel,
+    )
     .await
     .map_err(|error| match error {
         MessagingError::Cancelled | MessagingError::TimedOut { .. } => {
@@ -386,7 +375,7 @@ pub(crate) async fn recheck_outbox_source(
         | MessagingError::Unavailable
         | MessagingError::Bounds => PublishRejection::BrokerRefused,
     })?;
-    let config = &source.config;
+    let config = &source.cached_info().config;
     validate_stream_publication(config)
         .and_then(|()| validate_outbox_source(config))
         .map_err(|refusal| {

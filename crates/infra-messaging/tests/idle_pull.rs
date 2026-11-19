@@ -8,7 +8,9 @@ use std::time::Duration;
 use async_nats::jetstream::{self, stream};
 use domain_events::EventPayload;
 use futures_util::StreamExt as _;
-use infra_messaging::{ConsumerOptions, Messaging, MessagingOptions, Registry, Route};
+use infra_messaging::{
+    ConsumerOptions, Messaging, MessagingOptions, Registry, Route, TransportSecurity,
+};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -137,8 +139,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
             servers: vec![url],
             credentials: None,
             root_ca_path: None,
-            allow_plaintext: true,
-            tls_first: false,
+            security: TransportSecurity::AllowPlaintext,
             source_stream: stream_name.clone(),
             max_payload_bytes: 1024,
             consumer: Some(ConsumerOptions {

@@ -22,7 +22,7 @@ use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
     ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingError, MessagingOptions,
-    Registry, Route,
+    Registry, Route, TransportSecurity,
 };
 use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
@@ -250,8 +250,7 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         servers,
         credentials: None,
         root_ca_path: None,
-        allow_plaintext: true,
-        tls_first: false,
+        security: TransportSecurity::AllowPlaintext,
         source_stream: fixture.stream.clone(),
         max_payload_bytes: 1024,
         consumer: None,
@@ -1918,7 +1917,14 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
 // template:end inbound-webhooks:outbox-test-messaging-outbox-webhook-capacity
 
 fn event_key(id: &str) -> String {
+    use std::fmt::Write as _;
+
     use sha2::{Digest as _, Sha256};
 
-    infra_messaging::wire::prefixed_digest_hex("event-", &Sha256::digest(id.as_bytes()).into())
+    let mut key = String::with_capacity("event-".len() + 64);
+    key.push_str("event-");
+    for byte in Sha256::digest(id.as_bytes()) {
+        let _ = write!(&mut key, "{byte:02x}");
+    }
+    key
 }
