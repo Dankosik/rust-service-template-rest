@@ -5,7 +5,8 @@ availability alone does not authorize use.
 
 ## Native Map
 
-- Root task using `$orchestrator` owns the persisted ledger. Use collaboration
+- The root task bound as Ledger Orchestrator by [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
+  owns the persisted ledger. Use collaboration
   subagents for all internal execution and review (including mutable and
   cross-repo work); never create separate Codex App chats or use App task
   handoff as a carrier or fallback.

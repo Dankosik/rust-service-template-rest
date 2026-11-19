@@ -8,12 +8,21 @@ planned tasks and their tests; validate the assembled result at the end.
 In the session the user starts to execute a plan, open the named `tasks.md`
 and check its current state under [Resume](../shared/resume.md). Report a
 completed ledger as done and route an unready plan to its recorded owner.
-For a ready ledger, bind this session as [Ledger Orchestrator](../../../.agents/skills/orchestrator/SKILL.md)
-through the selected [Agent Harness](../../agent-harness.md) adapter, including
-for a one-task ledger. The Orchestrator schedules and Leads implement. The
-[Planning Ledger Contract](planning/ledger-contract.md) owns dependency
-unlocking and final acceptance. A single fixed inline unit uses a root-local
-Acceptance-Unit Lead.
+For a ready ledger, bind this session as Ledger Orchestrator
+(`LEDGER_ORCHESTRATOR`), including for a one-task ledger. Verify the selected
+[Agent Harness](../../agent-harness.md) adapter's full-ledger controls before
+dispatch. Report any capability gap that prevents full-ledger execution. The
+[Planning Ledger Contract](planning/ledger-contract.md) governs scheduling,
+canonical ledger writes, final acceptance, and cleanup.
+
+### Acceptance-Unit Lead
+
+An Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) owns its assigned unit or the
+assigned final validation boundary. For implementation, use the unit packet and
+return `Implemented` through [Acceptance Result V1](../interfaces/acceptance-result-v1.md)
+as soon as the implementation is complete and its writers have joined. The
+Orchestrator owns sibling scheduling and canonical ledger writes. A single
+fixed inline unit uses a root-local Lead.
 
 ## Execution
 
