@@ -148,25 +148,35 @@ pub fn parse_timeout(value: &[u8]) -> Option<Duration> {
         return None;
     }
     let (&unit, digits) = value.split_last()?;
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+    if !digits.first()?.is_ascii_digit() {
         return None;
     }
-    let amount: u128 = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    let amount: u32 = std::str::from_utf8(digits).ok()?.parse().ok()?;
     let (_, nanos_per_unit) = TIMEOUT_UNITS.into_iter().find(|&(code, _)| code == unit)?;
-    Some(Duration::from_nanos_u128(amount * nanos_per_unit))
+    Some(Duration::from_nanos_u128(
+        u128::from(amount) * nanos_per_unit,
+    ))
 }
 
 #[must_use]
 pub fn encode_timeout(remaining: Duration, wire: &mut [u8; MAX_TIMEOUT_DIGITS + 1]) -> &[u8] {
-    let nanos = remaining.min(WIRE_TIMEOUT_MAX).as_nanos();
-    let (unit, amount) = TIMEOUT_UNITS
-        .into_iter()
-        .map(|(unit, nanos_per_unit)| (unit, nanos / nanos_per_unit))
-        .find(|&(_, amount)| amount <= u128::from(MAX_TIMEOUT_VALUE))
-        .unwrap_or_else(|| {
-            let (unit, nanos_per_unit) = TIMEOUT_UNITS[TIMEOUT_UNITS.len() - 1];
-            (unit, nanos / nanos_per_unit)
-        });
+    const LIMIT: u64 = MAX_TIMEOUT_VALUE + 1;
+    let (unit, amount) = if remaining < Duration::from_nanos(LIMIT) {
+        (b'n', remaining.as_nanos())
+    } else if remaining < Duration::from_micros(LIMIT) {
+        (b'u', remaining.as_micros())
+    } else if remaining < Duration::from_millis(LIMIT) {
+        (b'm', remaining.as_millis())
+    } else if remaining < Duration::from_secs(LIMIT) {
+        (b'S', u128::from(remaining.as_secs()))
+    } else if remaining < Duration::from_mins(LIMIT) {
+        (b'M', u128::from(remaining.as_secs() / 60))
+    } else {
+        (
+            b'H',
+            u128::from(remaining.min(WIRE_TIMEOUT_MAX).as_secs() / 3600),
+        )
+    };
     let mut buffer = std::fmt::NumBuffer::new();
     let digits = amount.format_into(&mut buffer);
     let len = digits.len();
@@ -191,6 +201,7 @@ mod tests {
             ("0n", Some(Duration::ZERO)),
             ("123456789S", None),
             ("+5S", None),
+            ("1+5S", None),
             ("-5S", None),
             (" 5S", None),
             ("S", None),
@@ -224,6 +235,10 @@ mod tests {
         }
         let encoded = encode_timeout(Duration::MAX, &mut wire);
         assert_eq!(encoded, b"99999999H");
+        assert_eq!(
+            encode_timeout(Duration::from_nanos(99_999_999_999), &mut wire),
+            b"99999999u"
+        );
     }
 
     #[test]
