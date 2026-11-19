@@ -7,12 +7,11 @@ use metrics::Unit;
 use sqlx::postgres::PgConnection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
-use tokio_util::sync::CancellationToken;
 
 use crate::attempt::{self, AttemptId, ClaimFence};
 use crate::engine::{
-    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, WorkerGroup, backstop,
-    observe_failure, observe_recovery,
+    CANCEL_MARGIN, EngineSignals, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL,
+    WorkerGroup, backstop, observe_failure, observe_recovery,
 };
 use crate::kind::{JobId, Registered, saturating_micros};
 use crate::trace_context::Carrier;
@@ -85,11 +84,8 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-pub(crate) async fn run_claim_loop(
-    group: Arc<WorkerGroup>,
-    stop: CancellationToken,
-    failure: CancellationToken,
-) {
+pub(crate) async fn run_claim_loop(group: Arc<WorkerGroup>, signals: Arc<EngineSignals>) {
+    let stop = &signals.stop;
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let policy = PolicyBinds::new(&group.registry);
@@ -133,7 +129,7 @@ pub(crate) async fn run_claim_loop(
             }) => {
                 observe_recovery(&group, Operation::Claim);
                 let next_wait = ClaimWait::after_claim(outcomes.len(), requested);
-                dispatch_outcomes(&group, slots, outcomes, claim_started_at, &stop, &failure);
+                dispatch_outcomes(&group, slots, outcomes, claim_started_at, &signals);
                 next_wait
             }
             Err(error) => {
@@ -336,7 +332,8 @@ async fn claim(
                             WHEN picked.is_outbox THEN outbox_verified_payload( \
                                 job.id, job.unique_key, job.predecessor_job_id, job.payload_text, job.payload) \
                             ELSE COALESCE(job.payload_text, job.payload::text) END AS payload, \
-                       job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
+                       job.trace_context AS trace_parent, job.trace_state, \
+                       CASE WHEN job.state = 'failed' THEN job.error_summary END AS error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",
             &policy.names as _,
@@ -399,8 +396,7 @@ fn dispatch_outcomes(
     mut slots: OwnedSemaphorePermit,
     outcomes: Vec<ClaimOutcome>,
     claim_started_at: Instant,
-    stop: &CancellationToken,
-    failure: &CancellationToken,
+    signals: &Arc<EngineSignals>,
 ) {
     for outcome in outcomes {
         match outcome {
@@ -435,8 +431,7 @@ fn dispatch_outcomes(
                     .record(queue_wait_seconds.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
                     Arc::clone(&group.lifecycle.drain),
-                    stop.clone(),
-                    failure.clone(),
+                    Arc::clone(signals),
                     job.attempt.job_id,
                     job.attempt.kind,
                 );
