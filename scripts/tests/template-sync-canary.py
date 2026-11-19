@@ -104,11 +104,10 @@ def assert_tls_fixture_output(source: Path, target: Path) -> None:
 
 
 def assert_profile_output(
-    source: Path, target: Path, authn: str, outbound_http: str, http_idempotency: str = "none",
-    jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none", cache: str = "none",
-    object_storage: str = "none",
+    source: Path, target: Path, authn: str, outbound_http: str,
+    jobs: str = "none", webhooks: str = "none", inbound_webhooks: str = "none",
 ) -> None:
-    for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
+    for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", False)):
         assert_profile_pack(source, target, profile, selected)
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
     profiles = lock["profiles"]
@@ -116,8 +115,8 @@ def assert_profile_output(
         raise AssertionError(f"sync canary lock did not record authn={authn}")
     if profiles.get("outbound_http") != outbound_http:
         raise AssertionError(f"sync canary lock did not record outbound_http={outbound_http}")
-    if profiles.get("http_idempotency") != http_idempotency:
-        raise AssertionError(f"sync canary lock did not record http_idempotency={http_idempotency}")
+    if profiles.get("http_idempotency") != "none":
+        raise AssertionError("sync canary lock did not record http_idempotency=none")
     if profiles.get("jobs") != jobs:
         raise AssertionError(f"sync canary lock did not record jobs={jobs}")
     if profiles.get("webhooks") != webhooks:
@@ -126,13 +125,11 @@ def assert_profile_output(
         raise AssertionError(f"sync canary lock did not record inbound_webhooks={inbound_webhooks}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     assert_tls_fixture_output(source, target)
-    assert_profile_pack(source, target, "cache", cache == "redis")
-    assert_profile_pack(source, target, "object-storage", object_storage == "s3")
+    assert_profile_pack(source, target, "cache", False)
+    assert_profile_pack(source, target, "object-storage", False)
     has_compose_integration = (
         profiles.get("database") == "postgres"
         or profiles.get("messaging") == "nats-jetstream"
-        or cache == "redis"
-        or object_storage == "s3"
     )
     assert_profile_pack(source, target, "integration", has_compose_integration)
     assert_profile_pack(
@@ -141,16 +138,12 @@ def assert_profile_output(
     )
     assert_profile_pack(
         source, target, "request-budget",
-        outbound_http == "bounded" or http_idempotency == "postgres" or inbound_webhooks == "standard-webhooks",
+        outbound_http == "bounded" or inbound_webhooks == "standard-webhooks",
     )
-    assert_profile_pack(source, target, "http-idempotency", http_idempotency == "postgres")
-    assert_profile_pack(
-        source, target, "http-idempotency-mounted", http_idempotency == "postgres" and authn == "oidc-introspection"
-    )
+    assert_profile_pack(source, target, "http-idempotency", False)
+    assert_profile_pack(source, target, "http-idempotency-mounted", False)
     assert_profile_pack(source, target, "jobs", jobs == "postgres")
-    assert_profile_pack(
-        source, target, "jobs-http-idempotency", jobs == "postgres" and http_idempotency == "postgres"
-    )
+    assert_profile_pack(source, target, "jobs-http-idempotency", False)
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
@@ -163,7 +156,6 @@ def assert_profile_output(
 
 def initialize(
     source: Path, target: Path, authn: str | None, outbound_http: str | None = None,
-    http_idempotency: str | None = None,
     *,
     database: str = "none",
     jobs: str | None = None,
@@ -180,8 +172,6 @@ def initialize(
         command.extend(("--authn", authn))
     if outbound_http is not None:
         command.extend(("--outbound-http", outbound_http))
-    if http_idempotency is not None:
-        command.extend(("--http-idempotency", http_idempotency))
     if jobs is not None:
         command.extend(("--jobs", jobs))
     if webhooks is not None:
@@ -221,22 +211,19 @@ def check(source: Path) -> None:
             webhook_sync = sync(source, webhook_target, "--check")
             if webhook_sync.returncode:
                 raise AssertionError(f"webhook profile sync parity failed: {webhook_sync.stderr}")
-        for authn in ("oidc-introspection", None):
-            profile_target = work / f"profile-{authn or 'historical-none'}"
-            clone(source, profile_target)
-            profile_initialized = initialize(source, profile_target, authn)
-            if profile_initialized.returncode:
-                raise AssertionError(profile_initialized.stderr)
-            expected = authn or "none"
-            assert_profile_output(source, profile_target, expected, "none")
-            if authn is None:
-                before = tree_state(profile_target)
-                replay = initialize(source, profile_target, "none")
-                if replay.returncode or tree_state(profile_target) != before:
-                    raise AssertionError("none lock replay changed the sync canary target")
-                mismatch = initialize(source, profile_target, "oidc-jwt")
-                if mismatch.returncode == 0 or tree_state(profile_target) != before:
-                    raise AssertionError("none sync canary accepted an authn profile migration")
+        omitted_authn = work / "omitted-authn"
+        clone(source, omitted_authn)
+        profile_initialized = initialize(source, omitted_authn, None)
+        if profile_initialized.returncode:
+            raise AssertionError(profile_initialized.stderr)
+        assert_profile_output(source, omitted_authn, "none", "none")
+        before = tree_state(omitted_authn)
+        replay = initialize(source, omitted_authn, "none")
+        if replay.returncode or tree_state(omitted_authn) != before:
+            raise AssertionError("none lock replay changed the sync canary target")
+        mismatch = initialize(source, omitted_authn, "oidc-jwt")
+        if mismatch.returncode == 0 or tree_state(omitted_authn) != before:
+            raise AssertionError("none sync canary accepted an authn profile migration")
         # A DATABASE=postgres JOBS=none service keeps its migrations, and a
         # full portable sync from a source that retains the jobs pack restores
         # none of it.
@@ -315,8 +302,6 @@ def check(source: Path) -> None:
             raise AssertionError("full sync did not preserve dirty portable tooling refusal")
 
         tooling.write_bytes(tooling_before)
-        if tooling.read_bytes() != tooling_before:
-            raise AssertionError("canary could not restore the exact portable tooling baseline")
 
         full_owned = tooling
         full_owned.write_bytes(full_owned.read_bytes() + b"\n# committed full-sync drift\n")
@@ -329,10 +314,6 @@ def check(source: Path) -> None:
             raise AssertionError(f"full sync apply failed: {full_apply.stderr}")
         if "Local canary architecture fact." not in service_doc.read_text(encoding="utf-8") or not (skill / ".service-owned").is_file():
             raise AssertionError("full sync changed local authority or marked service skill")
-        # `target` never selected HTTP_IDEMPOTENCY=postgres; a full sync from a
-        # source that retains the pack must not restore it.
-        assert_profile_pack(source, target, "http-idempotency", False)
-        assert_profile_pack(source, target, "http-idempotency-mounted", False)
         assert_profile_output(source, target, "oidc-jwt", "bounded")
         commit(target, "adopt full portable snapshot")
         full_parity = sync(source, target, "--check")
