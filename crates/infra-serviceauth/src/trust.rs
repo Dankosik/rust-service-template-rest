@@ -252,14 +252,13 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut unique_members = Some(serde_json::Map::new());
                 while let Some((name, child)) = map.next_entry()? {
-                    match (&mut unique_members, child) {
-                        (Some(members), DuplicateCheckedJson::Value(value)) => {
-                            if members.insert(name, value).is_some() {
-                                unique_members = None;
-                            }
-                        }
-                        _ => unique_members = None,
+                    if let (Some(members), DuplicateCheckedJson::Value(value)) =
+                        (&mut unique_members, child)
+                        && members.insert(name, value).is_none()
+                    {
+                        continue;
                     }
+                    unique_members = None;
                 }
                 Ok(match unique_members {
                     Some(members) => {
