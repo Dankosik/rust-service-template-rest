@@ -202,14 +202,16 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
     let now = Instant::now();
-    let (result, residue) = server
+    let result = server
         .drain_until(
             now + Duration::from_millis(20),
             now + Duration::from_secs(2),
         )
         .await;
-    std::assert_matches!(result, Err(ServerError::AcceptTimeout));
-    assert_eq!(residue, DrainResidue::default());
+    std::assert_matches!(
+        result,
+        Err(DrainError::AcceptTimeout { residue }) if residue == DrainResidue::default()
+    );
     assert!(abort.is_finished());
     assert_peer_closed(peer).await;
 }
@@ -222,8 +224,9 @@ async fn expired_confirmation_reports_a_live_accept_producer_even_with_no_connec
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
     let now = Instant::now();
-    let (cause, residue) = server.drain_until(now, now).await;
-    std::assert_matches!(cause, Err(ServerError::AcceptTimeout));
+    let error = server.drain_until(now, now).await.unwrap_err();
+    std::assert_matches!(error, DrainError::AcceptTimeout { .. });
+    let residue = error.residue();
     assert!(residue.accept_unconfirmed);
     assert_eq!(residue.remaining_connections, 0);
     assert_eq!(residue.remaining_delegated_tasks, 0);
@@ -244,7 +247,10 @@ async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_conne
         failure
     );
     let result = server.drain(Duration::from_millis(20)).await;
-    std::assert_matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled());
+    std::assert_matches!(
+        result,
+        Err(DrainError::AcceptTask { source, .. }) if source.is_cancelled()
+    );
     assert_peer_closed(peer).await;
 }
 
@@ -283,7 +289,9 @@ async fn accept_panic_after_stop_is_still_observed() {
             .unwrap(),
         AcceptFailure::Panicked
     );
-    std::assert_matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic()
+    std::assert_matches!(
+        server.drain(Duration::from_secs(1)).await,
+        Err(DrainError::AcceptTask { source, .. }) if source.is_panic()
     );
     drop(peer);
 }
@@ -475,7 +483,7 @@ async fn bind_failure_is_reported() {
     let occupied = Server::bind(loopback(), app(), options()).unwrap();
     let err =
         Server::bind(occupied.local_addr(), app(), options()).expect_err("second bind must fail");
-    std::assert_matches!(err, ServerError::Bind { .. }, "{err}");
+    assert_eq!(err.addr(), occupied.local_addr(), "{err}");
     occupied.drain(Duration::from_secs(1)).await.unwrap();
 }
 
@@ -557,11 +565,13 @@ async fn forced_http2_drain_waits_for_the_stream_handler_or_reports_it_at_cutoff
             );
             release.send(()).unwrap();
         }
-        let (cause, residue) = tokio::time::timeout(Duration::from_secs(1), draining)
+        let outcome = tokio::time::timeout(Duration::from_secs(1), draining)
             .await
             .unwrap()
             .unwrap();
-        std::assert_matches!(cause, Ok(Drained::TimedOut { .. }));
+        let Ok(Drained::TimedOut { residue, .. }) = outcome else {
+            panic!("expected drain timeout, got {outcome:?}");
+        };
         if confirm {
             assert_eq!(residue, DrainResidue::default());
         } else {

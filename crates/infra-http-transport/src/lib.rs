@@ -4,8 +4,8 @@ mod trace_context;
 
 pub use admission::{acquire_borrowed_within, acquire_within};
 pub use server::{
-    AcceptFailure, BoundListener, ConnectionInfo, ConnectionLimits, DrainResidue, Drained,
-    Http1Options, Server, ServerError,
+    AcceptFailure, BindError, BoundListener, ConnectionInfo, ConnectionLimits, DrainError,
+    DrainResidue, Drained, Http1Options, Server,
 };
 pub use trace_context::{TRACEPARENT, TRACESTATE, admit_trace_context};
 // template:begin grpc:http2-transport-exports

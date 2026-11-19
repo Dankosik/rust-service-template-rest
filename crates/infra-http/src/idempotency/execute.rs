@@ -6,7 +6,9 @@ use std::time::Duration;
 use axum::http::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use enum_map::{Enum, EnumMap};
-use infra_idempotency_store::{AttemptError, Attempted, RequestFingerprint, ScopeKey, Store};
+use infra_idempotency_store::{
+    AttemptError, Attempted, RequestFingerprint, ScopeKey, Store, WriteOutcome,
+};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
 use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
@@ -157,17 +159,15 @@ impl Attempt {
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
-                let store = store.with_terminal_refusals(C::Terminal::ENABLED);
                 let command_cutoff = command_end.filter(|end| *end <= attempt_end);
                 let attempt = store.attempt_with_deadline(
                     &scope,
                     &fingerprint,
                     command_cutoff.unwrap_or(attempt_end),
                     async |tx: &mut Tx<'_>| match command.execute(tx).await {
-                        Ok(success) => Ok(success.capture()?.into_record()),
+                        Ok(success) => Ok(WriteOutcome::Success(success.capture()?.into_success())),
                         Err(Rollback::Terminal(problem)) => {
-                            let terminal: TerminalProblem = problem.into();
-                            Ok(terminal.capture()?)
+                            Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
                         }
                         Err(Rollback::Refused(response)) => Err(AttemptRollback::Refused(response)),
                         Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
@@ -199,25 +199,31 @@ mod sealed {
     pub trait TerminalMode {}
 }
 
-pub trait TerminalMode: sealed::TerminalMode + Into<TerminalProblem> + Send {
-    const ENABLED: bool;
+pub trait TerminalMode: sealed::TerminalMode + Send {
+    type StoreMode: infra_idempotency_store::RefusalMode;
+
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError>;
 }
 
 impl sealed::TerminalMode for Infallible {}
 impl TerminalMode for Infallible {
-    const ENABLED: bool = false;
+    type StoreMode = Self;
+
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError> {
+        match self {}
+    }
 }
 
 impl sealed::TerminalMode for TerminalProblem {}
 impl TerminalMode for TerminalProblem {
-    const ENABLED: bool = true;
-}
+    type StoreMode = infra_idempotency_store::TerminalRefusal;
 
-impl From<Infallible> for TerminalProblem {
-    fn from(never: Infallible) -> Self {
-        match never {}
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError> {
+        self.capture()
     }
 }
+
+const _: () = assert!(std::mem::size_of::<Rollback<TerminalProblem>>() <= 128);
 
 #[derive(derive_more::Debug, derive_more::From, thiserror::Error)]
 pub enum Rollback<T = Infallible> {
@@ -341,12 +347,10 @@ fn map_attempted(
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
         }
         Ok(Attempted::Committed(record)) => {
-            let outcome = if record.is_terminal_refusal() {
-                Outcome::TerminalRefusal
-            } else {
-                Outcome::Executed
-            };
-            Answer::operation_response(response_from_record(record), outcome)
+            Answer::operation_response(response_from_record(record), Outcome::Executed)
+        }
+        Ok(Attempted::TerminalRefusal(record)) => {
+            Answer::operation_response(response_from_record(record), Outcome::TerminalRefusal)
         }
     }
 }

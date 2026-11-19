@@ -4,11 +4,11 @@ use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
 use axum::routing::MethodFilter;
 use itertools::Itertools as _;
-use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
+use utoipa::openapi::path::{Operation, Parameter, ParameterIn, Paths};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::{Content, RefOr, Schema};
 
-use crate::contract::{fixed_path_operations, same_definition};
+use crate::contract::{path_operations_mut, same_definition};
 
 use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
@@ -30,21 +30,10 @@ impl CompositionError {
             rule,
         }
     }
-
-    pub(super) fn contract(subject: &str, error: crate::FinalizeError) -> Self {
-        Self::new(subject, Rule::Contract(error))
-    }
-
-    #[cfg(test)]
-    const fn rule(&self) -> &Rule {
-        &self.rule
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 enum Rule {
-    #[error(transparent)]
-    Contract(crate::FinalizeError),
     #[error("a composed route must be one path and one operation with a nonempty operationId")]
     Shape,
     #[error("the method must be POST, PUT, PATCH, or DELETE")]
@@ -91,16 +80,16 @@ pub(super) fn prepare(
     document: &mut utoipa::openapi::OpenApi,
     successes: BTreeMap<String, RefOr<Response>>,
     success_schemas: Vec<(String, RefOr<Schema>)>,
-) -> Result<PreparedOperation, CompositionError> {
+) -> Result<PreparedOperation, crate::FinalizeError> {
     let paths = &mut document.paths;
     let route_docs = document.external_docs.take();
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
-        return Err(shape());
+        return Err(shape().into());
     };
     if item.ref_path.is_some() {
-        return Err(shape());
+        return Err(shape().into());
     }
     let mut fingerprint_headers = Vec::new();
     collect_fingerprint_headers(
@@ -108,19 +97,22 @@ pub(super) fn prepare(
         &mut fingerprint_headers,
     )
     .map_err(|rule| CompositionError::new(&subject, rule))?;
-    let (method, operation) = one_operation_mut(item).ok_or_else(shape)?;
+    let has_additional = !item.additional_operations.is_empty();
+    let (method, operation) = path_operations_mut(item)
+        .exactly_one()
+        .map_err(|_| shape())?;
     let operation_id = operation
         .operation_id
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
     let at_operation = |rule| CompositionError::new(&operation_id, rule);
-    let method = match method {
-        "POST" => MethodFilter::POST,
-        "PUT" => MethodFilter::PUT,
-        "PATCH" => MethodFilter::PATCH,
-        "DELETE" => MethodFilter::DELETE,
-        _ => return Err(at_operation(Rule::Method)),
+    let method = match (!has_additional, method) {
+        (true, "POST") => MethodFilter::POST,
+        (true, "PUT") => MethodFilter::PUT,
+        (true, "PATCH") => MethodFilter::PATCH,
+        (true, "DELETE") => MethodFilter::DELETE,
+        _ => return Err(at_operation(Rule::Method).into()),
     };
 
     prepare_key_parameter(operation).map_err(at_operation)?;
@@ -133,8 +125,7 @@ pub(super) fn prepare(
     fingerprint_headers.dedup();
     prepare_problem_responses(operation).map_err(at_operation)?;
     let schemas = &mut document.components.get_or_insert_default().schemas;
-    crate::contract::merge_map("schemas", schemas, success_schemas)
-        .map_err(|error| at_operation(Rule::Contract(error)))?;
+    crate::contract::merge_map("schemas", schemas, success_schemas)?;
     prepare_success_responses(operation, successes, schemas).map_err(at_operation)?;
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
@@ -370,19 +361,6 @@ fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), 
     Ok(())
 }
 
-fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operation)> {
-    fixed_path_operations!(item, as_mut)
-        .into_iter()
-        .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
-        .chain(
-            item.additional_operations
-                .values_mut()
-                .map(|operation| ("additional", operation)),
-        )
-        .exactly_one()
-        .ok()
-}
-
 fn route_subject(paths: &Paths) -> String {
     paths
         .paths
@@ -407,7 +385,7 @@ mod tests {
     fn prepare(
         paths: &mut Paths,
         docs: Option<utoipa::openapi::external_docs::ExternalDocs>,
-    ) -> Result<PreparedOperation, CompositionError> {
+    ) -> Result<PreparedOperation, crate::FinalizeError> {
         let mut document = utoipa::openapi::OpenApiBuilder::new()
             .paths(std::mem::take(paths))
             .external_docs(docs)
@@ -415,6 +393,13 @@ mod tests {
         let result = super::prepare(&mut document, CreatedText::responses(), Vec::new());
         *paths = document.paths;
         result
+    }
+
+    fn rule(error: crate::FinalizeError) -> Rule {
+        match error {
+            crate::FinalizeError::Idempotency(error) => error.rule,
+            other => panic!("expected idempotency composition error, got {other:?}"),
+        }
     }
 
     #[utoipa::path(
@@ -510,10 +495,7 @@ mod tests {
                 .expect("application metadata");
             let feature = OpenApiRouter::new().routes(carrier).into_openapi();
             let contract: crate::HttpContract<()> = root
-                .merge(
-                    crate::idempotency::route(feature, |_, _, _, ()| async { Ok(TestCommand) })
-                        .unwrap(),
-                )
+                .merge(crate::idempotency::route(feature, || async { Ok(TestCommand) }).unwrap())
                 .unwrap();
 
             let result = contract.into_openapi().map(|_| ());
@@ -557,11 +539,11 @@ mod tests {
             let mut document =
                 serde_json::to_value(OpenApiRouter::new().routes(route()).into_openapi()).unwrap();
             document[field] = value;
-            let result = crate::idempotency::route(
+            let result = crate::idempotency::route::<(), _, _>(
                 serde_json::from_value(document).unwrap(),
-                |_, _, _, ()| async { Ok(TestCommand) },
+                || async { Ok(TestCommand) },
             );
-            assert_eq!(result.unwrap_err().rule(), &Rule::Contract(expected));
+            assert_eq!(result.unwrap_err(), expected);
         }
     }
 
@@ -569,8 +551,8 @@ mod tests {
     fn an_operation_without_published_retry_rules_fails_registration() {
         let (_, mut paths, _): UtoipaMethodRouter = routes!(create_widget);
         assert_eq!(
-            prepare(&mut paths, None).unwrap_err().rule(),
-            &Rule::RetryDocumentation
+            rule(prepare(&mut paths, None).unwrap_err()),
+            Rule::RetryDocumentation
         );
     }
 
@@ -639,8 +621,8 @@ mod tests {
     fn preparation_rejects_unsupported_shape_and_successes() {
         let (_, mut unsupported, _): UtoipaMethodRouter = routes!(get_widget);
         assert_eq!(
-            prepare(&mut unsupported, None).unwrap_err().rule(),
-            &Rule::Method
+            rule(prepare(&mut unsupported, None).unwrap_err()),
+            Rule::Method
         );
 
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
@@ -674,8 +656,8 @@ mod tests {
                 serde_json::from_value(annotation).unwrap(),
             );
             assert_eq!(
-                prepare(&mut paths, None).unwrap_err().rule(),
-                &Rule::SuccessConflict {
+                rule(prepare(&mut paths, None).unwrap_err()),
+                Rule::SuccessConflict {
                     status: status.to_owned()
                 }
             );
@@ -757,8 +739,8 @@ mod tests {
                     .map(|(name, header)| (name.to_owned(), header)),
             );
             assert_eq!(
-                prepare(&mut conflicting, None).unwrap_err().rule(),
-                &Rule::ReplayHeader {
+                rule(prepare(&mut conflicting, None).unwrap_err()),
+                Rule::ReplayHeader {
                     status: "201".to_owned()
                 }
             );

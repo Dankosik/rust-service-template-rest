@@ -78,23 +78,17 @@ impl CommandInput {
         &self.trailers
     }
 
-    pub async fn path<T: DeserializeOwned + Send>(&mut self) -> Result<T, Box<Problem>> {
+    pub async fn path<T: DeserializeOwned + Send>(&mut self) -> Result<T, Problem> {
         Path::from_request_parts(&mut self.parts, &())
             .await
             .map(|Path(value)| value)
-            .map_err(Box::new)
     }
 
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "query decoding starts when callers poll the returned future"
-    )]
-    pub async fn query<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
-        decode_query(self.raw_query().unwrap_or_default()).map_err(Box::new)
+    pub fn query<T: DeserializeOwned>(&self) -> Result<T, Problem> {
+        decode_query(self.raw_query().unwrap_or_default())
     }
 
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, Problem> {
         require_json_content_type(self.parts.headers.get(CONTENT_TYPE))?;
         decode_json(&self.body)
     }
@@ -152,7 +146,7 @@ mod tests {
             assert_eq!(input.method(), Method::POST);
             assert_eq!(input.raw_path(), "/accounts/a%20b/widgets/12");
             assert_eq!(input.raw_query(), Some("mode=full"));
-            assert_eq!(input.query::<Options>().await.unwrap().mode, "full");
+            assert_eq!(input.query::<Options>().unwrap().mode, "full");
             assert_eq!(
                 input.path::<(String, u32)>().await.unwrap(),
                 ("a b".to_owned(), 12)

@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use bytes::Bytes;
 use infra_idempotency_store::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Record, RequestFingerprint, ScopeKey,
-    Store,
+    Store, SuccessRecord, WriteOutcome,
 };
 use infra_jobs::{JobKind, KindName, enqueue_unique};
 use infra_postgres::{Dsn, PgPool, Tx};
@@ -54,10 +54,10 @@ fn scope(key: &[u8]) -> ScopeKey {
     )
 }
 
-fn success(body: &str) -> Record {
+fn success(body: &str) -> SuccessRecord {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    Record::capture(
+    SuccessRecord::capture(
         StatusCode::CREATED,
         &headers,
         Bytes::copy_from_slice(body.as_bytes()),
@@ -107,10 +107,10 @@ async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
         .store
         .attempt(&scope(KEY), &INPUT, async |tx: &mut Tx<'_>| {
             enqueue_widget(tx, WIDGET).await;
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
-    assert_eq!(committed(outcome), record);
+    assert_eq!(committed(outcome), Record::from(record));
     let _id = committed_job_id(&pool).await;
     super::close_pools(&[&first.pool]).await;
 }
@@ -125,25 +125,25 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
         .attempt(&scope(KEY), &INPUT, async |tx: &mut Tx<'_>| {
             runs.fetch_add(1, Ordering::SeqCst);
             enqueue_widget(tx, WIDGET).await;
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
-    assert_eq!(committed(first_outcome), record);
+    assert_eq!(committed(first_outcome), Record::from(record.clone()));
 
     let replay = second
         .store
         .attempt(
             &scope(KEY),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Result<Record, ()> {
+            async |tx: &mut Tx<'_>| -> Result<WriteOutcome, ()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 enqueue_widget(tx, DUPLICATE_WIDGET).await;
-                Ok(success(r#"{"widget":8}"#))
+                Ok(WriteOutcome::success(success(r#"{"widget":8}"#)))
             },
         )
         .await;
     match replay {
-        Ok(Attempted::Replay(stored)) => assert_eq!(stored, record),
+        Ok(Attempted::Replay(stored)) => assert_eq!(stored, Record::from(record)),
         other => panic!("expected a replay, got {other:?}"),
     }
     assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -157,11 +157,15 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
     let runs = AtomicUsize::new(0);
     let outcome = first
         .store
-        .attempt(&scope(KEY), &INPUT, async |tx: &mut Tx<'_>| {
-            runs.fetch_add(1, Ordering::SeqCst);
-            enqueue_widget(tx, WIDGET).await;
-            Err(())
-        })
+        .attempt(
+            &scope(KEY),
+            &INPUT,
+            async |tx: &mut Tx<'_>| -> Result<WriteOutcome, ()> {
+                runs.fetch_add(1, Ordering::SeqCst);
+                enqueue_widget(tx, WIDGET).await;
+                Err(())
+            },
+        )
         .await;
     std::assert_matches!(outcome, Ok(Attempted::RolledBack(())));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
@@ -185,7 +189,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                 enqueue_widget(tx, WIDGET).await;
                 entered_tx.send(()).expect("the entered receiver waits");
                 release_rx.await.expect("the release sender sends");
-                Ok(record.clone())
+                Ok(WriteOutcome::success(record.clone()))
             }),
         async {
             super::bounded("the held work to enter", entered_rx)
@@ -196,10 +200,10 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                 .attempt(
                     &scope,
                     &INPUT,
-                    async |tx: &mut Tx<'_>| -> Result<Record, ()> {
+                    async |tx: &mut Tx<'_>| -> Result<WriteOutcome, ()> {
                         runs.fetch_add(1, Ordering::SeqCst);
                         enqueue_widget(tx, DUPLICATE_WIDGET).await;
-                        Ok(record.clone())
+                        Ok(WriteOutcome::success(record.clone()))
                     },
                 )
                 .await;
@@ -209,7 +213,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             release_tx.send(()).expect("the held work waits");
         },
     );
-    assert_eq!(committed(held), record);
+    assert_eq!(committed(held), Record::from(record));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     let _id = committed_job_id(&pool).await;
     super::close_pools(&[&first.pool, &second.pool]).await;
@@ -224,20 +228,20 @@ async fn e6_another_scope_commits_without_replacing_the_job(pool: PgPool) {
         .store
         .attempt(&scope(KEY), &INPUT, async |tx: &mut Tx<'_>| {
             enqueue_widget(tx, WIDGET).await;
-            Ok(record.clone())
+            Ok(WriteOutcome::success(record.clone()))
         })
         .await;
-    assert_eq!(committed(first_outcome), record);
+    assert_eq!(committed(first_outcome), Record::from(record));
     let first_job_id = committed_job_id(&pool).await;
 
     let second_outcome = second
         .store
         .attempt(&scope(OTHER_KEY), &INPUT, async |tx: &mut Tx<'_>| {
             enqueue_widget(tx, DUPLICATE_WIDGET).await;
-            Ok(other.clone())
+            Ok(WriteOutcome::success(other.clone()))
         })
         .await;
-    assert_eq!(committed(second_outcome), other);
+    assert_eq!(committed(second_outcome), Record::from(other));
     assert_eq!(committed_job_id(&pool).await, first_job_id);
     super::close_pools(&[&first.pool, &second.pool]).await;
 }
@@ -260,7 +264,7 @@ async fn e6_a_concurrent_enqueue_waits_and_both_scopes_commit_with_one_job(pool:
                 enqueue_widget(tx, WIDGET).await;
                 entered_tx.send(()).expect("the entered receiver waits");
                 release_rx.await.expect("the release sender sends");
-                Ok(first_record)
+                Ok(WriteOutcome::success(first_record))
             })
             .await
     });
@@ -274,7 +278,7 @@ async fn e6_a_concurrent_enqueue_waits_and_both_scopes_commit_with_one_job(pool:
             .store
             .attempt(&scope(OTHER_KEY), &INPUT, async |tx: &mut Tx<'_>| {
                 enqueue_widget(tx, DUPLICATE_WIDGET).await;
-                Ok(second_record)
+                Ok(WriteOutcome::success(second_record))
             })
             .await
     });
@@ -290,8 +294,8 @@ async fn e6_a_concurrent_enqueue_waits_and_both_scopes_commit_with_one_job(pool:
     let first_outcome = super::bounded("the first attempt", first_task)
         .await
         .expect("the first attempt joins");
-    assert_eq!(committed(first_outcome), record);
-    assert_eq!(committed(second_outcome), other);
+    assert_eq!(committed(first_outcome), Record::from(record));
+    assert_eq!(committed(second_outcome), Record::from(other));
     let _id = committed_job_id(&pool).await;
     super::close_pools(&[&first_pool, &second_pool]).await;
 }

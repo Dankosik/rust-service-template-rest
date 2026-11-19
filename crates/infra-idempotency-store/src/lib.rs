@@ -8,11 +8,15 @@ use infra_postgres::{Isolation, TxOptions};
 use sqlx::postgres::PgPool;
 
 pub use attempt::{
-    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, RequestFingerprint, ScopeKey,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, RefusalMode, RequestFingerprint,
+    ScopeKey, WriteOutcome,
 };
 pub use infra_postgres::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
-pub use record::{CaptureError, MAX_STORED_BODY_BYTES, Record, is_replayable_header_name};
+pub use record::{
+    CaptureError, MAX_STORED_BODY_BYTES, Record, SuccessRecord, TerminalRefusal,
+    is_replayable_header_name,
+};
 
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
@@ -26,7 +30,6 @@ const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 pub struct Store {
     pool: PgPool,
     retention: Duration,
-    terminal_refusals: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -41,14 +44,7 @@ impl Store {
         Ok(Self {
             pool,
             retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
-            terminal_refusals: false,
         })
-    }
-
-    #[must_use]
-    pub fn with_terminal_refusals(mut self, enabled: bool) -> Self {
-        self.terminal_refusals = enabled;
-        self
     }
 }
 
