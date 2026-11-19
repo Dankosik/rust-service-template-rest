@@ -4,34 +4,14 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 repo=${ROOT_DIR}
 mode=full
-runtime_graphs=all
+runtime_graphs=
+graph_plan_args=(--list-graphs)
 validation_work=
 validation_receipt_dir=
 
 
-validate_runtime_graphs() {
-	local selection=$1 number seen=,
-	[[ ${selection} =~ ^([1-9]|[1-5][0-9]|6[0-8])(,([1-9]|[1-5][0-9]|6[0-8]))*$ ]] || return 1
-	local -a numbers
-	IFS=, read -r -a numbers <<<"${selection}"
-	for number in "${numbers[@]}"; do
-		[[ ${seen} != *",${number},"* ]] || return 1
-		seen+="${number},"
-	done
-}
-
-validate_artifact_graphs() {
-	validate_runtime_graphs "$1" || return
-	local number
-	local -a numbers
-	IFS=, read -r -a numbers <<<"$1"
-	for number in "${numbers[@]}"; do
-		case "${number}" in 1 | 7 | 47 | 65) ;; *) return 1 ;; esac
-	done
-}
-
-runtime_graph_selected() {
-	[[ ( ${mode} != runtime-graphs && ${mode} != artifact-graphs ) || ,${runtime_graphs}, == *",${1},"* ]]
+plan_graphs() {
+	python3 -B "${ROOT_DIR}/scripts/template/matrix.py" "${graph_plan_args[@]}"
 }
 
 prune_receipt_dir() {
@@ -77,13 +57,17 @@ while (($#)); do
 		;;
 	--runtime-graphs | --artifact-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
-		validate_runtime_graphs "${2:-}" || { echo "--runtime-graphs requires distinct comma-separated graph IDs 1..68" >&2; exit 2; }
 		mode=${1#--}
-		if [[ ${mode} == artifact-graphs ]]; then
-			validate_artifact_graphs "${2:-}" || { echo "--artifact-graphs accepts only distinct IDs 1,7,47,65" >&2; exit 2; }
-		fi
-		runtime_graphs=$2
-		shift 2
+		runtime_graphs=${2-}
+		graph_plan_args=("$1=${runtime_graphs}")
+		shift
+		if (($#)); then shift; fi
+		;;
+	--default-artifact-graphs)
+		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
+		mode=artifact-graphs
+		graph_plan_args=(--artifact-graphs)
+		shift
 		;;
 	--repo)
 		[[ -n ${2:-} ]] || { echo "--repo requires a path" >&2; exit 2; }
@@ -91,31 +75,22 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--runtime-graphs IDS|--artifact-graphs IDS|--list-graphs|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--runtime-graphs IDS|--artifact-graphs IDS|--default-artifact-graphs|--list-graphs|--self-test]" >&2
 		exit 2
 		;;
 	esac
 done
 
 if [[ ${mode} == runtime-graphs && ${ALLOW_FULL:-} != 1 && ${CI:-} != true ]]; then
+	plan_graphs >/dev/null
 	echo "--runtime-graphs requires ALLOW_FULL=1 (CI sets CI=true)" >&2
 	exit 2
 fi
 
 if [[ ${mode} == artifact-graphs && ${ALLOW_HEAVY:-} != 1 && ${CI:-} != true ]]; then
+	plan_graphs >/dev/null
 	echo "--artifact-graphs requires ALLOW_HEAVY=1 (CI sets CI=true)" >&2
 	exit 2
-fi
-
-if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
-	needs_docker=false
-	for number in {13..26} 27 29 30 48 49 53 55; do
-		runtime_graph_selected "${number}" && needs_docker=true
-	done
-	if [[ ${needs_docker} == true ]] && ! docker info >/dev/null 2>&1; then
-		echo "graphs 13-26,27,29,30,48,49,53,55 need a usable Docker daemon for their retained database suites; select an eligible focused graph when Docker is unavailable" >&2
-		exit 2
-	fi
 fi
 
 copy_path() {
@@ -197,35 +172,7 @@ recorder_self_test() {
 	[[ ${exit_code} == 7 ]] || { echo "recorder self-test changed exit ${exit_code}" >&2; return 1; }
 	grep -q 'status=failed label=forced-failure exit_code=7 ' "${receipt}"
 	[[ ! -e ${later} ]] || { echo "recorder self-test executed a later stage" >&2; return 1; }
-	local mode=full runtime_graphs=all number invalid
-	for number in {1..68}; do
-		runtime_graph_selected "${number}" || { echo "default full mode skipped graph ${number}" >&2; return 1; }
-	done
-	mode=runtime-graphs
-	runtime_graphs="3,4,5,6,$(seq -s, 9 68)"
-	runtime_graphs=${runtime_graphs%,}
-	validate_runtime_graphs "${runtime_graphs}"
-	for number in {1..68}; do
-		case "${number}" in
-		1 | 2 | 7 | 8) if runtime_graph_selected "${number}"; then echo "subset selected graph ${number}" >&2; return 1; fi ;;
-		*) runtime_graph_selected "${number}" || { echo "subset skipped graph ${number}" >&2; return 1; } ;;
-		esac
-	done
-	for invalid in '' 0 69 01 '1,1' '2,,3' '1,'; do
-		if validate_runtime_graphs "${invalid}"; then echo "invalid graph selection accepted" >&2; return 1; fi
-	done
-	mode=artifact-graphs
-	runtime_graphs=1,7,47,65
-	validate_artifact_graphs "${runtime_graphs}"
-	for number in {1..68}; do
-		case "${number}" in
-		1 | 7 | 47 | 65) runtime_graph_selected "${number}" || return 1 ;;
-		*) if runtime_graph_selected "${number}"; then return 1; fi ;;
-		esac
-	done
-	for invalid in 2 48 '1,7,7' '1,65,64'; do
-		if validate_artifact_graphs "${invalid}"; then echo "noncanonical artifact selection accepted" >&2; return 1; fi
-	done
+	graph_selection_self_test "${fixture}"
 	prune_dir=${fixture}/prune
 	mkdir -p "${prune_dir}"
 	for index in {1..13}; do
@@ -243,6 +190,51 @@ recorder_self_test() {
 	artifact_recorder_self_test "${fixture}"
 	printf 'template initializer graph selection self-test: pass\n'
 	printf 'template initializer recorder self-test: pass\n'
+}
+
+graph_selection_self_test() {
+	local fixture=$1 listing selection invalid failure status fake_source
+	local planner="${ROOT_DIR}/scripts/template/matrix.py"
+	listing=$(bash "$0" --list-graphs)
+	awk '$1 != NR || NF != 15 || $0 !~ /^[0-9]+( [a-z0-9-]+)+$/ { exit 1 } END { if (NR != 68) exit 1 }' <<<"${listing}" ||
+		{ echo "graph listing changed its 68-row CLI format" >&2; return 1; }
+	selection=$(python3 -B "${planner}" --runtime-graphs=68,1,7)
+	[[ $(cut -d ' ' -f 1 <<<"${selection}") == $'1\n7\n68' ]] ||
+		{ echo "explicit runtime selection must follow catalog order" >&2; return 1; }
+	selection=$(python3 -B "${planner}" --artifact-graphs=65,1)
+	[[ $(cut -d ' ' -f 1 <<<"${selection}") == $'1\n65' ]] ||
+		{ echo "explicit artifact selection must follow catalog order" >&2; return 1; }
+	selection=$(python3 -B "${planner}" --artifact-graphs)
+	[[ $(cut -d ' ' -f 1 <<<"${selection}") == $'1\n7\n47\n65' ]] ||
+		{ echo "default artifact selection must include every release representative" >&2; return 1; }
+	for invalid in '' 0 69 01 '1,1' '2,,3' '1,'; do
+		status=0
+		failure=$(CI=false ALLOW_FULL= bash "$0" --runtime-graphs "${invalid}" 2>&1) || status=$?
+		[[ ${status} == 2 && ${failure} == "--runtime-graphs requires distinct comma-separated graph IDs 1..68" ]] ||
+			{ echo "invalid runtime selection was not rejected: ${invalid}" >&2; return 1; }
+	done
+	for invalid in '' 2 48 '1,7,7' '1,65,64'; do
+		status=0
+		failure=$(CI=false ALLOW_HEAVY= bash "$0" --artifact-graphs "${invalid}" 2>&1) || status=$?
+		[[ ${status} == 2 && ${failure} == "--"*' distinct '* ]] ||
+			{ echo "invalid artifact selection was not rejected: ${invalid}" >&2; return 1; }
+	done
+
+	fake_source=${fixture}/failed-planner
+	mkdir -p "${fake_source}/scripts/template" "${fake_source}/scripts/verify" "${fake_source}/bin"
+	cp "${ROOT_DIR}/scripts/template/check_init.sh" "${fake_source}/scripts/template/"
+	cp "${ROOT_DIR}/scripts/verify/lock.py" "${fake_source}/scripts/verify/"
+	{
+		printf 'print("%s")\n' "${listing%%$'\n'*}"
+		printf 'raise SystemExit(7)\n'
+	} >"${fake_source}/scripts/template/matrix.py"
+	printf '#!/usr/bin/env bash\necho "validation must not start" >&2\nexit 9\n' >"${fake_source}/bin/git"
+	chmod +x "${fake_source}/bin/git"
+	status=0
+	failure=$(PATH="${fake_source}/bin:${PATH}" VALIDATION_LOCK_HELD=1 VALIDATION_LOCK_TOKEN=self-test ALLOW_FULL=1 \
+		bash "${fake_source}/scripts/template/check_init.sh" --runtime-graphs 1 2>&1) || status=$?
+	[[ ${status} == 7 && -z ${failure} ]] ||
+		{ echo "failed graph planner started validation or changed status: ${status} ${failure}" >&2; return 1; }
 }
 
 snapshot_failure_self_test() (
@@ -504,105 +496,32 @@ run_graph() {
 	fi
 }
 
-# Visit every runtime graph in inventory order with its profile tuple:
-# graph database authn outbound_http outbound_auth http_idempotency jobs
-# messaging outbox webhooks inbound_webhooks [grpc [cache [object_storage [service_auth]]]].
-each_runtime_graph() {
-	local action=$1 graph=0 database authn outbound_http selection http_idempotency
-	for database in none postgres; do
-		for authn in none oidc-jwt oidc-introspection; do
-			for outbound_http in none bounded; do
-				((graph += 1))
-				runtime_graph_selected "${graph}" || continue
-					"${action}" "${graph}" "${database}" "${authn}" "${outbound_http}" none none none none none none none
-			done
-		done
-	done
-	for authn in oidc-jwt oidc-introspection; do
-		for outbound_http in none bounded; do
-			((graph += 1))
-			runtime_graph_selected "${graph}" || continue
-				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none postgres none none none none none
-		done
-	done
-	for authn in none oidc-jwt oidc-introspection; do
-		for outbound_http in none bounded; do
-			((graph += 1))
-			runtime_graph_selected "${graph}" || continue
-				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none none postgres none none none none
-		done
-	done
-	for authn in oidc-jwt oidc-introspection; do
-		for outbound_http in none bounded; do
-			((graph += 1))
-			runtime_graph_selected "${graph}" || continue
-				"${action}" "${graph}" postgres "${authn}" "${outbound_http}" none postgres postgres none none none none
-		done
-	done
-	for selection in none:none oidc-jwt:none oidc-introspection:none oidc-jwt:postgres oidc-introspection:postgres; do
-		IFS=: read -r authn http_idempotency <<<"${selection}"
-		for outbound_http in none bounded; do
-			if [[ ${outbound_http} == none ]]; then
-				((graph += 1))
-				runtime_graph_selected "${graph}" || continue
-					"${action}" "${graph}" postgres "${authn}" none none "${http_idempotency}" postgres none none none standard-webhooks
-				continue
-			fi
-			((graph += 1))
-			if runtime_graph_selected "${graph}"; then
-					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none none standard-webhooks
-			fi
-			((graph += 1))
-			if runtime_graph_selected "${graph}"; then
-					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable none
-			fi
-			((graph += 1))
-			if runtime_graph_selected "${graph}"; then
-					"${action}" "${graph}" postgres "${authn}" bounded none "${http_idempotency}" postgres none none durable standard-webhooks
-			fi
-		done
-	done
-	[[ ${graph} == 46 ]] || { echo "webhook graph inventory ended at ${graph}, expected 46" >&2; return 1; }
-	graph=47; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none nats-jetstream none none none
-	graph=48; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres none none none none postgres nats-jetstream postgres none none
-	graph=49; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded none postgres postgres nats-jetstream postgres durable standard-webhooks
-	graph=50; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none none none none none
-	graph=51; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt bounded oauth2-client-credentials none none none none none none
-	graph=52; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-introspection bounded oauth2-client-credentials none none none none none none
-	graph=53; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres none none durable standard-webhooks
-	graph=54; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none nats-jetstream none none none
-	graph=55; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks
-	# Compile the integration fixture callback with jobs and messaging, without outbox.
-	graph=56; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres none none none none postgres nats-jetstream none none none
-	graph=57; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none enabled
-	graph=58; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt none none none none none none none none enabled
-	graph=59; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-introspection none none none none none none none none enabled
-	graph=60; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none bounded oauth2-client-credentials none none none none none none enabled
-	graph=61; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled
-	# Cache only: no database suite, so this graph does not need Docker.
-	graph=62; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none none redis
-	# Graph 61's profile set plus cache. Focused like 61: locked metadata and cargo check, not a database suite.
-	graph=63; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis
-	graph=64; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none none none s3
-	graph=65; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3
-	# Service tokens on gRPC without a bearer engine, then beside JWT bearer
-	# authentication (the two jsonwebtoken lock edges); both run their tests.
-	graph=66; runtime_graph_selected "${graph}" && "${action}" "${graph}" none none none none none none none none none none enabled none none jwt
-	graph=67; runtime_graph_selected "${graph}" && "${action}" "${graph}" none oidc-jwt none none none none none none none none enabled none none jwt
-	# Graph 65's profile set plus service tokens, with the gRPC wire suite.
-	graph=68; runtime_graph_selected "${graph}" && "${action}" "${graph}" postgres oidc-introspection bounded oauth2-client-credentials postgres postgres nats-jetstream postgres durable standard-webhooks enabled redis s3 jwt
-	[[ ${graph} == 68 ]] || { echo "profile graph inventory ended at ${graph}, expected 68" >&2; return 1; }
-}
-
-# One line per graph for scripts/template/matrix.py.
-print_graph() {
-	printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-none}" "${13:-none}" "${14:-none}" "${15:-none}"
-}
-
 run_validation() {
-	local work source candidate common receipt_dir receipt log_dir target_cache vendor_stamp
+	local work source candidate common receipt_dir receipt log_dir target_cache vendor_stamp graph_rows graph
 	local started=${SECONDS}
+	local -a row
 	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC -u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS -u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u SERVICE_AUTH -u AGENT_HARNESS)
+	if [[ ${mode} == full || ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then
+		graph_rows=$(plan_graphs) || return $?
+	fi
+	if [[ ${mode} == full || ${mode} == runtime-graphs ]]; then
+		while IFS=' ' read -r graph _; do
+			case "${graph}" in
+			1[3-9] | 2[0-6] | 27 | 29 | 30 | 48 | 49 | 53 | 55)
+				if ! docker info >/dev/null 2>&1; then
+					echo "graphs 13-26,27,29,30,48,49,53,55 need a usable Docker daemon for their retained database suites; select an eligible focused graph when Docker is unavailable" >&2
+					return 2
+				fi
+				break
+				;;
+			esac
+		done <<<"${graph_rows}"
+	fi
+	if [[ ${mode} == artifact-graphs && -z ${runtime_graphs} ]]; then
+		while IFS=' ' read -r graph _; do
+			runtime_graphs+="${runtime_graphs:+,}${graph}"
+		done <<<"${graph_rows}"
+	fi
 	common=$(git -C "${repo}" rev-parse --path-format=absolute --git-common-dir)
 	receipt_dir=${common}/codex/template-init
 	mkdir -p "${receipt_dir}"
@@ -649,7 +568,9 @@ run_validation() {
 			"${scrubbed_identity[@]}" python3 -B "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --quality-only
 	fi
 	if [[ ${mode} == full || ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then
-		each_runtime_graph run_graph
+		while IFS=' ' read -r -a row; do
+			run_graph "${row[@]}"
+		done <<<"${graph_rows}"
 	fi
 	printf 'state=passed\nduration_seconds=%s\n' "$((SECONDS - started))" >>"${receipt}"
 	trap - EXIT
@@ -661,14 +582,19 @@ run_validation() {
 if [[ ${mode} == self-test ]]; then
 	recorder_self_test
 elif [[ ${mode} == list-graphs ]]; then
-	each_runtime_graph print_graph
+	graph_rows=$(plan_graphs) || exit $?
+	printf '%s\n' "${graph_rows}"
 elif [[ ${VALIDATION_LOCK_HELD:-} == 1 ]]; then
 	python3 -B "${repo}/scripts/verify/lock.py" --assert-held
 	run_validation
 else
 	arguments=(--repo "${repo}")
 	if [[ ${mode} == runtime-graphs || ${mode} == artifact-graphs ]]; then
-		arguments+=("--${mode}" "${runtime_graphs}")
+		if [[ ${graph_plan_args[0]} == --artifact-graphs ]]; then
+			arguments+=(--default-artifact-graphs)
+		else
+			arguments+=("--${mode}" "${runtime_graphs}")
+		fi
 	elif [[ ${mode} != full ]]; then
 		arguments+=("--${mode}")
 	fi

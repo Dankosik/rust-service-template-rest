@@ -24,7 +24,10 @@ template-quality-projections: ## Exercise readability checkers on four retained/
 	bash scripts/template/check_init.sh --repo . --quality-projections
 
 # Kept separate from SOURCE_CHECK_TARGETS: the image job owns this serial proof.
-ARTIFACT_GRAPHS ?= 1,7,47,65
 template-init-artifacts: ## Build and prove selected initialized release images once each; ALLOW_HEAVY=1
 	@{ test "$(ALLOW_HEAVY)" = 1 || test "$(CI)" = true; } || { echo "template-init-artifacts requires ALLOW_HEAVY=1 (CI sets CI=true)" >&2; exit 2; }
+ifeq ($(origin ARTIFACT_GRAPHS),undefined)
+	bash scripts/template/check_init.sh --repo . --default-artifact-graphs
+else
 	bash scripts/template/check_init.sh --repo . --artifact-graphs "$(ARTIFACT_GRAPHS)"
+endif
