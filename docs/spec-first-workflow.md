@@ -15,7 +15,7 @@ Select the smallest non-direct execution path and current decision owner. If
 | `Candidate` | The tree state under work: assembled once every `Unit`'s `Implemented` change is integrated and its writers have joined, fixed while validation or review reads it. |
 | `Ledger Orchestrator` | Single routing owner (`LEDGER_ORCHESTRATOR`) that schedules `Unit`s and writes canonical `tasks.md` state. |
 | `Lane` | Bounded delegated worker (`worker-agent`, `specialist-agent`, `evidence-agent`) executing a strict subset for its parent. |
-| `Ready Frontier` | Set of tasks in `tasks.md` whose consumed contracts, writable scopes, and authority are ready to start immediately. |
+| `Ready Frontier` | Set of tasks in `tasks.md` whose coding `Depends on` prerequisites and authority are satisfied and whose `Mutable owners` and `Exclusive locks` are currently free (tasks gated only by `[acceptance]` or `[effect:<action>]` remain eligible to code; two ready tasks sharing a free owner or lock both appear on the frontier and dispatch serializes them by priority). |
 | `Implemented` vs `Accepted` | A Lead reports `Implemented` when its unit meets the [Implemented bar](spec-first-workflow/interfaces/acceptance-result-v1.md#implementation-result). Landing it unlocks consumers of that code. `Accepted` closes the requested scope, including final validation, any required review, and any requested external outcomes. |
 
 ## Path

@@ -59,15 +59,16 @@ state and result-delivery route to a single successor.
 When Planning returns a reviewed, ready `tasks.md`, leave the ledger and its
 inputs available in the same checkout. Present a compact one-screen plan
 overview in the user's language—each task's `T<ID>`, one-line deliverable,
-non-default shape when applicable (`prefactor`, `shared seam`,
-`integration-first`, `expand`/`migrate`/`contract`), `Depends on`, initial Ready
-Frontier (noting any shared `Exclusive locks` that serialize otherwise parallel
-tasks), and any carried `CONCERNS` risks—so the user can verify slicing,
-granularity, and real parallelism at a glance. Follow with one message to
-send in a new session there, in their language, with the actual ledger path,
-such as “Implement the plan in `specs/order-export/tasks.md`.” Include the
-selected adapter's native invocation in the handoff when needed. End the
-planning session's work here. Only the user starts the implementation session.
+non-default shape when applicable (`prefactor`, `shared-contract`,
+`integration-first`, `expand`/`migrate`/`contract`), `Depends on`, `Completion`
+target, execution waves (showing the initial Ready Frontier, parallel waves vs
+shared-lock serialization), and any carried `CONCERNS` or `Reopen if` risks—so
+the user can verify slicing, granularity, and real parallelism at a glance.
+Follow with one message to send in a new session there, in their language, with
+the actual ledger path, such as “Implement the plan in
+`specs/order-export/tasks.md`.” Include the selected adapter's native
+invocation in the handoff when needed. End preparation here. Only the user
+starts the implementation session.
 
 If Planning proves there is no implementation work, report that outcome.
 If the plan is blocked, return the missing input and its owner under

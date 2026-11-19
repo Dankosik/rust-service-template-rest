@@ -42,12 +42,13 @@ trace gaps batch into one `Repair Request`.
 
 - Read **primary sources**, not only Lead summaries: `intent.md`, `spec.md`,
   `design/`, `rollout.md` (when present), packets, and the candidate diff.
-- **Forward trace:** map every accepted obligation, `Observable claim`,
-  preserved `G<n>`, and `unverified` entry to a current passing check on
-  affected paths (running any locally runnable `unverified` test now). Verify
-  removals make old behavior unreachable and renames preserve behavior. Inspect
-  every cross-unit `Provides -> Depends on` seam and compare task `decisions`
-  for silent mismatches.
+- **Forward trace:** map every accepted obligation, active `Observable claim`
+  (treating `superseded at assembly by T<contract>` as closed by `T<contract>`
+  and `Completion`), preserved `G<n>`, and `unverified` entry to a current
+  passing check on affected paths (running any locally runnable `unverified`
+  test now). Verify removals make old behavior unreachable and renames preserve
+  behavior. Inspect every cross-unit `Provides -> Depends on` seam and compare
+  task `decisions` for silent mismatches.
 - **Backward trace:** map every material behavior change in the diff back to an
   accepted obligation (catching scope creep, leftover superseded code, or
   unintended side effects).
@@ -119,8 +120,9 @@ Return [Completion
 Result](../../interfaces/acceptance-result-v1.md#completion-result) only when
 every gate holds:
 
-- [ ] Every `Observable claim`, `Completion` criterion, and locally runnable
-  `unverified` entry has passing proof at its required boundary (only
+- [ ] Every active `Observable claim` (with `superseded at assembly by
+  T<contract>` closed via `T<contract>`), `Completion` criterion, and locally
+  runnable `unverified` entry has passing proof at its required boundary (only
   unavailable *optional* proof may remain a named gap; missing *required* proof
   blocks `Accepted`).
 - [ ] Every material behavior change in the candidate diff serves an accepted
