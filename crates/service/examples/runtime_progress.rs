@@ -517,7 +517,7 @@ fn register(
     services: &mut Services,
     _state: &service::AppState,
     background: &mut service::BackgroundRegistration<'_>,
-) -> Result<(), infra_grpc::Error> {
+) -> Result<(), service::RegistrationError> {
     let counts = Arc::new(Counts::default());
     let cpu = Arc::new(Cpu::new(Arc::clone(&counts)));
     let storage = ObjectStorage::try_new(ObjectStorageOptions {

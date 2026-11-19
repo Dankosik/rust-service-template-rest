@@ -129,8 +129,8 @@ deleted; selected ones stay inert until configured.
 - `OUTBOUND_AUTH=oauth2-client-credentials`: OAuth2 machine authentication with
   a private key and RFC 8693 token exchange
   ([`infra-oauth2-client-credentials`](crates/infra-oauth2-client-credentials)).
-  To call a provider as the service, pass `http_resource: Some(Box::new(prepare))`
-  in the `ServiceRegistration` given to `service::run_with`. In `prepare`,
+  To call a provider as the service, pass `ServiceRegistration::for_http_resource(prepare)`
+  to `service::run_with`. In `prepare`,
   pass the OAuth registration and target to `background.service_tokens` and return the adapter
   with its authenticated transport. Keep response limits, timeouts and provider
   error mapping in that adapter. In the handler, extract `Extension<MyAdapter>`
