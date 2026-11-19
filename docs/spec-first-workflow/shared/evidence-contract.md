@@ -20,13 +20,10 @@ variants, not every template profile. Reuse adequate existing coverage; do not
 invent an exhaustive scenario matrix or re-prove unchanged behavior without a
 relevant dependency change or concrete defect.
 
-Once this criterion and any explicit additions pass, report local completion
-and stop. Disclose unrun optional integration, container, provider, end-to-end,
-race, or performance scenarios only when their limitations are material. They
-are not blockers to invent or repair; do not claim they passed. Local completion is neither a
-CI result, production observation, deployment, release, nor authority for an
-external action. When the request includes such an outcome, retain it as a
-separate outstanding obligation until actually satisfied.
+Once the local criterion and explicit local additions pass, record the results
+and finish local verification. Report unrun optional scenarios only when they
+materially limit a claim. Requested CI, production observations, deployments,
+and releases need their own evidence and applicable authority.
 
 ## Required And Optional Proof
 
@@ -113,18 +110,17 @@ required checks only. Do not repeat the same failed attempt without changed
 code, environment, or a discriminating diagnostic hypothesis. A focused repair
 does not restart the whole plan, review, or task ledger.
 
-Valid consolidated scoped evidence can establish local Completion without an
+Valid consolidated scoped evidence can establish local verification without an
 aggregate receipt. An explicitly required exact-candidate aggregate, CI check,
 fresh runtime observation, or release gate still needs its actual result.
 Whole-candidate receipts retain the tool's exact base, candidate, plan, input,
 and environment rules under Validation Routing; do not synthesize them from
 partial results. The Orchestrator records acceptance without repeating proof.
 
-Missing required final proof means `implementation complete; verification incomplete`
-for that scope. Missing optional proof does not prevent local `Accepted`.
-When an external outcome remains requested, report local completion separately
-without declaring the whole request complete. Verification reports evidence
-and material gaps; repair and genuinely required recovery stay with their owners.
+When required final proof is unavailable, report `implementation complete; verification incomplete`
+for that scope. Report material optional gaps as limitations. Carry verified
+results into the [Completion Result](../interfaces/acceptance-result-v1.md#completion-result)
+when reporting the verdict for the requested scope.
 
 ## Evidence Result V1
 

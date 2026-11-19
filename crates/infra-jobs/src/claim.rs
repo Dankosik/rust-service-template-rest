@@ -1,12 +1,11 @@
 use std::num::NonZeroU32;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::observed;
 use metrics::Unit;
 use sqlx::postgres::PgConnection;
-use tokio::sync::{MutexGuard, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
@@ -94,111 +93,88 @@ pub(crate) async fn run_claim_loop(
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let policy = PolicyBinds::new(&shared.registry);
-    let mut next = Next::Idle;
+    let mut wait = ClaimWait::WakeOrTick;
     let mut last_claim = Instant::now();
     loop {
-        match next {
-            Next::Now => {}
-            Next::Soon => {
-                if cooldown(&stop, last_claim).await.is_break() {
-                    return;
+        let Some((slots, turn)) = stop
+            .run_until_cancelled(async {
+                match wait {
+                    ClaimWait::Immediate => {}
+                    ClaimWait::Cooldown => {
+                        tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN).await;
+                    }
+                    ClaimWait::WakeOrTick => {
+                        wait_for_wake_or_tick(&shared, &mut ticker).await;
+                        tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN).await;
+                    }
                 }
-            }
-            Next::Idle => {
-                if wait_for_wake_or_tick(&shared, &stop, &mut ticker)
-                    .await
-                    .is_break()
-                    || cooldown(&stop, last_claim).await.is_break()
-                {
-                    return;
-                }
-            }
-        }
-        let Some(slots) = take_slots(&shared, &stop).await else {
+                let slots = take_slots(&shared).await?;
+                let turn = shared.statement_turn.lock().await;
+                Some((slots, turn))
+            })
+            .await
+            .flatten()
+        else {
             return;
         };
         let requested = slots.num_permits();
         let round = {
-            let Some(_turn) = statement_turn(&shared, &stop).await else {
-                return;
-            };
+            let _turn = turn;
             if stop.is_cancelled() {
                 return;
             }
             last_claim = Instant::now();
             send_claim(&shared, &policy, slot_count(requested)).await
         };
-        next = match round {
+        wait = match round {
             Ok(ClaimRound {
                 claim_started_at,
-                rows,
+                outcomes,
             }) => {
                 observe_recovery(&shared, Operation::Claim);
-                let next = Next::after_claim(rows.len(), requested);
-                dispatch_drawn(&shared, slots, rows, claim_started_at, &stop, &failure);
-                next
+                let next_wait = ClaimWait::after_claim(outcomes.len(), requested);
+                dispatch_outcomes(&shared, slots, outcomes, claim_started_at, &stop, &failure);
+                next_wait
             }
             Err(error) => {
                 observe_failure(&shared, Operation::Claim, &error);
-                Next::Idle
+                ClaimWait::WakeOrTick
             }
         };
     }
 }
 
 #[derive(Clone, Copy)]
-enum Next {
-    Now,
-    Soon,
-    Idle,
+enum ClaimWait {
+    Immediate,
+    Cooldown,
+    WakeOrTick,
 }
 
-impl Next {
+impl ClaimWait {
     const fn after_claim(claimed: usize, requested: usize) -> Self {
         if claimed == requested {
-            Self::Now
+            Self::Immediate
         } else if claimed == 0 {
-            Self::Idle
+            Self::WakeOrTick
         } else {
-            Self::Soon
+            Self::Cooldown
         }
     }
 }
 
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
-async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> ControlFlow<()> {
+async fn wait_for_wake_or_tick(shared: &Shared, ticker: &mut tokio::time::Interval) {
     tokio::select! {
         biased;
-        () = stop.cancelled() => ControlFlow::Break(()),
-        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => ControlFlow::Continue(()),
-    }
-}
-
-async fn wait_for_wake_or_tick(
-    shared: &Shared,
-    stop: &CancellationToken,
-    ticker: &mut tokio::time::Interval,
-) -> ControlFlow<()> {
-    tokio::select! {
-        biased;
-        () = stop.cancelled() => return ControlFlow::Break(()),
         () = shared.claim_wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
-    if stop.is_cancelled() {
-        ControlFlow::Break(())
-    } else {
-        ControlFlow::Continue(())
-    }
 }
 
-async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSemaphorePermit> {
-    let mut permits = tokio::select! {
-        biased;
-        () = stop.cancelled() => return None,
-        permit = Arc::clone(&shared.slots).acquire_owned() => permit.ok()?,
-    };
+async fn take_slots(shared: &Shared) -> Option<OwnedSemaphorePermit> {
+    let mut permits = Arc::clone(&shared.slots).acquire_owned().await.ok()?;
     if let Ok(count) = u32::try_from(shared.slots.available_permits())
         && count > 0
         && let Ok(more) = Arc::clone(&shared.slots).try_acquire_many_owned(count)
@@ -208,20 +184,9 @@ async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSe
     Some(permits)
 }
 
-async fn statement_turn<'a>(
-    shared: &'a Shared,
-    stop: &CancellationToken,
-) -> Option<MutexGuard<'a, ()>> {
-    tokio::select! {
-        biased;
-        () = stop.cancelled() => None,
-        turn = shared.statement_turn.lock() => Some(turn),
-    }
-}
-
 struct ClaimRound {
     claim_started_at: Instant,
-    rows: Vec<Drawn>,
+    outcomes: Vec<ClaimOutcome>,
 }
 
 async fn send_claim(
@@ -236,9 +201,9 @@ async fn send_claim(
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed());
-    result.map(|rows| ClaimRound {
+    result.map(|outcomes| ClaimRound {
         claim_started_at,
-        rows,
+        outcomes,
     })
 }
 
@@ -251,7 +216,7 @@ async fn claim(
     worker_id: uuid::Uuid,
     policy: &PolicyBinds<'_>,
     requested: i64,
-) -> Result<Vec<Drawn>, sqlx::Error> {
+) -> Result<Vec<ClaimOutcome>, sqlx::Error> {
     let claim_limits: smallvec::SmallVec<[i64; 8]> = policy
         .registry
         .iter()
@@ -271,14 +236,14 @@ async fn claim(
             ClaimRow,
             "WITH policy AS ( \
                  SELECT policy.kind, policy.max_attempts, policy.lease_offset_micros, \
-                        policy.claim_limit, policy.recover_at_exhaustion \
+                        policy.claim_limit, policy.is_outbox \
                  FROM unnest($1::text[], $2::smallint[], $3::bigint[], $6::bigint[], $8::bool[]) \
-                     AS policy (kind, max_attempts, lease_offset_micros, claim_limit, recover_at_exhaustion) \
+                     AS policy (kind, max_attempts, lease_offset_micros, claim_limit, is_outbox) \
              ), \
              candidates AS ( \
                  SELECT candidate.id, candidate.not_before, candidate.attempts, candidate.state, \
                         candidate.claim_expires_at, policy.max_attempts, \
-                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.recover_at_exhaustion \
+                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.is_outbox \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before, job.attempts, job.state, \
@@ -297,7 +262,7 @@ async fn claim(
                  UNION ALL \
                  SELECT candidate.id, candidate.not_before, candidate.attempts, candidate.state, \
                         candidate.claim_expires_at, policy.max_attempts, \
-                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.recover_at_exhaustion \
+                        policy.lease_offset_micros, policy.kind, policy.claim_limit, policy.is_outbox \
                  FROM policy \
                  CROSS JOIN LATERAL ( \
                      SELECT job.id, job.not_before, job.attempts, job.state, \
@@ -318,7 +283,7 @@ async fn claim(
                  SELECT candidates.id, candidates.not_before, candidates.attempts, \
                         candidates.state, candidates.claim_expires_at, \
                         candidates.max_attempts, candidates.lease_offset_micros, \
-                        candidates.claim_limit, candidates.recover_at_exhaustion, \
+                        candidates.claim_limit, candidates.is_outbox, \
                         row_number() OVER ( \
                             PARTITION BY candidates.kind \
                             ORDER BY candidates.not_before, candidates.id \
@@ -327,8 +292,8 @@ async fn claim(
              ), \
              picked AS ( \
                  SELECT ranked.id, ranked.attempts, ranked.lease_offset_micros, ranked.max_attempts, \
-                        ranked.recover_at_exhaustion, \
-                        ranked.attempts >= ranked.max_attempts AND NOT ranked.recover_at_exhaustion AS exhausted, \
+                        ranked.is_outbox, \
+                        ranked.attempts >= ranked.max_attempts AND NOT ranked.is_outbox AS exhausted, \
                         ranked.state = 'running' \
                             AND ranked.claim_expires_at <= statement_timestamp() AS rescued \
                  FROM ranked \
@@ -368,7 +333,7 @@ async fn claim(
              RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
                        job.claim_generation, job.claim_token AS \"claim_token!\", \
                        CASE WHEN job.state <> 'running' THEN NULL \
-                            WHEN picked.recover_at_exhaustion THEN outbox_verified_payload( \
+                            WHEN picked.is_outbox THEN outbox_verified_payload( \
                                 job.id, job.unique_key, job.predecessor_job_id, job.payload_text, job.payload) \
                             ELSE COALESCE(job.payload_text, job.payload::text) END AS payload, \
                        job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
@@ -381,10 +346,10 @@ async fn claim(
             worker_id,
             &claim_limits[..],
             rescued_summary,
-            &policy.recover_at_exhaustion[..],
+            &policy.is_outbox[..],
             i32::from(crate::kind::MAX_ATTEMPTS),
         )
-        .try_map(|row| row.into_drawn(policy.registry).map_err(ClaimDecodeError::into_sqlx))
+        .try_map(|row| row.into_outcome(policy.registry).map_err(ClaimDecodeError::into_sqlx))
         .fetch_all(&mut *connection),
     )
     .await
@@ -395,12 +360,12 @@ struct PolicyBinds<'a> {
     names: Vec<&'static str>,
     max_attempts: Vec<i16>,
     lease_offsets_micros: Vec<i64>,
-    recover_at_exhaustion: Vec<bool>,
+    is_outbox: Vec<bool>,
 }
 
 impl<'a> PolicyBinds<'a> {
     fn new(registry: &'a crate::Kinds) -> Self {
-        let (names, max_attempts, lease_offsets_micros, recover_at_exhaustion) = registry
+        let (names, max_attempts, lease_offsets_micros, is_outbox) = registry
             .iter()
             .map(|registered| {
                 (
@@ -416,7 +381,7 @@ impl<'a> PolicyBinds<'a> {
             names,
             max_attempts,
             lease_offsets_micros,
-            recover_at_exhaustion,
+            is_outbox,
         }
     }
 }
@@ -429,23 +394,23 @@ fn slot_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }
 
-fn dispatch_drawn(
+fn dispatch_outcomes(
     shared: &Arc<Shared>,
     mut slots: OwnedSemaphorePermit,
-    rows: Vec<Drawn>,
+    outcomes: Vec<ClaimOutcome>,
     claim_started_at: Instant,
     stop: &CancellationToken,
     failure: &CancellationToken,
 ) {
-    for row in rows {
-        match row {
-            Drawn::Exhausted {
+    for outcome in outcomes {
+        match outcome {
+            ClaimOutcome::Exhausted {
                 attempt,
                 error_summary,
             } => {
                 attempt::record_exhausted(&attempt, &error_summary);
             }
-            Drawn::Running {
+            ClaimOutcome::Running {
                 job,
                 lease_offset,
                 queue_wait_seconds,
@@ -498,7 +463,7 @@ fn local_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant 
         .unwrap_or(claim_started_at)
 }
 
-enum Drawn {
+enum ClaimOutcome {
     Running {
         job: RunningJob,
         lease_offset: Duration,
@@ -525,7 +490,7 @@ struct ClaimRow {
 }
 
 impl ClaimRow {
-    fn into_drawn(self, registry: &crate::Kinds) -> Result<Drawn, ClaimDecodeError> {
+    fn into_outcome(self, registry: &crate::Kinds) -> Result<ClaimOutcome, ClaimDecodeError> {
         let registered = registry
             .get(&self.kind)
             .ok_or(ClaimDecodeError::UnknownKind)?;
@@ -536,7 +501,7 @@ impl ClaimRow {
                 .map_err(|_| ClaimDecodeError::AttemptOutOfRange)?,
         };
         if self.exhausted {
-            return Ok(Drawn::Exhausted {
+            return Ok(ClaimOutcome::Exhausted {
                 attempt,
                 error_summary: self.error_summary.unwrap_or_default(),
             });
@@ -548,7 +513,7 @@ impl ClaimRow {
             }
             None => return Err(ClaimDecodeError::MissingPayload),
         };
-        Ok(Drawn::Running {
+        Ok(ClaimOutcome::Running {
             lease_offset: lease_offset(registered.policy.timeout),
             job: RunningJob {
                 registered: Arc::clone(registered),

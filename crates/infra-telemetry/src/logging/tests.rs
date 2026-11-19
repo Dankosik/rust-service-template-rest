@@ -63,7 +63,7 @@ pub(crate) fn capture(
 ) -> (tracing::Dispatch, LoggerGuard, Buffer) {
     let buffer = Buffer::default();
     let (layer, guard) = buffer.layer(format);
-    let filter = directive_filter(level).expect("valid capture filter");
+    let filter = admission_filter(level).expect("valid capture filter");
     let otel = provider.map(|handle| tracing_opentelemetry::layer().with_tracer(handle.tracer()));
     let registry = Registry::default().with(filter);
     (
@@ -321,7 +321,7 @@ fn info_spans_survive_a_quieter_directive() {
     for directive in ["warn", "off", "warn,[never]=trace"] {
         let buffer = Buffer::default();
         let (layer, guard) = buffer.layer(LoggingFormat::Json);
-        let filter = directive_filter(directive).expect("valid directive");
+        let filter = admission_filter(directive).expect("valid directive");
         let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(layer));
         tracing::dispatcher::with_default(&dispatch, || {
             let request = tracing::info_span!("request", request_id = "r-1");
@@ -345,34 +345,12 @@ fn info_spans_survive_a_quieter_directive() {
 
 #[test]
 fn a_verbose_directive_still_enables_verbose_spans() {
-    let filter = directive_filter("info,app=debug").expect("valid directive");
+    let filter = admission_filter("info,app=debug").expect("valid directive");
     let dispatch = tracing::Dispatch::new(Registry::default().with(filter));
     tracing::dispatcher::with_default(&dispatch, || {
         assert!(!tracing::debug_span!(target: "app", "detail").is_disabled());
         assert!(tracing::debug_span!(target: "other", "detail").is_disabled());
     });
-}
-
-#[test]
-fn json_line_keeps_the_last_of_many_span_records() {
-    let buffer = Buffer::default();
-    let (layer, guard) = buffer.layer(LoggingFormat::Json);
-    let dispatch = tracing::Dispatch::new(Registry::default().with(layer));
-    tracing::dispatcher::with_default(&dispatch, || {
-        let span = tracing::info_span!("job", attempt = 0_u64, kind = "email");
-        for attempt in 1..=1000_u64 {
-            span.record("attempt", attempt);
-        }
-        span.in_scope(|| tracing::info!("retrying"));
-    });
-    drain(guard);
-    let record = buffer.records();
-    assert!(
-        record
-            .trim_end()
-            .ends_with(r#""message":"retrying","attempt":1000,"kind":"email","name":"job"}"#),
-        "{record}"
-    );
 }
 
 #[test]

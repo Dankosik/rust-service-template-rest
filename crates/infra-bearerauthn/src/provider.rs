@@ -3,29 +3,9 @@ use std::time::{Duration, Instant};
 use operation_context::Stopped;
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
-#[cfg(
-    // template:begin oidc-introspection:authn-provider-fixture-cancel-feature
-    any(feature = "test-support",
-    // template:end oidc-introspection:authn-provider-fixture-cancel-feature
-    test
-    // template:begin oidc-introspection:authn-provider-fixture-cancel-cfg-close
-    )
-    // template:end oidc-introspection:authn-provider-fixture-cancel-cfg-close
-)]
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use url::Url;
 
-#[cfg(
-    // template:begin oidc-introspection:authn-provider-fixture-failure-feature
-    any(feature = "test-support",
-    // template:end oidc-introspection:authn-provider-fixture-failure-feature
-    test
-    // template:begin oidc-introspection:authn-provider-fixture-failure-cfg-close
-    )
-    // template:end oidc-introspection:authn-provider-fixture-failure-cfg-close
-)]
-use crate::Failure;
 use crate::{PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
@@ -398,76 +378,76 @@ fn client_builder() -> reqwest::ClientBuilder {
 }
 
 #[cfg(
-    // template:begin oidc-introspection:authn-provider-fixture-client-feature
+    // template:begin oidc-introspection:authn-provider-fixture-feature
     any(feature = "test-support",
-    // template:end oidc-introspection:authn-provider-fixture-client-feature
+    // template:end oidc-introspection:authn-provider-fixture-feature
     test
-    // template:begin oidc-introspection:authn-provider-fixture-client-cfg-close
+    // template:begin oidc-introspection:authn-provider-fixture-cfg-close
     )
-    // template:end oidc-introspection:authn-provider-fixture-client-cfg-close
+    // template:end oidc-introspection:authn-provider-fixture-cfg-close
 )]
-pub(crate) fn new_fixture_client(
-    fixture_host: &str,
-    fixture_addr: std::net::SocketAddr,
-    fixture_root_der: &[u8],
-    cancel: CancellationToken,
-) -> Result<ProviderClient, Failure> {
-    if fixture_host.is_empty() || !fixture_addr.ip().is_loopback() {
-        return Err(Failure::Unavailable);
+mod fixture {
+    use tokio_util::sync::CancellationToken;
+
+    use super::{ProviderClient, client_builder};
+    use crate::Failure;
+
+    pub(crate) fn new_fixture_client(
+        fixture_host: &str,
+        fixture_addr: std::net::SocketAddr,
+        fixture_root_der: &[u8],
+        cancel: CancellationToken,
+    ) -> Result<ProviderClient, Failure> {
+        if fixture_host.is_empty() || !fixture_addr.ip().is_loopback() {
+            return Err(Failure::Unavailable);
+        }
+        let root =
+            reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
+        let resolver = std::sync::Arc::new(FixtureResolver {
+            host: fixture_host.to_owned(),
+            address: fixture_addr,
+            cancel,
+        });
+        ProviderClient::from_builder(
+            client_builder()
+                .dns_resolver(resolver)
+                .tls_certs_only([root]),
+        )
+        .map_err(|_| Failure::Unavailable)
     }
-    let root =
-        reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
-    let resolver = std::sync::Arc::new(FixtureResolver {
-        host: fixture_host.to_owned(),
-        address: fixture_addr,
-        cancel,
-    });
-    ProviderClient::from_builder(
-        client_builder()
-            .dns_resolver(resolver)
-            .tls_certs_only([root]),
-    )
-    .map_err(|_| Failure::Unavailable)
+
+    #[derive(Clone)]
+    struct FixtureResolver {
+        host: String,
+        address: std::net::SocketAddr,
+        cancel: CancellationToken,
+    }
+
+    impl reqwest::dns::Resolve for FixtureResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let host_matches = name.as_str().eq_ignore_ascii_case(&self.host);
+            let address = self.address;
+            let cancel = self.cancel.clone();
+            Box::pin(async move {
+                if cancel.is_cancelled() || !host_matches {
+                    return Err(std::io::Error::other("fixture DNS denied").into());
+                }
+                Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
+            })
+        }
+    }
 }
 
 #[cfg(
-    // template:begin oidc-introspection:authn-provider-fixture-resolver-feature
+    // template:begin oidc-introspection:authn-provider-fixture-export-feature
     any(feature = "test-support",
-    // template:end oidc-introspection:authn-provider-fixture-resolver-feature
+    // template:end oidc-introspection:authn-provider-fixture-export-feature
     test
-    // template:begin oidc-introspection:authn-provider-fixture-resolver-cfg-close
+    // template:begin oidc-introspection:authn-provider-fixture-export-cfg-close
     )
-    // template:end oidc-introspection:authn-provider-fixture-resolver-cfg-close
+    // template:end oidc-introspection:authn-provider-fixture-export-cfg-close
 )]
-#[derive(Clone)]
-struct FixtureResolver {
-    host: String,
-    address: std::net::SocketAddr,
-    cancel: CancellationToken,
-}
-
-#[cfg(
-    // template:begin oidc-introspection:authn-provider-fixture-resolve-feature
-    any(feature = "test-support",
-    // template:end oidc-introspection:authn-provider-fixture-resolve-feature
-    test
-    // template:begin oidc-introspection:authn-provider-fixture-resolve-cfg-close
-    )
-    // template:end oidc-introspection:authn-provider-fixture-resolve-cfg-close
-)]
-impl reqwest::dns::Resolve for FixtureResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = self.host.clone();
-        let address = self.address;
-        let cancel = self.cancel.clone();
-        Box::pin(async move {
-            if cancel.is_cancelled() || !name.as_str().eq_ignore_ascii_case(&host) {
-                return Err(std::io::Error::other("fixture DNS denied").into());
-            }
-            Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
-        })
-    }
-}
+pub(crate) use fixture::new_fixture_client;
 
 fn has_json_content_type(response: &reqwest::Response) -> bool {
     response

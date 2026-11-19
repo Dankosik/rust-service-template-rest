@@ -44,7 +44,7 @@ impl FullPipeline {
         let shared = Arc::new(Shared {
             max_concurrency: APPLICATION_SLOTS,
             state: ArcSwap::from_pointee(State::Connected(generation.clone())),
-            write: Mutex::new(()),
+            state_lock: Mutex::new(()),
             changed: Notify::new(),
             retirements: Counter::noop(),
             tasks: TaskTracker::new(),
@@ -176,7 +176,7 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
             );
             pipeline.answer_gets_and_ping().await;
             assert_eq!(peer.await, Ok(Some(b"live".to_vec())));
-            assert_eq!(maintenance.await, Ok(()));
+            assert_eq!(maintenance.await, PingOutcome::Ok);
         })
         .await;
     }

@@ -27,7 +27,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::ClientError;
 use crate::call::{
     ClientCustody, ClientGuards, ClientObservation, StatusHook, attach_client_response,
-    client_deadline, client_stopped, guard_upload,
+    client_deadline_status, client_stopped_status, guard_upload,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -217,50 +217,29 @@ impl Client {
         if caller_timeout.is_none() {
             request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
         }
-        let (opening_before_parent, lifetime_before_parent) =
-            self.timeout.deadlines(started_at, caller_timeout);
-        let (has_parent, parent_deadline, cancellation) =
-            match request.extensions().get::<OperationContext>() {
-                Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
-                None => (false, None, tokio_util::sync::CancellationToken::new()),
-            };
-        let opening = OperationContext::new(
-            earliest(Some(opening_before_parent), parent_deadline),
-            cancellation.clone(),
+        let contexts = derive_call_contexts(
+            self.timeout,
+            started_at,
+            caller_timeout,
+            request.extensions().get::<OperationContext>(),
         );
-        let lifetime = OperationContext::new(
-            earliest(lifetime_before_parent, parent_deadline),
-            cancellation.clone(),
-        );
-        let watch_stop = has_parent || lifetime.deadline().is_some();
         let call = crate::observe::Call::start(self.series, &request, self.destination.as_ref());
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        if let Err(reason) = opening.check() {
-            return Err(call.refuse(client_stopped(reason)));
-        }
-        let permit = if let Some(openings) = &self.openings {
-            let Ok(permit) = Arc::clone(openings).try_acquire_owned() else {
-                let status = opening.stopped().map_or_else(
-                    || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
-                    client_stopped,
-                );
-                return Err(call.refuse(status));
-            };
-            Some(permit)
-        } else {
-            None
+        let permit = match acquire_opening_permit(self.openings.as_ref(), &contexts.opening) {
+            Ok(permit) => permit,
+            Err(status) => return Err(call.refuse(status)),
         };
         Ok(PreparedCall {
             channel: self.channel.clone(),
             request,
-            opening,
-            lifetime,
-            watch_stop,
+            opening: contexts.opening,
+            lifetime: contexts.lifetime,
+            watch_stop: contexts.watch_stop,
             call,
-            cancel_on_drop: cancellation.drop_guard(),
+            cancel_on_drop: contexts.cancel_on_drop,
             permit,
         })
     }
@@ -355,17 +334,17 @@ impl PreparedCall {
         let result = async {
             let outcome = tokio::select! {
                 biased;
-                reason = opening.wait_stopped() => Err(client_stopped(reason)),
+                reason = opening.wait_stopped() => Err(client_stopped_status(reason)),
                 dispatched = async {
                     let ready = channel.ready().await.map_err(|err| transport_status(&err))?;
-                    opening.check().map_err(client_stopped)?;
+                    opening.check().map_err(client_stopped_status)?;
                     prepare_dispatch(request.headers_mut())?;
-                    opening.check().map_err(client_stopped)?;
+                    opening.check().map_err(client_stopped_status)?;
                     apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
                     ready.call(request).await.map_err(|err| transport_status(&err))
                 } => dispatched,
             };
-            opening.check().map_err(client_stopped)?;
+            opening.check().map_err(client_stopped_status)?;
             outcome
         }
         .instrument(call.span().clone())
@@ -391,7 +370,7 @@ impl PreparedCall {
                 watch_stop,
                 guards: ClientGuards {
                     upload_guard,
-                    cancel_on_drop: Some(cancel_on_drop),
+                    cancel_on_drop,
                 },
                 on_status,
             },
@@ -437,12 +416,7 @@ impl Service<http::Uri> for GrpcConnector {
             };
             tokio::time::timeout(CONNECT_TIMEOUT, dial)
                 .await
-                .unwrap_or_else(|elapsed| {
-                    Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        elapsed,
-                    )))
-                })
+                .map_err(|elapsed| std::io::Error::new(std::io::ErrorKind::TimedOut, elapsed))?
         })
     }
 }
@@ -463,11 +437,7 @@ fn parse_destination(
     match (security, parts.scheme) {
         (ClientSecurity::Plaintext, OriginScheme::Http) => Ok((uri, origin, None)),
         (ClientSecurity::Tls(material), OriginScheme::Https) => {
-            let trimmed_host = parts
-                .host
-                .strip_prefix('[')
-                .and_then(|inner| inner.strip_suffix(']'))
-                .unwrap_or(parts.host);
+            let trimmed_host = crate::protocol::unbracket_host(parts.host);
             let server_name = rustls::pki_types::ServerName::try_from(trimmed_host)
                 .map_err(|_| ClientError::InvalidDestination)?
                 .to_owned();
@@ -479,6 +449,61 @@ fn parse_destination(
             Err(ClientError::DestinationSecurityMismatch)
         }
     }
+}
+
+struct CallContexts {
+    opening: OperationContext,
+    lifetime: OperationContext,
+    watch_stop: bool,
+    cancel_on_drop: DropGuard,
+}
+
+fn derive_call_contexts(
+    timeout: ClientTimeout,
+    started_at: Instant,
+    caller_timeout: Option<Duration>,
+    parent: Option<&OperationContext>,
+) -> CallContexts {
+    let (opening_before_parent, lifetime_before_parent) =
+        timeout.deadlines(started_at, caller_timeout);
+    let (has_parent, parent_deadline, cancellation) = match parent {
+        Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
+        None => (false, None, tokio_util::sync::CancellationToken::new()),
+    };
+    let opening = OperationContext::new(
+        earliest(Some(opening_before_parent), parent_deadline),
+        cancellation.clone(),
+    );
+    let lifetime = OperationContext::new(
+        earliest(lifetime_before_parent, parent_deadline),
+        cancellation.clone(),
+    );
+    let watch_stop = has_parent || lifetime.deadline().is_some();
+    CallContexts {
+        opening,
+        lifetime,
+        watch_stop,
+        cancel_on_drop: cancellation.drop_guard(),
+    }
+}
+
+fn acquire_opening_permit(
+    openings: Option<&Arc<Semaphore>>,
+    opening: &OperationContext,
+) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
+    opening.check().map_err(client_stopped_status)?;
+    let Some(openings) = openings else {
+        return Ok(None);
+    };
+    Arc::clone(openings)
+        .try_acquire_owned()
+        .map(Some)
+        .map_err(|_| {
+            opening.stopped().map_or_else(
+                || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
+                client_stopped_status,
+            )
+        })
 }
 
 fn earliest(left: Option<Deadline>, right: Option<Deadline>) -> Option<Deadline> {
@@ -495,7 +520,7 @@ fn apply_forwarded_timeout(
     };
     let remaining = deadline.remaining();
     if remaining.is_zero() {
-        return Err(client_deadline());
+        return Err(client_deadline_status());
     }
     crate::protocol::set_grpc_timeout(headers, remaining);
     Ok(())
@@ -503,7 +528,7 @@ fn apply_forwarded_timeout(
 
 fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
     if error_chain::contains::<tonic::TimeoutExpired>(error) {
-        return client_deadline();
+        return client_deadline_status();
     }
     tracing::warn!(error = %DisplayErrorChain(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")

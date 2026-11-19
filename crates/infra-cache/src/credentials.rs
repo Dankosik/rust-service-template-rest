@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 use crate::CacheError;
 
 const DEFAULT_USER: &str = "default";
-const PASSWORD_FILE_BYTES: usize = 16 * 1024;
+const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(derive_more::Debug)]
 #[debug("PasswordFile {{ .. }}")]
@@ -98,7 +98,7 @@ pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec
 }
 
 fn read_password_file(path: &Path) -> Result<String, ErrorKind> {
-    let bytes = read_regular_file(path, PASSWORD_FILE_BYTES).map_err(|error| error.kind())?;
+    let bytes = read_regular_file(path, MAX_PASSWORD_FILE_BYTES).map_err(|error| error.kind())?;
     String::from_utf8(bytes).map_err(|_| ErrorKind::InvalidData)
 }
 

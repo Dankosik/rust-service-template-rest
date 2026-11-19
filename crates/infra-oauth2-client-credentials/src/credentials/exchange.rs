@@ -210,7 +210,7 @@ impl ExchangeTokens {
     ) -> Result<Arc<Token>, AcquisitionError> {
         let key = SubjectKey::of(subject);
         let registration = self.registration();
-        registration.check_admission(deadline)?;
+        registration.check_active(deadline)?;
         let result = if let Some(token) = self.0.state.reusable(key).await {
             Ok(token)
         } else {
@@ -221,7 +221,7 @@ impl ExchangeTokens {
             .await
             .map_err(|_| deadline.expiry_error)?
         };
-        registration.check_admission(deadline)?;
+        registration.check_active(deadline)?;
         result
     }
 
@@ -234,7 +234,7 @@ impl ExchangeTokens {
         let registration = self.registration();
         let state = &self.0.state;
         loop {
-            registration.check_admission(deadline)?;
+            registration.check_active(deadline)?;
             match state.join(key) {
                 ExchangeFlight::Leader(leader) => {
                     let result = if let Some(token) = state.reusable(key).await {
@@ -242,7 +242,7 @@ impl ExchangeTokens {
                     } else {
                         self.0.fetch(key, subject, deadline).await
                     };
-                    registration.check_admission(deadline)?;
+                    registration.check_active(deadline)?;
                     leader.publish(result.clone());
                     return result;
                 }

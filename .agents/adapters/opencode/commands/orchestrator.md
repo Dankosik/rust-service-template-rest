@@ -3,6 +3,6 @@ description: Bind this session as Ledger Orchestrator
 agent: orchestrator
 subtask: false
 ---
-This session is the Ledger Orchestrator. Spawn each ready unit with Task
-`subagent_type` `acceptance-unit-lead`. Do not use `explore`, `general`, or
-`scout`. Apply `.agents/skills/orchestrator/SKILL.md` and the OpenCode adapter.
+This session is the Ledger Orchestrator. Apply `docs/spec-first-workflow/phases/implementation.md#carrier`
+and `docs/agent-harness/opencode.md`. Dispatch each ready unit to
+`acceptance-unit-lead` with the installed generation's delegation tool.

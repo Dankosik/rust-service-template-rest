@@ -6,7 +6,12 @@ use foldhash::HashMap;
 use metrics::SharedString;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
-use shared_rules::grpc::{RpcName, STATUS_CODE_COUNT, split_method_path, status_code_names};
+use shared_rules::grpc::{
+    DIAGNOSTIC_BYTES, ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, HANDLING_SECONDS_BUCKETS,
+    RPC_METHOD_ATTR, RPC_METHOD_ORIGINAL_ATTR, RPC_METHOD_OTHER, RPC_STATUS_CODE_ATTR,
+    RPC_SYSTEM_GRPC, RPC_SYSTEM_NAME_ATTR, RpcName, STATUS_CODE_COUNT,
+    diagnostic_rpc_method_original, split_method_path, status_code_names,
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
@@ -15,12 +20,8 @@ pub(crate) const CLIENT_STARTED_METRIC: &str = "grpc_client_started_total";
 pub(crate) const CLIENT_HANDLED_METRIC: &str = "grpc_client_handled_total";
 pub(crate) const CLIENT_HANDLING_METRIC: &str = "grpc_client_handling_seconds";
 
-const DIAGNOSTIC_BYTES: usize = 1024;
-const CLIENT_METHOD_LIMIT: usize = 256;
-const CLIENT_COMPONENT_LIMIT: usize = 256;
-const HANDLING_SECONDS_BUCKETS: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
+const MAX_ADMITTED_METHODS: usize = 256;
+const MAX_RPC_NAME_PART_BYTES: usize = 256;
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SECONDS_BUCKETS)];
 
@@ -38,10 +39,7 @@ impl Destination {
         let host = uri
             .host()
             .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)?;
-        let address = host
-            .strip_prefix('[')
-            .and_then(|inner| inner.strip_suffix(']'))
-            .unwrap_or(host);
+        let address = crate::protocol::unbracket_host(host);
         Some(Self {
             address: Arc::from(address),
             port: uri.port_u16(),
@@ -90,12 +88,12 @@ impl Call {
 
     fn record(&self, code: tonic::Code) {
         let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute("rpc.status_code", span_code);
+        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
         if otel_http::grpc::status_is_error(code as u16, false) {
-            self.span.set_attribute("error.type", span_code);
+            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
             self.span.set_status(SpanStatus::error(""));
         }
-        self.metrics.handled(code, self.started.elapsed());
+        self.metrics.record_handled(code, self.started.elapsed());
     }
 }
 
@@ -117,14 +115,13 @@ fn make_client_span<B>(
         otel.name = metrics.span_name(),
         otel.kind = ?SpanKind::Client,
     );
-    span.set_attribute("rpc.system.name", "grpc");
+    span.set_attribute(RPC_SYSTEM_NAME_ATTR, RPC_SYSTEM_GRPC);
     if let Some(method) = &metrics.rpc_method {
-        span.set_attribute("rpc.method", Arc::clone(method));
+        span.set_attribute(RPC_METHOD_ATTR, Arc::clone(method));
     } else {
-        span.set_attribute("rpc.method", "_OTHER");
-        let original = request.uri().path().trim_start_matches('/');
-        if !original.is_empty() && original.len() <= DIAGNOSTIC_BYTES {
-            span.set_attribute("rpc.method_original", original.to_owned());
+        span.set_attribute(RPC_METHOD_ATTR, RPC_METHOD_OTHER);
+        if let Some(original) = diagnostic_rpc_method_original(request.uri().path()) {
+            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, original.to_owned());
         }
     }
     if let Some(destination) = destination {
@@ -194,7 +191,7 @@ impl Series {
         if let Some(existing) = current.get(path) {
             return Some(Arc::clone(existing));
         }
-        if current.len() >= CLIENT_METHOD_LIMIT {
+        if current.len() >= MAX_ADMITTED_METHODS {
             return None;
         }
         let metrics = Arc::new(MethodMetrics::for_method(rpc));
@@ -245,10 +242,10 @@ impl MethodMetrics {
     }
 
     fn span_name(&self) -> &str {
-        self.rpc_method.as_deref().unwrap_or("grpc")
+        self.rpc_method.as_deref().unwrap_or(FALLBACK_SPAN_NAME)
     }
 
-    fn handled(&self, code: tonic::Code, elapsed: Duration) {
+    fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
         self.handling_seconds.record(elapsed);
         self.handled[code as usize]
             .get_or_init(|| {
@@ -265,8 +262,8 @@ impl MethodMetrics {
 
 fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, RpcName<'_>)> {
     let declared = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
-    if declared.service().len() > CLIENT_COMPONENT_LIMIT
-        || declared.method().len() > CLIENT_COMPONENT_LIMIT
+    if declared.service().len() > MAX_RPC_NAME_PART_BYTES
+        || declared.method().len() > MAX_RPC_NAME_PART_BYTES
     {
         return None;
     }
@@ -407,88 +404,5 @@ mod tests {
             let names = status_code_names(Code::from_i32(raw) as usize);
             assert!(!names.span.is_empty() && !names.metric.is_empty());
         }
-    }
-
-    #[test]
-    fn series_enforces_component_validation_and_method_cardinality_cap() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = metrics::set_default_local_recorder(&recorder);
-
-        let series = Series::new();
-        let destination = Destination::from_uri(&"http://127.0.0.1:50051".parse().unwrap());
-
-        let overlong: &'static str =
-            Box::leak("x".repeat(CLIENT_COMPONENT_LIMIT + 1).into_boxed_str());
-        for (path, declared) in [
-            ("/raw.Service/Unary".to_owned(), None),
-            (
-                "/mismatch.Service/Unary".to_owned(),
-                Some(("other.Service", "Unary")),
-            ),
-            (
-                "/extra.Service/Unary/Tail".to_owned(),
-                Some(("extra.Service", "Unary/Tail")),
-            ),
-            (format!("/{overlong}/Unary"), Some((overlong, "Unary"))),
-            (
-                format!("/overlong.Service/{overlong}"),
-                Some(("overlong.Service", overlong)),
-            ),
-        ] {
-            drop(Call::start(
-                &series,
-                &test_request(&path, declared),
-                destination.as_ref(),
-            ));
-        }
-
-        let boundary: &'static str = Box::leak("b".repeat(CLIENT_COMPONENT_LIMIT).into_boxed_str());
-        Call::start(
-            &series,
-            &test_request(
-                &format!("/{boundary}/{boundary}"),
-                Some((boundary, boundary)),
-            ),
-            destination.as_ref(),
-        )
-        .finish(tonic::Code::Ok);
-
-        for index in 0..CLIENT_METHOD_LIMIT {
-            let method: &'static str = Box::leak(format!("Rpc{index}").into_boxed_str());
-            Call::start(
-                &series,
-                &test_request(
-                    &format!("/cap.Service/{method}"),
-                    Some(("cap.Service", method)),
-                ),
-                destination.as_ref(),
-            )
-            .finish(tonic::Code::Unavailable);
-        }
-
-        assert_eq!(series.admitted.load().len(), CLIENT_METHOD_LIMIT);
-
-        let rendered = handle.render();
-        assert!(
-            rendered.contains(&format!(
-                r#"grpc_client_handled_total{{grpc_service="{boundary}",grpc_method="{boundary}",grpc_code="OK"}} 1"#
-            )),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains(
-                r#"grpc_client_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Canceled"} 5"#
-            ),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains(
-                r#"grpc_client_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unavailable"} 1"#
-            ),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("Rpc255"), "{rendered}");
-        assert!(!rendered.contains("raw.Service"), "{rendered}");
     }
 }

@@ -99,7 +99,10 @@ pub enum Error {
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
-    #[error("configuration inputs are invalid: {}", join_input_errors(.0))]
+    #[error(
+        "configuration inputs are invalid: {}",
+        crate::validate::join_errors(.0)
+    )]
     InputErrors(Vec<Error>),
     #[error("load configuration: {0}")]
     Merge(String),
@@ -113,14 +116,6 @@ impl From<ValidationErrors> for Error {
     fn from(errors: ValidationErrors) -> Self {
         Self::Validate(errors)
     }
-}
-
-fn join_input_errors(errors: &[Error]) -> String {
-    errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 pub fn load(
@@ -268,49 +263,19 @@ fn merge_inputs<T: DeserializeOwned>(
     files: Vec<ScannedFile>,
     variables: variables::Variables,
 ) -> Result<T, Error> {
+    reject_table_overrides(&files, &variables)?;
+    reject_surviving_datetimes(&files, &variables)?;
     let mut builder = config::Config::builder();
-    let mut table_keys = BTreeSet::new();
-    let mut datetime_keys = BTreeMap::new();
     for file in files {
-        if let Some(key) =
-            record_tables_and_find_override(&file.table, &mut table_keys, &mut Vec::new())
-        {
-            return Err(Error::TableOverride {
-                key,
-                input: file.path.display().to_string(),
-            });
-        }
-        record_datetimes(&file.table, &file.path, &mut Vec::new(), &mut datetime_keys);
         builder = builder.add_source(file);
-    }
-    if let Some(variable) = variables
-        .values()
-        .find(|variable| table_keys.contains(&variable.key))
-    {
-        return Err(Error::TableOverride {
-            key: variable.key.clone(),
-            input: variable.original_name.to_ascii_uppercase(),
-        });
     }
     let mut variable_sources = Vec::with_capacity(variables.len());
     for variable in variables.into_values() {
-        let mut path = variable.key.as_str();
-        datetime_keys.remove(path);
-        while let Some((parent, _)) = path.rsplit_once('.') {
-            datetime_keys.remove(parent);
-            path = parent;
-        }
         let value = config::Value::new(Some(&variable.source.as_str().to_owned()), variable.value);
         builder = builder
             .set_override(&variable.key, value)
             .map_err(|error| Error::Merge(error.to_string()))?;
         variable_sources.push((variable.key, variable.source));
-    }
-    if let Some((key, path)) = datetime_keys.into_iter().next() {
-        return Err(Error::Deserialize(format!(
-            "key `{key}` in {} must not be an unquoted TOML datetime; quote it as a string",
-            path.display()
-        )));
     }
     let merged = builder
         .build()
@@ -328,6 +293,65 @@ fn merge_inputs<T: DeserializeOwned>(
         )));
     }
     merged.try_deserialize().map_err(rejection)
+}
+
+fn reject_table_overrides(
+    files: &[ScannedFile],
+    variables: &variables::Variables,
+) -> Result<(), Error> {
+    let mut table_keys = BTreeSet::new();
+    let mut key_segments = Vec::new();
+    for file in files {
+        if let Some(key) =
+            record_tables_and_find_override(&file.table, &mut table_keys, &mut key_segments)
+        {
+            return Err(Error::TableOverride {
+                key,
+                input: file.path.display().to_string(),
+            });
+        }
+    }
+    if let Some(variable) = variables
+        .values()
+        .find(|variable| table_keys.contains(&variable.key))
+    {
+        return Err(Error::TableOverride {
+            key: variable.key.clone(),
+            input: variable.original_name.to_ascii_uppercase(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_surviving_datetimes(
+    files: &[ScannedFile],
+    variables: &variables::Variables,
+) -> Result<(), Error> {
+    let mut datetime_keys = BTreeMap::new();
+    let mut key_segments = Vec::new();
+    for file in files {
+        update_datetime_keys(
+            &file.table,
+            &file.path,
+            &mut key_segments,
+            &mut datetime_keys,
+        );
+    }
+    for variable in variables.values() {
+        let mut key = variable.key.as_str();
+        datetime_keys.remove(key);
+        while let Some((parent, _)) = key.rsplit_once('.') {
+            datetime_keys.remove(parent);
+            key = parent;
+        }
+    }
+    if let Some((key, path)) = datetime_keys.into_iter().next() {
+        return Err(Error::Deserialize(format!(
+            "key `{key}` in {} must not be an unquoted TOML datetime; quote it as a string",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, derive_more::Debug)]
@@ -413,7 +437,7 @@ fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
     })
 }
 
-fn record_datetimes<'a>(
+fn update_datetime_keys<'a>(
     table: &'a toml::Table,
     file_path: &Path,
     key_segments: &mut Vec<&'a str>,
@@ -424,7 +448,7 @@ fn record_datetimes<'a>(
         let dotted = key_segments.join(".");
         if let toml::Value::Table(nested) = value {
             datetime_keys.remove(&dotted);
-            record_datetimes(nested, file_path, key_segments, datetime_keys);
+            update_datetime_keys(nested, file_path, key_segments, datetime_keys);
         } else if contains_datetime(value) {
             datetime_keys.insert(dotted, file_path.to_owned());
         } else {

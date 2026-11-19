@@ -181,6 +181,8 @@ const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 
 const SPAN_QUEUE_CAPACITY: usize = 16_384;
 
+const EXPORTER_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
 pub async fn install_tracer_provider(
@@ -199,57 +201,60 @@ async fn prepare_tracer_provider(
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
     let collector = CollectorConfig::resolve(options, trust, &env)?;
-    let timeout = export_timeout(&env);
 
-    let mut builder = SdkTracerProvider::builder()
+    let builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
         .with_sampler(options.sampler.to_sdk());
 
     let drain = Arc::new(Mutex::new(DrainObservation::default()));
-    let exporter_state = match collector {
-        None => ExporterState::Disabled,
-        Some(collector) => {
-            let (compression, ignored_compression) = compression(&env);
-            let (batch_config, invalid_batch_sizes) = batch_config(&env);
-            let trust_files = trust.clone();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            let preparation = tokio::task::spawn_blocking(move || {
-                span_exporter(
-                    collector.url.as_str(),
-                    collector.headers,
-                    &trust_files,
-                    timeout,
-                    compression,
-                )
-            });
-            let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
-                Ok(result) if tokio::time::Instant::now() < deadline => {
-                    result.map_err(|_| TracingError::ClientThread)??
-                }
-                _ => return Err(TracingError::PreparationTimeout),
-            };
-            builder = builder.with_span_processor(
-                sdktrace::BatchSpanProcessor::builder(ObservedExporter {
-                    inner: span_exporter,
-                    timeout,
-                    drain: Arc::clone(&drain),
-                })
-                .with_batch_config(batch_config)
-                .build(),
-            );
-            ExporterState::Initialized {
-                endpoint_source: collector.source,
-                has_certificate_file: trust.certificate.is_some(),
-                has_client_certificate: trust.client_certificate.is_some(),
-                ignored_compression,
-                invalid_batch_sizes,
-            }
-        }
+    let Some(collector) = collector else {
+        return Ok(TracerProviderHandle {
+            provider: builder.build(),
+            exporter_state: ExporterState::Disabled,
+            drain,
+        });
     };
+    let timeout = export_timeout(&env);
+    let (compression, ignored_compression) = compression(&env);
+    let (batch_config, invalid_batch_sizes) = batch_config(&env);
+    let trust_files = trust.clone();
+    let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
+    let preparation = tokio::task::spawn_blocking(move || {
+        span_exporter(
+            collector.url.as_str(),
+            collector.headers,
+            &trust_files,
+            timeout,
+            compression,
+        )
+    });
+    let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => {
+            result.map_err(|_| TracingError::ClientThread)??
+        }
+        _ => return Err(TracingError::PreparationTimeout),
+    };
+    let provider = builder
+        .with_span_processor(
+            sdktrace::BatchSpanProcessor::builder(ObservedExporter {
+                inner: span_exporter,
+                timeout,
+                drain: Arc::clone(&drain),
+            })
+            .with_batch_config(batch_config)
+            .build(),
+        )
+        .build();
 
     Ok(TracerProviderHandle {
-        provider: builder.build(),
-        exporter_state,
+        provider,
+        exporter_state: ExporterState::Initialized {
+            endpoint_source: collector.source,
+            has_certificate_file: trust.certificate.is_some(),
+            has_client_certificate: trust.client_certificate.is_some(),
+            ignored_compression,
+            invalid_batch_sizes,
+        },
         drain,
     })
 }
@@ -298,7 +303,7 @@ impl TracerProviderHandle {
         sdk_budget: Duration,
         deadline: tokio::time::Instant,
     ) -> ProviderShutdown {
-        self.drain.lock().draining = true;
+        self.drain.lock().begin_drain();
         let allowance = deadline.saturating_duration_since(tokio::time::Instant::now());
         let provider = self.provider;
         let job = tokio::task::spawn_blocking(move || {
@@ -327,7 +332,7 @@ impl TracerProviderHandle {
         if tokio::time::Instant::now() >= deadline {
             observed_here |= ProviderShutdownReasons::DEADLINE;
         }
-        let reasons = self.drain.lock().reasons | observed_here;
+        let reasons = self.drain.lock().reasons() | observed_here;
         if reasons.is_empty() {
             ProviderShutdown::Completed
         } else {
@@ -357,16 +362,27 @@ bitflags::bitflags! {
 }
 
 #[derive(Debug, Default)]
-struct DrainObservation {
-    draining: bool,
-    reasons: ProviderShutdownReasons,
+enum DrainObservation {
+    #[default]
+    Idle,
+    Draining(ProviderShutdownReasons),
 }
 
 impl DrainObservation {
+    fn begin_drain(&mut self) {
+        *self = Self::Draining(ProviderShutdownReasons::empty());
+    }
+
+    fn reasons(&self) -> ProviderShutdownReasons {
+        match self {
+            Self::Idle => ProviderShutdownReasons::empty(),
+            Self::Draining(reasons) => *reasons,
+        }
+    }
+
     fn latch(drain: &Mutex<Self>, failure: SdkFailure, operation: ProviderShutdownReasons) {
-        let mut drain = drain.lock();
-        if drain.draining {
-            drain.reasons |= operation | failure.reason();
+        if let Self::Draining(reasons) = &mut *drain.lock() {
+            *reasons |= operation | failure.reason();
         }
     }
 }

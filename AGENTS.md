@@ -178,6 +178,15 @@ Treat Markdown links as pointers rather than automatic reads: load an owner
 immediately before its first governed action or claim, and re-evaluate only when
 evidence changes phase, risk, ownership, proof, or harness control.
 
+Choose the route from the user's request in ordinary language. For a request
+to execute an existing plan, enter [Implementation](docs/spec-first-workflow/phases/implementation.md#carrier)
+with its `tasks.md`. For a new change, use Direct Work when it fits. When the
+change needs planning, the current session owns Intake and coordinates the
+[workflow through Planning](docs/spec-first-workflow.md#macro-phases).
+The user starts implementation in a new session after the plan is ready.
+Keep discussion, research, verification, and phase-only requests within their
+requested boundaries.
+
 ### Direct Work
 
 For a clear, local, reversible, single-owner outcome with bounded proof and

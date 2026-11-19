@@ -712,7 +712,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             WorkerError::from(refused).to_string(),
-            "configuration is invalid: http.grace_period: (30s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
+            "configuration is invalid: http.grace_period: (30s) must be >= http.drain_timeout (25s) plus the 18s 500ms jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
         );
     }
 }

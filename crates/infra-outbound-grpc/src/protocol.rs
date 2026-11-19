@@ -1,9 +1,15 @@
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use shared_rules::grpc::{MAX_TIMEOUT_DIGITS, encode_timeout, parse_timeout};
+use shared_rules::grpc::{MAX_TIMEOUT_DIGITS, TIMEOUT_HEADER, encode_timeout, parse_timeout};
 
-pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
+pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static(TIMEOUT_HEADER);
+
+pub(crate) fn unbracket_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
 
 #[must_use]
 pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {

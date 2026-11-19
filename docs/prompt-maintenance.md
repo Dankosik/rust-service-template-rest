@@ -22,7 +22,9 @@ Cursor's [rules](https://cursor.com/docs/rules.md),
 [subagents](https://cursor.com/docs/subagents.md) own current Cursor controls.
 OpenCode's [agents](https://opencode.ai/docs/agents),
 [skills](https://opencode.ai/docs/skills), [config](https://opencode.ai/docs/config),
-and [CLI](https://opencode.ai/docs/cli) own current OpenCode 1 controls.
+and [CLI](https://opencode.ai/docs/cli) describe the current release. Use
+the installed generation's schema and matching release source for differences
+between OpenCode 1 and 2.
 Antigravity's [rules](https://antigravity.google/docs/rules.md),
 [skills](https://antigravity.google/docs/skills.md), and
 [subagents](https://antigravity.google/docs/subagents.md) own current

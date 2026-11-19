@@ -380,9 +380,7 @@ async fn buffer_response(
             append_with_capacity_cap(&mut collected, &data, limit);
         }
     }
-    let buffered = Bytes::from(collected);
-    drop(body);
-    Ok(Response::from_parts(parts, buffered))
+    Ok(Response::from_parts(parts, Bytes::from(collected)))
 }
 
 impl From<Stopped> for Error {

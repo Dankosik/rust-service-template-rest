@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{
     DiscoveryTransportError, KeycloakError, Options, Registration, TransportBuildFailure,
-    options::{Scheme, admit_options, assertion_issuer, strict_provider_url, token_endpoint},
+    options::{Scheme, assertion_issuer, strict_provider_url, token_endpoint, validate_options},
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
 
@@ -33,17 +33,17 @@ impl Registration {
         options: Options,
         scheme: Scheme,
     ) -> Result<Self, KeycloakError> {
-        let admitted = admit_options(options, scheme, scheme)?;
+        let validated = validate_options(options, scheme, scheme)?;
         verify_metadata(
-            &admitted.options.assertion_audience,
-            &admitted.issuer,
-            &admitted.endpoint,
+            &validated.options.assertion_audience,
+            &validated.issuer,
+            &validated.endpoint,
             scheme,
         )
         .await?;
         let token_http =
-            build_client(scheme, &admitted.endpoint).map_err(TransportBuildFailure::token_url)?;
-        Self::build(admitted, token_http).map_err(KeycloakError::from)
+            build_client(scheme, &validated.endpoint).map_err(TransportBuildFailure::token_url)?;
+        Self::build(validated, token_http).map_err(KeycloakError::from)
     }
 }
 

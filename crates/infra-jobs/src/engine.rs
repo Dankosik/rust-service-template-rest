@@ -25,8 +25,8 @@ pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 pub struct Engine {
-    shared: Arc<Shared>,
-    additional: Vec<Arc<Shared>>,
+    primary_group: Arc<Shared>,
+    additional_groups: Vec<Arc<Shared>>,
 }
 
 pub struct Started {
@@ -81,14 +81,14 @@ impl Engine {
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self {
-            shared: Arc::new(Shared::new(
+            primary_group: Arc::new(Shared::new(
                 pool,
                 registry,
                 max_workers,
                 uuid::Uuid::new_v4(),
                 Arc::default(),
             )),
-            additional: Vec::new(),
+            additional_groups: Vec::new(),
         }
     }
 
@@ -99,18 +99,18 @@ impl Engine {
         {
             return Err(KindError::Duplicate(duplicate));
         }
-        self.additional.push(Arc::new(Shared::new(
-            self.shared.pool.clone(),
+        self.additional_groups.push(Arc::new(Shared::new(
+            self.primary_group.pool.clone(),
             registry,
             max_workers,
-            self.shared.worker_id,
-            Arc::clone(&self.shared.lifecycle),
+            self.primary_group.worker_id,
+            Arc::clone(&self.primary_group.lifecycle),
         )));
         Ok(())
     }
 
     pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<Shared>> {
-        std::iter::once(&self.shared).chain(&self.additional)
+        std::iter::once(&self.primary_group).chain(&self.additional_groups)
     }
 
     pub(crate) fn group_for_kind(&self, name: &str) -> Option<&Shared> {
@@ -120,11 +120,11 @@ impl Engine {
     }
 
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        crate::session::check_startup(&self.shared.pool).await
+        crate::session::check_startup(&self.primary_group.pool).await
     }
 
     pub async fn remove_expired(&self) -> Result<u64, OperationError> {
-        maintenance::remove_expired(&self.shared).await
+        maintenance::remove_expired(&self.primary_group).await
     }
 
     fn kind_names(&self) -> impl Iterator<Item = &'static str> + '_ {
@@ -153,13 +153,17 @@ impl Engine {
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         let kinds: Vec<_> = self.kind_names().collect();
         self.init_metrics(&kinds);
-        let groups = 1 + self.additional.len();
-        tracing::info!(worker.id = %self.shared.worker_id, groups, "jobs_engine_starting");
+        let groups = 1 + self.additional_groups.len();
+        tracing::info!(
+            worker.id = %self.primary_group.worker_id,
+            groups,
+            "jobs_engine_starting"
+        );
         let engine = Arc::new(self);
         let background = cancel.child_token();
         let stop = background.child_token();
         let failure = CancellationToken::new();
-        let lifecycle = Arc::clone(&engine.shared.lifecycle);
+        let lifecycle = Arc::clone(&engine.primary_group.lifecycle);
         lifecycle.drain.start_claim_loops(groups);
         for group in engine.groups() {
             spawn_guarded(
@@ -172,7 +176,7 @@ impl Engine {
                 failure.clone(),
             );
         }
-        let listener = infra_postgres::notifications_enabled(&engine.shared.pool)
+        let listener = infra_postgres::notifications_enabled(&engine.primary_group.pool)
             .then(|| Run::Listener(Arc::clone(&engine)));
         let background_tasks = [Run::Retention, Run::Sampling(kinds)]
             .into_iter()
@@ -180,7 +184,7 @@ impl Engine {
         for run in background_tasks {
             spawn_guarded(
                 tracker,
-                Arc::clone(&engine.shared),
+                Arc::clone(&engine.primary_group),
                 run,
                 background.clone(),
                 failure.clone(),
@@ -694,7 +698,7 @@ mod tests {
                 },
             );
             let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
-            let shared = &engine.shared;
+            let shared = &engine.primary_group;
             let job_id = crate::JobId(uuid::Uuid::nil());
             let guard = SupervisorGuard::new(
                 Arc::clone(&shared.lifecycle.drain),
@@ -767,11 +771,11 @@ mod tests {
                 Ok(())
             });
             let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
-            engine.shared.lifecycle.drain.start_claim_loops(1);
+            engine.primary_group.lifecycle.drain.start_claim_loops(1);
             let claim_loop =
-                DrainParticipant::ClaimLoop(Arc::clone(&engine.shared.lifecycle.drain));
+                DrainParticipant::ClaimLoop(Arc::clone(&engine.primary_group.lifecycle.drain));
             let started = Started {
-                lifecycle: Arc::clone(&engine.shared.lifecycle),
+                lifecycle: Arc::clone(&engine.primary_group.lifecycle),
                 _background: CancellationToken::new().drop_guard(),
                 stop: CancellationToken::new(),
                 failure: CancellationToken::new(),
@@ -919,12 +923,12 @@ mod tests {
         });
         let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
         let tracker = TaskTracker::new();
-        let registered = engine.shared.registry.get("ordinary").unwrap();
+        let registered = engine.primary_group.registry.get("ordinary").unwrap();
         for case in ["unpolled", "abort", "expired"] {
             let stop = CancellationToken::new();
             let failure = CancellationToken::new();
             let future = crate::attempt::supervise(
-                Arc::clone(&engine.shared),
+                Arc::clone(&engine.primary_group),
                 crate::claim::Claimed {
                     job: claim::RunningJob {
                         registered: Arc::clone(registered),
@@ -941,7 +945,7 @@ mod tests {
                         payload: Ok(b"null".to_vec()),
                         trace: crate::trace_context::Carrier::default(),
                     },
-                    slot: Arc::clone(&engine.shared.slots)
+                    slot: Arc::clone(&engine.primary_group.slots)
                         .try_acquire_owned()
                         .unwrap(),
                     kind_slot: None,
@@ -953,7 +957,7 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
-                    Arc::clone(&engine.shared.lifecycle.drain),
+                    Arc::clone(&engine.primary_group.lifecycle.drain),
                     stop.clone(),
                     failure.clone(),
                     crate::JobId(uuid::Uuid::nil()),
@@ -981,12 +985,12 @@ mod tests {
             }
             assert_eq!(failure.is_cancelled(), case != "expired", "{case}");
             assert_eq!(stop.is_cancelled(), case != "expired", "{case}");
-            assert_eq!(engine.shared.slots.available_permits(), 1, "{case}");
+            assert_eq!(engine.primary_group.slots.available_permits(), 1, "{case}");
             assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
         }
         assert_eq!(
             engine
-                .shared
+                .primary_group
                 .lifecycle
                 .counters
                 .uncertain

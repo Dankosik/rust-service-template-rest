@@ -37,7 +37,7 @@ pub async fn prepare_jwt(
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
     let provider = ProviderClient::try_new();
-    let provider = complete_startup_stage(startup_deadline, PreparationPhase::Client, provider)?;
+    let provider = enforce_startup_deadline(startup_deadline, PreparationPhase::Client, provider)?;
     prepare_with_provider(options, provider, cancel, startup_deadline).await
 }
 
@@ -59,7 +59,7 @@ async fn prepare_with_provider(
         ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)
     };
     let claim_policy =
-        complete_startup_stage(startup_deadline, PreparationPhase::Options, claim_policy)?;
+        enforce_startup_deadline(startup_deadline, PreparationPhase::Options, claim_policy)?;
     let source = match options.jwks_uri {
         Some(uri) => JwksSource::Configured(uri),
         None => JwksSource::Discovery(options.issuer),
@@ -79,7 +79,7 @@ async fn prepare_with_provider(
         .as_ref()
         .err()
         .map_or(PreparationPhase::Jwks, PreparationError::phase);
-    let key_set = complete_startup_stage(startup_deadline, phase, key_set)?;
+    let key_set = enforce_startup_deadline(startup_deadline, phase, key_set)?;
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
@@ -96,14 +96,14 @@ async fn prepare_with_provider(
         cancel,
         options.jwks_max_age,
     ));
-    complete_startup_stage(
+    enforce_startup_deadline(
         startup_deadline,
         PreparationPhase::Jwks,
         Ok((verifier, refresh_task)),
     )
 }
 
-fn complete_startup_stage<T>(
+fn enforce_startup_deadline<T>(
     deadline: Instant,
     phase: PreparationPhase,
     result: Result<T, PreparationError>,
@@ -115,11 +115,11 @@ fn complete_startup_stage<T>(
 }
 
 impl PreparationError {
-    fn issuer_mismatch(configured: &IssuerUrl, discovered: &str) -> Self {
+    fn issuer_mismatch(configured: &IssuerUrl, discovered: String) -> Self {
         let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
-            && IssuerUrl::parse(discovered).is_ok()
+            && IssuerUrl::parse(&discovered).is_ok()
         {
-            discovered.to_owned()
+            discovered
         } else {
             "<issuer value omitted>".to_owned()
         };
@@ -137,7 +137,7 @@ pub(crate) async fn discover_jwks_uri(
 ) -> Result<EndpointUrl, PreparationError> {
     let discovery = fetch_discovery(provider, issuer, deadline).await?;
     if discovery.issuer != issuer.as_str() {
-        return Err(PreparationError::issuer_mismatch(issuer, &discovery.issuer));
+        return Err(PreparationError::issuer_mismatch(issuer, discovery.issuer));
     }
     EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
         PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
@@ -149,9 +149,7 @@ async fn fetch_discovery(
     issuer: &IssuerUrl,
     deadline: Instant,
 ) -> Result<Discovery, PreparationError> {
-    let error = |reason| PreparationError::new(PreparationPhase::Discovery, reason);
-    let path = issuer.url().path();
-    let path = path.trim_suffix('/');
+    let path = issuer.url().path().trim_suffix('/');
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
     let discovery = match fetch_metadata(provider, &openid, deadline).await {
@@ -169,7 +167,7 @@ async fn fetch_discovery(
         }
         result => result,
     };
-    discovery.map_err(error)
+    discovery.map_err(|reason| PreparationError::new(PreparationPhase::Discovery, reason))
 }
 
 async fn fetch_metadata(
@@ -223,7 +221,8 @@ mod tests {
             "authentication preparation failed during Jwks: Fetch(Status(503))"
         );
         let configured = IssuerUrl::parse("https://issuer.example").unwrap();
-        let error = PreparationError::issuer_mismatch(&configured, "https://issuer.example/");
+        let error =
+            PreparationError::issuer_mismatch(&configured, "https://issuer.example/".to_owned());
         assert_eq!(error.phase(), PreparationPhase::Discovery);
         assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
         assert_eq!(
@@ -237,7 +236,7 @@ mod tests {
             format!("https://issuer.example/{}", "a".repeat(256)),
             "not an issuer\nprivate".to_owned(),
         ] {
-            let rendered = PreparationError::issuer_mismatch(&configured, &discovered).to_string();
+            let rendered = PreparationError::issuer_mismatch(&configured, discovered).to_string();
             assert!(rendered.contains("<issuer value omitted>"), "{rendered}");
             assert!(!rendered.contains("private") && !rendered.contains("aaaa"));
         }
@@ -351,7 +350,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(6);
         let stage = PreparationPhase::Jwks;
         let parse_failure = PreparationError::new(stage, PreparationReason::Parse);
-        let complete = |result| super::complete_startup_stage(deadline, stage, result);
+        let complete = |result| super::enforce_startup_deadline(deadline, stage, result);
         assert_eq!(
             complete(Err(parse_failure.clone())),
             Err(parse_failure.clone())

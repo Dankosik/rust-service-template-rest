@@ -288,7 +288,7 @@ mod tests {
         );
         assert_eq!(
             verifier
-                .verify(token.as_bytes(), || Ok(NOW + 59))
+                .verify(token.as_bytes(), NOW + 59)
                 .unwrap()
                 .name()
                 .as_str(),
@@ -299,7 +299,7 @@ mod tests {
             JwtType::parse("example-svc+jwt").unwrap(),
             TrustRegistry::parse(&registry(&[("orders", &[&key])])).unwrap(),
         );
-        assert!(other.verify(token.as_bytes(), || Ok(NOW)).is_err());
+        assert!(other.verify(token.as_bytes(), NOW).is_err());
     }
 
     #[test]

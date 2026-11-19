@@ -24,7 +24,7 @@ fn is_name_byte(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-')
 }
 
-fn is_key_path(suffix: &str) -> bool {
+fn is_variable_suffix(suffix: &str) -> bool {
     suffix.split(ENV_SEPARATOR).all(|segment| {
         !segment.is_empty()
             && segment
@@ -67,7 +67,7 @@ pub(super) struct Variable {
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 
-fn admit(
+fn insert_variable(
     variables: &mut Variables,
     name: &str,
     suffix: &str,
@@ -123,7 +123,7 @@ fn read_environment(
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if !is_key_path(suffix) {
+        if !is_variable_suffix(suffix) {
             return Err(Error::MalformedEnvName {
                 name: name.into_owned(),
             });
@@ -133,7 +133,7 @@ fn read_environment(
                 name: name.into_owned(),
             });
         };
-        admit(
+        insert_variable(
             &mut variables,
             &name,
             suffix,
@@ -159,23 +159,23 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
-        let next_generation = if let Some(scan_dir) = generation.as_deref() {
-            let variables = read_secret_files(dir, scan_dir);
-            let current = projected_generation(dir)?;
-            let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
-                && matches!(
-                    &variables,
-                    Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
-                        if error.kind() == io::ErrorKind::NotFound
-                );
-            if current == generation && !retry_not_found {
-                return variables;
-            }
-            current
-        } else {
-            projected_generation(dir)?
+        let active = generation.take();
+        let Some(scan_dir) = active.as_deref() else {
+            generation = projected_generation(dir)?;
+            continue;
         };
-        generation = next_generation;
+        let variables = read_secret_files(dir, scan_dir);
+        let current = projected_generation(dir)?;
+        let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
+            && matches!(
+                &variables,
+                Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
+                    if error.kind() == io::ErrorKind::NotFound
+            );
+        if current == active && !retry_not_found {
+            return variables;
+        }
+        generation = current;
     }
 
     Err(Error::ReadSecretsDir {
@@ -250,7 +250,7 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
             continue;
         };
         let reported_path = reported_dir.join(&file_name);
-        if !is_key_path(suffix) {
+        if !is_variable_suffix(suffix) {
             return Err(Error::MalformedSecretName {
                 path: reported_path,
             });
@@ -259,7 +259,7 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
             path: reported_path,
             error,
         })?;
-        admit(
+        insert_variable(
             &mut variables,
             &name,
             suffix,

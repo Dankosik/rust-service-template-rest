@@ -241,48 +241,6 @@ async fn acl_denial_is_distinct_in_traces_and_keeps_the_response_series_and_conn
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_readonly_reply_reconnects_to_the_new_primary() {
-    let caller = OperationContext::unbounded();
-    let server = FakeServer::start().await;
-    let cache = Cache::start(CacheOptions {
-        command_timeout: Duration::from_millis(200),
-        ..options(&format!("redis://{}", server.address), true, true, None)
-    })
-    .await
-    .expect("start connect");
-    let namespace = cache.namespace(namespace!("failover"));
-    let ttl = Duration::from_secs(1);
-
-    namespace
-        .set(&caller, "key", b"value", ttl)
-        .await
-        .expect("set on the current primary");
-    server.primary.fetch_add(1, Ordering::SeqCst);
-    assert_eq!(
-        namespace.set(&caller, "key", b"value", ttl).await,
-        Err(SetError::Mutation(MutationError::NotApplied(
-            OperationError::Unavailable
-        )))
-    );
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if namespace.set(&caller, "key", b"value", ttl).await.is_ok() {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the cache stayed unavailable after the primary generation advanced"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        server.connections() >= 2,
-        "READONLY must open a connection to the new primary"
-    );
-}
-
 #[tokio::test]
 async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
     let caller = OperationContext::unbounded();
@@ -906,7 +864,7 @@ async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_replaced_connection_dials_without_waiting_for_a_call() {
+async fn a_readonly_reply_reconnects_to_the_new_primary_without_waiting_for_a_call() {
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true).await;
@@ -916,6 +874,7 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         .set(&caller, "key", b"value", ttl)
         .await
         .expect("set on the current primary");
+    let prior_connections = server.connections();
     server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set(&caller, "key", b"value", ttl).await,
@@ -928,9 +887,11 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         .wait_for(
             Duration::from_secs(5),
             "the replaced connection waited for a call before it dialed",
-            || server.connections() >= 2,
+            || server.connections() > prior_connections,
         )
         .await;
+    wait_until_connected(&cache, Duration::from_secs(1)).await;
+    assert_eq!(namespace.set(&caller, "key", b"value", ttl).await, Ok(()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

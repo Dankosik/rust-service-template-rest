@@ -258,12 +258,18 @@ fn validate_resident_delivery_bound(
     Ok(())
 }
 
+enum BrokerScheme {
+    Plaintext,
+    Tls,
+}
+
 fn validate_urls(urls: &[String], tls_first: bool, plaintext_admitted: bool, v: &mut Violations) {
     let mut plaintext = false;
     let mut all_valid = true;
     for (index, raw) in urls.iter().enumerate() {
-        match validate_url_is_plaintext(index, raw) {
-            Ok(is_plaintext) => plaintext |= is_plaintext,
+        match validate_broker_url(index, raw) {
+            Ok(BrokerScheme::Plaintext) => plaintext = true,
+            Ok(BrokerScheme::Tls) => {}
             Err(error) => {
                 v.reject(error);
                 all_valid = false;
@@ -286,7 +292,7 @@ fn validate_urls(urls: &[String], tls_first: bool, plaintext_admitted: bool, v: 
     }
 }
 
-fn validate_url_is_plaintext(index: usize, raw: &str) -> Result<bool, ValidationError> {
+fn validate_broker_url(index: usize, raw: &str) -> Result<BrokerScheme, ValidationError> {
     let key = format!("messaging.urls[{index}]");
     non_blank(&key, raw)?;
     if shared_rules::uri::has_whitespace_or_control(raw) {
@@ -309,8 +315,8 @@ fn validate_url_is_plaintext(index: usize, raw: &str) -> Result<bool, Validation
         ));
     }
     match url.scheme() {
-        "nats" => Ok(true),
-        "tls" => Ok(false),
+        "nats" => Ok(BrokerScheme::Plaintext),
+        "tls" => Ok(BrokerScheme::Tls),
         _ => Err(ValidationError::new(key, "must use nats:// or tls://")),
     }
 }

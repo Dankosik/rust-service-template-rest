@@ -48,10 +48,9 @@ impl State {
     }
 }
 
-enum Admission {
+enum MissAdmission {
     Answer(SignatureRefresh),
-    Join(u64),
-    Request(u64),
+    Wait(u64),
 }
 
 pub(crate) struct KeyStore {
@@ -95,30 +94,40 @@ impl KeyStore {
         (!Arc::ptr_eq(&installed, checked)).then(|| Arc::clone(&installed))
     }
 
+    fn admit_signature_miss(&self, checked: &Arc<KeySet>) -> MissAdmission {
+        let mut admission = MissAdmission::Answer(SignatureRefresh::NoNewerSet);
+        self.state.send_if_modified(|state| {
+            if state.stopped {
+                return false;
+            }
+            if let Some(keys) = self.newer_set(checked) {
+                admission = MissAdmission::Answer(SignatureRefresh::NewerSet(keys));
+                return false;
+            }
+            if self.worker_lost.is_cancelled() {
+                admission = MissAdmission::Answer(SignatureRefresh::WorkerLost);
+                return false;
+            }
+            if let Some(ticket) = state.pending() {
+                admission = MissAdmission::Wait(ticket);
+                return false;
+            }
+            if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
+                return false;
+            }
+            admission = MissAdmission::Wait(state.request_fetch());
+            true
+        });
+        admission
+    }
+
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
-        let mut admission = Admission::Answer(SignatureRefresh::NoNewerSet);
-        self.state.send_if_modified(|state| {
-            admission = if state.stopped {
-                Admission::Answer(SignatureRefresh::NoNewerSet)
-            } else if let Some(keys) = self.newer_set(checked) {
-                Admission::Answer(SignatureRefresh::NewerSet(keys))
-            } else if self.worker_lost.is_cancelled() {
-                Admission::Answer(SignatureRefresh::WorkerLost)
-            } else if let Some(ticket) = state.pending() {
-                Admission::Join(ticket)
-            } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
-                Admission::Answer(SignatureRefresh::NoNewerSet)
-            } else {
-                Admission::Request(state.request_fetch())
-            };
-            matches!(admission, Admission::Request(_))
-        });
-        let ticket = match admission {
-            Admission::Answer(answer) => return answer,
-            Admission::Join(ticket) | Admission::Request(ticket) => ticket,
+        let ticket = match self.admit_signature_miss(checked) {
+            MissAdmission::Answer(answer) => return answer,
+            MissAdmission::Wait(ticket) => ticket,
         };
         let mut state_changes = self.state.subscribe();
         match self
@@ -207,7 +216,7 @@ pub(crate) fn run_refresh_worker(
     cancel: CancellationToken,
     jwks_max_age: Duration,
 ) -> impl Future<Output = ()> {
-    let lifetime = store.worker_lost.clone().drop_guard();
+    let worker_lost_guard = store.worker_lost.clone().drop_guard();
     let next_period = move || refresh_period().min(jwks_max_age / 2);
     let mut next_refresh = Instant::now() + next_period();
     async move {
@@ -232,7 +241,7 @@ pub(crate) fn run_refresh_worker(
             }
         }
         store.stop();
-        lifetime.disarm();
+        worker_lost_guard.disarm();
     }
 }
 

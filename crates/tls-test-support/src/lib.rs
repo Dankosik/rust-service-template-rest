@@ -1,3 +1,8 @@
+#![expect(
+    clippy::expect_used,
+    reason = "fixture setup failures are test failures"
+)]
+
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -15,10 +20,6 @@ pub struct TlsMaterial {
 
 impl TlsMaterial {
     #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "fixture setup failures are test failures"
-    )]
     pub fn new(host: &str) -> Self {
         assert!(!host.is_empty(), "TLS fixture host must not be empty");
         let issuer = new_issuer();
@@ -42,10 +43,6 @@ impl TlsMaterial {
 }
 
 #[must_use]
-#[expect(
-    clippy::expect_used,
-    reason = "fixture setup failures are test failures"
-)]
 pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -59,10 +56,6 @@ pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
 
 // template:begin grpc:tls-fixtures-http-listener-config
 #[must_use]
-#[expect(
-    clippy::expect_used,
-    reason = "fixture setup failures are test failures"
-)]
 pub fn localhost_tls(alpn: &[u8]) -> (rustls::ServerConfig, rustls::ClientConfig) {
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     let material = TlsMaterial::new("localhost");

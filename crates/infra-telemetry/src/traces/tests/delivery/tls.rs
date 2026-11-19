@@ -36,14 +36,29 @@ impl Pki {
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
-    fn file(&self, variable: &'static str, name: &str, pem: &str) -> TrustFile {
+    fn file(
+        &self,
+        scope: SettingScope,
+        variable: &'static str,
+        name: &str,
+        pem: &str,
+    ) -> TrustFile {
         let path = self.files.path().join(name);
         std::fs::write(&path, pem).expect("write a PEM file");
-        TrustFile { variable, path }
+        TrustFile {
+            scope,
+            variable,
+            path,
+        }
     }
 
     fn certificate_file(&self) -> TrustFile {
-        self.file(CERTIFICATE_VARS[1], "ca.pem", &self.issuer.pem())
+        self.file(
+            SettingScope::Common,
+            CERTIFICATE_VARS[1],
+            "ca.pem",
+            &self.issuer.pem(),
+        )
     }
 
     fn client_files(&self, bundled: bool) -> (TrustFile, TrustFile) {
@@ -53,6 +68,7 @@ impl Pki {
         let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
         if bundled {
             let certificate = self.file(
+                SettingScope::Common,
                 CLIENT_CERTIFICATE_VARS[1],
                 "client-bundle.pem",
                 &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
@@ -67,14 +83,25 @@ impl Pki {
                 }
             };
             let key = TrustFile {
+                scope: SettingScope::Common,
                 variable: CLIENT_KEY_VARS[1],
                 path: certificate.path.clone(),
             };
             return (certificate, key);
         }
         (
-            self.file(CLIENT_CERTIFICATE_VARS[1], "client.pem", &certificate.pem()),
-            self.file(CLIENT_KEY_VARS[1], "client.key", &key.serialize_pem()),
+            self.file(
+                SettingScope::Common,
+                CLIENT_CERTIFICATE_VARS[1],
+                "client.pem",
+                &certificate.pem(),
+            ),
+            self.file(
+                SettingScope::Common,
+                CLIENT_KEY_VARS[1],
+                "client.key",
+                &key.serialize_pem(),
+            ),
         )
     }
 

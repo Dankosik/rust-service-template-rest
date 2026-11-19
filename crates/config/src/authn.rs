@@ -27,6 +27,23 @@ impl Audiences {
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
+
+    fn from_values(values: impl IntoIterator<Item = String>) -> Result<Self, &'static str> {
+        let iter = values.into_iter();
+        let mut deduplicated = Vec::with_capacity(iter.size_hint().0);
+        for value in iter {
+            if value.trim().is_empty() {
+                return Err("values must be nonblank");
+            }
+            if !deduplicated.contains(&value) {
+                deduplicated.push(value);
+            }
+        }
+        if deduplicated.is_empty() {
+            return Err("must be a nonempty string or list of nonblank exact values");
+        }
+        Ok(Self(deduplicated))
+    }
 }
 
 impl<'de> Deserialize<'de> for Audiences {
@@ -47,11 +64,11 @@ impl<'de> Deserialize<'de> for Audiences {
                 &"a string or a list of strings",
             )
         })?;
-        let values = match input {
-            Input::One(value) => vec![value.0],
-            Input::Many(values) => values.into_iter().map(|value| value.0).collect(),
-        };
-        Self::try_from(values).map_err(|_| {
+        match input {
+            Input::One(value) => Self::from_values([value.0]),
+            Input::Many(values) => Self::from_values(values.into_iter().map(|value| value.0)),
+        }
+        .map_err(|_| {
             serde::de::Error::invalid_value(
                 Unexpected::Other("an empty or blank audience"),
                 &"a nonempty string or list of nonblank exact values",
@@ -64,20 +81,7 @@ impl TryFrom<Vec<String>> for Audiences {
     type Error = &'static str;
 
     fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
-        if values.is_empty() {
-            return Err("must be a nonempty string or list of nonblank exact values");
-        }
-        if values.iter().any(|value| value.trim().is_empty()) {
-            return Err("values must be nonblank");
-        }
-
-        let mut deduplicated = Vec::with_capacity(values.len());
-        for value in values {
-            if !deduplicated.contains(&value) {
-                deduplicated.push(value);
-            }
-        }
-        Ok(Self(deduplicated))
+        Self::from_values(values)
     }
 }
 
@@ -96,8 +100,9 @@ where
     };
     let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
     let items = Vec::<StrictString>::deserialize(value).map_err(|_| invalid())?;
-    let values: Vec<String> = items.into_iter().map(|item| item.0).collect();
-    Audiences::try_from(values).map(Some).map_err(|_| invalid())
+    Audiences::from_values(items.into_iter().map(|item| item.0))
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 // template:begin oidc-jwt:authn-token-profile
@@ -265,13 +270,9 @@ where
     const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
 
     #[derive(Deserialize)]
-    #[serde(transparent)]
-    struct StrictAlgorithm(#[serde(deserialize_with = "crate::de::string_enum")] JwtAlgorithm);
-
-    #[derive(Deserialize)]
     #[serde(untagged)]
     enum Input {
-        List(Vec<StrictAlgorithm>),
+        List(Vec<crate::de::StrictEnum<JwtAlgorithm>>),
         Text(StrictString),
     }
 
@@ -400,14 +401,14 @@ impl AuthnInput {
     fn admit_jwt(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
         self.reject_introspection_fields(v);
         let condition = "authn.mode = oidc-jwt";
-        let issuer = v.take(required_non_blank("authn.issuer", self.issuer, condition));
+        let issuer = v.record(required_non_blank("authn.issuer", self.issuer, condition));
         let audience = admit_audience(self.audience, self.audiences, condition, v);
-        let token_profile = v.take(required(
+        let token_profile = v.record(required(
             "authn.token_profile",
             self.token_profile,
             condition,
         ));
-        let jwks_max_age = v.take(required_jwks_max_age(self.jwks_max_age, condition));
+        let jwks_max_age = v.record(required_jwks_max_age(self.jwks_max_age, condition));
         let algorithms = self.algorithms.unwrap_or_else(default_algorithms);
         if self
             .jwks_uri
@@ -442,19 +443,19 @@ impl AuthnInput {
 
         self.reject_jwt_fields(v);
         let condition = "authn.mode = oidc-introspection";
-        let issuer = v.take(required_non_blank("authn.issuer", self.issuer, condition));
+        let issuer = v.record(required_non_blank("authn.issuer", self.issuer, condition));
         let audience = admit_audience(self.audience, self.audiences, condition, v);
-        let introspection_endpoint = v.take(required_non_blank(
+        let introspection_endpoint = v.record(required_non_blank(
             "authn.introspection_endpoint",
             self.introspection_endpoint,
             condition,
         ));
-        let introspection_client_id = v.take(required_non_blank(
+        let introspection_client_id = v.record(required_non_blank(
             "authn.introspection_client_id",
             self.introspection_client_id,
             condition,
         ));
-        let secret = v.take(required(
+        let secret = v.record(required(
             "authn.introspection_client_secret",
             self.introspection_client_secret,
             condition,

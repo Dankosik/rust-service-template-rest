@@ -48,10 +48,10 @@ impl tracing::Subscriber for Events {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn acquisition_reports_only_slow_success_and_native_timeout() {
     let events = Events::new(tracing::Level::WARN);
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let _subscriber = tracing::subscriber::set_default(events.clone());
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let budget = Duration::from_millis(2500);

@@ -150,7 +150,6 @@ async fn job_is(pool: &PgPool, id: &str, state: &str, attempts: i16) {
 
 async fn status_peer(
     response_head: &'static str,
-    body_bytes: usize,
 ) -> (
     std::net::SocketAddr,
     tokio::sync::oneshot::Sender<()>,
@@ -177,11 +176,9 @@ async fn status_peer(
             received.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
             "queued path and query reach the admitted receiver"
         );
-        let mut response =
-            format!("HTTP/1.1 {response_head}\r\nConnection: close\r\n\r\n").into_bytes();
-        response.resize(response.len() + body_bytes, b'x');
+        let response = format!("HTTP/1.1 {response_head}\r\nConnection: close\r\n\r\n");
         stream
-            .write_all(&response)
+            .write_all(response.as_bytes())
             .await
             .expect("fixture writes response");
         let _ = released.await;
@@ -251,59 +248,47 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_floor(pool: PgPool) {
-    for (head, body_bytes, expected_state, summary, floor_seconds) in [
+    for (head, expected_state, summary, floor_seconds) in [
         (
             "401 Unauthorized\r\nContent-Length: 0",
-            0,
             "pending",
             Some("response_status"),
             None,
         ),
         (
             "404 Not Found\r\nContent-Length: 0",
-            0,
             "pending",
             Some("response_status"),
             None,
         ),
         (
             "410 Gone\r\nContent-Length: 1",
-            0,
             "failed",
             Some("endpoint_gone"),
             None,
         ),
-        (
-            "200 OK\r\nContent-Length: 65537",
-            65_537,
-            "completed",
-            None,
-            None,
-        ),
-        ("204 No Content", 0, "completed", None, None),
+        ("200 OK\r\nContent-Length: 65537", "completed", None, None),
+        ("204 No Content", "completed", None, None),
         (
             "503 Service Unavailable\r\nRetry-After: 172800\r\nContent-Length: 1",
-            0,
             "pending",
             Some("response_status"),
             Some(172_800_i64),
         ),
         (
             "429 Too Many Requests\r\nRetry-After: 3153600000\r\nContent-Length: 0",
-            0,
             "pending",
             Some("response_status"),
             Some(3_153_600_000),
         ),
         (
             "429 Too Many Requests\r\nRetry-After: 18446744073709551616\r\nContent-Length: 0",
-            0,
             "failed",
             Some("retry_after_exceeds_max_delay"),
             None,
         ),
     ] {
-        let (address, release, peer) = status_peer(head, body_bytes).await;
+        let (address, release, peer) = status_peer(head).await;
         let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
         let running = RunningDispatcher::start(

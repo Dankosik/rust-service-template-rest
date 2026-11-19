@@ -4,7 +4,12 @@ use std::time::{Duration, Instant};
 
 use crate::services::{CallType, Method};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
-use shared_rules::grpc::{RpcName, STATUS_CODE_COUNT, status_code_names};
+use shared_rules::grpc::{
+    ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, HANDLING_SECONDS_BUCKETS, RPC_METHOD_ATTR,
+    RPC_METHOD_ORIGINAL_ATTR, RPC_METHOD_OTHER, RPC_STATUS_CODE_ATTR, RPC_SYSTEM_GRPC,
+    RPC_SYSTEM_NAME_ATTR, RpcName, STATUS_CODE_COUNT, diagnostic_rpc_method_original,
+    status_code_names,
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
@@ -17,14 +22,9 @@ const SERVER_ADMISSION_WAIT_METRIC: &str = "grpc_server_admission_wait_seconds";
 const SERVER_ADMISSION_WAITING_METRIC: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES_METRIC: &str = "grpc_server_failures_total";
 
-const DIAGNOSTIC_BYTES: usize = 1024;
-const HANDLING_BUCKETS: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
-
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
-    (SERVER_HANDLING_METRIC, HANDLING_BUCKETS),
-    (SERVER_ADMISSION_WAIT_METRIC, HANDLING_BUCKETS),
+    (SERVER_HANDLING_METRIC, HANDLING_SECONDS_BUCKETS),
+    (SERVER_ADMISSION_WAIT_METRIC, HANDLING_SECONDS_BUCKETS),
 ];
 
 static DESCRIBE: Once = Once::new();
@@ -72,7 +72,7 @@ impl MethodMetrics {
     }
 
     fn span_name(&self) -> &str {
-        self.rpc_method.as_deref().unwrap_or("grpc")
+        self.rpc_method.as_deref().unwrap_or(FALLBACK_SPAN_NAME)
     }
 
     fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
@@ -146,9 +146,9 @@ impl Call {
 
     fn emit(&self, code: tonic::Code) {
         let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute("rpc.status_code", span_code);
+        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
         if otel_http::grpc::status_is_error(code as u16, true) {
-            self.span.set_attribute("error.type", span_code);
+            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
             self.span.set_status(SpanStatus::error(""));
         }
         self.metrics.record_handled(code, self.started_at.elapsed());
@@ -181,14 +181,13 @@ fn open_server_span(path: &str, metrics: &MethodMetrics) -> tracing::Span {
         otel.name = metrics.span_name(),
         otel.kind = ?SpanKind::Server,
     );
-    span.set_attribute("rpc.system.name", "grpc");
+    span.set_attribute(RPC_SYSTEM_NAME_ATTR, RPC_SYSTEM_GRPC);
     if let Some(method) = &metrics.rpc_method {
-        span.set_attribute("rpc.method", Arc::clone(method));
+        span.set_attribute(RPC_METHOD_ATTR, Arc::clone(method));
     } else {
-        span.set_attribute("rpc.method", "_OTHER");
-        let raw = path.trim_start_matches('/');
-        if !raw.is_empty() && raw.len() <= DIAGNOSTIC_BYTES {
-            span.set_attribute("rpc.method_original", raw.to_owned());
+        span.set_attribute(RPC_METHOD_ATTR, RPC_METHOD_OTHER);
+        if let Some(raw) = diagnostic_rpc_method_original(path) {
+            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, raw.to_owned());
         }
     }
     span

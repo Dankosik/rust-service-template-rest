@@ -5,16 +5,16 @@ use std::{
 };
 
 use http::{Request, Response};
-use infra_outbound_grpc::Client;
+use infra_outbound_grpc::{Client, PreparedCall};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokens, ServiceTokens,
+    AcquisitionError, ConfigurationError, ExchangeTokens, OnBehalfOf, ServiceTokens,
     credentials::{TokenSource, acquisition_deadline},
-    request_admission::{AdmissionRefusal, take_request_subject},
+    request_admission::{AdmissionRefusal, take_request_auth},
 };
 
 type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
@@ -76,8 +76,8 @@ impl AuthenticatedClient {
             }
             request.extensions_mut().insert(context.clone());
         }
-        let subject = take_request_subject(&mut request);
-        let mut prepared =
+        let auth = take_request_auth(&mut request);
+        let prepared =
             self.resource
                 .prepare_call(request)
                 .map_err(|status| match status.code() {
@@ -86,40 +86,46 @@ impl AuthenticatedClient {
                     _ => status,
                 })?;
         let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
-        let admitted_tokens = match self.tokens.admit(subject, acquisition_deadline(&context)) {
+        let admitted_tokens = match self.tokens.admit(auth, acquisition_deadline(&context)) {
             Ok(admitted_tokens) => admitted_tokens,
             Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
         };
-        Ok(Box::pin(async move {
-            let token = match admitted_tokens
-                .acquire_for_request(acquisition_deadline(&context))
-                .await
-            {
-                Ok(acquired) => acquired,
-                Err(error) => return Err(prepared.refuse(acquisition_status(error))),
-            };
-            prepared
-                .headers_mut()
-                .insert(http::header::AUTHORIZATION, token.header.clone());
-            let used = Arc::downgrade(&token);
-            prepared
-                .send_with_dispatch_check(
-                    move || {
-                        token
-                            .check_expiry(Instant::now())
-                            .map_err(acquisition_status)
-                    },
-                    move |code| {
-                        if code == Code::Unauthenticated
-                            && let Some(token) = used.upgrade()
-                        {
-                            token.reject_if_old_enough();
-                        }
-                    },
-                )
-                .await
-        }))
+        Ok(Box::pin(send_admitted(prepared, admitted_tokens, context)))
     }
+}
+
+async fn send_admitted(
+    mut prepared: PreparedCall,
+    admitted_tokens: TokenSource<OnBehalfOf>,
+    context: infra_outbound_http::RequestContext,
+) -> Result<Response<Body>, Status> {
+    let token = match admitted_tokens
+        .acquire_for_request(acquisition_deadline(&context))
+        .await
+    {
+        Ok(acquired) => acquired,
+        Err(error) => return Err(prepared.refuse(acquisition_status(error))),
+    };
+    prepared
+        .headers_mut()
+        .insert(http::header::AUTHORIZATION, token.header.clone());
+    let used = Arc::downgrade(&token);
+    prepared
+        .send_with_dispatch_check(
+            move || {
+                token
+                    .check_expiry(Instant::now())
+                    .map_err(acquisition_status)
+            },
+            move |code| {
+                if code == Code::Unauthenticated
+                    && let Some(token) = used.upgrade()
+                {
+                    token.reject_if_old_enough();
+                }
+            },
+        )
+        .await
 }
 
 impl Service<Request<Body>> for AuthenticatedClient {

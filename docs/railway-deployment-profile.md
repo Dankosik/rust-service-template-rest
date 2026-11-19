@@ -38,10 +38,30 @@ automatically during deploys):
   key variables out of band (`preserve()`).
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
-- Use a hostname covered by the database certificate and `sslmode=verify-full`
-  in `APP__POSTGRES__DSN` for the service, worker, migration and operator
-  processes. For a private CA, package its public trust anchor in the derived
-  runtime image and set `sslrootcert` to its absolute path in the DSN. The
+- For a direct deployment, set `APP__POSTGRES__DSN` to the PostgreSQL URL and
+  leave `APP__POSTGRES__MIGRATION_DSN` unset. The API and `/migrate` then
+  share the configured endpoint and password source.
+- To put the API behind PgBouncer in transaction mode, set the following
+  variables on the Railway API service. Substitute the credentials and the
+  certificate hostnames for your endpoints. Both URLs must reach the same
+  writable database. The pre-deploy command holds a session-level advisory
+  lock across migrations and needs the direct connection.
+
+  | Railway variable | Example value |
+  | --- | --- |
+  | `APP__POSTGRES__DSN` | `postgres://api:<password>@pgbouncer.railway.internal:6432/app?sslmode=verify-full` |
+  | `APP__POSTGRES__MIGRATION_DSN` | `postgres://migrator:<password>@postgres.railway.internal:5432/app?sslmode=verify-full` |
+
+  Store the URLs as service secrets. Railway exposes both to the API service
+  and its pre-deploy command. The migration override supplies its own password.
+  An explicitly empty or invalid override stops the migration.
+  When using separate database roles, grant the API role read access to
+  `_sqlx_migrations` and the permissions its runtime queries need.
+  Configure the pooler to forward the startup settings in the
+  [PgBouncer example](../env/pgbouncer/pgbouncer.ini).
+- Use a hostname covered by each endpoint's certificate and
+  `sslmode=verify-full`. For a private CA, package its public trust anchor
+  in the derived runtime image and set `sslrootcert` to its absolute path in the DSN. The
   pre-deploy migrator runs in a separate container without the service's
   mounted volumes. [Railway pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command)
 - With PostgreSQL retained, `/migrate` runs as `preDeployCommand` in the new
@@ -51,6 +71,10 @@ automatically during deploys):
   overhead, and author expand-then-contract migrations so the old binary
   tolerates the new schema during build-to-cutover overlap.
 <!-- template:end postgres:docs-railway-postgres-migrate -->
+<!-- template:begin jobs:docs-railway-postgres-notifications -->
+- With transaction pooling, set `APP__POSTGRES__NOTIFICATIONS=false` on job
+  producers and workers using that endpoint. Workers pick up jobs by polling.
+<!-- template:end jobs:docs-railway-postgres-notifications -->
 
 `make docs-check` (`scripts/checks/image_inputs.py`) verifies that
 `build.watchPatterns` in `.railway/railway.ts` covers `Dockerfile`,
@@ -127,6 +151,11 @@ when lifecycle budgets move.
 - **Image deployments:** Roll back by verified immutable `sha256` digest, never
   mutable tags, paired with compatible configuration (older binaries reject
   unknown config keys).
+<!-- template:begin postgres:docs-railway-postgres-rollback -->
+- When rolling back to a binary that predates the migration override, restore
+  the direct PostgreSQL URL in `APP__POSTGRES__DSN` and remove
+  `APP__POSTGRES__MIGRATION_DSN` in the same configuration change.
+<!-- template:end postgres:docs-railway-postgres-rollback -->
 - **State compatibility:** Confirm schema and job/event payload compatibility
   under [Production Contract](production-contract.md#operation-and-recovery)
   before rolling back, then verify `/health/ready`, `app.version`, and

@@ -27,13 +27,16 @@ Exclusive locks:
 Final validation:
 - Claim: <what must be true in the assembled ledger>
 - Checks: <local completion checks; any explicit additional requirement with its source, or none; concrete test commands remain executor-owned>
-- Observable: <result at the selected test boundary; live observation only when explicitly required>
+- Observable: <observable result and any proof boundary explicitly required by an accepted source>
 
 Reopen if:
 <smallest upstream invalidation condition>
 ```
 
-The implementing agent fills in test cases and commands while writing code.
+For a removal, name the old behavior and the entry point where it must cease.
+For a pure rename, name the behavior that must still hold after the rename.
+Implementation chooses the proving layer, fixtures, test cases, and commands
+within any explicit proof requirement.
 [Evidence Contract](../shared/evidence-contract.md#required-and-optional-proof)
 owns required proof. A product claim does not automatically require a live
 scenario, and an agent-authored packet cannot expand local acceptance. Empty
@@ -55,9 +58,8 @@ resumption.
 
 Outcome and Provides describe code to implement; Final validation defines
 the behavior to establish after the whole ledger is assembled.
-Record a missing required criterion as Blocked, not as an alternative success.
-Missing optional proof does not block local completion. Keep explicitly requested
-CI, release, or external-effect requirements distinct and outstanding.
+The [Completion Result](acceptance-result-v1.md#completion-result) governs
+pending external outcomes, unavailable required proof, and optional gaps.
 
 Mutable owners are semantic (package, contract, bootstrap), not a guessed file
 list. Exclusive locks cannot be mutated concurrently even when files differ.

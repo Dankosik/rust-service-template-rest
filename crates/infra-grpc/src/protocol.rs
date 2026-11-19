@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use http::{HeaderMap, HeaderName};
 
-pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
+pub(crate) const GRPC_TIMEOUT: HeaderName =
+    HeaderName::from_static(shared_rules::grpc::TIMEOUT_HEADER);
 
 pub(crate) use shared_rules::grpc::split_method_path;
 
@@ -11,7 +12,7 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
 }
 
 /// gRPC over HTTP/2 §Requests and RFC 9110 §§5.6.2, 5.6.4, 5.6.6.
-pub(crate) fn native_content_type(headers: &HeaderMap) -> bool {
+pub(crate) fn has_native_content_type(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all(http::header::CONTENT_TYPE).iter();
     let Some(value) = values.next() else {
         return false;

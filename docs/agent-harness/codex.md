@@ -5,14 +5,15 @@ availability alone does not authorize use.
 
 ## Native Map
 
-- Root task using `$orchestrator` owns the persisted ledger. Use collaboration
+- The root task bound as Ledger Orchestrator by [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
+  owns the persisted ledger. Use collaboration
   subagents for all internal execution and review (including mutable and
   cross-repo work); never create separate Codex App chats or use App task
   handoff as a carrier or fallback.
 - Under [Transition](../spec-first-workflow/shared/transition.md#cross-phase-continuation),
-  map phase actors to fresh collaboration subagents and the continuation owner
-  to the root.
-- Subagents inherit the parent's working context. For a neighboring repository,
+  map preparation phases to fresh collaboration subagents with
+  `fork_turns: "none"`. The root handles Intake and coordinates those phases.
+- Subagents share the parent's working directory. For a neighboring repository,
   apply [Authority](../../AGENTS.md#authority) and target it in
   commands/navigation; brief paths or command `cwd` do not reload that project's
   config, roles, or tools.
@@ -20,7 +21,7 @@ availability alone does not authorize use.
   [Implementation](../spec-first-workflow/phases/implementation.md) as Method
   and that packet as boundary (it is Acceptance-Unit Lead; `worker-agent` and
   read-only roles lack acceptance authority). A root-local Lead handles
-  single-unit Implementation.
+  a single fixed inline unit.
 - When [Agent Harness](../agent-harness.md) selects isolation, assign a
   repo-native Git worktree's absolute root; share checkouts only with disjoint
   writable owners and locks. Report missing tools, config, or write access as

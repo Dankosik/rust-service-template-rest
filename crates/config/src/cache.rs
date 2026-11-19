@@ -105,7 +105,7 @@ impl CacheInput {
             local_development,
         ));
         let client_certificate = v
-            .take(optional_pair(
+            .record(optional_pair(
                 "cache.client_cert_path",
                 self.client_cert_path,
                 "cache.client_key_path",

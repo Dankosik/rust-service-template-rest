@@ -9,14 +9,10 @@ directory:
   shape used by [rust-cli-skills](https://github.com/Dankosik/rust-cli-skills):
   self-contained, decision-focused prose that a model selects from the
   description. The rest of this document describes them.
-- **Workflow skills** (`orchestrator`, `acceptance-unit-lead`,
-  `spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
-  `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
-  `thermo-nuclear-code-quality-review`) are carriers for the
-  [workflow](spec-first-workflow.md) and the [harness](agent-harness.md): a
-  user or a role invokes them, never the model on its own, and their bodies link
-  to the phase, interface, and contract documents instead of restating them. See
-  [Workflow skills](#workflow-skills).
+- **Workflow skills** provide a method a user or role can invoke explicitly.
+  When a [workflow phase](spec-first-workflow.md) or [harness
+  adapter](agent-harness.md) already owns the method, route directly to that
+  document. See [Workflow skills](#workflow-skills).
 
 ## Files
 
@@ -174,11 +170,10 @@ entry a person invokes directly) and `kind` (`carrier` or `workflow`), and
 carriers state their binding trigger with `Use when` or `Use only`; user-invoked
 workflow skills write human-facing picker descriptions in at most two sentences
 naming the job, deliverable, and boundary. The body is one H1 and at most 600
-words; it may hold lists and links to `docs/spec-first-workflow/**` and
-`docs/agent-harness*`, which own the method. Besides `SKILL.md`, a
+words. Keep the skill's method in the body and link to the workflow and harness
+for shared contracts. Besides `SKILL.md`, a
 workflow skill may hold `references/*.md` (examples the body names) and
 `agents/openai.yaml`, the Codex carrier with `allow_implicit_invocation: false`.
 
 A decision skill carries only `name` and `description`; harness sync treats the
-omitted `metadata` as `invocation: model`, `kind: method`. Update a workflow
-skill's method in the workflow document it links rather than in the skill.
+omitted `metadata` as `invocation: model`, `kind: method`.

@@ -69,28 +69,11 @@ def check(root: Path) -> None:
     entries = state.manifest_entries(root)
     if set(synchronizer.SOURCE_HELPERS) != REQUIRED_SYNC_HELPERS:
         raise AssertionError("sync SOURCE_HELPERS drifted from REQUIRED_SYNC_HELPERS")
-    profile = json.loads((root / "scripts/template/profiles.json").read_text(encoding="utf-8"))
-    non_profile_keys = {"schema_version", "source_only", "identity"}
-    if not isinstance(profile, dict) or not non_profile_keys.issubset(profile):
-        raise AssertionError("profile inventory is missing top-level metadata keys")
-    section_names = sorted(set(profile) - non_profile_keys)
-    if not section_names:
-        raise AssertionError("profile inventory contains no profile sections")
-    for name in section_names:
-        removal_key = "remove_when_none" if name == "postgres" else "remove_when_unselected"
-        section = profile.get(name)
-        if not isinstance(section, dict) or set(section) != {removal_key}:
-            raise AssertionError(f"profile inventory has no exact {name} section")
-        removals = section[removal_key]
-        if not isinstance(removals, list):
-            raise AssertionError(f"profile inventory has an incomplete {name} projection")
+    for name, removals in initializer._profile_data(root).removals.items():
         for relative in removals:
-            if not isinstance(relative, str) or not relative:
-                raise AssertionError(f"profile inventory has malformed {name} removal")
-            plain = relative.rstrip("/")
             if name == "profile-runner-tests" and relative == "scripts/tests/test_profile_runners.py":
                 continue
-            if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):
+            if _manifest_covers(entries, relative.rstrip("/")):
                 raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
     for broad_owner in (
         "make/",

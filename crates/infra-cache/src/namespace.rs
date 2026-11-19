@@ -133,7 +133,7 @@ impl CacheNamespace {
         key: &str,
     ) -> Result<Option<Vec<u8>>, OperationError> {
         let key = self.admit_key(key)?;
-        let limit = self.cache.max_value_bytes;
+        let max_value_bytes = self.cache.max_value_bytes;
         self.run(
             parent,
             Operation::Get,
@@ -146,11 +146,11 @@ impl CacheNamespace {
                     .cmd("GETRANGE")
                     .arg(key)
                     .arg(0)
-                    .arg(limit);
-                query_read(pipeline, connection, limit)
+                    .arg(max_value_bytes);
+                query_read(pipeline, connection, max_value_bytes)
             },
             |value| match value {
-                Some(bytes) if bytes.len() > limit => Err(ErrorType::ValueTooLarge),
+                Some(bytes) if bytes.len() > max_value_bytes => Err(ErrorType::ValueTooLarge),
                 Some(_) => Ok(Outcome::Hit),
                 None => Ok(Outcome::Miss),
             },
@@ -177,21 +177,11 @@ impl CacheNamespace {
             return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
         }
         let build_query = |connection| {
-            const SET_PX_EXTRA_ARGS: usize = 3;
-            const PX_OPTION_BYTES: usize = "PX".len();
-            const MAX_U64_DECIMAL_BYTES: usize = 20;
-
-            let options =
-                SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
-            let mut command = key.command(
+            query_mutation(
+                key.set_command(value, milliseconds.cast_unsigned()),
+                connection,
                 operation,
-                ExtraCommandCapacity {
-                    extra_args: SET_PX_EXTRA_ARGS,
-                    extra_bytes: value.len() + PX_OPTION_BYTES + MAX_U64_DECIMAL_BYTES,
-                },
-            );
-            command.arg(value).arg(options);
-            query_mutation(command, connection, operation)
+            )
         };
         self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
             .await
@@ -201,10 +191,7 @@ impl CacheNamespace {
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
         let operation = Operation::Delete;
         let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
-        let build_query = |connection| {
-            let command = key.command(operation, ExtraCommandCapacity::default());
-            query_mutation(command, connection, operation)
-        };
+        let build_query = |connection| query_mutation(key.delete_command(), connection, operation);
         self.run(parent, operation, build_query, |()| Ok(Outcome::Ok))
             .await
             .map_err(Into::into)
@@ -274,16 +261,16 @@ pub(super) async fn query_mutation(
 async fn query_read(
     pipeline: redis::Pipeline,
     mut connection: MultiplexedConnection,
-    limit: usize,
+    max_value_bytes: usize,
 ) -> redis::RedisResult<Option<Vec<u8>>> {
     let replies =
         tokio::task::unconstrained(connection.send_packed_commands(&pipeline, 0, 4)).await?;
-    decode_read_transaction(replies, limit)
+    decode_read_transaction(replies, max_value_bytes)
 }
 
 fn decode_read_transaction(
     replies: Vec<redis::Value>,
-    limit: usize,
+    max_value_bytes: usize,
 ) -> redis::RedisResult<Option<Vec<u8>>> {
     use redis::Value;
 
@@ -305,15 +292,11 @@ fn decode_read_transaction(
     let [exists, value] = <[_; 2]>::try_from(results).map_err(|_| unexpected())?;
     match (reply_data(exists)?, reply_data(value)?) {
         (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
-        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= limit + 1 => Ok(Some(bytes)),
+        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= max_value_bytes + 1 => {
+            Ok(Some(bytes))
+        }
         _ => Err(unexpected()),
     }
-}
-
-#[derive(Clone, Copy, Default)]
-struct ExtraCommandCapacity {
-    extra_args: usize,
-    extra_bytes: usize,
 }
 
 const fn valid_namespace(name: &str) -> bool {
@@ -343,12 +326,25 @@ impl NamespacedKey<'_> {
         self.namespace.len() + 1 + self.key.len()
     }
 
-    fn command(self, operation: Operation, extra_capacity: ExtraCommandCapacity) -> redis::Cmd {
+    fn set_command(self, value: &[u8], ttl_ms: u64) -> redis::Cmd {
+        const SET_PX_EXTRA_ARGS: usize = 3;
+        const PX_OPTION_BYTES: usize = "PX".len();
+        const MAX_U64_DECIMAL_BYTES: usize = 20;
+
+        let command_name = Operation::Set.redis_name();
+        let options = SetOptions::default().with_expiration(SetExpiry::PX(ttl_ms));
         let mut command = redis::Cmd::with_capacity(
-            2 + extra_capacity.extra_args,
-            operation.redis_name().len() + self.len() + extra_capacity.extra_bytes,
+            2 + SET_PX_EXTRA_ARGS,
+            command_name.len() + self.len() + value.len() + PX_OPTION_BYTES + MAX_U64_DECIMAL_BYTES,
         );
-        command.arg(operation.redis_name()).arg(self);
+        command.arg(command_name).arg(self).arg(value).arg(options);
+        command
+    }
+
+    fn delete_command(self) -> redis::Cmd {
+        let command_name = Operation::Delete.redis_name();
+        let mut command = redis::Cmd::with_capacity(2, command_name.len() + self.len());
+        command.arg(command_name).arg(self);
         command
     }
 }
