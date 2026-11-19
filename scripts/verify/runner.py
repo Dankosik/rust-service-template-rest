@@ -551,15 +551,14 @@ def _preflight_environment(
             raise _blocked("required binary is unavailable: go")
 
     docker_steps = [step for step in steps if step.requires_docker]
-    docker_command = os.environ.get("VERIFY_DOCKER_COMMAND") or "docker"
     docker_environment = "not-used"
 
     if docker_steps:
-        has_docker_bin = shutil.which(docker_command) is not None
+        has_docker_bin = shutil.which("docker") is not None
         daemon_ok = False
         if has_docker_bin:
             info_res = subprocess.run(
-                [docker_command, "info"],
+                ["docker", "info"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -567,7 +566,7 @@ def _preflight_environment(
             daemon_ok = info_res.returncode == 0
 
         if daemon_ok:
-            docker_environment = _cmd_version(docker_command, "version", "--format", "{{.Client.Version}}/{{.Server.Version}}")
+            docker_environment = _cmd_version("docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}")
         else:
             is_ci = os.environ.get("CI") == "true"
             fallback_versions: list[str] = []
