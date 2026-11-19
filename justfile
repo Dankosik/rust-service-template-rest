@@ -92,18 +92,25 @@ lint-package pkg:
 profiling-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    feats="hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus"
-    cargo clippy --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath -- -D warnings
-    cargo clippy --locked --manifest-path crates/service/Cargo.toml --all-targets --features "${feats}" -- -D warnings
+    lib_pkgs=()
+    lib_feats=()
     for pkg in infra-http infra-telemetry infra-postgres infra-jobs infra-webhooks; do
         if [[ -f "crates/${pkg}/Cargo.toml" ]]; then
-            cargo clippy --locked -p "${pkg}" --all-targets --features "${pkg}/hotpath" -- -D warnings
-            RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
-                cargo doc --locked -p "${pkg}" --no-deps --document-private-items --features "${pkg}/hotpath"
+            lib_pkgs+=(-p "${pkg}")
+            lib_feats+=("${pkg}/hotpath")
         fi
     done
+    if ((${#lib_pkgs[@]} > 0)); then
+        joined_feats=$(IFS=,; echo "${lib_feats[*]}")
+        cargo clippy --locked "${lib_pkgs[@]}" --all-targets --keep-going --features "${joined_feats}" -- -D warnings
+        RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
+            cargo doc --locked "${lib_pkgs[@]}" --no-deps --document-private-items --keep-going --features "${joined_feats}"
+    fi
+    full_feats="hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus"
+    cargo clippy --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath -- -D warnings
+    cargo clippy --locked --manifest-path crates/service/Cargo.toml --all-targets --features "${full_feats}" -- -D warnings
     RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
-        cargo doc --locked --manifest-path crates/service/Cargo.toml --no-deps --document-private-items --features "${feats}"
+        cargo doc --locked --manifest-path crates/service/Cargo.toml --no-deps --document-private-items --features "${full_feats}"
 
 # Mutation testing for one crate (optional file filter)
 [positional-arguments]

@@ -12,6 +12,10 @@ outputs:
     value: ${{ steps.classify.outputs.rust }}
   deps:
     value: ${{ steps.classify.outputs.deps }}
+  profiling:
+    value: ${{ steps.classify.outputs.profiling }}
+  vendor_transport:
+    value: ${{ steps.classify.outputs.vendor_transport }}
   openapi:
     value: ${{ steps.classify.outputs.openapi }}
   grpc:

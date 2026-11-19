@@ -281,8 +281,15 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         return
     lib.require_docker(allow_refusal=True)
     with lib.ComposeStack("service-oauth") as stack:
-        port = stack.up("keycloak", 8080, profile="oauth", ready_url="/realms/master", ready_timeout_s=180)
-        lib.run(cmd, env=lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": f"http://127.0.0.1:{port}"}))
+        port = stack.start("keycloak", 8080, profile="oauth")
+        env = lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": f"http://127.0.0.1:{port}"})
+        compile_cmd = [
+            "cargo", "test", "--locked", "-p", "infra-oauth2-client-credentials",
+            "--features", "integration", "--no-run",
+        ]
+        lib.run(compile_cmd, env=env)
+        stack.wait("keycloak", port, profile="oauth", ready_url="/realms/master", ready_timeout_s=180)
+        lib.run(cmd, env=env)
 
 
 def cmd_sqlx_prepare(*, check_only: bool) -> None:

@@ -31,6 +31,8 @@ jobs:
     outputs:
       rust: ${{ steps.detect.outputs.rust }}
       deps: ${{ steps.detect.outputs.deps }}
+      profiling: ${{ steps.detect.outputs.profiling }}
+      vendor_transport: ${{ steps.detect.outputs.vendor_transport }}
       openapi: ${{ steps.detect.outputs.openapi }}
       grpc: ${{ steps.detect.outputs.grpc }}
       migrations: ${{ steps.detect.outputs.migrations }}
@@ -60,6 +62,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          filter: ${{ github.event_name == 'pull_request' && 'blob:none' || '' }}
           persist-credentials: false
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
@@ -146,30 +149,30 @@ jobs:
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
           version: "2026.11.10"
-          install_args: just cargo-nextest github:Boshen/cargo-shear github:oasdiff/oasdiff npm:@redocly/cli
+          install_args: just cargo-nextest typos github:Boshen/cargo-shear github:oasdiff/oasdiff npm:@redocly/cli
           cache_key_prefix: mise-rust
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache_save_post: true
       - run: cargo fetch --locked
-      - name: Format, lint, build, test, and architecture
+      - name: Format, lint, test, and architecture
         run: |
           set -euo pipefail
           just fmt-check
           just lint
-          just build
           just test
           just unused-deps
           just architecture-check
           just vendor-drift
-      - name: Profiling and vendored transport regressions
-        if: needs.changes.outputs.deps == 'true' || needs.changes.outputs.post_merge == 'true'
-        run: |
-          set -euo pipefail
-          just profiling-check
-          just native-transport
+          just typos
+      - name: Profiling features
+        if: needs.changes.outputs.profiling == 'true' || needs.changes.outputs.post_merge == 'true'
+        run: just profiling-check
+      - name: Vendored transport regressions
+        if: needs.changes.outputs.vendor_transport == 'true' || needs.changes.outputs.post_merge == 'true'
+        run: just native-transport
       - name: OpenAPI contract
         if: needs.changes.outputs.openapi == 'true'
-        run: just openapi-check
+        run: just openapi-lint
       - name: OpenAPI breaking compatibility
         if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
         env:
@@ -312,6 +315,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: integration
+          cache-bin: "false"
+          save-if: "false"
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
           version: "2026.11.10"

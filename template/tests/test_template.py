@@ -38,6 +38,21 @@ class DetectChangesTests(unittest.TestCase):
         self.assertTrue(res["openapi"])
         self.assertFalse(res["grpc"])
         self.assertFalse(res["migrations"])
+        self.assertFalse(res["repo_lint"])
+        self.assertFalse(res["profiling"])
+        self.assertFalse(res["vendor_transport"])
+
+        lock_only = DETECT.classify(ROOT, ["Cargo.lock"])
+        self.assertTrue(lock_only["deps"])
+        self.assertFalse(lock_only["profiling"])
+        self.assertFalse(lock_only["vendor_transport"])
+
+        hotpath_res = DETECT.classify(ROOT, ["vendor/hotpath/src/lib.rs"])
+        self.assertTrue(hotpath_res["profiling"])
+        self.assertTrue(hotpath_res["vendor_transport"])
+
+        md_in_crate = DETECT.classify(ROOT, ["crates/service/README.md"])
+        self.assertTrue(md_in_crate["repo_lint"])
 
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp)

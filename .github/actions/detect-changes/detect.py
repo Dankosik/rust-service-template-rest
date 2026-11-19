@@ -24,6 +24,13 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "tools/grpc-codegen/**", "mise.toml", "mise.lock",
         "scripts/checks/vendor.py", "scripts/lib.py",
     ),
+    "profiling": (
+        "vendor/hotpath/**", "Cargo.toml", "rust-toolchain.toml", "justfile",
+    ),
+    "vendor_transport": (
+        "vendor/**", "Cargo.toml", "rust-toolchain.toml",
+        "scripts/checks/vendor.py", "scripts/lib.py", "justfile",
+    ),
     "openapi": (
         "api/openapi/**", "crates/service/**", "crates/infra-http/**", "crates/service-failure/**",
         ".redocly.yaml", "scripts/checks/openapi_idempotency.py", "justfile", "mise.toml", "mise.lock", ".mise/**",
@@ -63,9 +70,9 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
     ),
     "repo_lint": (
-        "*.md", "docs/**", ".agents/**", ".github/**", "scripts/**", "template/**",
+        "*.md", "*.sh", "*.py", "docs/**", ".agents/**", ".github/**", "scripts/**", "template/**",
         "env/monitoring/**", "quality/architecture.json", "mise.toml", "mise.lock", ".mise/**",
-        ".typos.toml", "ruff.toml", "justfile", "crates/**", "Cargo.toml",
+        ".typos.toml", "ruff.toml", "justfile",
         ".config/wt.toml", ".worktreeinclude",
     ),
     "template": (
@@ -102,6 +109,8 @@ def _applicable(repo: Path) -> dict[str, bool]:
     return {
         "rust": True,
         "deps": True,
+        "profiling": True,
+        "vendor_transport": True,
         "openapi": True,
         "grpc": has_grpc,
         "migrations": has_postgres,

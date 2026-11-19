@@ -216,6 +216,53 @@ class ComposeStack:
                 signal.signal(sig, handler)
             self._prev_handlers.clear()
 
+    def start(
+        self,
+        service: str,
+        container_port: int,
+        *,
+        extra_env: Mapping[str, str] | None = None,
+        profile: str | None = None,
+    ) -> int:
+        self.active = True
+        env = self._env(extra_env)
+        res = run(self._cmd(["up", "-d", service], profile=profile), cwd=self.root, env=env, check=False)
+        if res.returncode != 0:
+            run(self._cmd(["ps", "--all"], profile=profile), cwd=self.root, env=env, check=False)
+            run(self._cmd(["logs", "--no-color", "--tail", "100", service], profile=profile), cwd=self.root, env=env, check=False)
+            raise ScriptError(f"compose up failed for {service}")
+        return self.port(service, container_port, extra_env=extra_env, profile=profile)
+
+    def wait(
+        self,
+        service: str,
+        port: int,
+        *,
+        timeout_s: int | None = None,
+        extra_env: Mapping[str, str] | None = None,
+        profile: str | None = None,
+        ready_url: str | None = None,
+        ready_timeout_s: int = 180,
+    ) -> None:
+        env = self._env(extra_env)
+        if ready_url is not None:
+            cid = run(self._cmd(["ps", "-q", service], profile=profile), cwd=self.root, env=env, capture=True).stdout.strip()
+            try:
+                wait_http_ready(f"http://127.0.0.1:{port}{ready_url}", container=cid or None, timeout_s=ready_timeout_s)
+            except ScriptError:
+                run(self._cmd(["logs", "--no-color", "--tail", "100", service], profile=profile), cwd=self.root, env=env, check=False)
+                raise
+            return
+        wait_args = ["up", "-d", "--no-recreate", "--wait"]
+        if timeout_s is not None:
+            wait_args.extend(["--wait-timeout", str(timeout_s)])
+        wait_args.append(service)
+        res = run(self._cmd(wait_args, profile=profile), cwd=self.root, env=env, check=False)
+        if res.returncode != 0:
+            run(self._cmd(["ps", "--all"], profile=profile), cwd=self.root, env=env, check=False)
+            run(self._cmd(["logs", "--no-color", "--tail", "100", service], profile=profile), cwd=self.root, env=env, check=False)
+            raise ScriptError(f"compose wait failed for {service}")
+
     def up(
         self,
         service: str,
@@ -227,28 +274,29 @@ class ComposeStack:
         ready_url: str | None = None,
         ready_timeout_s: int = 180,
     ) -> int:
+        if ready_url is not None:
+            port = self.start(service, container_port, extra_env=extra_env, profile=profile)
+            self.wait(
+                service,
+                port,
+                extra_env=extra_env,
+                profile=profile,
+                ready_url=ready_url,
+                ready_timeout_s=ready_timeout_s,
+            )
+            return port
         self.active = True
         env = self._env(extra_env)
-        up_args = ["up", "-d"]
-        if ready_url is None:
-            up_args.append("--wait")
-            if timeout_s is not None:
-                up_args.extend(["--wait-timeout", str(timeout_s)])
+        up_args = ["up", "-d", "--wait"]
+        if timeout_s is not None:
+            up_args.extend(["--wait-timeout", str(timeout_s)])
         up_args.append(service)
         res = run(self._cmd(up_args, profile=profile), cwd=self.root, env=env, check=False)
         if res.returncode != 0:
             run(self._cmd(["ps", "--all"], profile=profile), cwd=self.root, env=env, check=False)
             run(self._cmd(["logs", "--no-color", "--tail", "100", service], profile=profile), cwd=self.root, env=env, check=False)
             raise ScriptError(f"compose up failed for {service}")
-        port = self.port(service, container_port, extra_env=extra_env, profile=profile)
-        if ready_url is not None:
-            cid = run(self._cmd(["ps", "-q", service], profile=profile), cwd=self.root, env=env, capture=True).stdout.strip()
-            try:
-                wait_http_ready(f"http://127.0.0.1:{port}{ready_url}", container=cid or None, timeout_s=ready_timeout_s)
-            except ScriptError:
-                run(self._cmd(["logs", "--no-color", "--tail", "100", service], profile=profile), cwd=self.root, env=env, check=False)
-                raise
-        return port
+        return self.port(service, container_port, extra_env=extra_env, profile=profile)
 
     def restart(
         self,
