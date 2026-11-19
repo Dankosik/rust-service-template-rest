@@ -6,11 +6,10 @@ Load from [Technical Design](../technical-design.md) only when triggered.
 
 Inspect only what changed across `intent.md`, `spec.md`, existing
 `specs/<task>/design/design.md`, and `specs/<task>/rollout.md` under
-[Artifacts](../../shared/artifacts.md). Keep surviving `D<n>` and `S<n>` IDs
-stable (retire deleted IDs rather than renumbering), re-verify prior `Carried
-concerns`, drop resolved `Blocked decisions` before drafting, flip any retained
-`blocked` `rollout.md` back to `draft` before review, and mark superseded
-`design/*.md` or `rollout.md` siblings for deletion in step 3 (or
+[Artifacts](../../shared/artifacts.md). Preserve surviving `D<n>`/`S<n>` IDs per
+[Design V1](../../interfaces/design-v1.md#field-rules), re-verify prior `Carried
+concerns`, flip any retained `blocked` `rollout.md` back to `draft` before
+review, and mark superseded siblings for deletion in step 3 (or
 [No-Open-Decisions Exit](#no-open-decisions-exit)). Continue [Technical
 Design](../technical-design.md) from step 1.
 
@@ -27,8 +26,8 @@ Design](../technical-design.md) from step 1.
 
 ## No-Open-Decisions Exit
 
-Eligible only when step 1 proves zero open forks, zero unpinned `Open to
-Technical Design:` identifiers, and no non-trivial `rollout.md`:
+Triggered from [Technical Design](../technical-design.md#steps) step 1 when zero
+open forks apply:
 
 1. Create no new `design.md`. Submit inline **forced-owner evidence** to 1
    fresh `reviewer-agent` running [Technical Design
@@ -56,12 +55,12 @@ Technical Design:` identifiers, and no non-trivial `rollout.md`:
 Use on non-`ready` `spec.md` (outside a skipped-Definition contract), missing
 or contradictory product behavior, tripped `spec.md` `Reopen if`, falsified
 baseline/requirement, missing external authority, or a surviving user-owned
-trade-off. Collect all independent blockers in one pass—framing `Intake`-bound
-`B<n>` in requester behavior and consequences worded so `"yes"` accepts the
-recommendation when supported (or `none` when balanced)—then emit [Transition
-Result V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
-`owner: Technical Design`, `review: none`, `reopen_owner: Specification |
-Intake | <external authority>`, `next_owner: none`):
+trade-off. Collect all independent blockers in one pass—formatting `B<n>` per
+[Design V1](../../interfaces/design-v1.md)—then emit [Transition Result
+V1](../../shared/transition.md#transition-result-v1) (`status: blocked`,
+`owner: Technical Design`, `review: <locator or inline result, or none when
+unreviewed>`, `reopen_owner: Specification | Intake | <external authority>`,
+`next_owner: none`):
 
 - **Existing or worthwhile `design/design.md`:** save `design/design.md` at
   `status: blocked` with `Blocked decisions`, flip any persisted `rollout.md`

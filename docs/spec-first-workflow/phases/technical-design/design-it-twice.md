@@ -1,11 +1,9 @@
 # Design It Twice
 
-Load from [Technical Design](../technical-design.md) for any **one-way door**
-open fork unless existing repository conventions (`docs/decisions/`, sibling
-subsystem, `quality/architecture.json`) fix one concrete shape with no viable
-competing topology or interface. Parallel lanes with identical briefs collapse
-onto one median answer; incompatible pressures force **radically different**
-architectures.
+Triggered from [Technical Design](../technical-design.md#steps) under
+[Generative Candidate
+Lanes](../../shared/read-only-delegation.md#generative-candidate-lanes) for a
+qualifying **one-way door** open fork.
 
 ## Steps
 
@@ -20,14 +18,12 @@ architectures.
 2. **Dispatch 3 parallel fresh `specialist-agent` lanes with contrasting
    pressures** *(use 2 only for a strictly binary fork between two concrete
    mechanisms)*. Give every lane the identical neutral frame, read-only
-   boundary, fresh context window (never forking parent history), `Method:
+   boundary, `Method:
    docs/spec-first-workflow/shared/read-only-delegation.md#candidate-proposal-v1`
    (plus matching domain skills), and **strictly its own pressure** (omit
-   sibling pressures and any parent hypothesis). Each lane runs as a
-   **generative candidate lane** pushing its pressure to its honest extreme and
-   returning [Candidate Proposal
-   V1](../../shared/read-only-delegation.md#candidate-proposal-v1) without
-   picking a winner or comparing siblings.
+   sibling pressures and any parent hypothesis). Each lane pushes its pressure
+   to its honest extreme and returns [Candidate Proposal
+   V1](../../shared/read-only-delegation.md#candidate-proposal-v1).
    - **Derive problem-specific incompatible pressures first** when concrete
      competing topologies exist (e.g., advisory lock vs unique-upsert + retry vs
      transactional outbox). Otherwise select presets:

@@ -29,9 +29,9 @@ loading only the domain skills whose probes fire.
 ## Rollout And Mixed-Version Compatibility
 
 Load `rust-delivery-platform` when delivery gates or profiles change. Record
-deployment impact (`none`, `standard single-step deploy`, or [Release
-Closure](../../rubrics/release-closure.md) in `rollout.md`), covering rolling
-mixed-version overlap across `crates/migrate`, `crates/service`, and
+deployment impact (`no deployment impact`, `standard single-step deploy`, or
+[Release Closure](../../rubrics/release-closure.md) in `rollout.md`), covering
+rolling mixed-version overlap across `crates/migrate`, `crates/service`, and
 `crates/jobs-worker`: lock-safe DDL (`rust-sqlx`) **and** forward/backward
 compatibility of serialized rows/`JSONB`, cache (`infra-cache`), job
 (`infra-jobs`), and event (`infra-messaging`) payloads.
