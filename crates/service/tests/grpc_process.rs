@@ -1004,9 +1004,9 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
             .block_on(provider.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))),
         infra_telemetry::ProviderShutdown::Completed
     );
-    std::assert_matches!(
+    assert_eq!(
         logger.shutdown(Instant::now() + Duration::from_secs(2)),
-        infra_telemetry::LoggerShutdown::Completed(_)
+        infra_telemetry::LoggerShutdown::Completed
     );
     let client_exported = client_collector.finish(&oidc.runtime);
     let client_spans = exported_spans(&client_exported);

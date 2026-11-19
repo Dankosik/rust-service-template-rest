@@ -2,9 +2,7 @@ mod format;
 mod output;
 mod sdk_diagnostics;
 
-pub use output::{
-    DropReason, LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons, SinkOperation,
-};
+pub use output::{LoggerGuard, LoggerShutdown, LoggerShutdownReasons};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
@@ -108,84 +106,18 @@ pub(crate) fn publish_observations() {
     sdk_diagnostics::publish();
 }
 
-enum DirectiveFilter {
+enum AdmissionFilter {
     Targets(Targets),
     Env(Box<EnvFilter>),
 }
 
-impl<S> Layer<S> for DirectiveFilter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
-            Self::Env(filter) => <EnvFilter as Layer<S>>::register_callsite(filter, metadata),
-        }
-    }
-
-    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
-            Self::Env(filter) => filter.enabled(metadata, ctx),
-        }
-    }
-
-    fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::event_enabled(targets, event, ctx),
-            Self::Env(filter) => filter.event_enabled(event, ctx),
-        }
-    }
-
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => {
-                <Targets as Layer<S>>::on_new_span(targets, attrs, id, ctx);
-            }
-            Self::Env(filter) => filter.on_new_span(attrs, id, ctx),
-        }
-    }
-
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_record(targets, id, values, ctx),
-            Self::Env(filter) => filter.on_record(id, values, ctx),
-        }
-    }
-
-    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_enter(targets, id, ctx),
-            Self::Env(filter) => filter.on_enter(id, ctx),
-        }
-    }
-
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_exit(targets, id, ctx),
-            Self::Env(filter) => filter.on_exit(id, ctx),
-        }
-    }
-
-    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_close(targets, id, ctx),
-            Self::Env(filter) => filter.on_close(id, ctx),
-        }
-    }
-}
-
 fn admission_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
     let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
-    let inner = match static_targets(directive) {
-        Some(targets) => DirectiveFilter::Targets(targets),
-        None => DirectiveFilter::Env(Box::new(filter)),
-    };
-    Ok(AdmissionFilter(inner))
+    Ok(match static_targets(directive) {
+        Some(targets) => AdmissionFilter::Targets(targets),
+        None => AdmissionFilter::Env(Box::new(filter)),
+    })
 }
-
-struct AdmissionFilter(DirectiveFilter);
 
 fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && *metadata.level() <= Level::INFO
@@ -219,7 +151,10 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        let interest = <DirectiveFilter as Layer<S>>::register_callsite(&self.0, metadata);
+        let interest = match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
+            Self::Env(filter) => <EnvFilter as Layer<S>>::register_callsite(filter, metadata),
+        };
         match admission(metadata) {
             Admission::Always => Interest::always(),
             Admission::Never => Interest::never(),
@@ -232,7 +167,10 @@ where
         match admission(metadata) {
             Admission::Always | Admission::Deferred => true,
             Admission::Never => false,
-            Admission::Directive => self.0.enabled(metadata, ctx),
+            Admission::Directive => match self {
+                Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
+                Self::Env(filter) => filter.enabled(metadata, ctx),
+            },
         }
     }
 
@@ -243,20 +181,45 @@ where
             sdk_diagnostics::observe(event, metadata);
             return false;
         }
-        self.0.enabled(metadata, ctx.clone()) && self.0.event_enabled(event, ctx)
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
+            Self::Env(filter) => {
+                filter.enabled(metadata, ctx.clone()) && filter.event_enabled(event, ctx)
+            }
+        }
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
         Some(LevelFilter::TRACE)
     }
 
-    delegate::delegate! {
-        to self.0 {
-            fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
-            fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>);
-            fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>);
-            fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>);
-            fn on_close(&self, id: span::Id, ctx: Context<'_, S>);
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_new_span(attrs, id, ctx);
+        }
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_record(id, values, ctx);
+        }
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_enter(id, ctx);
+        }
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_exit(id, ctx);
+        }
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_close(id, ctx);
         }
     }
 }

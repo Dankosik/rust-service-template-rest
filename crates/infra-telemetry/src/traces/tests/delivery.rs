@@ -164,8 +164,8 @@ fn a_finished_span_reaches_an_anonymous_http_collector() {
     let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
-        handle.exporter_state,
-        ExporterState::Initialized {
+        handle.exporter_state(),
+        &ExporterState::Initialized {
             endpoint_source: EndpointSource::Typed,
             has_certificate_file: false,
             has_client_certificate: false,
@@ -390,9 +390,9 @@ fn assert_exporter_warning(state: &ExporterState, variable: &str) -> String {
     use crate::logging::{LoggingFormat, tests::capture};
     let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
     tracing::dispatcher::with_default(&dispatch, || state.log());
-    std::assert_matches!(
+    assert_eq!(
         guard.shutdown(std::time::Instant::now() + WAIT),
-        crate::logging::LoggerShutdown::Completed(_)
+        crate::logging::LoggerShutdown::Completed
     );
     let records = buffer.records();
     let record: serde_json::Value = serde_json::from_str(&records).unwrap();
@@ -414,7 +414,7 @@ fn ignored_compression_is_reported_after_logging_starts_without_disabling_export
         &CollectorTrust::default(),
     )
     .unwrap();
-    let records = assert_exporter_warning(&handle.exporter_state, variable);
+    let records = assert_exporter_warning(handle.exporter_state(), variable);
     assert!(!records.contains("private-compression-value"));
     handle.tracer().start("still exported").end();
     assert_eq!(shutdown(handle), ProviderShutdown::Completed);
@@ -438,7 +438,7 @@ fn zero_batch_processor_sizes_warn_and_spans_still_reach_the_collector() {
             &CollectorTrust::default(),
         )
         .unwrap();
-        assert_exporter_warning(&handle.exporter_state, variable);
+        assert_exporter_warning(handle.exporter_state(), variable);
 
         for _ in 0..=batch_limit {
             handle.tracer().start("still exported").end();
@@ -702,9 +702,9 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 assert_eq!(request.header("authorization"), Some(HEADER_SECRET));
                 thread.join().expect("collector script finishes");
                 assert_eq!(shutdown(handle), ProviderShutdown::Completed);
-                std::assert_matches!(
+                assert_eq!(
                     logger.shutdown(std::time::Instant::now() + WAIT),
-                    crate::logging::LoggerShutdown::Completed(_)
+                    crate::logging::LoggerShutdown::Completed
                 );
                 let records = records.records();
                 assert!(

@@ -1,19 +1,69 @@
-pub const OTHER_METHOD: &str = "_OTHER";
+const OTHER_METHOD: &str = "_OTHER";
 
-#[must_use]
-pub fn request_method(method: &str) -> &'static str {
-    match method {
-        "CONNECT" => "CONNECT",
-        "DELETE" => "DELETE",
-        "GET" => "GET",
-        "HEAD" => "HEAD",
-        "OPTIONS" => "OPTIONS",
-        "PATCH" => "PATCH",
-        "POST" => "POST",
-        "PUT" => "PUT",
-        "QUERY" => "QUERY",
-        "TRACE" => "TRACE",
-        _ => OTHER_METHOD,
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum HttpMethod {
+    Connect,
+    Delete,
+    Get,
+    Head,
+    Options,
+    Patch,
+    Post,
+    Put,
+    Query,
+    Trace,
+    Other,
+}
+
+impl HttpMethod {
+    pub const COUNT: usize = Self::Other as usize + 1;
+
+    #[must_use]
+    pub fn parse(method: &str) -> Self {
+        match method {
+            "CONNECT" => Self::Connect,
+            "DELETE" => Self::Delete,
+            "GET" => Self::Get,
+            "HEAD" => Self::Head,
+            "OPTIONS" => Self::Options,
+            "PATCH" => Self::Patch,
+            "POST" => Self::Post,
+            "PUT" => Self::Put,
+            "QUERY" => Self::Query,
+            "TRACE" => Self::Trace,
+            _ => Self::Other,
+        }
+    }
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "CONNECT",
+            Self::Delete => "DELETE",
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+            Self::Patch => "PATCH",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Query => "QUERY",
+            Self::Trace => "TRACE",
+            Self::Other => OTHER_METHOD,
+        }
+    }
+
+    #[must_use]
+    pub const fn span_name_prefix(self) -> &'static str {
+        match self {
+            Self::Other => "HTTP",
+            _ => self.as_str(),
+        }
     }
 }
 
@@ -58,7 +108,36 @@ pub fn response_status_code(code: u16) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::response_status_code;
+    use super::{HttpMethod, response_status_code};
+
+    #[test]
+    fn http_methods_round_trip_and_index_within_count() {
+        let known = [
+            (HttpMethod::Connect, "CONNECT"),
+            (HttpMethod::Delete, "DELETE"),
+            (HttpMethod::Get, "GET"),
+            (HttpMethod::Head, "HEAD"),
+            (HttpMethod::Options, "OPTIONS"),
+            (HttpMethod::Patch, "PATCH"),
+            (HttpMethod::Post, "POST"),
+            (HttpMethod::Put, "PUT"),
+            (HttpMethod::Query, "QUERY"),
+            (HttpMethod::Trace, "TRACE"),
+        ];
+        assert_eq!(known.len() + 1, HttpMethod::COUNT);
+        for (slot, (method, text)) in known.into_iter().enumerate() {
+            assert_eq!(HttpMethod::parse(text), method);
+            assert_eq!(method.as_str(), text);
+            assert_eq!(method.span_name_prefix(), text);
+            assert_eq!(method.index(), slot);
+        }
+        assert_eq!(HttpMethod::Other.index(), HttpMethod::COUNT - 1);
+        assert_eq!(HttpMethod::Other.as_str(), "_OTHER");
+        assert_eq!(HttpMethod::Other.span_name_prefix(), "HTTP");
+        for unknown in ["", "get", "PURGE", "_OTHER"] {
+            assert_eq!(HttpMethod::parse(unknown), HttpMethod::Other, "{unknown}");
+        }
+    }
 
     #[test]
     fn every_three_digit_status_is_its_decimal_text() {

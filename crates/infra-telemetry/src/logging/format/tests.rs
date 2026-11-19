@@ -11,10 +11,12 @@ fn capture(format: LoggingFormat, emit: impl FnOnce()) -> (String, LogSnapshot) 
     let (output, guard) = output::start(buffer.clone()).expect("writer starts");
     let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format, false)));
     tracing::dispatcher::with_default(&dispatch, emit);
-    let result = guard.shutdown(Instant::now() + Duration::from_secs(2));
-    let LoggerShutdown::Completed(snapshot) = result else {
-        panic!("memory sink drain failed: {result:?}");
-    };
+    let (result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + Duration::from_secs(2));
+    assert_eq!(
+        result,
+        LoggerShutdown::Completed,
+        "memory sink drain failed"
+    );
     (buffer.records(), snapshot)
 }
 
@@ -485,10 +487,12 @@ fn callback_capacity(format: LoggingFormat) {
         worker.join().expect("released callback joins");
     }
     tracing::dispatcher::with_default(&dispatch, || payload("after_callback_release"));
-    let result = guard.shutdown(Instant::now() + Duration::from_secs(2));
-    let LoggerShutdown::Completed(snapshot) = result else {
-        panic!("capacity writer drain failed: {result:?}");
-    };
+    let (result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + Duration::from_secs(2));
+    assert_eq!(
+        result,
+        LoggerShutdown::Completed,
+        "capacity writer drain failed"
+    );
     let records = buffer.records();
     assert_eq!(records.lines().count(), 33);
     assert_eq!(records.matches("held_callback").count(), 32);
