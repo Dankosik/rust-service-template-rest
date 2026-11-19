@@ -11,7 +11,7 @@ use crate::{Client, ClientError, PreparedCall};
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
     tokens: ReceiverTokens,
-    resource: Client,
+    client: Client,
 }
 
 impl Client {
@@ -29,14 +29,14 @@ impl Client {
         }
         Ok(ServiceTokenClient {
             tokens,
-            resource: self.clone(),
+            client: self.clone(),
         })
     }
 }
 
 impl ServiceTokenClient {
     fn prepare(&self, request: http::Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let mut prepared = self.resource.prepare_call(request)?;
+        let mut prepared = self.client.prepare_call(request)?;
         if prepared.headers_mut().contains_key(AUTHORIZATION) {
             return Err(prepared.refuse(tonic::Status::internal(
                 "authorization conflicts with the service token",

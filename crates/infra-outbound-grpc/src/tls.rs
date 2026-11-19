@@ -4,7 +4,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
 use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, ConfigBuilder, InconsistentKeys, RootCertStore, WantsVerifier};
-use rustls_platform_verifier::{BuilderVerifierExt as _, Verifier};
+use rustls_platform_verifier::Verifier;
 use secrecy::ExposeSecret as _;
 
 use crate::{ClientError, ClientIdentity, ClientTlsMaterial, TlsMaterialError};
@@ -12,33 +12,10 @@ use crate::{ClientError, ClientIdentity, ClientTlsMaterial, TlsMaterialError};
 pub(crate) fn client_tls_config(
     material: &ClientTlsMaterial,
 ) -> Result<Arc<ClientConfig>, ClientError> {
-    let mut config = match (&material.ca_certificate_pem, &material.identity) {
-        (None, None) => return default_tls_config(),
-        (None, Some(identity)) => {
-            let (certs, key) = parse_client_identity(identity)?;
-            let verifier = platform_verifier()?;
-            tls13_builder()?
-                .dangerous()
-                .with_custom_certificate_verifier(verifier)
-                .with_client_auth_cert(certs, key)
-                .map_err(identity_setup_error)?
-        }
-        (Some(ca_pem), identity) => {
-            let roots = parse_ca_roots(ca_pem)?;
-            let builder = tls13_builder()?.with_root_certificates(roots);
-            match identity {
-                Some(identity) => {
-                    let (certs, key) = parse_client_identity(identity)?;
-                    builder
-                        .with_client_auth_cert(certs, key)
-                        .map_err(identity_setup_error)?
-                }
-                None => builder.with_no_client_auth(),
-            }
-        }
-    };
-    config.alpn_protocols = vec![b"h2".to_vec()];
-    Ok(Arc::new(config))
+    if material.ca_certificate_pem.is_none() && material.identity.is_none() {
+        return default_tls_config();
+    }
+    Ok(Arc::new(build_client_tls_config(material)?))
 }
 
 fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
@@ -46,12 +23,35 @@ fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
     if let Some(config) = DEFAULT_CONFIG.get() {
         return Ok(Arc::clone(config));
     }
-    let mut config = tls13_builder()?
-        .with_platform_verifier()
-        .map_err(|_| ClientError::ClientVerifierSetup)?
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec()];
+    let config = build_client_tls_config(&ClientTlsMaterial::default())?;
     Ok(Arc::clone(DEFAULT_CONFIG.get_or_init(|| Arc::new(config))))
+}
+
+fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig, ClientError> {
+    let roots = material
+        .ca_certificate_pem
+        .as_deref()
+        .map(parse_ca_roots)
+        .transpose()?;
+    let identity = material
+        .identity
+        .as_ref()
+        .map(parse_client_identity)
+        .transpose()?;
+    let builder = match roots {
+        Some(roots) => tls13_builder()?.with_root_certificates(roots),
+        None => tls13_builder()?
+            .dangerous()
+            .with_custom_certificate_verifier(platform_verifier()?),
+    };
+    let mut config = match identity {
+        Some((certs, key)) => builder
+            .with_client_auth_cert(certs, key)
+            .map_err(identity_setup_error)?,
+        None => builder.with_no_client_auth(),
+    };
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(config)
 }
 
 fn platform_verifier() -> Result<Arc<Verifier>, ClientError> {
@@ -59,18 +59,19 @@ fn platform_verifier() -> Result<Arc<Verifier>, ClientError> {
     if let Some(verifier) = PLATFORM_VERIFIER.get() {
         return Ok(Arc::clone(verifier));
     }
-    let verifier = Verifier::new(tls13_provider()).map_err(|_| ClientError::ClientVerifierSetup)?;
+    let verifier =
+        Verifier::new(crypto_provider()).map_err(|_| ClientError::ClientVerifierSetup)?;
     Ok(Arc::clone(
         PLATFORM_VERIFIER.get_or_init(|| Arc::new(verifier)),
     ))
 }
 
-fn tls13_provider() -> Arc<CryptoProvider> {
+fn crypto_provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
 fn tls13_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, ClientError> {
-    ClientConfig::builder_with_provider(tls13_provider())
+    ClientConfig::builder_with_provider(crypto_provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(ClientError::ClientProtocolSetup)
 }

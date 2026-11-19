@@ -29,7 +29,7 @@ pub(crate) fn deadline_status() -> tonic::Status {
     crate::Failure::new(service_failure::Code::GatewayTimeout).into()
 }
 
-pub(crate) fn server_stopped(reason: Stopped) -> tonic::Status {
+pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
     match reason {
         Stopped::Deadline => deadline_status(),
         Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
@@ -149,7 +149,7 @@ impl<B: Body> ServerState<B> {
         (self.pop_terminal(), finalizer)
     }
 
-    fn inspect_frame(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
+    fn close_if_terminal(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
@@ -179,7 +179,7 @@ struct ResponseBody<B> {
     stop_watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
-pub(crate) fn attach_server(
+pub(crate) fn wrap_response(
     mut response: axum::response::Response,
     call: Call,
     fallback: Option<opentelemetry::Context>,
@@ -234,31 +234,29 @@ where
         } else {
             None
         };
-        if let Some(finalizer) = finalizer {
-            finalizer.emit();
-        }
-        let response_active = matches!(state, ServerState::Active(_));
         let mut this = Self {
             state: Arc::new(Mutex::new(state)),
             stop_watcher: None,
             #[cfg(test)]
             stop_watcher_done: None,
         };
-        if response_active {
-            if let Some(drain) = custody.end_on_drain {
-                let context = OperationContext::new(custody.deadline, drain);
-                this.watch_stop(async move {
-                    match context.wait_stopped().await {
-                        Stopped::Deadline => deadline_status(),
-                        Stopped::Cancelled => tonic::Status::ok(""),
-                    }
-                });
-            } else if let Some(deadline) = custody.deadline {
-                this.watch_stop(async move {
-                    deadline.wait().await;
-                    deadline_status()
-                });
-            }
+        if let Some(finalizer) = finalizer {
+            finalizer.emit();
+            return this;
+        }
+        if let Some(drain) = custody.end_on_drain {
+            let context = OperationContext::new(custody.deadline, drain);
+            this.watch_stop(async move {
+                match context.wait_stopped().await {
+                    Stopped::Deadline => deadline_status(),
+                    Stopped::Cancelled => tonic::Status::ok(""),
+                }
+            });
+        } else if let Some(deadline) = custody.deadline {
+            this.watch_stop(async move {
+                deadline.wait().await;
+                deadline_status()
+            });
         }
         this
     }
@@ -349,7 +347,7 @@ where
                     if state.is_expired() {
                         state.cut_off(&deadline_status())
                     } else {
-                        let finalizer = state.inspect_frame(&polled);
+                        let finalizer = state.close_if_terminal(&polled);
                         (polled, finalizer)
                     }
                 }
@@ -747,13 +745,13 @@ mod tests {
 
     #[test]
     fn server_stopped_maps_deadline_and_cancellation() {
-        let deadline = server_stopped(Stopped::Deadline);
+        let deadline = stopped_status(Stopped::Deadline);
         assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
             crate::status::catalog_code(&deadline),
             Some(service_failure::Code::GatewayTimeout)
         );
-        let cancelled = server_stopped(Stopped::Cancelled);
+        let cancelled = stopped_status(Stopped::Cancelled);
         assert_eq!(cancelled.code(), tonic::Code::Cancelled);
         assert_eq!(crate::status::catalog_code(&cancelled), None);
     }

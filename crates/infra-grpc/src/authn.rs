@@ -10,7 +10,7 @@ use operation_context::OperationContext;
 use serde::Deserialize;
 
 use crate::Failure;
-use crate::call::server_stopped;
+use crate::call::stopped_status;
 use crate::router::reject_with_budget;
 use crate::status::internal_status;
 
@@ -107,7 +107,7 @@ pub(crate) async fn authenticate(
     mut request: Request,
 ) -> Result<Request, Response> {
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
     let result = {
         let authorization = request
@@ -120,7 +120,7 @@ pub(crate) async fn authenticate(
             .await
     };
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
     let (principal, token) = match result {
         Ok(presentation) => presentation,
@@ -141,14 +141,13 @@ pub(crate) async fn authenticate(
         return Err(response);
     }
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
-    let delegation = requirement
-        .delegate
-        .then(|| token.into_delegation_credential());
     request.headers_mut().remove(AUTHORIZATION);
-    if let Some(credential) = delegation {
-        request.extensions_mut().insert(credential);
+    if requirement.delegate {
+        request
+            .extensions_mut()
+            .insert(token.into_delegation_credential());
     }
     request
         .extensions_mut()
