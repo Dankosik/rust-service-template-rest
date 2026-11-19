@@ -97,7 +97,7 @@ impl Attempt {
         method: &Method,
         template: Option<UrlTemplate>,
         server: &Server,
-        stops: &'a RequestContext,
+        context: &'a RequestContext,
     ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
@@ -124,7 +124,7 @@ impl Attempt {
                 span,
             },
             move |attempt| {
-                let outcome = match stops.check() {
+                let outcome = match context.check() {
                     Ok(()) => Outcome::Cancelled,
                     Err(reason) => Outcome::from_error(&Error::from(reason)),
                 };

@@ -100,7 +100,7 @@ pub struct Server {
 
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
-    finish: CancellationToken,
+    drain: CancellationToken,
     force: CancellationToken,
 }
 
@@ -148,21 +148,23 @@ impl BoundListener {
 
     #[must_use]
     pub fn serve(self, app: Router, options: Http1Options) -> Server {
-        serve_plaintext(self, app, options.connections, http1_driver(options))
+        let (driver, delegated) = http1_driver(options);
+        serve_plaintext(self, app, options.connections, driver, delegated)
     }
 
     // template:begin grpc:http-bound-listener-tls
     #[must_use]
     pub fn serve_tls(self, app: Router, options: Http1Options, tls: TlsOptions) -> Server {
-        serve_tls(self, app, options.connections, http1_driver(options), tls)
+        let (driver, delegated) = http1_driver(options);
+        serve_tls(self, app, options.connections, driver, delegated, tls)
     }
 
     #[must_use]
     pub fn serve_h2(self, app: Router, options: Http2Options, tls: Option<TlsOptions>) -> Server {
-        let driver = http2_driver(options);
+        let (driver, delegated) = http2_driver(options);
         match tls {
-            Some(tls) => serve_tls(self, app, options.connections, driver, tls),
-            None => serve_plaintext(self, app, options.connections, driver),
+            Some(tls) => serve_tls(self, app, options.connections, driver, delegated, tls),
+            None => serve_plaintext(self, app, options.connections, driver, delegated),
         }
     }
     // template:end grpc:http-bound-listener-tls
@@ -173,10 +175,17 @@ fn serve_plaintext(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
+    delegated: ListenerExecutor,
 ) -> Server {
-    serve_listener(bound, app, limits, driver, |stream| async move {
-        Some((stream, "http"))
-    })
+    serve_listener(
+        bound,
+        app,
+        limits,
+        driver,
+        delegated,
+        "http",
+        |stream, _| async move { Some(stream) },
+    )
 }
 
 // template:begin grpc:http-serve-tls
@@ -185,6 +194,7 @@ fn serve_tls(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
+    delegated: ListenerExecutor,
     tls: TlsOptions,
 ) -> Server {
     let TlsOptions {
@@ -197,39 +207,49 @@ fn serve_tls(
         Arc::make_mut(&mut config).alpn_protocols = vec![protocol.to_vec()];
     }
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
-    serve_listener(bound, app, limits, driver, move |stream| {
-        let acceptor = acceptor.clone();
-        async move {
-            let peer = stream.peer_addr().ok();
-            match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                Ok(Ok(tls_stream)) => {
-                    if require_h2 && tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-                        tracing::debug!(
-                            peer = peer.map(tracing::field::display),
-                            "http2_alpn_missing"
-                        );
-                        return None;
-                    }
-                    Some((tls_stream, "https"))
-                }
-                Ok(Err(error)) => {
-                    tracing::debug!(
-                        peer = peer.map(tracing::field::display),
-                        %error,
-                        "http_tls_handshake_failed"
-                    );
-                    None
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        peer = peer.map(tracing::field::display),
-                        "http_tls_handshake_timed_out"
-                    );
-                    None
-                }
+    serve_listener(
+        bound,
+        app,
+        limits,
+        driver,
+        delegated,
+        "https",
+        move |stream, peer| {
+            accept_tls(
+                acceptor.clone(),
+                stream,
+                peer,
+                handshake_timeout,
+                require_h2,
+            )
+        },
+    )
+}
+
+async fn accept_tls(
+    acceptor: tokio_rustls::TlsAcceptor,
+    stream: TcpStream,
+    peer: SocketAddr,
+    handshake_timeout: Duration,
+    require_h2: bool,
+) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
+    match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
+        Ok(Ok(tls_stream)) => {
+            if require_h2 && tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+                tracing::debug!(%peer, "http2_alpn_missing");
+                return None;
             }
+            Some(tls_stream)
         }
-    })
+        Ok(Err(error)) => {
+            tracing::debug!(%peer, %error, "http_tls_handshake_failed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(%peer, "http_tls_handshake_timed_out");
+            None
+        }
+    }
 }
 // template:end grpc:http-serve-tls
 
@@ -261,17 +281,17 @@ impl Server {
     }
 
     pub fn accept_failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
-        let mut failure = self.accept_failure.clone();
+        let mut receiver = self.accept_failure.clone();
         async move {
-            let seen = failure
+            match receiver
                 .wait_for(Option::is_some)
                 .await
                 .ok()
-                .and_then(|seen| *seen);
-            let Some(failure) = seen else {
-                return std::future::pending().await;
-            };
-            failure
+                .and_then(|seen| *seen)
+            {
+                Some(failure) => failure,
+                None => std::future::pending().await,
+            }
         }
     }
 
@@ -285,9 +305,8 @@ impl Server {
         graceful_deadline: Instant,
         confirmation_deadline: Instant,
     ) -> (Result<Drained, ServerError>, DrainResidue) {
-        self.connection_shutdown.finish.cancel();
+        self.connection_shutdown.drain.cancel();
         let joined = self.join_accept_until(graceful_deadline).await;
-        let mut accept_unconfirmed = joined.is_none();
         let graceful_result = match joined {
             None => {
                 self.accept_loop.abort();
@@ -295,7 +314,7 @@ impl Server {
             }
             Some(Err(error)) => Err(ServerError::AcceptTask(error)),
             Some(Ok(())) => {
-                if self.wait_for_work(graceful_deadline).await {
+                if self.drain_tasks_until(graceful_deadline).await {
                     return (Ok(Drained::Complete), DrainResidue::default());
                 }
                 Ok(Drained::TimedOut {
@@ -304,12 +323,11 @@ impl Server {
             }
         };
         self.connection_shutdown.force.cancel();
-        if accept_unconfirmed {
-            accept_unconfirmed = self
+        let accept_unconfirmed = matches!(graceful_result, Err(ServerError::AcceptTimeout))
+            && self
                 .join_accept_until(confirmation_deadline)
                 .await
                 .is_none();
-        }
         let producers_stopped =
             !accept_unconfirmed && close_and_wait(&self.connections, confirmation_deadline).await;
         self.delegated.force.cancel();
@@ -334,7 +352,7 @@ impl Server {
         timeout_at(deadline, &mut self.accept_loop).await.ok()
     }
 
-    async fn wait_for_work(&self, deadline: Instant) -> bool {
+    async fn drain_tasks_until(&self, deadline: Instant) -> bool {
         close_and_wait(&self.connections, deadline).await
             && close_and_wait(&self.delegated.tasks, deadline).await
     }
@@ -354,7 +372,7 @@ fn deadline_after(budget: Duration) -> Instant {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.connection_shutdown.finish.cancel();
+        self.connection_shutdown.drain.cancel();
         self.connection_shutdown.force.cancel();
         self.delegated.force.cancel();
     }
@@ -383,7 +401,6 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
 #[derive(Clone)]
 struct ConnectionDriver {
     builder: auto::Builder<ListenerExecutor>,
-    executor: ListenerExecutor,
     // template:begin grpc:http2-driver-preface-budget
     preface_timeout: Option<Duration>,
     // template:end grpc:http2-driver-preface-budget
@@ -399,7 +416,7 @@ const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 // template:end grpc:http2-wire-limits
 
-fn http1_driver(options: Http1Options) -> ConnectionDriver {
+fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -412,17 +429,17 @@ fn http1_driver(options: Http1Options) -> ConnectionDriver {
                 .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
         )
         .keep_alive(true);
-    ConnectionDriver {
+    let driver = ConnectionDriver {
         builder: builder.http1_only(),
-        executor,
         // template:begin grpc:http1-driver-no-preface
         preface_timeout: None,
         // template:end grpc:http1-driver-no-preface
-    }
+    };
+    (driver, executor)
 }
 
 // template:begin grpc:http2-driver
-fn http2_driver(options: Http2Options) -> ConnectionDriver {
+fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -434,29 +451,72 @@ fn http2_driver(options: Http2Options) -> ConnectionDriver {
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
         .initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
-    ConnectionDriver {
+    let driver = ConnectionDriver {
         builder: builder.http2_only(),
-        executor,
         preface_timeout: Some(options.preface_timeout),
-    }
+    };
+    (driver, executor)
+}
+
+fn observe_http2_preface<IO>(
+    io: IO,
+    timeout: Option<Duration>,
+) -> (
+    impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    Option<(Instant, tokio::sync::oneshot::Receiver<()>)>,
+)
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let Some(timeout) = timeout else {
+        return (tokio_util::either::Either::Right(io), None);
+    };
+    let (notify, received) = tokio::sync::oneshot::channel();
+    let mut notify = Some(notify);
+    // RFC 9113 §3.4, client connection preface magic.
+    let mut remaining = 24_usize;
+    let io = tokio_util::io::InspectReader::new(io, move |bytes| {
+        remaining = remaining.saturating_sub(bytes.len());
+        if remaining == 0
+            && let Some(notify) = notify.take()
+        {
+            let _ = notify.send(());
+        }
+    });
+    (
+        tokio_util::either::Either::Left(io),
+        Some((deadline_after(timeout), received)),
+    )
 }
 // template:end grpc:http2-driver
+
+#[derive(Clone)]
+struct ConnectionService<F> {
+    app: Router,
+    driver: ConnectionDriver,
+    max_connection_age: Option<Duration>,
+    shutdown: ConnectionShutdown,
+    scheme: &'static str,
+    prepare_io: F,
+}
 
 fn serve_listener<F, Fut, IO>(
     bound: BoundListener,
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
+    delegated: ListenerExecutor,
+    scheme: &'static str,
     prepare_io: F,
 ) -> Server
 where
-    F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let local_addr = bound.local_addr;
     let connection_shutdown = ConnectionShutdown {
-        finish: CancellationToken::new(),
+        drain: CancellationToken::new(),
         force: CancellationToken::new(),
     };
     let connections = TaskTracker::new();
@@ -470,30 +530,27 @@ where
     }
     let (failure, accept_failure) = watch::channel(None);
     let guard = DropGuard::new(
-        (connection_shutdown.finish.clone(), failure),
-        |(finish, failure)| {
+        (connection_shutdown.drain.clone(), failure),
+        |(drain, failure)| {
             let observed = if std::thread::panicking() {
-                Some(AcceptFailure::Panicked)
-            } else if !finish.is_cancelled() {
-                Some(AcceptFailure::Ended)
+                AcceptFailure::Panicked
+            } else if !drain.is_cancelled() {
+                AcceptFailure::Ended
             } else {
-                None
+                return;
             };
-            if let Some(observed) = observed {
-                failure.send_replace(Some(observed));
-            }
+            failure.send_replace(Some(observed));
         },
     );
-    let delegated = driver.executor.clone();
-    let accept = accept_loop(
-        bound,
+    let service = ConnectionService {
         app,
-        limits,
         driver,
-        connection_shutdown.clone(),
-        connections.clone(),
+        max_connection_age: limits.max_connection_age,
+        shutdown: connection_shutdown.clone(),
+        scheme,
         prepare_io,
-    );
+    };
+    let accept = accept_loop(bound, limits.max_connections, connections.clone(), service);
     let accept_loop = AbortOnDropHandle::new(tokio::spawn(async move {
         let _guard = guard;
         accept.await;
@@ -513,37 +570,31 @@ async fn accept_loop<F, Fut, IO>(
         listener,
         local_addr,
     }: BoundListener,
-    app: Router,
-    limits: ConnectionLimits,
-    driver: ConnectionDriver,
-    connection_shutdown: ConnectionShutdown,
+    max_connections: Option<NonZeroU32>,
     connections: TaskTracker,
-    prepare_io: F,
+    service: ConnectionService<F>,
 ) where
-    F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let finish = &connection_shutdown.finish;
-    let permits = limits
-        .max_connections
-        .map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
+    let drain = &service.shutdown.drain;
+    let permits = max_connections.map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
     loop {
         let accepted = tokio::select! {
-            () = finish.cancelled() => break,
+            () = drain.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
         let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(err) => {
-                let delay = accept_retry_delay(&err);
-                if delay.is_zero() {
+                let Some(delay) = accept_retry_delay(&err) else {
                     continue;
-                }
+                };
                 tracing::warn!(error = %err, "http_accept_failed");
                 tokio::select! {
-                    () = finish.cancelled() => break,
+                    () = drain.cancelled() => break,
                     () = tokio::time::sleep(delay) => {}
                 }
                 continue;
@@ -560,20 +611,12 @@ async fn accept_loop<F, Fut, IO>(
             continue;
         };
         configure_accepted(&stream);
-        connections.spawn(serve_connection(
-            (stream, peer),
-            permit,
-            prepare_io.clone(),
-            driver.clone(),
-            app.clone(),
-            limits,
-            connection_shutdown.clone(),
-        ));
+        connections.spawn(serve_connection(stream, peer, permit, service.clone()));
     }
     drop(listener);
 }
 
-fn accept_retry_delay(error: &std::io::Error) -> Duration {
+fn accept_retry_delay(error: &std::io::Error) -> Option<Duration> {
     use std::io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted};
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -595,104 +638,34 @@ fn accept_retry_delay(error: &std::io::Error) -> Duration {
                     | ENETUNREACH
             )
         ) {
-            return Duration::ZERO;
+            return None;
         }
     }
     match error.kind() {
-        ConnectionAborted | ConnectionRefused | ConnectionReset | Interrupted => Duration::ZERO,
-        _ => Duration::from_millis(50),
+        ConnectionAborted | ConnectionRefused | ConnectionReset | Interrupted => None,
+        _ => Some(Duration::from_millis(50)),
     }
 }
 
 fn serve_connection<F, Fut, IO>(
-    (stream, peer): (TcpStream, SocketAddr),
+    stream: TcpStream,
+    peer: SocketAddr,
     permit: Option<OwnedSemaphorePermit>,
-    prepare_io: F,
-    driver: ConnectionDriver,
-    app: Router,
-    limits: ConnectionLimits,
-    shutdown: ConnectionShutdown,
+    service: ConnectionService<F>,
 ) -> impl Future<Output = ()>
 where
-    F: Fn(TcpStream) -> Fut,
-    Fut: Future<Output = Option<(IO, &'static str)>>,
+    F: Fn(TcpStream, SocketAddr) -> Fut,
+    Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let age_deadline = limits
+    let age_deadline = service
         .max_connection_age
         .map(|age| deadline_after(spread(age)));
     async move {
         let _permit = permit;
-        let ConnectionShutdown { finish, force } = shutdown;
+        let force = service.shutdown.force.clone();
         let forced = Arc::new(AtomicBool::new(false));
-        let connection_forced = Arc::clone(&forced);
-        let serve = async move {
-            let closing = wind_down(&finish, age_deadline);
-            tokio::pin!(closing);
-            let io = tokio::select! {
-                biased;
-                () = closing.as_mut() => None,
-                io = prepare_io(stream) => io,
-            };
-            let Some((io, scheme)) = io else {
-                return Ok(());
-            };
-            // template:begin grpc:http2-observe-initial-read
-            let (io, preface) = if let Some(timeout) = driver.preface_timeout {
-                let (notify, received) = tokio::sync::oneshot::channel();
-                let mut notify = Some(notify);
-                // RFC 9113 §3.4, client connection preface magic.
-                let mut remaining = 24_usize;
-                let io = tokio_util::io::InspectReader::new(io, move |bytes| {
-                    remaining = remaining.saturating_sub(bytes.len());
-                    if remaining == 0
-                        && let Some(notify) = notify.take()
-                    {
-                        let _ = notify.send(());
-                    }
-                });
-                (
-                    tokio_util::either::Either::Left(io),
-                    Some((deadline_after(timeout), received)),
-                )
-            } else {
-                (tokio_util::either::Either::Right(io), None)
-            };
-            // template:end grpc:http2-observe-initial-read
-            let service = ServiceBuilder::new()
-                .layer(Extension(ConnectionInfo {
-                    scheme,
-                    forced: connection_forced,
-                    drain: finish.clone(),
-                }))
-                .service(app);
-            let connection = driver
-                .builder
-                .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
-            tokio::pin!(connection);
-            // template:begin grpc:http2-wait-initial-read
-            if let Some((deadline, received)) = preface {
-                tokio::select! {
-                    biased;
-                    _ = received => {}
-                    () = closing.as_mut() => return Ok(()),
-                    () = tokio::time::sleep_until(deadline) => {
-                        tracing::debug!(%peer, "http2_preface_timed_out");
-                        return Ok(());
-                    }
-                    ended = connection.as_mut() => return ended,
-                }
-            }
-            // template:end grpc:http2-wait-initial-read
-            tokio::select! {
-                biased;
-                () = closing => {
-                    connection.as_mut().graceful_shutdown();
-                    connection.await
-                }
-                ended = connection.as_mut() => ended,
-            }
-        };
+        let serve = drive_connection(stream, peer, service, age_deadline, Arc::clone(&forced));
         tokio::select! {
             biased;
             () = async {
@@ -708,13 +681,81 @@ where
     }
 }
 
-async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
+async fn drive_connection<F, Fut, IO>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    service: ConnectionService<F>,
+    age_deadline: Option<Instant>,
+    forced: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Fn(TcpStream, SocketAddr) -> Fut,
+    Fut: Future<Output = Option<IO>>,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let ConnectionService {
+        app,
+        driver,
+        shutdown,
+        scheme,
+        prepare_io,
+        ..
+    } = service;
+    let closing = wind_down(&shutdown.drain, age_deadline);
+    tokio::pin!(closing);
+    let io = tokio::select! {
+        biased;
+        () = closing.as_mut() => None,
+        io = prepare_io(stream, peer) => io,
+    };
+    let Some(io) = io else {
+        return Ok(());
+    };
+    // template:begin grpc:http2-observe-initial-read
+    let (io, preface) = observe_http2_preface(io, driver.preface_timeout);
+    // template:end grpc:http2-observe-initial-read
+    let service = ServiceBuilder::new()
+        .layer(Extension(ConnectionInfo {
+            scheme,
+            forced,
+            drain: shutdown.drain.clone(),
+        }))
+        .service(app);
+    let connection = driver
+        .builder
+        .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+    tokio::pin!(connection);
+    // template:begin grpc:http2-wait-initial-read
+    if let Some((deadline, received)) = preface {
+        tokio::select! {
+            biased;
+            _ = received => {}
+            () = closing.as_mut() => return Ok(()),
+            () = tokio::time::sleep_until(deadline) => {
+                tracing::debug!(%peer, "http2_preface_timed_out");
+                return Ok(());
+            }
+            ended = connection.as_mut() => return ended,
+        }
+    }
+    // template:end grpc:http2-wait-initial-read
+    tokio::select! {
+        biased;
+        () = closing => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+        ended = connection.as_mut() => ended,
+    }
+}
+
+async fn wind_down(drain: &CancellationToken, age_deadline: Option<Instant>) {
     if let Some(deadline) = age_deadline {
-        finish
+        drain
             .run_until_cancelled(tokio::time::sleep_until(deadline))
             .await;
     } else {
-        finish.cancelled().await;
+        drain.cancelled().await;
     }
 }
 

@@ -197,7 +197,21 @@ const fn delivery_version() -> u8 {
     2
 }
 
-const EMPTY_DELIVERY_JSON: &str = r#"{"version":2,"endpoint_id":"","content_type":"","body":""}"#;
+impl Delivery {
+    fn empty_serialized_len() -> Result<usize, serde_json::Error> {
+        static LEN: OnceLock<usize> = OnceLock::new();
+        if let Some(&len) = LEN.get() {
+            return Ok(len);
+        }
+        let len = infra_jobs::json_payload_len(&Self {
+            version: delivery_version(),
+            endpoint_id: String::new(),
+            content_type: String::new(),
+            body: Bytes::new(),
+        })?;
+        Ok(*LEN.get_or_init(|| len))
+    }
+}
 
 impl JobKind for Delivery {
     const NAME: &'static str = DELIVERY_KIND;
@@ -245,47 +259,30 @@ impl EndpointOutcomes {
         response: Result<http::response::Parts, HttpError>,
         response_time: SystemTime,
     ) -> Result<(), JobError> {
-        match response {
-            Ok(response) if response.status.is_success() => {
-                tracing::debug!(
-                    webhook.endpoint = &*self.endpoint,
-                    webhook.outcome = "delivered",
-                    http.status = response.status.as_u16(),
-                    "webhook_delivery_finished"
-                );
-                self.record_delivered();
+        match classify_response(response, response_time) {
+            Ok(status) => {
+                self.record_delivered(status);
                 Ok(())
             }
-            Ok(response) if response.status == StatusCode::GONE => {
-                Err(self.fail(DeliveryFailure::EndpointGone))
-            }
-            Ok(response) => {
-                let failure = DeliveryFailure::Status(response.status);
-                let Some(delay) = retry_after(&response.headers, response_time) else {
-                    return Err(self.fail(failure));
-                };
-                let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) else {
-                    return Err(
-                        self.fail(DeliveryFailure::RetryAfterExceedsMaxDelay(response.status))
-                    );
-                };
+            Err((failure, error)) => {
                 self.record_failure(failure);
-                Err(retry)
+                Err(error)
             }
-            Err(error) => Err(self.fail(DeliveryFailure::from_exchange(&error))),
         }
     }
 
     fn fail(&self, failure: DeliveryFailure) -> JobError {
         self.record_failure(failure);
-        if failure.is_permanent() {
-            JobError::permanent(failure.reason())
-        } else {
-            JobError::retryable(failure.reason())
-        }
+        failure.into_job_error()
     }
 
-    fn record_delivered(&self) {
+    fn record_delivered(&self, status: StatusCode) {
+        tracing::debug!(
+            webhook.endpoint = &*self.endpoint,
+            webhook.outcome = "delivered",
+            http.status = status.as_u16(),
+            "webhook_delivery_finished"
+        );
         self.counters[OutcomeSlot::Delivered]
             .get_or_init(|| {
                 metrics::counter!(
@@ -409,6 +406,43 @@ impl DeliveryFailure {
             | Self::Client => None,
         }
     }
+
+    fn into_job_error(self) -> JobError {
+        if self.is_permanent() {
+            JobError::permanent(self.reason())
+        } else {
+            JobError::retryable(self.reason())
+        }
+    }
+}
+
+fn classify_response(
+    response: Result<http::response::Parts, HttpError>,
+    response_time: SystemTime,
+) -> Result<StatusCode, (DeliveryFailure, JobError)> {
+    match response {
+        Ok(response) if response.status.is_success() => Ok(response.status),
+        Ok(response) if response.status == StatusCode::GONE => {
+            let failure = DeliveryFailure::EndpointGone;
+            Err((failure, failure.into_job_error()))
+        }
+        Ok(response) => {
+            let failure = DeliveryFailure::Status(response.status);
+            let Some(delay) = retry_after(&response.headers, response_time) else {
+                return Err((failure, failure.into_job_error()));
+            };
+            if let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) {
+                Err((failure, retry))
+            } else {
+                let exceeded = DeliveryFailure::RetryAfterExceedsMaxDelay(response.status);
+                Err((exceeded, exceeded.into_job_error()))
+            }
+        }
+        Err(error) => {
+            let failure = DeliveryFailure::from_exchange(&error);
+            Err((failure, failure.into_job_error()))
+        }
+    }
 }
 
 impl Endpoint {
@@ -528,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_delivery_json_is_the_serialized_empty_delivery() {
+    fn empty_serialized_len_matches_the_serialized_empty_delivery() {
         let empty = super::Delivery {
             version: super::delivery_version(),
             endpoint_id: String::new(),
@@ -537,8 +571,8 @@ mod tests {
         };
 
         assert_eq!(
-            serde_json::to_string(&empty).unwrap(),
-            super::EMPTY_DELIVERY_JSON
+            super::Delivery::empty_serialized_len().unwrap(),
+            serde_json::to_string(&empty).unwrap().len()
         );
     }
 

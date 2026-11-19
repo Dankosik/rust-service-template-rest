@@ -18,24 +18,32 @@ use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
-#[derive(Clone, derive_more::Debug)]
+#[derive(Clone)]
 pub struct WebhookState {
-    #[debug("{}", active.active.is_some())]
-    active: Arc<ReceiverState>,
+    state: Arc<ReceiverState>,
+}
+
+impl std::fmt::Debug for WebhookState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebhookState")
+            .field("active", &self.state.active.is_some())
+            .finish()
+    }
 }
 
 impl WebhookState {
     #[must_use]
     pub fn inert() -> Self {
         Self {
-            active: Arc::new(ReceiverState::inert()),
+            state: Arc::new(ReceiverState::inert()),
         }
     }
 
     #[must_use]
     pub fn active(receiver: Receiver) -> Self {
         Self {
-            active: Arc::new(ReceiverState::active(receiver)),
+            state: Arc::new(ReceiverState::active(receiver)),
         }
     }
 }
@@ -82,7 +90,7 @@ impl ReceiverState {
         Some((&active.receiver, metrics))
     }
 
-    fn unknown_endpoint(&self) -> Response {
+    fn reject_unknown_endpoint(&self) -> Response {
         self.unknown_endpoint
             .get_or_init(|| {
                 metrics::counter!(
@@ -168,9 +176,9 @@ async fn receive(
     State(state): State<WebhookState>,
     request: Request,
 ) -> Response {
-    let state = state.active.as_ref();
+    let state = state.state.as_ref();
     let Some((receiver, metrics)) = state.endpoint(&endpoint_id) else {
-        return state.unknown_endpoint();
+        return state.reject_unknown_endpoint();
     };
     let (parts, body) = request.into_parts();
     let (Some(deadline), Some(context)) = (
@@ -217,7 +225,7 @@ async fn receive(
             metrics.record(slot);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(ReceiveError::UnknownEndpoint) => state.unknown_endpoint(),
+        Err(ReceiveError::UnknownEndpoint) => state.reject_unknown_endpoint(),
         Err(ReceiveError::Rejected(rejection)) => {
             metrics.record_rejection(rejection.reason());
             Problem::new(Code::WebhookRejected).into_response()
@@ -402,14 +410,14 @@ mod tests {
         ));
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
-            let (_, partner) = state.active.endpoint("partner").expect("partner endpoint");
+            let (_, partner) = state.state.endpoint("partner").expect("partner endpoint");
             partner.record(OutcomeSlot::Accepted);
-            let (_, cloned_partner) = cloned.active.endpoint("partner").expect("partner endpoint");
+            let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
             cloned_partner.record(OutcomeSlot::Accepted);
             partner.record_rejection("invalid_signature");
             partner.record_rejection("invalid_token");
-            let _ = state.active.unknown_endpoint();
-            let _ = cloned.active.unknown_endpoint();
+            let _ = state.state.reject_unknown_endpoint();
+            let _ = cloned.state.reject_unknown_endpoint();
         });
         let mut samples: Vec<(Vec<Label>, u64)> = snapshotter
             .snapshot()
@@ -458,7 +466,7 @@ mod tests {
         let second_snapshotter = second_recorder.snapshotter();
         let inert = WebhookState::inert();
         metrics::with_local_recorder(&second_recorder, || {
-            let _ = inert.clone().active.unknown_endpoint();
+            let _ = inert.clone().state.reject_unknown_endpoint();
         });
         assert_eq!(second_snapshotter.snapshot().into_vec().len(), 1);
     }

@@ -173,7 +173,7 @@ async fn dropping_server_forces_in_flight_connection_cleanup() {
 #[tokio::test]
 async fn cancelling_drain_forces_in_flight_connection_cleanup() {
     let (server, peer) = pending_request().await;
-    let graceful = server.connection_shutdown.finish.clone();
+    let graceful = server.connection_shutdown.drain.clone();
     let draining = tokio::spawn(server.drain(Duration::from_mins(1)));
     tokio::time::timeout(Duration::from_secs(2), graceful.cancelled())
         .await
@@ -254,17 +254,20 @@ async fn accept_panic_after_stop_is_still_observed() {
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
     let listener = BoundListener::bind(loopback()).unwrap();
+    let (driver, delegated) = http1_driver(options());
     let server = serve_listener(
         listener,
         app(),
         options().connections,
-        http1_driver(options()),
-        move |stream| {
+        driver,
+        delegated,
+        "http",
+        move |stream, _| {
             let _ = &marker;
-            async move { Some((stream, "http")) }
+            async move { Some(stream) }
         },
     );
-    stop.set(server.connection_shutdown.finish.clone()).unwrap();
+    stop.set(server.connection_shutdown.drain.clone()).unwrap();
     let failure = server.accept_failure();
     let peer = TcpStream::connect(server.local_addr()).await.unwrap();
     assert_eq!(
@@ -286,23 +289,19 @@ fn transient_accept_errors_retry_without_the_resource_backoff() {
         io::ErrorKind::ConnectionRefused,
         io::ErrorKind::Interrupted,
     ] {
-        assert_eq!(
-            accept_retry_delay(&error.into()),
-            Duration::ZERO,
-            "{error:?}"
-        );
+        assert_eq!(accept_retry_delay(&error.into()), None, "{error:?}");
     }
     assert_eq!(
         accept_retry_delay(&io::ErrorKind::OutOfMemory.into()),
-        Duration::from_millis(50)
+        Some(Duration::from_millis(50))
     );
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use nix::errno::Errno;
-        assert_eq!(accept_retry_delay(&Errno::EPROTO.into()), Duration::ZERO);
+        assert_eq!(accept_retry_delay(&Errno::EPROTO.into()), None);
         assert_eq!(
             accept_retry_delay(&Errno::EMFILE.into()),
-            Duration::from_millis(50)
+            Some(Duration::from_millis(50))
         );
     }
 }

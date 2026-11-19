@@ -1,6 +1,8 @@
 use axum::http::header::Entry;
 use axum::http::{HeaderMap, HeaderValue};
 
+const TRACEPARENT_V0_LEN: usize = 55;
+
 pub fn admit_trace_context(headers: &mut HeaderMap, trusted: bool) -> bool {
     let accepted = trusted && normalize_parent(headers);
     if accepted {
@@ -20,7 +22,7 @@ fn normalize_parent(headers: &mut HeaderMap) -> bool {
         return false;
     }
     let wire = entry.get().as_bytes();
-    let Some(prefix) = known_fields(wire.trim_ascii()) else {
+    let Some(prefix) = validate_traceparent_prefix(wire.trim_ascii()) else {
         return false;
     };
     if prefix.len() != wire.len() {
@@ -33,8 +35,8 @@ fn normalize_parent(headers: &mut HeaderMap) -> bool {
 }
 
 // W3C Trace Context §3.2.4.
-fn known_fields(wire: &[u8]) -> Option<&[u8]> {
-    let prefix = wire.get(..55)?;
+fn validate_traceparent_prefix(wire: &[u8]) -> Option<&[u8]> {
+    let prefix = wire.get(..TRACEPARENT_V0_LEN)?;
     let version = &prefix[..2];
     let trace_id = &prefix[3..35];
     let parent_id = &prefix[36..52];
@@ -49,7 +51,8 @@ fn known_fields(wire: &[u8]) -> Option<&[u8]> {
         && valid_id(parent_id)
         && prefix[52] == b'-'
         && lower_hex(flags)
-        && (wire.len() == 55 || (version != b"00" && wire[55] == b'-')))
+        && (wire.len() == TRACEPARENT_V0_LEN
+            || (version != b"00" && wire[TRACEPARENT_V0_LEN] == b'-')))
         .then_some(prefix)
 }
 

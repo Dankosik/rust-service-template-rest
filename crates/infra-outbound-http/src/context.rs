@@ -4,14 +4,14 @@ use smallvec::SmallVec;
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     operation: OperationContext,
-    requests: SmallVec<[OperationContext; 1]>,
+    request_contexts: SmallVec<[OperationContext; 1]>,
 }
 
 impl From<OperationContext> for RequestContext {
     fn from(operation: OperationContext) -> Self {
         Self {
             operation,
-            requests: SmallVec::new(),
+            request_contexts: SmallVec::new(),
         }
     }
 }
@@ -26,13 +26,11 @@ impl RequestContext {
     pub(super) fn for_request(
         mut self,
         mut ceiling: Deadline,
-        request: Option<OperationContext>,
+        request_context: Option<OperationContext>,
     ) -> Self {
-        if let Some(request) = request {
-            if let Some(deadline) = request.deadline() {
-                ceiling = ceiling.earlier(deadline);
-            }
-            self.requests.push(request);
+        if let Some(request_context) = request_context {
+            ceiling = request_context.effective_deadline(ceiling);
+            self.request_contexts.push(request_context);
         }
         self.operation = self.operation.child_until(ceiling);
         self
@@ -42,7 +40,7 @@ impl RequestContext {
     pub fn child_until(&self, ceiling: Deadline) -> Self {
         Self {
             operation: self.operation.child_until(ceiling),
-            requests: self.requests.clone(),
+            request_contexts: self.request_contexts.clone(),
         }
     }
 
@@ -53,9 +51,11 @@ impl RequestContext {
 
     #[must_use]
     pub fn stopped(&self) -> Option<Stopped> {
-        self.operation
-            .stopped()
-            .or_else(|| self.requests.iter().find_map(OperationContext::stopped))
+        self.operation.stopped().or_else(|| {
+            self.request_contexts
+                .iter()
+                .find_map(OperationContext::stopped)
+        })
     }
 
     pub fn check(&self) -> Result<(), Stopped> {
@@ -63,15 +63,15 @@ impl RequestContext {
     }
 
     pub async fn wait_stopped(&self) -> Stopped {
-        let requests = async {
-            match self.requests.as_slice() {
+        let request_stopped = async {
+            match self.request_contexts.as_slice() {
                 [] => std::future::pending().await,
-                [request] => request.wait_stopped().await,
-                requests => {
+                [context] => context.wait_stopped().await,
+                contexts => {
                     futures_util::future::select_all(
-                        requests
+                        contexts
                             .iter()
-                            .map(|request| Box::pin(request.wait_stopped())),
+                            .map(|context| Box::pin(context.wait_stopped())),
                     )
                     .await
                     .0
@@ -81,7 +81,7 @@ impl RequestContext {
         tokio::select! {
             biased;
             stopped = self.operation.wait_stopped() => stopped,
-            stopped = requests => stopped,
+            stopped = request_stopped => stopped,
         }
     }
 }
