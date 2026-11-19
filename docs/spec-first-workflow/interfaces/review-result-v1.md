@@ -5,16 +5,24 @@ Every independent review returns:
 ```text
 candidate: <fixed artifact revision, diff, tree, or commit>
 verdict: <phase adapter value>
-findings: <anchored surviving findings grouped by axis for Implementation, or none>
+findings: <anchored surviving findings grouped by axis for multi-axis reviews, or none>
 evidence_boundary: <what was independently checked>
 reopen_owner: <owner or none>
 ```
 
 Each surviving finding names its anchor, outcome impact, classification,
 smallest repair/reopen owner, and evidence boundary (grouped under explicit
-per-axis headings for Implementation reviews). Record the attempted falsifier
-and result, or why it is unavailable; missing mandatory proof is not downgraded
-to a concern.
+per-axis headings for multi-axis reviews). Record the attempted falsifier and
+result, or why it is unavailable; missing mandatory proof is not downgraded to
+a concern.
+
+Non-implementation finding classification:
+
+| Kind | Meaning | Routing |
+| --- | --- | --- |
+| `PHASE_DEFECT` | The candidate falsifies an assigned check within the current phase. | `FAIL`; repair in the owning phase. |
+| `UPSTREAM_GAP` | An accepted input, premise, or external/requester decision is missing, contradicted, or undelegated. | `FAIL`; reopen the smallest upstream owner (`Intake`, prior phase, or external authority). |
+| `CONCERN` | A bounded downstream proof or external risk over an otherwise closed candidate. | `CONCERNS` (permits handoff without blocking movement; carry forward with risk, owner, and closing action). |
 
 Implementation finding classification is closed:
 
