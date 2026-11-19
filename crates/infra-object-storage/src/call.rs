@@ -10,7 +10,7 @@ use crate::error::Call;
 const MAX_ATTEMPTS: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
-const READ_ATTEMPT_SHARE: u32 = 2;
+const READ_ATTEMPT_DIVISOR: u32 = 2;
 
 pub(crate) fn call_policy(
     call: Call,
@@ -19,7 +19,7 @@ pub(crate) fn call_policy(
 ) -> (TimeoutConfig, RetryConfig) {
     let (attempt_timeout, retry_config) = match call {
         Call::Read => (
-            remaining.min(ceiling / READ_ATTEMPT_SHARE),
+            remaining.min(ceiling / READ_ATTEMPT_DIVISOR),
             RetryConfig::standard()
                 .with_max_attempts(MAX_ATTEMPTS)
                 .with_max_backoff(MAX_BACKOFF),
@@ -68,9 +68,8 @@ pub(crate) async fn within_mutation<T>(
     context: &CallContext,
     future: impl std::future::Future<Output = T>,
 ) -> Result<(T, Option<CallStop>), Interrupted> {
-    let mut future = std::pin::pin!(future);
     within(context, async {
-        let reply = future.as_mut().await;
+        let reply = future.await;
         (reply, context.stopped())
     })
     .await

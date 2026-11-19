@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use aws_sdk_s3::config::{
     BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
-    SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
+    SharedHttpClient, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
@@ -32,7 +32,7 @@ use self::call::{CallContext, Interrupted, call_policy, within, within_mutation}
 pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
-use self::error::{Call, Failure, LocalFailure, UploadFailure};
+use self::error::{Call, Failure, LocalFailure};
 pub use self::error::{ConfigError, MutationError, MutationFailure, ObjectStorageError};
 pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
@@ -156,39 +156,26 @@ impl PresignedUrl {
 
 impl ObjectStorage {
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
-        let admitted = provider::admit(&options.provider, &options.bucket)?;
-        if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {
-            return Err(ConfigError::MaxConcurrency);
-        }
-        let http_client = https_client();
-        let credentials = options
-            .credentials
-            .credentials_provider(&admitted, &http_client)?;
-        Ok(Self::build(options, admitted, http_client, credentials))
-    }
-
-    fn build(
-        options: ObjectStorageOptions,
-        admitted: provider::Admitted,
-        http_client: SharedHttpClient,
-        credentials: SharedCredentialsProvider,
-    ) -> Self {
         let ObjectStorageOptions {
             provider,
             bucket,
-            credentials: _,
+            credentials,
             max_object_bytes,
             max_concurrency,
             operation_timeout,
         } = options;
+        let admitted = provider::admit(&provider, &bucket)?;
+        if !(1..=Semaphore::MAX_PERMITS).contains(&max_concurrency) {
+            return Err(ConfigError::MaxConcurrency);
+        }
+        let http_client = https_client();
+        let credentials = credentials.credentials_provider(&admitted, &http_client)?;
         let (timeout, retry) = call_policy(Call::Read, operation_timeout, operation_timeout);
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
-            .region(Region::new(admitted.region))
             .credentials_provider(credentials)
             .http_client(http_client)
             .interceptor(ResponseLimit::ErrorBody)
-            .force_path_style(admitted.path_style)
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
             .retry_config(retry)
@@ -198,24 +185,34 @@ impl ObjectStorage {
                     .grace_period(STALL_GRACE)
                     .build(),
             );
-        if let Some(endpoint) = admitted.endpoint {
-            config = config.endpoint_url(endpoint);
-        }
+        let (cloud_region, expected_bucket_owner) = match admitted.target {
+            provider::Target::AmazonS3 {
+                expected_bucket_owner,
+            } => {
+                config = config.force_path_style(false);
+                (Some(admitted.region.clone()), Some(expected_bucket_owner))
+            }
+            provider::Target::Endpoint { url, path_style } => {
+                config = config.endpoint_url(url).force_path_style(path_style);
+                (None, None)
+            }
+        };
+        config = config.region(Region::new(admitted.region));
         observe::describe();
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
                 provider_name: provider.name(),
-                cloud_region: admitted.cloud_region,
+                cloud_region,
                 bucket,
-                expected_bucket_owner: admitted.expected_bucket_owner,
+                expected_bucket_owner,
                 checksum: admitted.checksum,
                 max_object_bytes,
                 operation_timeout,
                 admission: Arc::new(Semaphore::new(max_concurrency)),
                 histograms: Arc::default(),
             }),
-        }
+        })
     }
 
     #[must_use]
@@ -227,7 +224,7 @@ impl ObjectStorage {
         &self,
         parent: &OperationContext,
         key: &ObjectKey,
-        mut body: PutBody,
+        body: PutBody,
         options: PutOptions,
     ) -> Result<(), MutationError> {
         let (context, mut guard) = self.begin_mutation(parent, Operation::Put)?;
@@ -235,7 +232,6 @@ impl ObjectStorage {
             return Err(guard.fail_mutation(Failure::TOO_LARGE));
         }
         let _permit = self.admit_mutation(&mut guard)?;
-        let outcomes = body.outcomes.take();
         let body = within(&context, body.normalize_empty_stream())
             .await
             .map_err(|interrupted| {
@@ -278,7 +274,7 @@ impl ObjectStorage {
             .send();
         let mut dispatched = None;
         let result = within_mutation(&context, async {
-            if let Some(outcomes) = &outcomes {
+            if let Some(outcomes) = &body.outcomes {
                 outcomes.dispatched();
                 dispatched = Some(outcomes);
             }
@@ -288,21 +284,12 @@ impl ObjectStorage {
         if let Ok((answer, _)) = &result {
             guard.answered_by(answer);
         }
-        let outcome = match result {
-            Ok((Ok(_), _)) => {
+        let outcome = match error::interpret_put_result(&result, call, body.source.mismatched()) {
+            Ok(()) => {
                 guard.succeed();
                 Ok(())
             }
-            Ok((Err(sdk_error), stopped_on_reply)) => {
-                Err(guard.fail_mutation(error::from_sdk_mutation(
-                    &sdk_error,
-                    call,
-                    body.source.mismatched(),
-                    stopped_on_reply,
-                )))
-            }
-            Err(_) if body.source.mismatched() => Err(guard.fail_mutation(UploadFailure::Length)),
-            Err(interrupted) => Err(guard.fail_mutation(interrupted)),
+            Err(failure) => Err(guard.fail_mutation(failure)),
         };
         if let Some(dispatched) = dispatched
             && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
@@ -334,17 +321,9 @@ impl ObjectStorage {
         );
         let result =
             Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
-        let output = match result {
-            Ok(output) => output,
-            Err(sdk_error) => {
-                let failure = error::from_sdk(&sdk_error);
-                Self::check(&context, &mut guard)?;
-                return Err(guard.fail(&failure));
-            }
-        };
-        let metadata = download_metadata(&output, self.inner.max_object_bytes);
-        Self::check(&context, &mut guard)?;
-        let metadata = metadata.map_err(|failure| guard.fail(&failure))?;
+        let output = result.map_err(|sdk_error| guard.fail(error::from_sdk(&sdk_error)))?;
+        let metadata = download_metadata(&output, self.inner.max_object_bytes)
+            .map_err(|failure| guard.fail(failure))?;
         let mut download = Download::open(metadata, output.body, guard, permit, context);
         if download.metadata().size == 0 {
             download.next_chunk().await?;
@@ -373,15 +352,14 @@ impl ObjectStorage {
             .send();
         let result =
             Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
-        let output = result.map_err(|sdk_error| guard.fail(&error::from_sdk(&sdk_error)))?;
+        let output = result.map_err(|sdk_error| guard.fail(error::from_sdk(&sdk_error)))?;
         let metadata = ObjectMetadata::from_response_fields(
             output.content_length(),
             output.content_type(),
             output.last_modified(),
             output.e_tag(),
         )
-        .map_err(|failure| guard.fail(&failure))?;
-        Self::check(&context, &mut guard)?;
+        .map_err(|failure| guard.fail(failure))?;
         guard.succeed();
         Ok(metadata)
     }
@@ -424,10 +402,10 @@ impl ObjectStorage {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
-            return Err(guard.fail(&LocalFailure::PresignExpiry.into()));
+            return Err(guard.fail(LocalFailure::PresignExpiry));
         }
         let config = PresigningConfig::expires_in(expires_in)
-            .map_err(|_| guard.fail(&LocalFailure::PresignExpiry.into()))?;
+            .map_err(|_| guard.fail(LocalFailure::PresignExpiry))?;
         let request = self
             .inner
             .client
@@ -439,19 +417,18 @@ impl ObjectStorage {
             .presigned(config);
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| guard.fail(&interrupted.into()))?;
-        Self::check(&context, &mut guard)?;
+            .map_err(|interrupted| guard.fail(interrupted))?;
+        Self::fail_if_stopped(&context, &mut guard)?;
         match result {
             Ok(request) if request.headers().next().is_some() => {
-                Err(guard.fail(&LocalFailure::PresignedHeaders.into()))
+                Err(guard.fail(LocalFailure::PresignedHeaders))
             }
             Ok(request) => {
                 let url = PresignedUrl(request.uri().to_owned());
-                Self::check(&context, &mut guard)?;
                 guard.succeed();
                 Ok(url)
             }
-            Err(sdk_error) => Err(guard.fail(&error::from_sdk(&sdk_error))),
+            Err(sdk_error) => Err(guard.fail(error::from_sdk(&sdk_error))),
         }
     }
 
@@ -469,7 +446,7 @@ impl ObjectStorage {
     ) -> Result<OwnedSemaphorePermit, ObjectStorageError> {
         Arc::clone(&self.inner.admission)
             .try_acquire_owned()
-            .map_err(|_| guard.fail(&LocalFailure::Busy.into()))
+            .map_err(|_| guard.fail(LocalFailure::Busy))
     }
 
     fn admit_mutation(
@@ -488,7 +465,7 @@ impl ObjectStorage {
     ) -> Result<(CallContext, OperationGuard), ObjectStorageError> {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(operation);
-        Self::check(&context, &mut guard)?;
+        Self::fail_if_stopped(&context, &mut guard)?;
         Ok((context, guard))
     }
 
@@ -513,15 +490,18 @@ impl ObjectStorage {
         context: &CallContext,
         guard: &mut OperationGuard,
     ) -> Result<R, ObjectStorageError> {
-        let reply = result.map_err(|interrupted| guard.fail(&interrupted.into()))?;
+        let reply = result.map_err(|interrupted| guard.fail(interrupted))?;
         guard.answered_by(&reply);
-        Self::check(context, guard)?;
+        Self::fail_if_stopped(context, guard)?;
         Ok(reply)
     }
 
-    fn check(context: &CallContext, guard: &mut OperationGuard) -> Result<(), ObjectStorageError> {
+    fn fail_if_stopped(
+        context: &CallContext,
+        guard: &mut OperationGuard,
+    ) -> Result<(), ObjectStorageError> {
         if let Some(stopped) = context.stopped() {
-            return Err(guard.fail(&Failure::stopped(stopped)));
+            return Err(guard.fail(Failure::stopped(stopped)));
         }
         Ok(())
     }

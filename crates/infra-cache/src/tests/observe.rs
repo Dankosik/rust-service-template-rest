@@ -52,7 +52,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Other,
             ] {
                 OperationGuard::start("causes", &histograms, operation, &server)
-                    .fail(error_type, None);
+                    .record_error(error_type, None);
             }
         }
     });

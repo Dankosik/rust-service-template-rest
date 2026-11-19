@@ -111,7 +111,6 @@ impl Cache {
 
         const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-        let deadline = tokio::time::Instant::now() + ADMISSION_TIMEOUT;
         let command_timeout = options.command_timeout;
         let max_concurrency = options.max_concurrency;
         if !(1..tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency) {
@@ -126,7 +125,7 @@ impl Cache {
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             admission::admit(options)
         }));
-        let admitted = tokio::time::timeout_at(deadline, admission)
+        let admitted = tokio::time::timeout(ADMISSION_TIMEOUT, admission)
             .await
             .map_err(|_| CacheError::AdmissionTimedOut)?
             .map_err(|_| CacheError::ClientBuild)??;

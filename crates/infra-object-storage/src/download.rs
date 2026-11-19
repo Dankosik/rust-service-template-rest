@@ -61,22 +61,22 @@ enum Outcome {
 struct Completion {
     resources: Resources,
     outcome: Outcome,
-    waker: Option<Waker>,
     discarded: Option<Result<Bytes, ByteStreamError>>,
 }
 
 impl Completion {
     fn finish(mut self) {
-        match &self.outcome {
+        match self.outcome {
             Outcome::Success => self.resources.guard.succeed(),
             Outcome::Failure(failure) => {
                 self.resources.guard.fail(failure);
             }
             Outcome::Cancelled => self.resources.guard.cancel(),
         }
+        let waker = self.resources.waker.take();
         drop(self.discarded);
         drop(self.resources);
-        if let Some(waker) = self.waker {
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -89,6 +89,25 @@ enum ReadStep {
 }
 
 type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
+
+impl Resources {
+    fn collection_buffer(&self, limit: usize) -> Result<Vec<u8>, Failure> {
+        if let Some(stopped) = self.context.stopped() {
+            return Err(Failure::stopped(stopped));
+        }
+        let Ok(unread) = usize::try_from(self.unread_bytes()) else {
+            return Err(LocalFailure::TooLarge.into());
+        };
+        if unread > limit.min(isize::MAX as usize) {
+            return Err(LocalFailure::TooLarge.into());
+        }
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(unread)
+            .map_err(|_| LocalFailure::DownloadAllocation)?;
+        Ok(buffer)
+    }
+}
 
 impl State {
     fn close(
@@ -104,14 +123,12 @@ impl State {
             Outcome::Failure(failure) => State::Failed(failure.error),
             Outcome::Cancelled => State::Failed(ObjectStorageError::Unavailable),
         };
-        let State::Open(mut resources) = std::mem::replace(self, terminal) else {
+        let State::Open(resources) = std::mem::replace(self, terminal) else {
             return None;
         };
-        let waker = resources.waker.take();
         Some(Completion {
             resources,
             outcome,
-            waker,
             discarded,
         })
     }
@@ -144,23 +161,13 @@ impl State {
             State::Succeeded => return (Ok(Vec::new()), None),
             State::Failed(error) => return (Err(*error), None),
         };
-        let failure = if let Some(stopped) = resources.context.stopped() {
-            Failure::stopped(stopped)
-        } else if let Ok(unread) = usize::try_from(resources.unread_bytes())
-            && unread <= limit.min(isize::MAX as usize)
-        {
-            let mut buffer = Vec::new();
-            if buffer.try_reserve_exact(unread).is_ok() {
-                return (Ok(buffer), None);
-            }
-            LocalFailure::DownloadAllocation.into()
-        } else {
-            LocalFailure::TooLarge.into()
-        };
-        (
-            Err(failure.error),
-            self.close(Outcome::Failure(failure), None),
-        )
+        match resources.collection_buffer(limit) {
+            Ok(buffer) => (Ok(buffer), None),
+            Err(failure) => (
+                Err(failure.error),
+                self.close(Outcome::Failure(failure), None),
+            ),
+        }
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
@@ -274,9 +281,8 @@ impl Download {
                 );
             }
         });
-        let timer_context = context;
         let timer = tokio::spawn(async move {
-            let stopped = timer_context.wait_stopped().await;
+            let stopped = context.wait_stopped().await;
             if let Some(shared) = exit.upgrade() {
                 terminate(&shared, Termination::Stopped(stopped));
             }

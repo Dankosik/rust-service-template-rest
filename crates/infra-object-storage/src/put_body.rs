@@ -1,10 +1,11 @@
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use aws_sdk_s3::primitives::ByteStream;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
@@ -98,7 +99,11 @@ impl PutBody {
         match self.stream.next().await {
             Some(_) if self.source.mismatched() => Err(UploadFailure::Length),
             Some(_) => Err(UploadFailure::Body),
-            None => Ok(Self::from(Bytes::new())),
+            None => Ok(Self {
+                stream: ByteStream::from(Bytes::new()),
+                source: UploadSource::InMemory,
+                ..self
+            }),
         }
     }
 }
@@ -124,12 +129,22 @@ impl From<Vec<u8>> for PutBody {
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
+enum ExactLengthPhase {
+    Reading {
+        remaining: NonZeroU64,
+    },
+    AwaitingEnd {
+        held: Option<Bytes>,
+    },
+    Draining {
+        held: Option<Bytes>,
+        trailers: Option<Frame<Bytes>>,
+    },
+}
+
 struct ExactLength {
     inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
-    remaining: u64,
-    held: Option<Frame<Bytes>>,
-    trailers: Option<Frame<Bytes>>,
-    ended: bool,
+    phase: ExactLengthPhase,
     mismatch: Arc<AtomicBool>,
 }
 
@@ -140,12 +155,13 @@ impl ExactLength {
         E: Into<BoxError> + 'static,
     {
         let mismatch = Arc::new(AtomicBool::new(false));
+        let phase = NonZeroU64::new(len)
+            .map_or(ExactLengthPhase::AwaitingEnd { held: None }, |remaining| {
+                ExactLengthPhase::Reading { remaining }
+            });
         let body = Self {
             inner: SyncWrapper::new(UnsyncBoxBody::new(body.map_err(Into::into))),
-            remaining: len,
-            held: None,
-            trailers: None,
-            ended: false,
+            phase,
             mismatch: Arc::clone(&mismatch),
         };
         (body, mismatch)
@@ -153,8 +169,10 @@ impl ExactLength {
 
     fn refuse(&mut self) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         self.mismatch.store(true, Ordering::Release);
-        self.ended = true;
-        self.held = None;
+        self.phase = ExactLengthPhase::Draining {
+            held: None,
+            trailers: None,
+        };
         Poll::Ready(Some(Err(Box::new(LengthMismatch))))
     }
 }
@@ -169,11 +187,11 @@ impl Body for ExactLength {
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
-            if self.ended {
-                if let Some(frame) = self.held.take() {
-                    return Poll::Ready(Some(Ok(frame)));
+            if let ExactLengthPhase::Draining { held, trailers } = &mut self.phase {
+                if let Some(data) = held.take() {
+                    return Poll::Ready(Some(Ok(Frame::data(data))));
                 }
-                return Poll::Ready(self.trailers.take().map(Ok));
+                return Poll::Ready(trailers.take().map(Ok));
             }
             if polls_remaining == 0 {
                 context.waker().wake_by_ref();
@@ -182,47 +200,70 @@ impl Body for ExactLength {
             polls_remaining -= 1;
             let polled = std::task::ready!(Pin::new(self.inner.get_mut()).poll_frame(context));
             match polled {
-                Some(Ok(frame)) => {
-                    let Some(data) = frame.data_ref() else {
-                        if self.remaining != 0 {
-                            return self.refuse();
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(data) => {
+                        let len = data.len() as u64;
+                        if len == 0 {
+                            continue;
                         }
-                        self.ended = true;
-                        self.trailers = Some(frame);
-                        continue;
-                    };
-                    let len = data.remaining() as u64;
-                    if len == 0 {
-                        continue;
+                        let ExactLengthPhase::Reading { remaining } = self.phase else {
+                            return self.refuse();
+                        };
+                        let Some(next) = remaining.get().checked_sub(len) else {
+                            return self.refuse();
+                        };
+                        if let Some(remaining) = NonZeroU64::new(next) {
+                            self.phase = ExactLengthPhase::Reading { remaining };
+                            return Poll::Ready(Some(Ok(Frame::data(data))));
+                        }
+                        self.phase = ExactLengthPhase::AwaitingEnd { held: Some(data) };
                     }
-                    let Some(remaining) = self.remaining.checked_sub(len) else {
-                        return self.refuse();
-                    };
-                    self.remaining = remaining;
-                    if remaining == 0 {
-                        self.held = Some(frame);
-                        continue;
-                    }
-                    return Poll::Ready(Some(Ok(frame)));
-                }
+                    Err(trailers) => match &mut self.phase {
+                        ExactLengthPhase::Reading { .. } => return self.refuse(),
+                        ExactLengthPhase::AwaitingEnd { held } => {
+                            let held = held.take();
+                            self.phase = ExactLengthPhase::Draining {
+                                held,
+                                trailers: Some(trailers),
+                            };
+                        }
+                        ExactLengthPhase::Draining { .. } => {}
+                    },
+                },
                 Some(Err(error)) => return Poll::Ready(Some(Err(error))),
-                None if self.remaining != 0 => return self.refuse(),
-                None => self.ended = true,
+                None => match &mut self.phase {
+                    ExactLengthPhase::Reading { .. } => return self.refuse(),
+                    ExactLengthPhase::AwaitingEnd { held } => {
+                        let held = held.take();
+                        self.phase = ExactLengthPhase::Draining {
+                            held,
+                            trailers: None,
+                        };
+                    }
+                    ExactLengthPhase::Draining { .. } => {}
+                },
             }
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.ended && self.held.is_none() && self.trailers.is_none()
+        matches!(
+            self.phase,
+            ExactLengthPhase::Draining {
+                held: None,
+                trailers: None,
+            }
+        )
     }
 
     fn size_hint(&self) -> SizeHint {
-        let held = self
-            .held
-            .as_ref()
-            .and_then(Frame::data_ref)
-            .map_or(0, |data| data.remaining() as u64);
-        SizeHint::with_exact(self.remaining + held)
+        let exact = match &self.phase {
+            ExactLengthPhase::Reading { remaining } => remaining.get(),
+            ExactLengthPhase::AwaitingEnd { held } | ExactLengthPhase::Draining { held, .. } => {
+                held.as_ref().map_or(0, |data| data.len() as u64)
+            }
+        };
+        SizeHint::with_exact(exact)
     }
 }
 
