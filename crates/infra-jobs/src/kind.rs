@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -357,15 +358,14 @@ impl KindsBuilder {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
         }
-        let mut seen = Vec::with_capacity(self.entries.len());
+        let mut seen = HashSet::with_capacity(self.entries.len());
         for entry in &self.entries {
             if !is_valid_kind_name(entry.name) {
                 return Err(KindError::InvalidName(entry.name));
             }
-            if seen.contains(&entry.name) {
+            if !seen.insert(entry.name) {
                 return Err(KindError::Duplicate(entry.name));
             }
-            seen.push(entry.name);
             if !(1..=MAX_ATTEMPTS).contains(&entry.policy.max_attempts) {
                 return Err(KindError::InvalidMaxAttempts { kind: entry.name });
             }

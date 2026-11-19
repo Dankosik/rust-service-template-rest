@@ -3,7 +3,7 @@ use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 
 use super::{AttemptId, ClaimFence, execute_before_deadline};
-use crate::engine::{Operation, Shared, observe_failure};
+use crate::engine::{Operation, WorkerGroup, observe_failure};
 use crate::kind::{
     Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
     saturating_micros,
@@ -11,6 +11,8 @@ use crate::kind::{
 use crate::state::FailureReason;
 
 const OUTBOX_MAX_RETRY_BASE_SECONDS: i64 = 54;
+const RETRY_JITTER_HALF_DIVISOR: i64 = 10;
+const RETRY_JITTER_SPAN_DIVISOR: i64 = 5;
 
 #[derive(Debug)]
 pub(super) enum Transition {
@@ -120,12 +122,13 @@ pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
         Transition::Retry {
             summary,
             base_micros,
-            floor_micros: floor,
+            floor_micros,
             ..
         } => {
-            let minimum_micros = (base_micros - base_micros / 10).max(*floor);
-            let jitter_micros = (base_micros / 5)
-                .max(floor / 10)
+            let minimum_micros =
+                (base_micros - base_micros / RETRY_JITTER_HALF_DIVISOR).max(*floor_micros);
+            let jitter_micros = (base_micros / RETRY_JITTER_SPAN_DIVISOR)
+                .max(floor_micros / RETRY_JITTER_HALF_DIVISOR)
                 .min(saturating_micros(MAX_DELAY) - minimum_micros);
             Some(WritePlan::Single(Write::Retry {
                 summary,
@@ -145,18 +148,18 @@ pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
 }
 
 pub(super) async fn send_outcome(
-    shared: &Shared,
+    group: &WorkerGroup,
     fence: ClaimFence,
     write: Write<'_>,
     deadline: Instant,
 ) -> Result<Written, Unacknowledged> {
     let result =
-        execute_before_deadline(shared, "record job outcome", deadline, async |connection| {
+        execute_before_deadline(group, "record job outcome", deadline, async |connection| {
             execute(connection, fence, write).await
         })
         .await;
     result.map(Written::from_rows).map_err(|error| {
-        observe_failure(shared, write.operation(), &error);
+        observe_failure(group, write.operation(), &error);
         Unacknowledged
     })
 }
