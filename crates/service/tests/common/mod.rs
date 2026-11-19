@@ -63,6 +63,7 @@ pub(crate) fn agent() -> ureq::Agent {
         .new_agent()
 }
 
+#[cfg(test)]
 pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     agent().get(url).call().map(|mut response| {
         let status = response.status().as_u16();
@@ -75,15 +76,32 @@ pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
-pub(crate) fn poll_until(url: &str, want: u16, within: Duration) -> bool {
+pub(crate) fn poll_until(
+    url: &str,
+    want: u16,
+    within: Duration,
+) -> Option<ureq::http::Response<ureq::Body>> {
+    let agent = agent();
     let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if let Ok((status, _)) = get(url)
-            && status == want
-        {
-            return true;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        if let Ok(response) = agent
+            .get(url)
+            .config()
+            .timeout_global(Some(remaining.min(Duration::from_secs(3))))
+            .build()
+            .call()
+            && response.status().as_u16() == want
+        {
+            return Some(response);
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20)),
+        );
     }
-    false
 }

@@ -172,13 +172,10 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     service.await_record("service_ready");
 
     let ready = format!("http://{api}/health/ready");
-    assert!(
-        poll_until(&ready, 200, Duration::from_secs(5)),
-        "service never became ready"
-    );
+    let serving =
+        poll_until(&ready, 200, Duration::from_secs(5)).expect("service never became ready");
     let (status, body) = get(&format!("http://{api}/health/live")).unwrap();
     assert_eq!((status, body.as_str()), (200, "ok"));
-    let serving = agent().get(&ready).call().unwrap();
     assert!(!serving.headers().contains_key("connection"));
 
     let (status, _) = get(&format!("http://{api}/missing")).unwrap();
@@ -212,11 +209,8 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
 
     let started = Instant::now();
     service.terminate();
-    assert!(
-        poll_until(&ready, 503, Duration::from_millis(250)),
-        "readiness must flip to 503 before the listener closes"
-    );
-    let draining = agent().get(&ready).call().unwrap();
+    let draining = poll_until(&ready, 503, Duration::from_millis(250))
+        .expect("readiness must flip to 503 before the listener closes");
     assert_eq!(
         draining.headers()["connection"],
         "close",
@@ -302,7 +296,7 @@ fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
 
         drop(held);
         assert!(
-            poll_until(&app_live, 200, Duration::from_secs(2)),
+            poll_until(&app_live, 200, Duration::from_secs(2)).is_some(),
             "the application listener must answer again once connections close"
         );
 
@@ -411,7 +405,7 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
     assert!(
-        poll_until(&ready, 200, Duration::from_secs(5)),
+        poll_until(&ready, 200, Duration::from_secs(5)).is_some(),
         "a cache outage must not keep the service from becoming ready"
     );
     let outage = service.await_record("cache_connection_failed");
@@ -610,7 +604,7 @@ fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
     assert!(
-        poll_until(&ready, 200, Duration::from_secs(5)),
+        poll_until(&ready, 200, Duration::from_secs(5)).is_some(),
         "object storage is not a readiness dependency"
     );
     service.terminate();
@@ -899,11 +893,14 @@ fn stopped_stdout_does_not_block_requests_or_process_exit() {
         lines,
         reader: None,
     };
-    assert!(poll_until(
-        &format!("http://{api}/health/ready"),
-        200,
-        Duration::from_secs(10)
-    ));
+    assert!(
+        poll_until(
+            &format!("http://{api}/health/ready"),
+            200,
+            Duration::from_secs(10)
+        )
+        .is_some()
+    );
     for _ in 0..2048 {
         assert_eq!(get(&format!("http://{api}/missing")).unwrap().0, 404);
     }
@@ -950,11 +947,14 @@ fn inbound_private_values_are_absent_from_real_json_and_text_logs() {
             ("APP__LOG__LEVEL", "trace"),
             ("APP__HTTP__TRUST_TRACE_CONTEXT", "true"),
         ]);
-        assert!(poll_until(
-            &format!("http://{api}/health/ready"),
-            200,
-            Duration::from_secs(10)
-        ));
+        assert!(
+            poll_until(
+                &format!("http://{api}/health/ready"),
+                200,
+                Duration::from_secs(10)
+            )
+            .is_some()
+        );
         for method in ["GET", "PRIVATE_METHOD_SENTINEL"] {
             #[expect(
                 clippy::disallowed_methods,

@@ -144,7 +144,7 @@ impl Receiver {
             }
         }
         let http = http.ok_or("receiver omitted its HTTP address")?;
-        if !common::poll_until(&format!("http://{http}/health/ready"), 200, RPC) {
+        if common::poll_until(&format!("http://{http}/health/ready"), 200, RPC).is_none() {
             return Err("receiver failed HTTP readiness".into());
         }
         let uri: Uri = format!(
