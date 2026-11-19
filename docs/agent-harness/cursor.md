@@ -7,7 +7,8 @@ callable Task fields outrank public prose.
 
 - Keep preparation (Intake through Planning) in the root session, using fresh
   [Cursor subagents](https://cursor.com/docs/subagents#how-subagents-work)
-  (omit `resume`) for wide scans, `Design It Twice`, and `Plan Review`.
+  (omit `resume`) for wide scans, bounded specialists / `Design It Twice`, and
+  `Plan Review` / adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
   directly.
@@ -43,7 +44,8 @@ through Task (`subagent_type`, `prompt`, `description`, `model`, `resume`,
 [Context And Lifetime](../agent-harness.md#context-and-lifetime) and [Nested
 Execution](../agent-harness.md#nested-execution): retain every returned agent
 ID before waiting (missing identity is a carrier failure), omit `resume` on new
-lanes and initial reviews, and use `resume` only for permitted continuations.
+lanes and every review (including Delta Recheck), and use `resume` only for
+permitted continuations.
 
 Raise `reviewer-agent` Task `model` only for highest-consequence review
 boundaries.

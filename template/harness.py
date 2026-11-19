@@ -371,8 +371,8 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     )
     for rel_dir, fm, label, doc in lead_specs:
         rendered[rel_dir]["acceptance-unit-lead.md"] = (
-            f"---\n{fm}\n---\n\n{lead_method}Load [{label} adapter](../../docs/agent-harness/{doc}) "
-            f"only when spawning sub-lanes.\n{lead_tail}"
+            f"---\n{fm}\n---\n\n{lead_method}Load [Agent Harness](../../docs/agent-harness.md#nested-execution) "
+            f"and [{label} adapter](../../docs/agent-harness/{doc}) only when delegating a strict subset.\n{lead_tail}"
         ).encode("utf-8")
 
     orch_specs = (

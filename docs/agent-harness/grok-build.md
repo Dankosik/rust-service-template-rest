@@ -12,8 +12,8 @@ a deeper native route.
 
 - Keep preparation (Intake through Planning) in the root primary session,
   using fresh read-only `spawn_subagent` lanes (`evidence-agent`,
-  `specialist-agent`, `reviewer-agent`) for wide scans, `Design It Twice`, and
-  `Plan Review`.
+  `specialist-agent`, `reviewer-agent`, `adjudicator-agent`) for wide scans,
+  bounded specialists / `Design It Twice`, and `Plan Review` / adjudication.
 - The ordinary Grok primary session is the root carrier (`--agent orchestrator`
   is optional). Bind `LEDGER_ORCHESTRATOR` under
   [Implementation](../spec-first-workflow/phases/implementation.md#carrier);
@@ -40,16 +40,17 @@ a deeper native route.
 ## Models And Dispatch
 
 Use `grok-4.6` or `grok-build` at `high` effort for Orchestrator; Lead
-`--effort` follows [Agent Harness](../agent-harness.md). Children inherit the
-Lead model unless a role pins stronger, and use role `reasoning_effort`
-(`spawn_subagent` has no `effort` field; optional `model` is ignored with
-`resume_from`). Preserve user-selected models and never encode models only in
-prompt prose.
+`--effort` follows [Agent Harness](../agent-harness.md). Children inherit their
+parent session's model unless a role pins stronger, and use role
+`reasoning_effort` (`spawn_subagent` has no `effort` field; optional `model` is
+ignored with `resume_from`). Preserve user-selected models and never encode
+models only in prompt prose.
 
 Apply [Context And Lifetime](../agent-harness.md#context-and-lifetime) and
 [Nested Execution](../agent-harness.md#nested-execution). Retain every Lead
 `sessionId` and child `subagent_id` before waiting (missing identity or
-rejected spawn is a carrier failure). Omit `resume_from` on new lanes and
-initial reviews; resume only a completed child from the same parent and agent
-type (replacing the locator if a new ID returns), and track primary Leads and
-subtrees explicitly (stopping one primary does not stop siblings).
+rejected spawn is a carrier failure). Omit `resume_from` on new lanes and every
+review (including Delta Recheck); resume only a completed child from the same
+parent and agent type (replacing the locator if a new ID returns), and track
+primary Leads and subtrees explicitly (stopping one primary does not stop
+siblings).

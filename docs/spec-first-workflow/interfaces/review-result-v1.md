@@ -17,8 +17,13 @@ downgraded to a concern.
 | Scope | Classifications | Allowed verdicts |
 | --- | --- | --- |
 | Plan / Research review | `PHASE_DEFECT` (local repair), `UPSTREAM_GAP` (reopen user or external owner), `CONCERN` (bounded downstream risk with risk, owner, and closing action) | `PASS \| CONCERNS \| FAIL \| REVIEW_HANDOFF_INVALID` (`PASS \| FAIL` only on zero-delta checks) |
-| Implementation review | `TASK_DEFECT` (repair owning task), `INTEGRATION_DEFECT` (repair seam across tasks), `UPSTREAM_GAP` (missing/invalid accepted input), `FOLLOW_UP` (non-blocking) | `PASS \| FAIL \| NEEDS_PARENT \| REVIEW_HANDOFF_INVALID` |
+| Implementation review | `TASK_DEFECT` (repair owning task), `INTEGRATION_DEFECT` (repair seam across tasks), `UPSTREAM_GAP` (invalid accepted requirement/design in candidate scope), `FOLLOW_UP` (non-blocking) | `PASS \| FAIL \| NEEDS_PARENT \| REVIEW_HANDOFF_INVALID` |
 
-Return `REVIEW_HANDOFF_INVALID` when a required artifact, boundary, or ref is
-missing or the candidate diff is empty; fix the handoff and redispatch without
-consuming a repair round.
+- `FAIL`: witnessed in-scope defect (`PHASE_DEFECT`, `TASK_DEFECT`,
+  `INTEGRATION_DEFECT`) or confirmed `UPSTREAM_GAP` invalidating the candidate
+  or plan.
+- `NEEDS_PARENT`: review cannot close because required proof, authority, or an
+  authoritative input outside the candidate diff is missing or unavailable.
+- `REVIEW_HANDOFF_INVALID`: broken review handoff (missing artifact/boundary,
+  unresolved ref, or empty diff); fix the handoff and redispatch without
+  consuming a repair round.

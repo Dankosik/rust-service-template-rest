@@ -110,22 +110,27 @@ scoped `no-commit` candidate diff from Step 1):
      redispatch without consuming a repair round.
    - `NEEDS_PARENT`: resolve missing input or unavailable required proof under
      [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery) (or
-     hold at `status: blocked`).
+     hold at `status: blocked`), then re-run Step 4.1/4.2 on the closed
+     evidence.
    - `FAIL`: verify every finding against live code before editing or
      escalating:
      - Confirmed `UPSTREAM_GAP`: resolve under [Parent-Owned
-       Recovery](../shared/transition.md#parent-owned-recovery) (update
-       `spec.md`/`design.md`/packets in place if technical; reopen the user only
-       for a product/risk contradiction or missing external authority).
+       Recovery](../shared/transition.md#parent-owned-recovery) (reopen the
+       user only for a product/risk contradiction or missing external
+       authority). For a technical gap, update `spec.md`/`design.md`/packets in
+       place, then execute any newly added or reopened tasks via Steps 2–3 (or
+       batch a bounded in-scope fix through Step 4.3), followed by a fresh full
+       review.
      - Confirmed `TASK_DEFECT` or `INTEGRATION_DEFECT`: batch into Step 4.3.
      - Complete refutation (zero code changes): never self-approve past `FAIL`;
        dispatch `adjudicator-agent` with both sides' primary anchors under
        [Review Lifecycle](../shared/review.md#lifecycle).
-3. **Repair confirmed defects:** batch confirmed `TASK_DEFECT` and
-   `INTEGRATION_DEFECT` findings (or pre-review Step 4.1 failures) into one
-   fresh [Repair Lead](implementation/repair.md) with combined writable scope
-   and the adapter's capability escalation for a missed invariant (max **2
-   repair rounds** per defect class under [Review
+3. **Repair confirmed defects:** batch confirmed `TASK_DEFECT`,
+   `INTEGRATION_DEFECT`, or bounded technical `UPSTREAM_GAP` fixes (or
+   pre-review Step 4.1 failures) into one fresh [Repair
+   Lead](implementation/repair.md) with combined writable scope and the
+   adapter's capability escalation for a missed invariant (max **2 repair
+   rounds** per defect class under [Review
    Lifecycle](../shared/review.md#lifecycle)).
    - On `Implemented`: land via Step 3 without flipping task checkboxes and
      re-run invalidated checks. If initial review has not run yet, return to

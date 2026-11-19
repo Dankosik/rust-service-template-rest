@@ -21,8 +21,9 @@ on, the agent owns **how** to specify, design, plan, and implement autonomously
 without asking the user to drive steps or make technical choices.
 
 Keep preparation in **one continuous session** so the verbatim *why* from
-grilling stays a primary source (use fresh subagents only for read-heavy scans,
-`Design It Twice`, and `Plan Review`), then stop for a fresh Implementation
+grilling stays a primary source (use fresh subagents only where independence or
+parallelism helps: read-heavy scans, bounded domain specialists, `Design It
+Twice`, and `Plan Review` / adjudication), then stop for a fresh Implementation
 session:
 
 | Phase | Owner | Output |

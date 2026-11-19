@@ -9,9 +9,10 @@ workflow (Direct Work still runs in-session).
 ## Native Map
 
 - Keep preparation (Intake through Planning) in the root session, using fresh
-  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) lanes
-  (`evidence-agent`, `specialist-agent`, `reviewer-agent`) on workspace
-  `inherit` for wide scans, `Design It Twice`, and `Plan Review`.
+  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) read-only
+  lanes (`evidence-agent`, `specialist-agent`, `reviewer-agent`,
+  `adjudicator-agent`) on workspace `inherit` for wide scans, bounded
+  specialists / `Design It Twice`, and `Plan Review` / adjudication.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by

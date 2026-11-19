@@ -7,7 +7,8 @@ outrank prose.
 
 - Keep preparation (Intake through Planning) in the root session, using fresh
   [regular subagents](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/#fork-subagent)
-  (`agent`, never `fork`) for evidence scans, `Design It Twice`, and `Plan Review`.
+  (`agent`, never `fork`) for evidence scans, bounded specialists / `Design It
+  Twice`, and `Plan Review` / adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds Ledger Orchestrator. Dispatch ready units via `agent`
   (`subagent_type: "acceptance-unit-lead"`, display name `Agent`, not `task`)

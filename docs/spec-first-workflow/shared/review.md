@@ -40,17 +40,17 @@ standalone `research only` syntheses.
   primary code before editing or escalating. Never self-approve past `FAIL`:
   present partial refutations alongside fixes in a fresh `Delta Recheck`, and
   dispatch `adjudicator-agent` with both sides' primary anchors for a complete
-  refutation (zero code changes) or a surviving evidence-backed conflict across
-  panel lenses or recheck.
+  refutation (zero candidate changes) or a surviving evidence-backed conflict
+  across panel lenses or recheck.
 - **Evaluate proposed remedies:** a repair closes the finding; any suggested
   fix is evidence. Every recheck also checks repair structure against
   [Engineering](../../../AGENTS.md#engineering)—a fix that introduces an
   unjustified crate, dependency, layer, config key, or parallel path still
   fails.
 - **Bounded repair rounds:**
-  - *Plan Review:* at most **one** bounded delta recheck (when repair addresses
-    only anchored findings without reslicing or changing interfaces); if that
-    still fails, run one fresh full review, then apply [Parent-Owned
+  - *Plan / Research Review:* at most **one** bounded delta recheck (when repair
+    addresses only anchored findings without reslicing or changing interfaces);
+    if that still fails, run one fresh full review, then apply [Parent-Owned
     Recovery](transition.md#parent-owned-recovery) instead of a third cycle.
   - *Implementation Review:* batch confirmed findings per pass and allow at
     most **two** repair rounds for the same defect class, using a fresh

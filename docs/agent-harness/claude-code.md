@@ -7,8 +7,9 @@ schemas outrank prose.
 
 - Keep preparation (Intake through Planning) in the root session, dispatching
   fresh [non-fork subagents](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
-  (`evidence-agent`, `specialist-agent`, `reviewer-agent`) for wide scans,
-  `Design It Twice`, and `Plan Review`.
+  (`evidence-agent`, `specialist-agent`, `reviewer-agent`, `adjudicator-agent`)
+  for wide scans, bounded specialists / `Design It Twice`, and `Plan Review` /
+  adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator. Dispatch ready units via `Agent`
   (`subagent_type: "acceptance-unit-lead"`) within capacity; the

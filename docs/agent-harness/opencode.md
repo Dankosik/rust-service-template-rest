@@ -7,10 +7,11 @@ Use the native tool schema for the installed OpenCode generation. Check
 
 Start an ordinary request in `build` under [Work Selection](../../AGENTS.md#work-selection-and-loading).
 Keep preparation (Intake through Planning) in that root session, dispatching
-fresh `evidence-agent`, `specialist-agent`, or read-only `reviewer-agent` lanes
-as needed for grounding, `Design It Twice`, and `Plan Review`. If `reviewer-agent`'s
-model is unavailable, preserve the candidate and report the pending review—a
-writable `general` session cannot supply that verdict.
+fresh read-only `evidence-agent`, `specialist-agent`, `reviewer-agent`, or
+`adjudicator-agent` lanes as needed for grounding, bounded specialists / `Design
+It Twice`, and `Plan Review` / adjudication. If `reviewer-agent`'s model is
+unavailable, preserve the candidate and report the pending review—a writable
+`general` session cannot supply that verdict.
 After ready Planning, return the [user's launch message](../spec-first-workflow/shared/transition.md#implementation-handoff).
 A new `build` or `orchestrator` session executes the named ledger.
 
@@ -25,8 +26,8 @@ Use the result of a foreground call when the next step depends on it.
 In [2.2.7](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/subagent.ts)
 foreground is the default. If a call returns `running`, retain its ID and
 consume the completion notification before proceeding. Use a new session ID for
-each fresh subagent (evidence scan, `Design It Twice`, reviewer, or
-implementation Lead); a follow-up keeps that child's history.
+each fresh subagent—including every review and Delta Recheck; a follow-up keeps
+that child's history.
 
 Dispatch each ready implementation unit to `acceptance-unit-lead` and
 independent reviews to `reviewer-agent`. A configured role model takes
@@ -69,7 +70,8 @@ via Task (`subagent_type`, `prompt`, `description`, and `task_id` only for
 permitted continuation). Apply [Context And Lifetime](../agent-harness.md#context-and-lifetime)
 and [Nested Execution](../agent-harness.md#nested-execution): retain returned
 session IDs before waiting (missing identity is a carrier failure) and omit
-`task_id` on new lanes and initial reviews. Spawned children lack `question`;
-the Orchestrator primary prefers plain-text rounds under
-[Grilling](../spec-first-workflow/shared/grilling.md) and uses `question` only
-when it preserves full trade-off context and free-form qualification.
+`task_id` on new lanes and every review (including Delta Recheck). Spawned
+children lack `question`; the root primary (`build` or `orchestrator`) prefers
+plain-text rounds under [Grilling](../spec-first-workflow/shared/grilling.md)
+and uses `question` only when it preserves full trade-off context and free-form
+qualification.

@@ -11,8 +11,8 @@ availability alone does not authorize use.
   cross-repo work); never create separate Codex App chats or use App task
   handoff as a carrier or fallback.
 - Keep preparation (Intake through Planning) in the root session, using fresh
-  collaboration subagents (`fork_turns: "none"`) for read-heavy evidence scans,
-  `Design It Twice`, and `Plan Review`.
+  collaboration subagents (`fork_turns: "none"`) for wide scans, bounded
+  specialists / `Design It Twice`, and `Plan Review` / adjudication.
 - Subagents share the parent's working directory. For a neighboring repository,
   apply [Authority](../../AGENTS.md#authority) and target it in
   commands/navigation; brief paths or command `cwd` do not reload that project's
@@ -93,6 +93,6 @@ Result](../spec-first-workflow/interfaces/acceptance-result-v1.md) with a fixed
 `candidate`; the Orchestrator integrates it serially under [Implementation Step
 3](../spec-first-workflow/phases/implementation.md#3-acceptance-transition).
 Spawn independent reviews as fresh `reviewer-agent` (`fork_turns: "none"`) with
-the phase review Method, and retain agent identities across [Recovery And
-Handoff](../spec-first-workflow/shared/transition.md) interruptions to reconcile
+the phase review Method, and retain agent identities across
+[Resume](../spec-first-workflow/shared/resume.md) interruptions to reconcile
 completion and resume from the verified checkout.
