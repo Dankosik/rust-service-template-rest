@@ -216,7 +216,7 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
             &group.lifecycle.cleanup,
             deadline,
             execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
-                observed(
+                observed!(
                     "complete jobs",
                     sqlx::query_scalar!(
                         "UPDATE background_jobs AS job \

@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Weak};
+use std::task::Poll;
 use std::time::Duration;
 
 use crate::slots::{Queue, Slot, Slots};
 
 use futures_util::future::BoxFuture;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Postgres};
+use tokio::time::{Instant, timeout_at};
 
 use crate::dsn::Dsn;
 use crate::observe::{observe_acquisition, observed};
@@ -161,7 +163,7 @@ pub fn prepare_pool_with_notifications(
         .after_release(move |conn, _meta| {
             let _ = &alive;
             conn.shrink_buffers();
-            Box::pin(async { Ok(true) })
+            accept_connection()
         });
     let pool = pool_options.connect_lazy_with(connect_options);
     PoolPolicy::register(&pool, liveness, options, notifications);
@@ -174,7 +176,7 @@ struct PoolPolicy {
     notifications: bool,
 }
 
-static POOL_POLICIES: Mutex<BTreeMap<usize, PoolPolicy>> = Mutex::new(BTreeMap::new());
+static POOL_POLICIES: RwLock<BTreeMap<usize, PoolPolicy>> = RwLock::new(BTreeMap::new());
 
 impl PoolPolicy {
     fn key(pool: &PgPool) -> usize {
@@ -187,7 +189,7 @@ impl PoolPolicy {
 
     fn register(pool: &PgPool, alive: Weak<()>, options: &PoolOptions<'_>, notifications: bool) {
         let key = Self::key(pool);
-        let mut policies = POOL_POLICIES.lock();
+        let mut policies = POOL_POLICIES.write();
         policies.retain(|address, policy| *address != key && policy.is_live());
         let slots = match options.wait_order {
             WaitOrder::Arrival => None,
@@ -209,10 +211,15 @@ impl PoolPolicy {
 
     fn lookup<T>(pool: &PgPool, select: impl FnOnce(&Self) -> T) -> Option<T> {
         POOL_POLICIES
-            .lock()
+            .read()
             .get(&Self::key(pool))
             .filter(|policy| policy.is_live())
             .map(select)
+    }
+
+    fn checkout(pool: &PgPool) -> (Option<Arc<Slots>>, bool) {
+        Self::lookup(pool, |policy| (policy.slots.clone(), policy.notifications))
+            .unwrap_or((None, true))
     }
 }
 
@@ -222,17 +229,15 @@ pub fn notifications_enabled(pool: &PgPool) -> bool {
 }
 
 async fn take_slot(
-    pool: &PgPool,
-    deadline: tokio::time::Instant,
+    slots: Option<Arc<Slots>>,
+    deadline: Instant,
     queue: Queue,
 ) -> Result<Option<Slot>, sqlx::Error> {
-    let Some(slots) = PoolPolicy::lookup(pool, |entry| entry.slots.clone()).flatten() else {
+    let Some(slots) = slots else {
         return Ok(None);
     };
-    if let Some(slot) = slots.try_take() {
-        return Ok(Some(slot));
-    }
-    tokio::time::timeout_at(deadline, slots.take(queue))
+    slots
+        .take(queue, deadline)
         .await
         .map(Some)
         .map_err(|_elapsed| sqlx::Error::PoolTimedOut)
@@ -242,11 +247,32 @@ pub async fn acquire(
     pool: &PgPool,
     operation: &'static str,
 ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquire_with_queue(pool, operation, Queue::Regular).await
+    acquire_with_queue(pool, operation, Queue::Regular, None)
+        .await
+        .map(|(connection, _)| connection)
 }
 
 pub(crate) async fn acquire_probe(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquire_with_queue(pool, "readiness", Queue::Probe).await
+    acquire_with_queue(pool, "readiness", Queue::Probe, None)
+        .await
+        .map(|(connection, _)| connection)
+}
+
+pub(super) async fn acquire_for_transaction(
+    pool: &PgPool,
+    deadline: Option<Instant>,
+) -> Result<(PoolConnection<Postgres>, bool), sqlx::Error> {
+    acquire_with_queue(pool, "transaction", Queue::Regular, deadline).await
+}
+
+pub async fn acquire_until(
+    pool: &PgPool,
+    operation: &'static str,
+    deadline: Instant,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquire_with_queue(pool, operation, Queue::Regular, Some(deadline))
+        .await
+        .map(|(connection, _)| connection)
 }
 
 #[expect(
@@ -257,43 +283,28 @@ async fn acquire_with_queue(
     pool: &PgPool,
     operation: &'static str,
     queue: Queue,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    let budget = pool.options().get_acquire_timeout();
-    let deadline = tokio::time::Instant::now() + budget;
+    caller_deadline: Option<Instant>,
+) -> Result<(PoolConnection<Postgres>, bool), sqlx::Error> {
+    let (deadline, budget) = if let Some(deadline) = caller_deadline {
+        (deadline, deadline.saturating_duration_since(Instant::now()))
+    } else {
+        let budget = pool.options().get_acquire_timeout();
+        (Instant::now() + budget, budget)
+    };
+    let enforce_caller_deadline = caller_deadline.is_some();
     observe_acquisition(operation, budget, async {
-        let _slot = take_slot(pool, deadline, queue).await?;
-        tokio::time::timeout_at(deadline, pool.acquire())
-            .await
-            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
-    })
-    .await
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the pool adapter owns the native checkout"
-)]
-pub async fn acquire_until(
-    pool: &PgPool,
-    operation: &'static str,
-    deadline: tokio::time::Instant,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    observe_acquisition(
-        operation,
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
-        async {
-            let _slot = take_slot(pool, deadline, Queue::Regular).await?;
-            while tokio::time::Instant::now() < deadline {
-                match tokio::time::timeout_at(deadline, pool.acquire()).await {
-                    Err(_elapsed) => break,
-                    Ok(Ok(_)) if tokio::time::Instant::now() >= deadline => break,
-                    Ok(Err(sqlx::Error::PoolTimedOut)) => {}
-                    Ok(result) => return result,
-                }
+        let (slots, notifications) = PoolPolicy::checkout(pool);
+        let _slot = take_slot(slots, deadline, queue).await?;
+        while !enforce_caller_deadline || Instant::now() < deadline {
+            match timeout_at(deadline, pool.acquire()).await {
+                Err(_elapsed) => break,
+                Ok(Ok(_)) if enforce_caller_deadline && Instant::now() >= deadline => break,
+                Ok(Err(sqlx::Error::PoolTimedOut)) if enforce_caller_deadline => {}
+                Ok(result) => return result.map(|connection| (connection, notifications)),
             }
-            Err(sqlx::Error::PoolTimedOut)
-        },
-    )
+        }
+        Err(sqlx::Error::PoolTimedOut)
+    })
     .await
 }
 
@@ -305,28 +316,38 @@ fn ping_if_idle(
     conn: &mut PgConnection,
     meta: PoolConnectionMetadata,
 ) -> BoxFuture<'_, Result<bool, sqlx::Error>> {
-    Box::pin(async move {
-        if meta.idle_for <= PING_IDLE_AFTER {
-            return Ok(true);
-        }
-        let started = tokio::time::Instant::now();
-        let (cause, error) = match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
-            Ok(Ok(())) => return Ok(true),
-            Ok(Err(error)) => (crate::error::failure_cause(&error), error),
-            Err(_elapsed) => (
-                "timeout",
-                sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
-            ),
-        };
-        tracing::warn!(
-            idle_for = ?meta.idle_for,
-            elapsed = ?started.elapsed(),
-            budget = ?IDLE_PING_TIMEOUT,
-            error.type = cause,
-            "postgres_idle_ping_failed"
-        );
-        Err(error)
-    })
+    if meta.idle_for <= PING_IDLE_AFTER {
+        accept_connection()
+    } else {
+        Box::pin(ping_idle_connection(conn, meta.idle_for))
+    }
+}
+
+fn accept_connection() -> BoxFuture<'static, Result<bool, sqlx::Error>> {
+    Box::pin(std::future::poll_fn(|_| Poll::Ready(Ok(true))))
+}
+
+async fn ping_idle_connection(
+    conn: &mut PgConnection,
+    idle_for: Duration,
+) -> Result<bool, sqlx::Error> {
+    let started = Instant::now();
+    let (cause, error) = match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
+        Ok(Ok(())) => return Ok(true),
+        Ok(Err(error)) => (crate::error::failure_cause(&error), error),
+        Err(_elapsed) => (
+            "timeout",
+            sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
+        ),
+    };
+    tracing::warn!(
+        ?idle_for,
+        elapsed = ?started.elapsed(),
+        budget = ?IDLE_PING_TIMEOUT,
+        error.type = cause,
+        "postgres_idle_ping_failed"
+    );
+    Err(error)
 }
 
 pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
@@ -581,36 +602,29 @@ mod tests {
     async fn only_a_pool_that_asked_takes_slots_and_a_slot_is_bounded_by_the_deadline() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let in_arrival_order = unreachable_pool(WaitOrder::Arrival);
-        assert!(
-            take_slot(&in_arrival_order, deadline, Queue::Regular)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            take_slot(&in_arrival_order, deadline, Queue::Probe)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for queue in [Queue::Regular, Queue::Probe] {
+            let (slots, _) = PoolPolicy::checkout(&in_arrival_order);
+            assert!(take_slot(slots, deadline, queue).await.unwrap().is_none());
+        }
 
         let newest_first = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let held = take_slot(&newest_first, deadline, Queue::Regular)
+        let (slots, _) = PoolPolicy::checkout(&newest_first);
+        let held = take_slot(slots.clone(), deadline, Queue::Regular)
             .await
             .unwrap();
         assert!(held.is_some());
-        let beyond_the_pool = take_slot(&newest_first, deadline, Queue::Regular).await;
+        let beyond_the_pool = take_slot(slots.clone(), deadline, Queue::Regular).await;
         std::assert_matches!(beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
         assert!(tokio::time::Instant::now() >= deadline);
         let probe_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        let probe_beyond_the_pool = take_slot(&newest_first, probe_deadline, Queue::Probe).await;
+        let probe_beyond_the_pool = take_slot(slots.clone(), probe_deadline, Queue::Probe).await;
         std::assert_matches!(probe_beyond_the_pool, Err(sqlx::Error::PoolTimedOut));
         assert!(tokio::time::Instant::now() >= probe_deadline);
 
         drop(held);
         let later = tokio::time::Instant::now() + Duration::from_secs(1);
         assert!(
-            take_slot(&newest_first, later, Queue::Probe)
+            take_slot(slots, later, Queue::Probe)
                 .await
                 .unwrap()
                 .is_some()
@@ -623,8 +637,9 @@ mod tests {
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
         let alive = PoolPolicy::lookup(&pool, |policy| Weak::clone(&policy.alive)).unwrap();
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
+        let (slots, _) = PoolPolicy::checkout(&pool);
         assert!(
-            take_slot(&pool, deadline, Queue::Regular)
+            take_slot(slots, deadline, Queue::Regular)
                 .await
                 .unwrap()
                 .is_some()

@@ -13,3 +13,17 @@ later versions while checking the history its binary knows. The
 Each release must keep the previous release's queries compatible throughout
 their overlap. Reopen this choice if the deployment contract requires an
 exclusive schema version and guarantees older binaries cannot restart.
+
+## Retaining the PostgreSQL write buffer between checkouts
+
+Shrinking an idle connection's write buffer to the length of its last COMMIT
+frame makes the next prepared statement grow it again. Retaining the initial
+8 KiB capacity removed three allocator reallocation calls per warm
+single-statement transaction in each of five baseline/candidate pairs, for
+both SELECT and UPDATE. The isolated comparison used four pooled connections,
+PostgreSQL 18.6 over loopback, and a dedicated DigitalOcean c-4 with jemalloc.
+
+After four concurrent 2 MiB round trips and 60 seconds idle, median anonymous
+client RSS was 4,348 KiB on the baseline and 4,436 KiB with the floor. The
+observed ranges overlapped. Reopen the floor if a derived service with a
+larger idle pool measures retained memory that outweighs the saved reallocations.

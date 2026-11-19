@@ -205,7 +205,7 @@ impl Receiver {
             deadline,
             READ_COMMITTED,
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
-                let inserted = observed(
+                let inserted = observed!(
                     "insert webhook receipt",
                     sqlx::query!(
                         "INSERT INTO webhook_receipts (endpoint_id, message_id) \

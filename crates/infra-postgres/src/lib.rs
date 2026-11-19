@@ -33,3 +33,10 @@ pub use transaction::{
     TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline, in_tx_with_deadline,
     set_statement_timeout,
 };
+
+#[doc(hidden)]
+pub mod __statement_observation {
+    pub use metrics::{Key, Label};
+
+    pub use crate::observe::{OPERATION_DURATION_METRIC, observed_with_success_key};
+}

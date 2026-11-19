@@ -252,7 +252,7 @@ async fn arbitrate(
     scope: &ScopeKey,
     fingerprint: &RequestFingerprint,
 ) -> Result<Option<Decision>, AttemptError> {
-    let probe = observed(
+    let probe = observed!(
         "lock and read idempotency record",
         sqlx::query!(
             "SELECT \
@@ -288,7 +288,7 @@ async fn arbitrate(
     if !probe.acquired {
         return Ok(Some(Decision::InProgress));
     }
-    observed(
+    observed!(
         "read idempotency record",
         sqlx::query!(
             "SELECT fingerprint AS \"fingerprint: Digest\", status, \
@@ -348,7 +348,7 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    let written = observed(
+    let written = observed!(
         "write idempotency record",
         sqlx::query!(
             "WITH locked AS MATERIALIZED ( \

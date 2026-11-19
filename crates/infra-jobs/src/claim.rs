@@ -230,7 +230,7 @@ async fn claim(
         })
         .collect();
     let rescued_summary = "lease expired; rescued";
-    observed(
+    observed!(
         "claim jobs",
         sqlx::query_as!(
             ClaimRow,

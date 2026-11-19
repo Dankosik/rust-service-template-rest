@@ -175,12 +175,12 @@ async fn execute(
         token,
     } = fence;
     let id = job_id.0;
-    let (statement_summary, query) = match write {
+    let statement = match write {
         Write::Retry {
             summary,
             minimum_micros,
             jitter_micros,
-        } => (
+        } => observed!(
             "retry job",
             sqlx::query!(
                 "UPDATE background_jobs \
@@ -197,7 +197,8 @@ async fn execute(
                 summary,
                 i32::from(MAX_ATTEMPTS),
                 token,
-            ),
+            )
+            .execute(connection),
         ),
         Write::Snooze { delay_micros } => {
             let delay = sqlx::postgres::types::PgInterval {
@@ -205,7 +206,7 @@ async fn execute(
                 days: 0,
                 microseconds: delay_micros,
             };
-            (
+            observed!(
                 "snooze job",
                 sqlx::query!(
                     "UPDATE background_jobs \
@@ -216,10 +217,11 @@ async fn execute(
                     generation,
                     delay,
                     token,
-                ),
+                )
+                .execute(connection),
             )
         }
-        Write::Release => (
+        Write::Release => observed!(
             "release job",
             sqlx::query!(
                 "UPDATE background_jobs \
@@ -228,9 +230,10 @@ async fn execute(
                 id,
                 generation,
                 token,
-            ),
+            )
+            .execute(connection),
         ),
-        Write::Fail { reason, summary } => (
+        Write::Fail { reason, summary } => observed!(
             "fail job",
             sqlx::query!(
                 "UPDATE background_jobs \
@@ -245,12 +248,11 @@ async fn execute(
                 summary,
                 i32::from(MAX_ATTEMPTS),
                 token,
-            ),
+            )
+            .execute(connection),
         ),
     };
-    Ok(observed(statement_summary, query.execute(connection))
-        .await?
-        .rows_affected())
+    Ok(statement.await?.rows_affected())
 }
 
 #[derive(Debug)]
