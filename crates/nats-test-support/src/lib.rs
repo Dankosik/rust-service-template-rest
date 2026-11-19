@@ -167,6 +167,26 @@ enum ReplyAckState {
     Dropped,
 }
 
+impl ReplyAckState {
+    fn record_request(&mut self, reply: &str) {
+        if matches!(self, Self::WaitingForRequest) {
+            *self = Self::WaitingForReply(reply.to_owned());
+        }
+    }
+
+    fn should_drop_reply(&mut self, header: &PayloadHeader<'_>, payload: &[u8]) -> bool {
+        let matched = matches!(
+            self,
+            Self::WaitingForReply(expected)
+                if payload.is_empty() && header.subject == expected
+        );
+        if matched {
+            *self = Self::Dropped;
+        }
+        matched
+    }
+}
+
 impl AckDroppingRelay {
     pub async fn start(stream: &str) -> Self {
         let stream = stream.to_owned();
@@ -196,7 +216,7 @@ impl AckDroppingRelay {
         let mut pulls = 0;
         let relay = Self::start_withholding(
             move |header, payload| {
-                if header.verb != "PUB" || header.subject != subject {
+                if header.verb != PayloadVerb::Pub || header.subject != subject {
                     return false;
                 }
                 pulls += 1;
@@ -218,14 +238,14 @@ impl AckDroppingRelay {
     }
 
     pub async fn start_source_ack(stream: &str, durable: &str, dropped: DroppedAck) -> Self {
-        let identity = format!(".{stream}.{durable}.");
+        let stream_durable_segment = format!(".{stream}.{durable}.");
         match dropped {
             DroppedAck::Request => {
                 let mut dropped_request = false;
                 Self::start_withholding(
                     move |header, payload| {
                         if !dropped_request
-                            && source_ack_reply(header, payload, &identity).is_some()
+                            && source_ack_reply(header, payload, &stream_durable_segment).is_some()
                         {
                             dropped_request = true;
                             return true;
@@ -241,26 +261,21 @@ impl AckDroppingRelay {
                 let request_state = Arc::clone(&state);
                 Self::start_withholding(
                     move |header, payload| {
-                        if let Some(reply) = source_ack_reply(header, payload, &identity) {
-                            let mut state = request_state.lock().expect("ACK reply lock");
-                            if matches!(*state, ReplyAckState::WaitingForRequest) {
-                                *state = ReplyAckState::WaitingForReply(reply.to_owned());
-                            }
+                        if let Some(reply) =
+                            source_ack_reply(header, payload, &stream_durable_segment)
+                        {
+                            request_state
+                                .lock()
+                                .expect("ACK reply lock")
+                                .record_request(reply);
                         }
                         false
                     },
                     move |header, payload| {
-                        let mut state = state.lock().expect("ACK reply lock");
-                        let matched = matches!(
-                            &*state,
-                            ReplyAckState::WaitingForReply(expected)
-                                if payload.is_empty() && header.subject == expected
-                        );
-                        if matched {
-                            *state = ReplyAckState::Dropped;
-                            return true;
-                        }
-                        false
+                        state
+                            .lock()
+                            .expect("ACK reply lock")
+                            .should_drop_reply(header, payload)
                     },
                 )
                 .await
@@ -284,25 +299,11 @@ impl AckDroppingRelay {
             let broker = TcpStream::connect(target).await.expect("relay broker");
             let (client_read, client_write) = client.into_split();
             let (broker_read, broker_write) = broker.into_split();
-            let requests = relay_frames(client_read, broker_write, |_, payload| {
-                if let Some((header, payload)) = payload
-                    && withhold_to_broker(header, payload)
-                {
-                    dropped.cancel();
-                    FrameAction::Drop
-                } else {
-                    FrameAction::Forward
-                }
+            let requests = relay_frames(client_read, broker_write, |frame| {
+                decide_frame_action(frame, &dropped, &mut withhold_to_broker)
             });
-            let replies = relay_frames(broker_read, client_write, |_, payload| {
-                if let Some((header, payload)) = payload
-                    && withhold_to_client(header, payload)
-                {
-                    dropped.cancel();
-                    FrameAction::Drop
-                } else {
-                    FrameAction::Forward
-                }
+            let replies = relay_frames(broker_read, client_write, |frame| {
+                decide_frame_action(frame, &dropped, &mut withhold_to_client)
             });
             tokio::select! {
                 result = requests => result.expect("relay requests"),
@@ -361,10 +362,33 @@ enum FrameAction {
     Drop,
 }
 
+enum RelayFrame<'a> {
+    Control(&'a [u8]),
+    Payload {
+        header: &'a PayloadHeader<'a>,
+        payload: &'a [u8],
+    },
+}
+
+fn decide_frame_action(
+    frame: RelayFrame<'_>,
+    dropped: &CancellationToken,
+    withhold: &mut impl FnMut(&PayloadHeader<'_>, &[u8]) -> bool,
+) -> FrameAction {
+    if let RelayFrame::Payload { header, payload } = frame
+        && withhold(header, payload)
+    {
+        dropped.cancel();
+        FrameAction::Drop
+    } else {
+        FrameAction::Forward
+    }
+}
+
 async fn relay_frames(
     reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
-    mut on_frame: impl FnMut(&[u8], Option<(&PayloadHeader<'_>, &[u8])>) -> FrameAction,
+    mut on_frame: impl FnMut(RelayFrame<'_>) -> FrameAction,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(reader);
     loop {
@@ -373,14 +397,17 @@ async fn relay_frames(
             return Ok(());
         }
         let Some(header) = parse_payload_header(&line) else {
-            if matches!(on_frame(&line, None), FrameAction::Forward) {
+            if matches!(on_frame(RelayFrame::Control(&line)), FrameAction::Forward) {
                 writer.write_all(&line).await?;
             }
             continue;
         };
         let (payload, ending) = read_payload_and_ending(&mut reader, header.length).await?;
         if matches!(
-            on_frame(&line, Some((&header, &payload))),
+            on_frame(RelayFrame::Payload {
+                header: &header,
+                payload: &payload,
+            }),
             FrameAction::Forward
         ) {
             writer.write_all(&line).await?;
@@ -430,8 +457,10 @@ async fn relay_authenticated_connection(
     let (client_read, client_write) = client.into_split();
     let (broker_read, broker_write) = broker.into_split();
     let requests = relay_authenticated_requests(client_read, broker_write, observations);
-    let replies = relay_frames(broker_read, client_write, |line, _| {
-        if is_broker_auth_refusal(line) {
+    let replies = relay_frames(broker_read, client_write, |frame| {
+        if let RelayFrame::Control(line) = frame
+            && is_broker_auth_refusal(line)
+        {
             observations.send_modify(|state| state.refused = true);
         }
         FrameAction::Forward
@@ -447,11 +476,11 @@ async fn relay_authenticated_connection(
 fn source_ack_reply<'a>(
     header: &PayloadHeader<'a>,
     payload: &[u8],
-    identity: &str,
+    stream_durable_segment: &str,
 ) -> Option<&'a str> {
-    if header.verb == "PUB"
+    if header.verb == PayloadVerb::Pub
         && header.subject.starts_with("$JS.ACK.")
-        && header.subject.contains(identity)
+        && header.subject.contains(stream_durable_segment)
         && payload == b"+ACK"
     {
         header.reply
@@ -490,8 +519,16 @@ pub fn jwt_subject(jwt: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadVerb {
+    Pub,
+    Hpub,
+    Msg,
+    Hmsg,
+}
+
 struct PayloadHeader<'a> {
-    verb: &'a str,
+    verb: PayloadVerb,
     subject: &'a str,
     reply: Option<&'a str>,
     length: usize,
@@ -499,35 +536,28 @@ struct PayloadHeader<'a> {
 
 fn parse_payload_header(line: &[u8]) -> Option<PayloadHeader<'_>> {
     let mut fields = std::str::from_utf8(line).ok()?.split_ascii_whitespace();
-    let verb = fields.next()?;
+    let verb = match fields.next()? {
+        "PUB" => PayloadVerb::Pub,
+        "HPUB" => PayloadVerb::Hpub,
+        "MSG" => PayloadVerb::Msg,
+        "HMSG" => PayloadVerb::Hmsg,
+        _ => return None,
+    };
     let subject = fields.next()?;
-    let (reply, length) = match verb {
-        "PUB" => match (fields.next()?, fields.next(), fields.next()) {
-            (length, None, None) => (None, length),
-            (reply, Some(length), None) => (Some(reply), length),
-            _ => return None,
-        },
-        "HPUB" => match (fields.next()?, fields.next()?, fields.next(), fields.next()) {
-            (_, length, None, None) => (None, length),
-            (reply, _, Some(length), None) => (Some(reply), length),
-            _ => return None,
-        },
-        "MSG" => match (fields.next()?, fields.next()?, fields.next(), fields.next()) {
-            (_, length, None, None) => (None, length),
-            (_, reply, Some(length), None) => (Some(reply), length),
-            _ => return None,
-        },
-        "HMSG" => match (
-            fields.next()?,
-            fields.next()?,
-            fields.next()?,
-            fields.next(),
-            fields.next(),
-        ) {
-            (_, _, length, None, None) => (None, length),
-            (_, reply, _, Some(length), None) => (Some(reply), length),
-            _ => return None,
-        },
+    let rest = std::array::from_fn(|_| fields.next());
+    let (reply, length) = match (verb, rest) {
+        (PayloadVerb::Pub, [Some(length), None, ..]) => (None, length),
+        (PayloadVerb::Pub, [Some(reply), Some(length), None, ..]) => (Some(reply), length),
+        (PayloadVerb::Hpub, [Some(_), Some(length), None, ..]) => (None, length),
+        (PayloadVerb::Hpub, [Some(reply), Some(_), Some(length), None, ..]) => {
+            (Some(reply), length)
+        }
+        (PayloadVerb::Msg, [Some(_), Some(length), None, ..]) => (None, length),
+        (PayloadVerb::Msg, [Some(_), Some(reply), Some(length), None, ..]) => (Some(reply), length),
+        (PayloadVerb::Hmsg, [Some(_), Some(_), Some(length), None, ..]) => (None, length),
+        (PayloadVerb::Hmsg, [Some(_), Some(reply), Some(_), Some(length), None]) => {
+            (Some(reply), length)
+        }
         _ => return None,
     };
     Some(PayloadHeader {
