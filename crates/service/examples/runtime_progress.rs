@@ -523,7 +523,7 @@ fn register(
     let storage = ObjectStorage::try_new(ObjectStorageOptions {
         provider: Provider::Local {
             endpoint: std::env::var("RUNTIME_PROGRESS_UPLOAD_ENDPOINT").unwrap_or_default(),
-            region: "us-east-1".to_owned(),
+            region: Some("us-east-1".to_owned()),
         },
         bucket: "runtime-progress".to_owned(),
         credentials: CredentialSource::AccessKey {

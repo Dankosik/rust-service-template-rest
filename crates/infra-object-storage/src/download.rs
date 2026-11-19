@@ -39,7 +39,7 @@ struct Resources {
     body: ByteStream,
     progress: ByteProgress,
     guard: OperationGuard,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
 }
 
 enum Outcome {
@@ -55,17 +55,32 @@ struct Completion {
 }
 
 impl Completion {
-    fn finish(mut self) {
-        match self.outcome {
-            Outcome::Success => self.resources.guard.succeed(),
+    fn finish(self) {
+        let Self {
+            resources,
+            outcome,
+            discarded,
+        } = self;
+        let Resources {
+            waker,
+            context,
+            body,
+            progress,
+            guard,
+            permit,
+        } = resources;
+        match outcome {
+            Outcome::Success => guard.succeed(),
             Outcome::Failure(failure) => {
-                self.resources.guard.fail(failure);
+                guard.fail(&failure);
             }
-            Outcome::Cancelled => self.resources.guard.cancel(),
+            Outcome::Cancelled => guard.cancel(),
         }
-        let waker = self.resources.waker.take();
-        drop(self.discarded);
-        drop(self.resources);
+        drop(discarded);
+        drop(body);
+        drop(progress);
+        drop(context);
+        drop(permit);
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -248,7 +263,7 @@ impl Download {
             body,
             progress: ByteProgress::new(metadata.size),
             guard,
-            _permit: permit,
+            permit,
         })));
         let shared_on_exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {

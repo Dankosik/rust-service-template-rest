@@ -84,7 +84,7 @@ pub(crate) enum BootstrapError {
     Metrics(#[from] infra_telemetry::MetricsError),
     // template:begin cache:service-bootstrap-cache-errors
     #[error("cache startup: {0}")]
-    Cache(#[from] infra_cache::CacheError),
+    Cache(#[from] infra_cache::StartError),
     // template:end cache:service-bootstrap-cache-errors
     // template:begin object-storage:service-bootstrap-object-storage-errors
     #[error("object storage configuration: {0}")]

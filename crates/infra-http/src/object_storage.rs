@@ -4,7 +4,8 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use infra_object_storage::{
-    Download, MutationError, MutationFailure, ObjectKey, ObjectStorage, ObjectStorageError, PutBody,
+    Download, MutationError, MutationFailure, ObjectKey, ObjectStorage, ObjectStorageError,
+    PutBody, UnknownOutcome,
 };
 
 use crate::context::BodyReadTracker;
@@ -97,8 +98,8 @@ pub fn mutation_problem(
         },
         MutationError::OutcomeUnknown(reason) => {
             let problem = match reason {
-                MutationFailure::Stopped(stopped) => Problem::from(stopped),
-                _ => Problem::new(Code::ServiceUnavailable),
+                UnknownOutcome::Stopped(stopped) => Problem::from(stopped),
+                UnknownOutcome::Unavailable => Problem::new(Code::ServiceUnavailable),
             };
             unconfirmed_write(problem)
         }

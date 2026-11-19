@@ -16,7 +16,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 
 use self::connection::Link;
-pub use self::error::{MutationError, OperationError, SetError};
+pub use self::error::{MutationError, OperationError, SetError, StartError, UnknownOutcome};
 pub use self::namespace::{CacheLookup, CacheNamespace, Namespace};
 pub use self::observe::HISTOGRAMS;
 
@@ -38,50 +38,6 @@ pub struct CacheOptions {
 pub struct ClientCertificate {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum CacheError {
-    #[error("cache.max_concurrency must allow application commands and leave one maintenance slot")]
-    InvalidConcurrency,
-    #[error("cache key or value size limit is outside the supported range")]
-    InvalidSizeLimit,
-    #[error("cache DSN is invalid")]
-    InvalidDsn,
-    #[error("cache address is unsupported")]
-    UnsupportedAddress,
-    #[error("cache plaintext is refused")]
-    PlaintextRefused,
-    #[error("cache unauthenticated connection is refused")]
-    UnauthenticatedRefused,
-    #[error("cache DSN must not carry a password when cache.password_file is set")]
-    PasswordInDsn,
-    #[error("cache password file could not be read ({kind})")]
-    PasswordFile { kind: std::io::ErrorKind },
-    #[error("cache password file is empty")]
-    PasswordFileEmpty,
-    #[error("cache insecure TLS is refused")]
-    InsecureTlsRefused,
-    #[error("cache root CA requires TLS")]
-    CaRequiresTls,
-    #[error("cache root CA file could not be read ({kind})")]
-    CaFile { kind: std::io::ErrorKind },
-    #[error("cache root CA is invalid")]
-    InvalidCa,
-    #[error("cache client certificate requires TLS")]
-    ClientCertificateRequiresTls,
-    #[error("cache client certificate file could not be read ({kind})")]
-    ClientCertificateFile { kind: std::io::ErrorKind },
-    #[error("cache client certificate is invalid")]
-    InvalidClientCertificate,
-    #[error("cache client key file could not be read ({kind})")]
-    ClientKeyFile { kind: std::io::ErrorKind },
-    #[error("cache client key is invalid or does not match the client certificate")]
-    InvalidClientKey,
-    #[error("cache client could not be built")]
-    ClientBuild,
-    #[error("cache startup admission timed out")]
-    AdmissionTimedOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,7 +62,7 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub async fn start(options: CacheOptions) -> Result<Self, CacheError> {
+    pub async fn start(options: CacheOptions) -> Result<Self, StartError> {
         use tokio_util::task::AbortOnDropHandle;
 
         const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,21 +70,21 @@ impl Cache {
         let command_timeout = options.command_timeout;
         let max_concurrency = options.max_concurrency;
         if !(1..tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency) {
-            return Err(CacheError::InvalidConcurrency);
+            return Err(StartError::InvalidConcurrency);
         }
         let max_key_bytes = options.max_key_bytes;
         let max_value_bytes = options.max_value_bytes;
         let supported = 1..=shared_rules::cache::MAX_ENTRY_BYTES;
         if !supported.contains(&max_key_bytes) || !supported.contains(&max_value_bytes) {
-            return Err(CacheError::InvalidSizeLimit);
+            return Err(StartError::InvalidSizeLimit);
         }
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             admission::admit(options)
         }));
         let admitted = tokio::time::timeout(ADMISSION_TIMEOUT, admission)
             .await
-            .map_err(|_| CacheError::AdmissionTimedOut)?
-            .map_err(|_| CacheError::ClientBuild)??;
+            .map_err(|_| StartError::AdmissionTimedOut)?
+            .map_err(|_| StartError::ClientBuild)??;
         observe::describe();
         Ok(Self {
             max_key_bytes,
