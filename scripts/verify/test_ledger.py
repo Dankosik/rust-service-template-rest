@@ -265,6 +265,7 @@ class CheckLedgerTests(unittest.TestCase):
 
     def test_rejects_unready_upstream_and_leftover_workflow_plan(self) -> None:
         _build_valid_multi_task_fixture(self.task_dir)
+        _write(self.task_dir / "intent.md", "# Intent: Rate limiting\n\nstatus: draft\n")
         (self.task_dir / "spec.md").write_text(
             (self.task_dir / "spec.md").read_text(encoding="utf-8").replace("status: ready", "status: draft"),
             encoding="utf-8",
@@ -277,6 +278,7 @@ class CheckLedgerTests(unittest.TestCase):
 
         report = check_ledger.check_ledger(self.task_dir)
         joined = "\n".join(report.errors)
+        self.assertIn("upstream artifact intent.md has status 'draft'", joined)
         self.assertIn("upstream artifact spec.md has status 'draft'", joined)
         self.assertIn("workflow-plan.md must be deleted", joined)
 

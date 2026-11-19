@@ -645,7 +645,7 @@ def check_ledger(target: Path) -> CheckReport:
     header, tasks, ledger_raw = _parse_tasks_md(ledger_path, errors)
     status = header.get("status")
 
-    for rel in ("spec.md", "design/design.md", "rollout.md"):
+    for rel in ("intent.md", "spec.md", "design/design.md", "rollout.md"):
         up_path = task_dir / rel
         if up_path.is_file():
             up_status = _parse_front_status(up_path) or "missing"

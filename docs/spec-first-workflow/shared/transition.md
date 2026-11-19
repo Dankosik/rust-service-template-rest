@@ -60,11 +60,9 @@ state and result-delivery route to a single successor.
 When Planning returns a reviewed, ready `tasks.md`, leave the ledger and its
 inputs available in the same checkout. Present a compact one-screen plan
 overview in the user's language—each task's `T<ID>`, one-line deliverable,
-non-default shape when applicable (`prefactor`, `shared-contract`,
-`integration-first`, `expand`/`migrate`/`contract`), `Depends on`, `Completion`
-target, plus execution waves (showing the initial Ready Frontier, parallel
-waves vs shared-lock serialization) and any carried `CONCERNS` or `Reopen if`
-risks directly from Planning's handoff summary (`movement_evidence` /
+non-default shape tag when present, `Depends on`, `Completion` target, plus
+execution waves (showing the initial Ready Frontier, parallel waves vs
+shared-lock serialization) and any carried `CONCERNS` or `Reopen if` risks directly from Planning's handoff summary (`movement_evidence` /
 `make ledger-check` output)—so the user can verify slicing, granularity, and
 real parallelism at a glance.
 Follow with one message to send in a new session there, in their language, with
@@ -132,7 +130,7 @@ Return one durable macro-phase receipt:
 status: ready | blocked | skipped
 owner: <phase>
 result: <artifact path or inline result>
-review: <Review Result V1 locator or inline result; none for blocked/skipped>
+review: <Review Result V1 locator or inline result; none when unreviewed or skipped>
 movement_evidence: <why the next owner may act, or none>
 reopen_owner: <owner or none>
 next_owner: <owner or none>

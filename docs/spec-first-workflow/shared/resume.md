@@ -18,7 +18,7 @@ completed phases.
 2. For structured work, read `tasks.md` first once Planning has persisted it.
    During preparation, if `tasks.md` is `status: blocked`, route to its
    `Blocked stop` owner and also check `workflow-plan.md` when present;
-   otherwise resume Planning review or its
+   otherwise resume Planning, its review, or its
    [handoff](transition.md#implementation-handoff). During implementation or
    validation read the index and current ready-frontier packets. Before a
    ledger exists, read `workflow-plan.md` when present.
