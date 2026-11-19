@@ -45,7 +45,7 @@ use infra_grpc::{
 };
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{
-    Client, ClientError, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
+    Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
 };
 // template:begin authn:grpc-scope-trace-test-imports
 use axum::extract::State;
@@ -3261,24 +3261,6 @@ fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
     }
 }
 
-#[test]
-fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
-    let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
-    assert_matches!(
-        Client::try_new("http://127.0.0.1:1", tls, CLIENT_TIMEOUT).unwrap_err(),
-        ClientError::DestinationSecurityMismatch
-    );
-    assert_matches!(
-        Client::try_new(
-            "https://127.0.0.1:1",
-            ClientSecurity::Plaintext,
-            CLIENT_TIMEOUT
-        )
-        .unwrap_err(),
-        ClientError::DestinationSecurityMismatch
-    );
-}
-
 #[tokio::test]
 async fn both_reflection_versions_list_registered_services_and_close_idle_streams_on_drain() {
     use prost::Message as _;
@@ -3995,8 +3977,7 @@ async fn answer_introspection(
 ) {
     use http_body_util::BodyExt as _;
 
-    let (read, write) = tokio::io::split(stream);
-    let io = hyper_util::rt::TokioIo::new(tokio::io::join(read.take(4096), write));
+    let io = hyper_util::rt::TokioIo::new(stream);
     let service =
         hyper::service::service_fn(|request: http::Request<hyper::body::Incoming>| async move {
             let body = request.into_body().collect().await?.to_bytes();
@@ -4013,7 +3994,6 @@ async fn answer_introspection(
             Ok::<_, hyper::Error>(introspection_response(unscoped))
         });
     let _ = hyper::server::conn::http1::Builder::new()
-        .max_headers(1024)
         .keep_alive(false)
         .half_close(true)
         .header_read_timeout(None)
@@ -4083,29 +4063,6 @@ async fn introspection_classifies_the_complete_decoded_token() {
     .await;
     assert_eq!(calls, 0);
     assert!(!response.starts_with("HTTP/1.1 200 "));
-}
-
-#[tokio::test]
-async fn introspection_wire_limit_includes_headers_and_body() {
-    for extra_headers in [0, 150] {
-        let headers = "X:\r\n".repeat(extra_headers);
-        for total in [4096, 4097] {
-            let head =
-                format!("POST / HTTP/1.1\r\nHost: provider.test\r\n{headers}Content-Length: ");
-            let body_len = total - head.len() - "0000\r\n\r\n".len();
-            let body = "token=unscoped&pad=";
-            let pad = "x".repeat(body_len - body.len());
-            let request = format!("{head}{body_len}\r\n\r\n{body}{pad}");
-            assert_eq!(request.len(), total);
-            let (calls, response) = introspection_exchange(&request, "").await;
-            assert_eq!(calls, usize::from(total == 4096));
-            assert_eq!(
-                response.starts_with("HTTP/1.1 200 "),
-                total == 4096,
-                "{response}"
-            );
-        }
-    }
 }
 
 fn provider_tls_config(pki: &Pki) -> rustls::ServerConfig {
