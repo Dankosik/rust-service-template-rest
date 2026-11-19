@@ -15,7 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
 use crate::protocol::header_status_code;
-use crate::status::internal_status;
+use crate::status::FixedFailure;
 
 #[derive(Default)]
 pub(crate) struct ServerCustody {
@@ -25,13 +25,9 @@ pub(crate) struct ServerCustody {
     pub(crate) end_on_drain: Option<CancellationToken>,
 }
 
-pub(crate) fn deadline_status() -> tonic::Status {
-    crate::Failure::new(service_failure::Code::GatewayTimeout).into()
-}
-
 pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
     match reason {
-        Stopped::Deadline => deadline_status(),
+        Stopped::Deadline => FixedFailure::Deadline.status(),
         Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
     }
 }
@@ -46,11 +42,27 @@ pub(crate) fn check_open(context: &OperationContext) -> Result<(), axum::respons
         .map_err(|reason| stopped_status(reason).into_http())
 }
 
+const STATUS_HEADERS: [http::HeaderName; 3] = [
+    tonic::Status::GRPC_STATUS,
+    tonic::Status::GRPC_MESSAGE,
+    tonic::Status::GRPC_STATUS_DETAILS,
+];
+const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
+
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
-    tonic::Status::from_header_map(headers)
-        .as_ref()
-        .and_then(crate::status::catalog_code)
+    let status = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
+        tonic::Status::from_header_map(headers)
+    } else {
+        let mut fields = HeaderMap::with_capacity(STATUS_HEADERS.len());
+        for name in STATUS_HEADERS {
+            if let Some(value) = headers.get(&name) {
+                fields.insert(name, value.clone());
+            }
+        }
+        tonic::Status::from_header_map(&fields)
+    }?;
+    crate::status::catalog_code(&status)
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +103,35 @@ impl ServerOutcome {
 }
 
 type FramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
+
+struct LocalStatus {
+    status: tonic::Status,
+    failure: Option<service_failure::Code>,
+}
+
+impl LocalStatus {
+    fn failure(failure: FixedFailure) -> Self {
+        Self {
+            status: failure.status(),
+            failure: Some(failure.catalog_code()),
+        }
+    }
+
+    fn drained() -> Self {
+        Self {
+            status: tonic::Status::ok(""),
+            failure: None,
+        }
+    }
+
+    fn write_headers(self, headers: &mut HeaderMap) -> ServerOutcome {
+        let _ = self.status.add_header(headers);
+        ServerOutcome {
+            code: self.status.code(),
+            failure: self.failure,
+        }
+    }
+}
 
 struct ActiveStream<B> {
     body: B,
@@ -140,20 +181,20 @@ impl<B> ServerState<B> {
         }
     }
 
-    fn stage_status_trailers(&mut self, status: &tonic::Status) -> Option<StreamFinalizer<B>> {
+    fn stage_status_trailers(&mut self, status: LocalStatus) -> Option<StreamFinalizer<B>> {
+        if !matches!(self, Self::Active(_)) {
+            return None;
+        }
         let mut trailers = HeaderMap::new();
-        let _ = status.add_header(&mut trailers);
-        self.transition(
-            Self::PendingTrailers(trailers),
-            ServerOutcome::from_status(status),
-        )
+        let outcome = status.write_headers(&mut trailers);
+        self.transition(Self::PendingTrailers(trailers), outcome)
     }
 }
 
 impl<B: Body> ServerState<B> {
     fn cut_off(
         &mut self,
-        status: &tonic::Status,
+        status: LocalStatus,
     ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
         let finalizer = self.stage_status_trailers(status);
         (self.pop_terminal(), finalizer)
@@ -189,14 +230,17 @@ where
     fn poll_next(
         &mut self,
         cx: &mut Context<'_>,
+        watched: bool,
     ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
         let Self::Active(active) = self else {
             return (self.pop_terminal(), None);
         };
         if active.deadline.is_some_and(Deadline::expired) {
-            return self.cut_off(&deadline_status());
+            return self.cut_off(LocalStatus::failure(FixedFailure::Deadline));
         }
-        register_waker(&mut active.waker, cx.waker());
+        if watched {
+            register_waker(&mut active.waker, cx.waker());
+        }
         let inner = {
             let _entered = active.call.span().enter();
             let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
@@ -205,17 +249,19 @@ where
             }))
         };
         match inner {
-            Ok(_) if self.is_expired() => self.cut_off(&deadline_status()),
+            Ok(_) if self.is_expired() => {
+                self.cut_off(LocalStatus::failure(FixedFailure::Deadline))
+            }
             Ok(polled) => {
                 let finalizer = self.close_if_terminal(&polled);
                 (polled, finalizer)
             }
-            Err(_panic) => self.cut_off(&internal_status()),
+            Err(_panic) => self.cut_off(LocalStatus::failure(FixedFailure::Internal)),
         }
     }
 }
 
-struct ResponseBody<B> {
+struct WatchedBody<B> {
     state: Arc<Mutex<ServerState<B>>>,
     stop_watcher: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
@@ -229,22 +275,20 @@ pub(crate) fn wrap_response(
     custody: ServerCustody,
 ) -> axum::response::Response {
     let initial = if custody.deadline.is_some_and(Deadline::expired) {
-        let status = deadline_status();
-        for header in [
-            tonic::Status::GRPC_STATUS,
-            tonic::Status::GRPC_MESSAGE,
-            tonic::Status::GRPC_STATUS_DETAILS,
-        ] {
+        let status = LocalStatus::failure(FixedFailure::Deadline);
+        for header in STATUS_HEADERS {
             response.headers_mut().remove(header);
         }
-        let _ = status.add_header(response.headers_mut());
-        Some(ServerOutcome::from_status(&status))
+        Some(status.write_headers(response.headers_mut()))
     } else {
         ServerOutcome::from_response(&response)
     };
-    response
-        .map(|body| ResponseBody::start(body, call, fallback, custody, initial))
-        .map(axum::body::Body::new)
+    response.map(|body| ResponseBody::start(body, call, fallback, custody, initial).into_body())
+}
+
+enum ResponseBody<B> {
+    Local(ServerState<B>),
+    Watched(WatchedBody<B>),
 }
 
 impl<B> ResponseBody<B>
@@ -271,54 +315,65 @@ where
         let finalizer = if let Some(outcome) = initial {
             state.transition(ServerState::Closed, outcome)
         } else if state.is_expired() {
-            state.stage_status_trailers(&deadline_status())
+            state.stage_status_trailers(LocalStatus::failure(FixedFailure::Deadline))
         } else if body_ended {
             state.transition(ServerState::Closed, ServerOutcome::unknown())
         } else {
             None
         };
-        let mut this = Self {
-            state: Arc::new(Mutex::new(state)),
-            stop_watcher: None,
-            #[cfg(test)]
-            stop_watcher_done: None,
-        };
         if let Some(finalizer) = finalizer {
             finalizer.emit();
-            return this;
+            return Self::Local(state);
         }
         if let Some(drain) = custody.end_on_drain {
             let context = OperationContext::new(custody.deadline, drain);
-            this.watch_stop(async move {
+            Self::Watched(WatchedBody::new(state, async move {
                 match context.wait_stopped().await {
-                    Stopped::Deadline => deadline_status(),
-                    Stopped::Cancelled => tonic::Status::ok(""),
+                    Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
+                    Stopped::Cancelled => LocalStatus::drained(),
                 }
-            });
+            }))
         } else if let Some(deadline) = custody.deadline {
-            this.watch_stop(async move {
+            Self::Watched(WatchedBody::new(state, async move {
                 deadline.wait().await;
-                deadline_status()
-            });
+                LocalStatus::failure(FixedFailure::Deadline)
+            }))
+        } else {
+            Self::Local(state)
         }
-        this
     }
 
-    fn watch_stop(&mut self, stopped: impl Future<Output = tonic::Status> + Send + 'static) {
-        let weak = Arc::downgrade(&self.state);
+    fn into_body(self) -> axum::body::Body
+    where
+        B::Error: Into<axum::BoxError>,
+    {
+        match self {
+            Self::Local(ServerState::Closed) => axum::body::Body::empty(),
+            Self::Local(state) => axum::body::Body::new(state),
+            Self::Watched(body) => axum::body::Body::new(body),
+        }
+    }
+}
+
+impl<B> WatchedBody<B>
+where
+    B: Send + 'static,
+{
+    fn new(
+        state: ServerState<B>,
+        stopped: impl Future<Output = LocalStatus> + Send + 'static,
+    ) -> Self {
+        let state = Arc::new(Mutex::new(state));
+        let weak = Arc::downgrade(&state);
         #[cfg(test)]
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        #[cfg(test)]
-        {
-            self.stop_watcher_done = Some(done_rx);
-        }
-        self.stop_watcher = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let watcher = tokio::spawn(async move {
             #[cfg(test)]
             let _done_tx = done_tx;
             let result = AssertUnwindSafe(async {
                 let status = stopped.await;
                 if let Some(state) = weak.upgrade() {
-                    terminate_stream(&state, &status);
+                    terminate_stream(&state, status);
                 }
             })
             .catch_unwind()
@@ -326,9 +381,15 @@ where
             if result.is_err()
                 && let Some(state) = weak.upgrade()
             {
-                terminate_stream(&state, &internal_status());
+                terminate_stream(&state, LocalStatus::failure(FixedFailure::Internal));
             }
-        })));
+        });
+        Self {
+            state,
+            stop_watcher: Some(AbortOnDropHandle::new(watcher)),
+            #[cfg(test)]
+            stop_watcher_done: Some(done_rx),
+        }
     }
 
     fn poll_stop_watcher(&mut self, cx: &mut Context<'_>) {
@@ -337,13 +398,13 @@ where
         {
             self.stop_watcher = None;
             if joined.is_err() {
-                terminate_stream(&self.state, &internal_status());
+                terminate_stream(&self.state, LocalStatus::failure(FixedFailure::Internal));
             }
         }
     }
 }
 
-fn terminate_stream<B>(state: &Mutex<ServerState<B>>, status: &tonic::Status) {
+fn terminate_stream<B>(state: &Mutex<ServerState<B>>, status: LocalStatus) {
     let finalizer = state.lock().stage_status_trailers(status);
     if let Some(mut finalizer) = finalizer {
         if let Some(waker) = finalizer.active.waker.take() {
@@ -360,7 +421,34 @@ fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
     }
 }
 
-impl<B> Body for ResponseBody<B>
+impl<B> Body for ServerState<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
+        let (polled, finalizer) = self.poll_next(cx, false);
+        if let Some(finalizer) = finalizer {
+            finalizer.emit();
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Active(active) => active.body.size_hint(),
+            Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
+        }
+    }
+}
+
+impl<B> Body for WatchedBody<B>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
@@ -370,7 +458,7 @@ where
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
         let this = self.get_mut();
         this.poll_stop_watcher(cx);
-        let (polled, finalizer) = this.state.lock().poll_next(cx);
+        let (polled, finalizer) = this.state.lock().poll_next(cx, true);
         if let Some(finalizer) = finalizer {
             this.stop_watcher = None;
             finalizer.emit();
@@ -379,20 +467,15 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        let guard = self.state.lock();
-        matches!(*guard, ServerState::Closed)
+        self.state.lock().is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        let guard = self.state.lock();
-        match &*guard {
-            ServerState::Active(active) => active.body.size_hint(),
-            ServerState::PendingTrailers(_) | ServerState::Closed => SizeHint::with_exact(0),
-        }
+        self.state.lock().size_hint()
     }
 }
 
-impl<B> Drop for ResponseBody<B> {
+impl<B> Drop for WatchedBody<B> {
     fn drop(&mut self) {
         let stage = {
             let mut guard = self.state.lock();
@@ -416,6 +499,30 @@ mod tests {
     use tokio::sync::Semaphore;
 
     const BUDGET: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn rich_trailers_use_the_first_status_values_even_with_repeated_metadata() {
+        let mut trailers = HeaderMap::new();
+        FixedFailure::Deadline
+            .status()
+            .add_header(&mut trailers)
+            .unwrap();
+        trailers.append(
+            tonic::Status::GRPC_STATUS,
+            http::HeaderValue::from_static("0"),
+        );
+        trailers.append(
+            tonic::Status::GRPC_STATUS_DETAILS,
+            http::HeaderValue::from_static("!"),
+        );
+        for _ in 0..64 {
+            trailers.append("custom", http::HeaderValue::from_static("metadata"));
+        }
+
+        let outcome = ServerOutcome::from_headers(&trailers).unwrap();
+        assert_eq!(outcome.code, tonic::Code::DeadlineExceeded);
+        assert_eq!(outcome.failure, Some(service_failure::Code::GatewayTimeout));
+    }
 
     fn budget_deadline() -> Deadline {
         Deadline::after(BUDGET)
@@ -465,11 +572,14 @@ mod tests {
         Call::start(methods.resolve(path), path)
     }
 
-    fn start_response<B>(body: B, custody: ServerCustody) -> ResponseBody<B>
+    fn start_watched<B>(body: B, custody: ServerCustody) -> WatchedBody<B>
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        ResponseBody::start(body, server_call(), None, custody, None)
+        match ResponseBody::start(body, server_call(), None, custody, None) {
+            ResponseBody::Watched(body) => body,
+            ResponseBody::Local(_) => panic!("expected a response with a stop watcher"),
+        }
     }
 
     #[tokio::test]
@@ -480,11 +590,22 @@ mod tests {
         let frames = futures_util::stream::iter([Err::<Frame<Bytes>, _>(
             tonic::Status::unavailable("body read failed"),
         )]);
-        let mut body = start_response(
+        let mut body = ResponseBody::start(
             http_body_util::StreamBody::new(frames),
+            server_call(),
+            None,
             ServerCustody::default(),
-        );
-        let error = body.frame().await.unwrap().unwrap_err();
+            None,
+        )
+        .into_body();
+        let error = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap_err()
+            .into_inner()
+            .downcast::<tonic::Status>()
+            .unwrap();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "body read failed");
         assert!(body.frame().await.is_none());
@@ -502,7 +623,7 @@ mod tests {
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
-        let mut body = start_response(
+        let mut body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -553,7 +674,7 @@ mod tests {
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
-        let mut body = start_response(
+        let mut body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -595,7 +716,7 @@ mod tests {
             .add_header(&mut trailers)
             .unwrap();
         source.frames.push_back(Frame::trailers(trailers));
-        let mut body = start_response(
+        let mut body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -631,7 +752,7 @@ mod tests {
         let permits = Arc::new(Semaphore::new(1));
         let source = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
-        let mut body = start_response(
+        let mut body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -677,7 +798,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
         let dropped = Arc::new(AtomicBool::new(false));
-        let mut body = start_response(
+        let mut body = start_watched(
             PanicBody(Arc::clone(&dropped)),
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -726,7 +847,7 @@ mod tests {
             .unwrap();
         let mut body = {
             let _entered = runtime.enter();
-            start_response(
+            start_watched(
                 source,
                 ServerCustody {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -811,7 +932,8 @@ mod tests {
             Some(fallback),
             ServerCustody::default(),
             None,
-        );
+        )
+        .into_body();
         let ambient = opentelemetry::Context::current()
             .span()
             .span_context()
