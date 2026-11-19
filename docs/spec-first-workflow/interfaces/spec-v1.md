@@ -1,8 +1,7 @@
 # Specification V1
 
 `specs/<task>/spec.md` is the reviewed behavioral contract for one structured
-task: what external observers (users, callers, operators, downstream systems)
-can rely on.
+task (scope owned by [Specification](../phases/specification.md)).
 
 ```markdown
 # Specification: <short observable outcome>

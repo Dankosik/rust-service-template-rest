@@ -87,10 +87,9 @@ systems) can rely on.
      | Requester- or policy-owned fork *(one-way door)* | Unsettled choice altering user semantics, compatibility, persisted-data fate, authz/privacy exposure, or money/SLA/external effects *(e.g. cancelling a completed job deletes artifact vs `409`)* → [Blocked Frontier](specification/non-standard-paths.md#blocked-frontier). |
 
    - *Done when:* all six probes on every touched entity/surface, every
-     `intent.md` item, and every `research/*.md` bounded unknown/refresh trigger
-     map to `R<n>`, `G<n>`, `Non-goals`, `Downstream handoff`, `Reopen if`, or
-     `Blocked decisions` (with any unresolved authority conflict blocked or
-     returned to its evidence owner).
+     `intent.md` item, and every `research/*.md` bounded unknown, conflict, or
+     refresh trigger map to `R<n>`, `G<n>`, `Non-goals`, `Downstream handoff`,
+     `Reopen if`, or `Blocked decisions`.
 
 3. **Render draft `spec.md`.** Write `specs/<task>/spec.md` at `status: draft`
    per [Specification V1](../interfaces/spec-v1.md).
@@ -123,11 +122,12 @@ systems) can rely on.
    [Specification Review](specification-review.md) with a fresh context window
    (never forking parent history):
    - **Brief hygiene:** on initial or fresh reviews, pass strictly the candidate
-     path (`specs/<task>/spec.md`), input paths (`intent.md`, `research/*.md`),
-     assigned axis/checks, and method path (`specification-review.md`)—omit
-     author summaries, rationale, or "already verified" claims that break
-     cold-start blindness or anchor the reviewer. Bounded delta rechecks add
-     only the anchored findings and repair delta or refuting primary locators.
+     path (`specs/<task>/spec.md`), input paths matching the assigned axis
+     (`intent.md`, plus `research/*.md` for Axis 1 or single-reviewer), assigned
+     axis/checks, and method path (`specification-review.md`)—omit author
+     summaries, rationale, or "already verified" claims that break cold-start
+     blindness or anchor the reviewer. Bounded delta rechecks add only the
+     anchored findings and repair delta or refuting primary locators.
    - **Two-axis parallel (2 reviewers):** use for any multi-surface spec,
      breaking/external compatibility change, or authorization, money, data
      integrity, or concurrent state transitions—dispatch **Axis 1 (Grounding,
