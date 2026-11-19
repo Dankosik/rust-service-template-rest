@@ -14,7 +14,7 @@ use sqlx::{Connection, Either, Execute, Executor, SqlStr};
 use tokio::time::Instant;
 use tracing::Instrument;
 
-use crate::error::sqlstate;
+use crate::error::{QUERY_CANCELED, STATEMENT_COMPLETION_UNKNOWN, sqlstate};
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
 use crate::pool::{acquire, acquire_until, format_pg_duration};
 
@@ -127,7 +127,7 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
         &mut self,
         observation: &mut TransactionObservation,
     ) -> Result<(), E> {
-        if self.remaining_ms().await.is_none() {
+        if self.remaining_ms_or_expire().await.is_none() {
             observation.end(TransactionOutcome::RolledBack);
             return Err(OperationDeadlineElapsed.into());
         }
@@ -140,7 +140,7 @@ fn deadline_elapsed_error() -> sqlx::Error {
 }
 
 impl OperationDeadline {
-    async fn remaining_ms(&mut self) -> Option<i32> {
+    async fn remaining_ms_or_expire(&mut self) -> Option<i32> {
         let ms = self
             .at
             .saturating_duration_since(Instant::now())
@@ -157,7 +157,7 @@ impl OperationDeadline {
 
     async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
         let remaining_ms = self
-            .remaining_ms()
+            .remaining_ms_or_expire()
             .await
             .ok_or_else(deadline_elapsed_error)?;
         let result = sqlx::query_as::<_, (String, bool)>(
@@ -172,7 +172,7 @@ impl OperationDeadline {
         .await;
         let (_, deadline_controls_statement_timeout) = self.check_result(result).await?;
         self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
-        self.remaining_ms()
+        self.remaining_ms_or_expire()
             .await
             .map(|_| ())
             .ok_or_else(deadline_elapsed_error)
@@ -185,7 +185,7 @@ impl OperationDeadline {
         let rounded_expiry = self.armed_timeout_ms.is_some()
             && result
                 .as_ref()
-                .is_err_and(|e| sqlstate(e).as_deref() == Some("57014"))
+                .is_err_and(|e| sqlstate(e).as_deref() == Some(QUERY_CANCELED))
             && self.at.saturating_duration_since(Instant::now()) < Duration::from_millis(1);
         self.expired |= rounded_expiry;
         let at = self.at;
@@ -281,7 +281,7 @@ impl<M: TxMode> Tx<'_, M> {
         let rollback = self.conn.execute("ROLLBACK TO SAVEPOINT command_work");
         if let Some(budget) = self.mode.operation_deadline() {
             budget
-                .remaining_ms()
+                .remaining_ms_or_expire()
                 .await
                 .ok_or_else(deadline_elapsed_error)?;
             let response = tokio::time::timeout_at(budget.at, rollback)
@@ -663,8 +663,14 @@ where
 }
 
 fn classify_commit(err: sqlx::Error) -> TxError {
-    let rejected = sqlstate(&err)
-        .is_some_and(|code| code.starts_with("23") || (code.starts_with("40") && code != "40003"));
+    const CLASS_INTEGRITY_CONSTRAINT_VIOLATION: &str = "23";
+    const CLASS_TRANSACTION_ROLLBACK: &str = "40";
+
+    let rejected = sqlstate(&err).is_some_and(|code| {
+        code.starts_with(CLASS_INTEGRITY_CONSTRAINT_VIOLATION)
+            || (code.starts_with(CLASS_TRANSACTION_ROLLBACK)
+                && code != STATEMENT_COMPLETION_UNKNOWN)
+    });
     if rejected {
         TxError::CommitFailed(err)
     } else {

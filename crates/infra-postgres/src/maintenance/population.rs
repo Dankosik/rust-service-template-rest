@@ -242,14 +242,14 @@ impl MaintenanceObserver {
         }
     }
 
-    fn record_unsuccessful(&mut self, outcome: AttemptOutcome, cause: &'static str) {
+    fn record_unsuccessful(&mut self, outcome: UnsuccessfulOutcome) {
         self.last_attempt_success.set(0.0);
-        self.observations(outcome).increment(1);
+        self.observations(outcome.attempt_outcome()).increment(1);
         if !self.failing {
             tracing::warn!(
                 target: LOG_TARGET,
                 population = self.population.label(),
-                cause,
+                cause = outcome.cause(),
                 "postgres_maintenance_observation_failed"
             );
         }
@@ -276,6 +276,28 @@ impl AttemptOutcome {
             Self::Succeeded => "success",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum UnsuccessfulOutcome {
+    Failed(MaintenanceFailure),
+    Cancelled,
+}
+
+impl UnsuccessfulOutcome {
+    const fn attempt_outcome(self) -> AttemptOutcome {
+        match self {
+            Self::Failed(_) => AttemptOutcome::Failed,
+            Self::Cancelled => AttemptOutcome::Cancelled,
+        }
+    }
+
+    const fn cause(self) -> &'static str {
+        match self {
+            Self::Failed(failure) => failure.label(),
+            Self::Cancelled => AttemptOutcome::Cancelled.label(),
         }
     }
 }
@@ -354,7 +376,7 @@ impl MaintenanceAttempt<'_> {
             self.observer.clock_valid.set(0.0);
         }
         self.observer
-            .record_unsuccessful(self.outcome, failure.label());
+            .record_unsuccessful(UnsuccessfulOutcome::Failed(failure));
     }
 }
 
@@ -363,7 +385,7 @@ impl Drop for MaintenanceAttempt<'_> {
         if self.outcome == AttemptOutcome::Cancelled {
             self.observer.previous_clock = MaintenanceClock::now();
             self.observer
-                .record_unsuccessful(self.outcome, self.outcome.label());
+                .record_unsuccessful(UnsuccessfulOutcome::Cancelled);
         }
         tracing::debug!(
             target: LOG_TARGET,
@@ -389,7 +411,7 @@ where
             read_only: true,
         },
         async |tx| -> Result<PopulationSample, MaintenanceFailure> {
-            limit_observation(tx)
+            set_observation_timeouts(tx)
                 .await
                 .map_err(|_| MaintenanceFailure::Statement)?;
             read(tx).await.map_err(|_| MaintenanceFailure::Statement)
@@ -398,7 +420,7 @@ where
     .await
 }
 
-async fn limit_observation(tx: &mut Tx<'_>) -> Result<(), sqlx::Error> {
+async fn set_observation_timeouts(tx: &mut Tx<'_>) -> Result<(), sqlx::Error> {
     observed(
         "set observation statement timeout",
         sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),

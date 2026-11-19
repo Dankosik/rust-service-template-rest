@@ -10,25 +10,39 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     })
 }
 
+const CLASS_CONNECTION_EXCEPTION: &str = "08";
+const CLASS_INSUFFICIENT_RESOURCES: &str = "53";
+const SERIALIZATION_FAILURE: &str = "40001";
+pub(crate) const STATEMENT_COMPLETION_UNKNOWN: &str = "40003";
+const DEADLOCK_DETECTED: &str = "40P01";
+const ADMIN_SHUTDOWN: &str = "57P01";
+const CRASH_SHUTDOWN: &str = "57P02";
+const CANNOT_CONNECT_NOW: &str = "57P03";
+pub(crate) const QUERY_CANCELED: &str = "57014";
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+const IDLE_IN_TRANSACTION_SESSION_TIMEOUT: &str = "25P03";
+const TRANSACTION_TIMEOUT: &str = "25P04";
+const READ_ONLY_SQL_TRANSACTION: &str = "25006";
+
 #[must_use]
 pub fn is_transient(err: &sqlx::Error) -> bool {
     match sqlstate(err) {
         Some(code) => {
-            code.starts_with("08")
-                || code.starts_with("53")
+            code.starts_with(CLASS_CONNECTION_EXCEPTION)
+                || code.starts_with(CLASS_INSUFFICIENT_RESOURCES)
                 || matches!(
                     code.as_ref(),
-                    "40001"
-                        | "40003"
-                        | "40P01"
-                        | "57P01"
-                        | "57P02"
-                        | "57P03"
-                        | "57014"
-                        | "55P03"
-                        | "25P03"
-                        | "25P04"
-                        | "25006"
+                    SERIALIZATION_FAILURE
+                        | STATEMENT_COMPLETION_UNKNOWN
+                        | DEADLOCK_DETECTED
+                        | ADMIN_SHUTDOWN
+                        | CRASH_SHUTDOWN
+                        | CANNOT_CONNECT_NOW
+                        | QUERY_CANCELED
+                        | LOCK_NOT_AVAILABLE
+                        | IDLE_IN_TRANSACTION_SESSION_TIMEOUT
+                        | TRANSACTION_TIMEOUT
+                        | READ_ONLY_SQL_TRANSACTION
                 )
         }
         None => matches!(
