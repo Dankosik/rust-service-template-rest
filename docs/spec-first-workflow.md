@@ -65,7 +65,7 @@ Evaluate these triggers before loading a phase owner:
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
 | Structured work lacks a reviewed behavioral contract ([Specification V1](spec-first-workflow/interfaces/spec-v1.md)) | [Specification](spec-first-workflow/phases/specification.md) |
 | Structured work lacks a reviewed technical design ([Design V1](spec-first-workflow/interfaces/design-v1.md)) because Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery or rollout mechanism, or Rust placement, invariant ownership, caller obligations, or dependency direction (even with fixed files) | [Technical Design](spec-first-workflow/phases/technical-design.md) |
-| Preparation needs a ready ledger for handoff, or structured work lacks a ready ledger | [Planning](spec-first-workflow/phases/planning.md) |
+| Structured work needs a ready task ledger, or an existing ledger must be resliced or reconciled after an upstream or handoff change | [Planning](spec-first-workflow/phases/planning.md) |
 | The user starts a ready plan in a new session, or an accepted inline unit or active implementation task is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 
 Intake is required for new structured work unless a complete Intent already

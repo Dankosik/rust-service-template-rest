@@ -1,8 +1,8 @@
 # Acceptance Result V1
 
-Wire schemas for Implementation results. Unit and Repair Leads return
-`Implementation Result`; only the Delivery Owner returns `Repair Request` or
-`Completion Result`.
+Wire schemas for Implementation results and Orchestrator-owned ledger runtime
+state. Unit and Repair Leads return `Implementation Result`; only the Delivery
+Owner returns `Repair Request` or `Completion Result`.
 
 ## Implementation Result
 
@@ -66,3 +66,34 @@ next_owner: <exact remaining action and owner, or none>
 - Return `Accepted` only when every gate in [Emit Completion
   Result](../phases/implementation/final-validation.md#5-emit-completion-result)
   holds; otherwise return `Blocked` as specified there.
+
+## Ledger Runtime State
+
+Orchestrator-owned fields appended to `specs/<task>/tasks.md` during
+[Implementation](../phases/implementation.md#orchestrator-loop); Planning omits
+these fields.
+
+- `Base: <commit SHA>` (header, pinned before the first dispatch so worktrees,
+  Final Validation, and Review share one exact diff baseline; add `Commit mode:
+  no-commit` only when the user explicitly forbade local commits under
+  [Implementation](../phases/implementation.md#1-verify-controls-and-pin-baseline)).
+- Routing fields per task (not acceptance evidence): `Execution: <native task or
+  agent locator>` (set on dispatch, clear when writers stop) and `Resume:
+  <remaining action and indispensable verified context>` (only when native state
+  cannot recover after interruption; delete on resume).
+- Checkboxes (`[x]`) record integrated `Implemented` code only; `Blocked` stays
+  unchecked, and a checked task makes no acceptance claim while final validation
+  or later gates remain open.
+- Replace one receipt in place per task and one for `Completion` (Git keeps
+  history; write non-empty `decisions` or `unverified` as indented sub-bullets
+  under the task so primary details stay untruncated):
+
+```text
+Implemented: <unit>; verification: pending final validation; candidate: <commit or bounded diff>
+  - decisions: <carried verbatim from Lead's result; omit when none>
+  - unverified: <carried verbatim from Lead's result; omit when none>
+Accepted: Completion; evidence: <claim-matched result>; candidate: <identity>
+Blocked: <unit>; unverified: <claim>; evidence: <narrower result>; next owner: <owner and condition>; candidate: <identity or none>
+```
+
+Mark `status: done` only after final `Accepted` proves `Completion`.

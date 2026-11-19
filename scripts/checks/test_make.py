@@ -234,6 +234,40 @@ class MakeGateTests(unittest.TestCase):
                     self.assertIn("POST /", result.stderr)
                     self.assertIn(expected, result.stderr)
 
+    def test_ledger_check_resolves_slug_colliding_root_dir_and_paths(self) -> None:
+        verify_dir = self.root / "scripts/verify"
+        verify_dir.mkdir(parents=True)
+        shutil.copy2(ROOT / "scripts/verify/check_ledger.py", verify_dir)
+
+        missing_arg = self.run_make("ledger-check")
+        self.assertNotEqual(missing_arg.returncode, 0)
+        self.assertIn("ledger-check requires TASK=", missing_arg.stderr)
+
+        # Create a repo-root directory named 'migrations' that collides with TASK=migrations.
+        (self.root / "migrations").mkdir()
+        task_dir = self.root / "specs/migrations"
+        (task_dir / "tasks").mkdir(parents=True)
+        (task_dir / "tasks.md").write_text(
+            "# Goal: Minimal check\nstatus: draft\nCompletion: Done.\n\n## Tasks\n\n"
+            "- [ ] T1: Land slice\n  - Depends on: none\n  - Packet: tasks/01-slice.md\n",
+            encoding="utf-8",
+        )
+        (task_dir / "tasks/01-slice.md").write_text(
+            "# T1 — Land slice\n\nOutcome:\nChanges seam.\n\nDepends on:\n- none\n\n"
+            "Sources:\n- Cargo.toml — workspace\n\nProvides:\n- none (leaf)\n\n"
+            "Boundary:\n- In scope: slice\n- Out of scope: other\n\n"
+            "Mutable owners:\n- crates/service — api\n\nExclusive locks:\n- none\n\n"
+            "Final validation:\n- Observable claim: seam fails on base\n- Additional proof: none\n\n"
+            "Reopen if:\n- none\n",
+            encoding="utf-8",
+        )
+
+        for target_arg in ("migrations", "specs/migrations", "specs/migrations/tasks.md"):
+            with self.subTest(task=target_arg):
+                result = self.run_make("ledger-check", f"TASK={target_arg}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Wave 1 (Ready Frontier): T1", result.stdout)
+
 
 class CargoArtifactTests(unittest.TestCase):
     def setUp(self) -> None:

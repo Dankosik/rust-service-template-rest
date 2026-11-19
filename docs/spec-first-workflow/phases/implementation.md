@@ -13,8 +13,8 @@ validates the assembled candidate at the end.
 
 ## Carrier
 
-Open the named `tasks.md` and use [Task Ledger V1 — Runtime
-State](../interfaces/task-ledger-v1.md#runtime-state-orchestrator-owned) for
+Open the named `tasks.md` and use [Ledger Runtime
+State](../interfaces/acceptance-result-v1.md#ledger-runtime-state) for
 ledger fields. Load [Resume](../shared/resume.md) only when `tasks.md` already
 has runtime state (`Base:`, `[x]`, `Execution:`, `Resume:`) or after
 interruption or compaction. Report a completed ledger as done and route an

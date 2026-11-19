@@ -89,7 +89,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 # may not override these names; profile blocks extend it statically so
 # `scripts/template/sync.py` can inspect it without executing Make.
 TEMPLATE_STANDARD_TARGETS := help template-sync build run test test-package test-changed mutants fmt fmt-check lint lint-changed \
-	check check-unlocked check-instructions clean \
+	check check-unlocked check-instructions ledger-check clean \
 	agent-harness-sync agent-harness-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
 	tools-check deny dependency-drift unused-deps typos secret-scan secret-scan-history actionlint zizmor shellcheck python-lint docs-check profiling-check \
@@ -282,6 +282,10 @@ agent-harness-check: check-instructions ## Verify canonical .agents sources and 
 
 check-instructions: ## Validate .agents/skills, canonical roles, and materialized harness carriers
 	python3 scripts/harness/sync.py --check --repo . $(if $(wildcard make/source.mk),,--require-materialized)
+
+ledger-check: ## Verify specs/<TASK>/tasks.md invariants and print execution waves (TASK=<slug|path>)
+	@test -n "$(TASK)" || { echo "ledger-check requires TASK=<slug> or TASK=<path>" >&2; exit 2; }
+	python3 scripts/verify/check_ledger.py "$(if $(wildcard $(TASK)/tasks.md),$(TASK),$(if $(wildcard specs/$(TASK)/tasks.md),specs/$(TASK),$(if $(and $(wildcard $(TASK)),$(filter %.md,$(TASK))),$(TASK),specs/$(TASK))))"
 
 $(TOOLS_ROOT)/typos-cli-$(TYPOS_VERSION)/bin/typos:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/typos-cli-$(TYPOS_VERSION)" --version "$(TYPOS_VERSION)" typos-cli
@@ -496,6 +500,7 @@ install-hooks: ## Run `make verify` before every push from this clone; `git push
 
 VERIFY_TEST_MODULES := scripts/tests/test_verify.py scripts/tests/test_checks_and_image.py \
 	scripts/checks/test_make.py scripts/image/test_publication.py scripts/harness/test_sync.py \
+	scripts/verify/test_ledger.py \
 	scripts/tests/test_image_inputs.py scripts/tests/test_image_inventory.py
 # template:begin profile-runner-tests:make-verify-tests
 VERIFY_TEST_MODULES += scripts/tests/test_profile_runners.py
