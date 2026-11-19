@@ -518,7 +518,8 @@
       "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
-        "scripts/integration.py"
+        "scripts/integration.py",
+        "scripts/tests/test_integration.py"
       ]
     },
     "outbox": {

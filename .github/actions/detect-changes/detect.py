@@ -11,6 +11,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+_INTEGRATION_SHARED: tuple[str, ...] = (
+    "crates/config/**", "crates/service/**", "env/docker-compose.yml",
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+    "scripts/integration.py", "scripts/lib.py", "justfile", "mise.toml", "mise.lock",
+)
+
 SURFACES: dict[str, tuple[str, ...]] = {
     "rust": (
         "crates/**", "test/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
@@ -44,13 +50,49 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "scripts/image.py", "scripts/lib.py", "test/fixtures/migrations/**",
         "justfile", "mise.toml", "mise.lock",
     ),
-    "integration": (
+    "integration_db": (
         "crates/infra-postgres/**", "crates/infra-jobs/**", "crates/infra-idempotency-store/**",
-        "crates/infra-webhooks/**", "crates/infra-messaging/**", "crates/infra-cache/**",
-        "crates/infra-object-storage/**", "crates/service/**", "crates/config/**",
-        "migrations/**", ".sqlx/**", "test/**", "env/**", "Cargo.toml", "Cargo.lock",
-        "rust-toolchain.toml", "vendor/**", "scripts/integration.py", "scripts/lib.py",
-        "justfile", "mise.toml", "mise.lock",
+        "crates/infra-webhooks/**", "crates/jobs-worker/**", "crates/migrate/**",
+        "crates/infra-messaging/**", "crates/domain-events/**", "crates/nats-test-support/**",
+        "crates/infra-http/**", "crates/infra-http-transport/**", "crates/infra-grpc/**",
+        "crates/infra-outbound-http/**", "crates/infra-outbound-grpc/**", "crates/grpc-contracts/**",
+        "crates/infra-bearerauthn/**", "crates/health/**", "crates/operation-context/**",
+        "crates/shared-rules/**", "crates/service-failure/**", "crates/json-payload/**",
+        "crates/infra-telemetry/**", "crates/tls-test-support/**",
+        "migrations/**", ".sqlx/**", "env/pgbouncer/**", "env/nats/**",
+        "test/Cargo.toml", "test/src/**", "test/fixtures/**", "test/tests/support/**",
+        "test/tests/postgres.rs", "test/tests/postgres/**", "test/tests/jobs/**",
+        "test/tests/http_idempotency/**", "test/tests/webhooks/**",
+        "test/tests/messaging_outbox.rs", "test/tests/messaging_outbox/**",
+        "test/tests/messaging_recovery.rs",
+        "vendor/sqlx-core/**", "vendor/sqlx-postgres/**", "vendor/async-nats/**",
+        "vendor/hyper-util/**", "vendor/tonic/**",
+        *_INTEGRATION_SHARED,
+    ),
+    "sqlx_check": (
+        "crates/infra-postgres/**", "crates/infra-jobs/**", "crates/infra-idempotency-store/**",
+        "crates/infra-webhooks/**", "crates/migrate/**",
+        "migrations/**", ".sqlx/**", "vendor/sqlx-core/**", "vendor/sqlx-postgres/**",
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+        "scripts/integration.py", "scripts/lib.py", "justfile", "mise.toml", "mise.lock",
+    ),
+    "integration_cache": (
+        "crates/infra-cache/**", "crates/health/**", "crates/operation-context/**",
+        "crates/shared-rules/**", "crates/infra-telemetry/**", "crates/tls-test-support/**",
+        *_INTEGRATION_SHARED,
+    ),
+    "integration_object_storage": (
+        "crates/infra-object-storage/**", "crates/health/**", "crates/operation-context/**",
+        "crates/shared-rules/**", "crates/infra-telemetry/**", "crates/tls-test-support/**",
+        "vendor/aws-smithy-http-client/**", "vendor/hyper-util/**",
+        *_INTEGRATION_SHARED,
+    ),
+    "integration_messaging": (
+        "crates/infra-messaging/**", "crates/domain-events/**", "crates/nats-test-support/**",
+        "crates/jobs-worker/**", "crates/health/**", "crates/operation-context/**",
+        "crates/shared-rules/**", "crates/json-payload/**", "crates/infra-telemetry/**",
+        "crates/tls-test-support/**", "env/nats/**", "vendor/async-nats/**",
+        *_INTEGRATION_SHARED,
     ),
     "oauth": (
         "crates/infra-oauth2-client-credentials/**", "crates/infra-outbound-http/**",
@@ -98,13 +140,13 @@ def _match(path: str, pattern: str) -> bool:
 
 def _applicable(repo: Path) -> dict[str, bool]:
     has_postgres = (repo / "crates/infra-postgres").is_dir()
+    has_cache = (repo / "crates/infra-cache").is_dir()
+    has_object_storage = (repo / "crates/infra-object-storage").is_dir()
+    has_messaging = (repo / "crates/infra-messaging").is_dir()
     has_grpc = (repo / "crates/grpc-contracts").is_dir()
     has_oauth = (repo / "crates/infra-oauth2-client-credentials").is_dir()
     has_rt = (repo / "template/runtime_progress.py").is_file()
-    has_int = any(
-        (repo / crate).is_dir()
-        for crate in ("crates/infra-postgres", "crates/infra-cache", "crates/infra-object-storage", "crates/infra-messaging")
-    )
+    has_int = has_postgres or has_cache or has_object_storage or has_messaging
     has_tpl = (repo / "template/init.py").is_file()
     return {
         "rust": True,
@@ -115,6 +157,11 @@ def _applicable(repo: Path) -> dict[str, bool]:
         "grpc": has_grpc,
         "migrations": has_postgres,
         "integration": has_int,
+        "integration_db": has_postgres,
+        "sqlx_check": has_postgres,
+        "integration_cache": has_cache,
+        "integration_object_storage": has_object_storage,
+        "integration_messaging": has_messaging,
         "oauth": has_oauth,
         "docker": True,
         "runtime_progress": has_rt,
@@ -125,15 +172,25 @@ def _applicable(repo: Path) -> dict[str, bool]:
     }
 
 
+_INTEGRATION_SUBSURFACES: tuple[str, ...] = (
+    "integration_db",
+    "sqlx_check",
+    "integration_cache",
+    "integration_object_storage",
+    "integration_messaging",
+)
+
+
 def classify(repo: Path, files: Sequence[str] | None) -> dict[str, bool]:
     allowed = _applicable(repo)
     if files is None:
         return dict(allowed)
-    result = dict.fromkeys(SURFACES, False)
+    result = dict.fromkeys(allowed, False)
     for path in files:
         for surface, patterns in SURFACES.items():
             if allowed[surface] and not result[surface] and any(_match(path, pat) for pat in patterns):
                 result[surface] = True
+    result["integration"] = allowed["integration"] and any(result[key] for key in _INTEGRATION_SUBSURFACES)
     return result
 
 

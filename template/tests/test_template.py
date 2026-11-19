@@ -54,6 +54,35 @@ class DetectChangesTests(unittest.TestCase):
         md_in_crate = DETECT.classify(ROOT, ["crates/service/README.md"])
         self.assertTrue(md_in_crate["repo_lint"])
 
+        cache_only = DETECT.classify(ROOT, ["crates/infra-cache/src/namespace.rs"])
+        self.assertTrue(cache_only["integration"])
+        self.assertTrue(cache_only["integration_cache"])
+        self.assertFalse(cache_only["integration_db"])
+        self.assertFalse(cache_only["sqlx_check"])
+        self.assertFalse(cache_only["integration_object_storage"])
+        self.assertFalse(cache_only["integration_messaging"])
+
+        s3_only = DETECT.classify(ROOT, ["crates/infra-object-storage/src/download.rs"])
+        self.assertTrue(s3_only["integration"])
+        self.assertTrue(s3_only["integration_object_storage"])
+        self.assertFalse(s3_only["integration_db"])
+        self.assertFalse(s3_only["sqlx_check"])
+        self.assertFalse(s3_only["integration_cache"])
+        self.assertFalse(s3_only["integration_messaging"])
+
+        pg_only = DETECT.classify(ROOT, ["crates/infra-postgres/src/pool.rs"])
+        self.assertTrue(pg_only["integration"])
+        self.assertTrue(pg_only["integration_db"])
+        self.assertTrue(pg_only["sqlx_check"])
+        self.assertFalse(pg_only["integration_cache"])
+        self.assertFalse(pg_only["integration_object_storage"])
+        self.assertFalse(pg_only["integration_messaging"])
+
+        util_test = DETECT.classify(ROOT, ["test/tests/utility_values.rs"])
+        self.assertTrue(util_test["rust"])
+        self.assertFalse(util_test["integration"])
+        self.assertFalse(util_test["integration_db"])
+
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp)
             all_empty = DETECT.classify(empty, None)

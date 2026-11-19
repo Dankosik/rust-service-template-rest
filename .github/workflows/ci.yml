@@ -37,6 +37,11 @@ jobs:
       grpc: ${{ steps.detect.outputs.grpc }}
       migrations: ${{ steps.detect.outputs.migrations }}
       integration: ${{ steps.detect.outputs.integration }}
+      integration_db: ${{ steps.detect.outputs.integration_db }}
+      sqlx_check: ${{ steps.detect.outputs.sqlx_check }}
+      integration_cache: ${{ steps.detect.outputs.integration_cache }}
+      integration_object_storage: ${{ steps.detect.outputs.integration_object_storage }}
+      integration_messaging: ${{ steps.detect.outputs.integration_messaging }}
       oauth: ${{ steps.detect.outputs.oauth }}
       docker: ${{ steps.detect.outputs.docker }}
       runtime_progress: ${{ steps.detect.outputs.runtime_progress }}
@@ -279,27 +284,38 @@ jobs:
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
           version: "2026.11.10"
-          install_args: just
+          install_args: just cargo-nextest
           cache_key_prefix: mise-int
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache_save_post: true
       - name: PostgreSQL integration and SQLx check
-        if: hashFiles('crates/infra-postgres/Cargo.toml') != ''
+        if: >-
+          hashFiles('crates/infra-postgres/Cargo.toml') != '' &&
+          (needs.changes.outputs.integration_db == 'true' || needs.changes.outputs.sqlx_check == 'true')
         env:
           MISE_GITHUB_TOKEN: ${{ github.token }}
+          RUN_DB: ${{ needs.changes.outputs.integration_db }}
+          RUN_SQLX: ${{ needs.changes.outputs.sqlx_check }}
         run: |
           set -euo pipefail
-          REQUIRE_DOCKER=1 just test-integration-db
-          mise install --locked cargo:sqlx-cli
-          just sqlx-check
+          if [[ "${RUN_SQLX}" == true ]]; then
+            mise install --locked cargo:sqlx-cli
+          fi
+          if [[ "${RUN_DB}" == true && "${RUN_SQLX}" == true ]]; then
+            REQUIRE_DOCKER=1 INTEGRATION_DB_SQLX_CHECK=1 just test-integration-db
+          elif [[ "${RUN_DB}" == true ]]; then
+            REQUIRE_DOCKER=1 just test-integration-db
+          else
+            REQUIRE_DOCKER=1 just sqlx-check
+          fi
       - name: Cache integration
-        if: hashFiles('crates/infra-cache/Cargo.toml') != ''
+        if: hashFiles('crates/infra-cache/Cargo.toml') != '' && needs.changes.outputs.integration_cache == 'true'
         run: REQUIRE_DOCKER=1 just test-integration-cache
       - name: Object storage integration
-        if: hashFiles('crates/infra-object-storage/Cargo.toml') != ''
+        if: hashFiles('crates/infra-object-storage/Cargo.toml') != '' && needs.changes.outputs.integration_object_storage == 'true'
         run: REQUIRE_DOCKER=1 just test-integration-object-storage
       - name: JetStream integration
-        if: hashFiles('crates/infra-messaging/Cargo.toml') != ''
+        if: hashFiles('crates/infra-messaging/Cargo.toml') != '' && needs.changes.outputs.integration_messaging == 'true'
         run: REQUIRE_DOCKER=1 just test-integration-messaging
   # template:end integration:ci-integration-job
 
