@@ -362,6 +362,7 @@ enum FrameAction {
     Drop,
 }
 
+#[derive(Clone, Copy)]
 enum RelayFrame<'a> {
     Control(&'a [u8]),
     Payload {
@@ -546,16 +547,13 @@ fn parse_payload_header(line: &[u8]) -> Option<PayloadHeader<'_>> {
     let subject = fields.next()?;
     let rest = std::array::from_fn::<_, 5, _>(|_| fields.next());
     let (reply, length) = match (verb, rest) {
-        (PayloadVerb::Pub, [Some(length), None, ..]) => (None, length),
-        (PayloadVerb::Pub, [Some(reply), Some(length), None, ..]) => (Some(reply), length),
-        (PayloadVerb::Hpub, [Some(_), Some(length), None, ..]) => (None, length),
-        (PayloadVerb::Hpub, [Some(reply), Some(_), Some(length), None, ..]) => {
-            (Some(reply), length)
-        }
-        (PayloadVerb::Msg, [Some(_), Some(length), None, ..]) => (None, length),
-        (PayloadVerb::Msg, [Some(_), Some(reply), Some(length), None, ..]) => (Some(reply), length),
-        (PayloadVerb::Hmsg, [Some(_), Some(_), Some(length), None, ..]) => (None, length),
-        (PayloadVerb::Hmsg, [Some(_), Some(reply), Some(_), Some(length), None]) => {
+        (PayloadVerb::Pub, [Some(length), None, ..])
+        | (PayloadVerb::Hpub | PayloadVerb::Msg, [Some(_), Some(length), None, ..])
+        | (PayloadVerb::Hmsg, [Some(_), Some(_), Some(length), None, ..]) => (None, length),
+        (PayloadVerb::Pub, [Some(reply), Some(length), None, ..])
+        | (PayloadVerb::Hpub, [Some(reply), Some(_), Some(length), None, ..])
+        | (PayloadVerb::Msg, [Some(_), Some(reply), Some(length), None, ..])
+        | (PayloadVerb::Hmsg, [Some(_), Some(reply), Some(_), Some(length), None]) => {
             (Some(reply), length)
         }
         _ => return None,
