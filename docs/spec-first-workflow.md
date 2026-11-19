@@ -17,6 +17,7 @@ Select the smallest non-direct execution path and current decision owner. If
 | `Lane` | Bounded delegated worker (`worker-agent`, `specialist-agent`, `evidence-agent`) executing a strict subset for its parent. |
 | `Ready Frontier` | Set of tasks in `tasks.md` whose coding `Depends on` prerequisites and authority are satisfied and whose `Mutable owners` and `Exclusive locks` are currently free (tasks gated only by `[acceptance]` or `[effect:<action>]` remain eligible to code; two ready tasks sharing a free owner or lock both appear on the frontier and dispatch serializes them by priority). |
 | `Implemented` vs `Accepted` | A Lead reports `Implemented` when its unit meets the [Implemented bar](spec-first-workflow/interfaces/acceptance-result-v1.md#implementation-result). Landing it unlocks consumers of that code. `Accepted` closes the requested scope, including final validation, any required review, and any requested external outcomes. |
+| `Smart zone` | Lean working-context envelope where one actor holds one coherent outcome, bounded files, and primary sources without attention degradation from unrelated history or diffs. |
 
 ## Path
 

@@ -11,7 +11,7 @@ unit: <T<ID> or fixed implementation scope>
 verdict: Implemented | Blocked
 candidate: <commit/branch, bounded diff, or none if blocked>
 provides: <implemented code or contract; no acceptance claim>
-decisions: <choices downstream/siblings/Delivery Owner may depend on, packet deviations, repair root causes/refutations, or none>
+decisions: <only diff-independent facts siblings/downstream/Delivery Owner need: new/changed public symbols & signatures, error variants/codes, defaults, reusable test helpers, packet deviations, repair root causes/refutations; omit narration, or none>
 unverified: <unchecked assumptions, unrun tests with exact reason, or none>
 next_owner: <next implementation owner, or exact missing input and its owner>
 ```
@@ -46,6 +46,7 @@ findings:
     evidence: <exact failing output or verified counterexample>
     owning_tasks: <T<ID> or seam pair T<ID> + T<ID>>
 retained_evidence: <passing checks unaffected by this repair, or none>
+prior_attempt: <Round 1 candidate, attempted hypothesis, and recheck failure; omit on Round 1>
 ```
 
 ## Completion Result
