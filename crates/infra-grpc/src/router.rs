@@ -22,7 +22,7 @@ use tonic::server::NamedService as _;
 use tower::Layer as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, attach_server, deadline_status, server_stopped};
+use crate::call::{ServerCustody, deadline_status, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
@@ -68,19 +68,34 @@ impl ResponseContext {
     }
 }
 
-struct BusinessState {
-    authentication: Authentication,
-    methods: Arc<Methods>,
-    limits: Limits,
-    reflection_enabled: bool,
-    opening_permits: Option<Arc<Semaphore>>,
-    call_permits: Option<Arc<Semaphore>>,
+enum BusinessAuth {
+    None,
     // template:begin authn:grpc-router-bearer-field
-    scopes: crate::authn::Scopes,
+    Bearer {
+        verifier: infra_bearerauthn::Verifier,
+        scopes: crate::authn::Scopes,
+    },
     // template:end authn:grpc-router-bearer-field
     // template:begin service-auth:grpc-router-caller-field
-    caller_rules: crate::service_auth::CallerRules,
+    ServiceTokens {
+        verifier: infra_serviceauth::Verifier,
+        caller_rules: crate::service_auth::CallerRules,
+    },
     // template:end service-auth:grpc-router-caller-field
+}
+
+struct AdmissionPermits {
+    opening: Arc<Semaphore>,
+    call: Arc<Semaphore>,
+    max_wait: Duration,
+}
+
+struct BusinessState {
+    authentication: BusinessAuth,
+    methods: Arc<Methods>,
+    request_timeout: Duration,
+    reflection_enabled: bool,
+    admission: Option<AdmissionPermits>,
 }
 
 #[derive(Clone, Debug)]
@@ -136,8 +151,8 @@ pub fn router(
     }
     services.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
     // template:begin service-auth:grpc-router-caller-rules
-    let requires_tls = matches!(authentication, Authentication::ServiceTokens(_));
-    if requires_tls {
+    let uses_service_tokens = matches!(authentication, Authentication::ServiceTokens(_));
+    if uses_service_tokens {
         services.validate_caller_rules()?;
     } else if !services.caller_rules.is_empty() {
         return Err(Error::CallerRulesRequireServiceTokens);
@@ -162,19 +177,35 @@ pub fn router(
     }
     observe::describe();
     let methods = Arc::new(services.methods());
+    let authentication = match authentication {
+        Authentication::None => BusinessAuth::None,
+        // template:begin authn:grpc-router-bearer-init
+        Authentication::Bearer(verifier) => BusinessAuth::Bearer {
+            verifier,
+            scopes: services.scopes,
+        },
+        // template:end authn:grpc-router-bearer-init
+        // template:begin service-auth:grpc-router-caller-init
+        Authentication::ServiceTokens(verifier) => BusinessAuth::ServiceTokens {
+            verifier,
+            caller_rules: services.caller_rules,
+        },
+        // template:end service-auth:grpc-router-caller-init
+    };
+    let admission = limits.max_in_flight.map(|count| {
+        let count = count.get() as usize;
+        AdmissionPermits {
+            opening: Arc::new(Semaphore::new(count)),
+            call: Arc::new(Semaphore::new(count)),
+            max_wait: limits.max_admission_wait,
+        }
+    });
     let state = Arc::new(BusinessState {
         authentication,
         methods: Arc::clone(&methods),
-        limits,
+        request_timeout: limits.request_timeout,
         reflection_enabled: services.reflection,
-        opening_permits: semaphore(limits.max_in_flight),
-        call_permits: semaphore(limits.max_in_flight),
-        // template:begin authn:grpc-router-bearer-init
-        scopes: services.scopes,
-        // template:end authn:grpc-router-bearer-init
-        // template:begin service-auth:grpc-router-caller-init
-        caller_rules: services.caller_rules,
-        // template:end service-auth:grpc-router-caller-init
+        admission,
     });
     let business = services
         .routes
@@ -192,7 +223,7 @@ pub fn router(
             trust_trace_context,
         ),
         // template:begin service-auth:grpc-app-tls-init
-        requires_tls,
+        requires_tls: uses_service_tokens,
         // template:end service-auth:grpc-app-tls-init
     })
 }
@@ -204,10 +235,6 @@ pub fn server_options(connections: ConnectionLimits) -> Http2Options {
         max_header_list_size: 16 * 1024,
         connections,
     }
-}
-
-fn semaphore(limit: Option<NonZeroU32>) -> Option<Arc<Semaphore>> {
-    limit.map(|count| Arc::new(Semaphore::new(count.get() as usize)))
 }
 
 fn native_router(
@@ -279,7 +306,7 @@ async fn business_call(
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
     // template:begin service-auth:grpc-router-verified-transport
-    if matches!(state.authentication, Authentication::ServiceTokens(_))
+    if matches!(state.authentication, BusinessAuth::ServiceTokens { .. })
         && connection
             .as_ref()
             .is_none_or(|info| info.scheme() != "https")
@@ -292,9 +319,9 @@ async fn business_call(
     let path = request.uri().path();
     let method = state.methods.resolve(path);
     let call = observe::Call::start(method, path);
-    let fallback = observe::propagated_parent(call.span(), request.headers());
+    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
     let (opening_deadline, response_deadline) =
-        call_deadlines(request.headers(), state.limits.request_timeout);
+        call_deadlines(request.headers(), state.request_timeout);
 
     let call_type = method.call_type;
     let streams_response = matches!(
@@ -327,12 +354,12 @@ async fn business_call(
             let outcome = tokio::select! {
                 biased;
                 reason = opening_context.wait_stopped() => {
-                    Err(server_stopped(reason).into_http())
+                    Err(stopped_status(reason).into_http())
                 }
                 outcome = open_business(&state, &opening_context, call_type, request, next) => outcome,
             };
             if let Some(reason) = opening_context.stopped() {
-                return Err(server_stopped(reason).into_http());
+                return Err(stopped_status(reason).into_http());
             }
             outcome
         },
@@ -356,9 +383,12 @@ async fn open_business(
     request: Request,
     next: Next,
 ) -> Result<Admitted, Response> {
-    let mut remaining_wait = state.limits.max_admission_wait;
+    let mut remaining_wait = state
+        .admission
+        .as_ref()
+        .map_or(Duration::ZERO, |admission| admission.max_wait);
     let (_opening_permit, request) = acquire_permit(
-        state.opening_permits.as_ref(),
+        state.admission.as_ref().map(|admission| &admission.opening),
         &mut remaining_wait,
         opening_context,
         request,
@@ -366,22 +396,20 @@ async fn open_business(
     .await?;
     let admission: Result<_, Response> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
-        Authentication::Bearer(verifier) => {
-            crate::authn::authenticate(verifier, &state.scopes, opening_context, request).await
+        BusinessAuth::Bearer { verifier, scopes } => {
+            crate::authn::authenticate(verifier, scopes, opening_context, request).await
         }
         // template:end authn:grpc-router-run-authn
         // template:begin service-auth:grpc-router-run-service-auth
-        Authentication::ServiceTokens(verifier) => {
-            crate::service_auth::admit_caller(
-                verifier,
-                &state.caller_rules,
-                opening_context,
-                request,
-            )
-            .await
+        BusinessAuth::ServiceTokens {
+            verifier,
+            caller_rules,
+        } => {
+            crate::service_auth::admit_caller(verifier, caller_rules, opening_context, request)
+                .await
         }
         // template:end service-auth:grpc-router-run-service-auth
-        Authentication::None => {
+        BusinessAuth::None => {
             // template:begin service-auth:grpc-router-strip-unverified-authorization
             let mut request = request;
             request.headers_mut().remove(http::header::AUTHORIZATION);
@@ -395,7 +423,7 @@ async fn open_business(
         return Err(reject_with_budget(opening_context, request, status).await);
     }
     let (call_permit, request) = acquire_permit(
-        state.call_permits.as_ref(),
+        state.admission.as_ref().map(|admission| &admission.call),
         &mut remaining_wait,
         opening_context,
         request,
@@ -426,7 +454,7 @@ async fn acquire_permit(
         infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
     else {
         if let Some(reason) = opening_context.stopped() {
-            return Err(server_stopped(reason).into_http());
+            return Err(stopped_status(reason).into_http());
         }
         return Err(reject_shed(opening_context, request).await);
     };
@@ -437,7 +465,7 @@ async fn acquire_permit(
 async fn reject_shed(opening_context: &OperationContext, request: Request) -> Response {
     let response = reject_with_budget(opening_context, request, shed_status()).await;
     if let Some(reason) = opening_context.stopped() {
-        return server_stopped(reason).into_http();
+        return stopped_status(reason).into_http();
     }
     observe::record_shed();
     response
@@ -469,7 +497,7 @@ async fn health_call(
 
     let path = request.uri().path();
     let call = observe::Call::start(methods.resolve(path), path);
-    let fallback = observe::propagated_parent(call.span(), request.headers());
+    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
     let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
     let response = run_in_span(
         async {
@@ -495,7 +523,7 @@ async fn health_call(
         deadline: response_deadline,
         ..ServerCustody::default()
     };
-    attach_server(response, call, fallback, custody)
+    wrap_response(response, call, fallback, custody)
 }
 
 fn call_deadlines(
@@ -556,7 +584,7 @@ fn finish_call(
     match outcome {
         Ok(Admitted { response, permit }) => {
             custody.permit = permit;
-            attach_server(response, call, fallback, custody)
+            wrap_response(response, call, fallback, custody)
         }
         Err(response) => {
             // template:begin authn:grpc-router-scope-refusal-span
@@ -569,7 +597,7 @@ fn finish_call(
             }
             // template:end authn:grpc-router-scope-refusal-span
             drop(custody);
-            attach_server(response, call, fallback, ServerCustody::default())
+            wrap_response(response, call, fallback, ServerCustody::default())
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry;
+
 use bytes::Bytes;
 use foldhash::HashMap;
 use futures_util::StreamExt as _;
@@ -23,21 +25,25 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
             .map_err(Error::InspectReflectionFile)?;
         for file in set.file {
             let descriptor =
-                FileDescriptorProto::decode(file.clone()).map_err(Error::InspectReflectionFile)?;
+                FileDescriptorProto::decode(file.as_ref()).map_err(Error::InspectReflectionFile)?;
             let name = descriptor.name.ok_or(Error::MissingReflectionFileName)?;
-            if let Some(first) = files.get(&name) {
-                if file != first && definition(file)? != definition(first.clone())? {
-                    return Err(Error::ConflictingFileDescription(name));
+            match files.entry(name) {
+                Entry::Occupied(entry) => {
+                    let first = entry.get();
+                    if file != first && definition(&file)? != definition(first)? {
+                        return Err(Error::ConflictingFileDescription(entry.remove_entry().0));
+                    }
                 }
-            } else {
-                files.insert(name, file);
+                Entry::Vacant(entry) => {
+                    entry.insert(file);
+                }
             }
         }
     }
     Ok(())
 }
 
-fn definition(file: Bytes) -> Result<DynamicMessage, Error> {
+fn definition(file: &[u8]) -> Result<DynamicMessage, Error> {
     let mut descriptor = DynamicMessage::decode(FileDescriptorProto::default().descriptor(), file)
         .map_err(Error::InspectReflectionFile)?;
     descriptor.clear_field_by_name("source_code_info");

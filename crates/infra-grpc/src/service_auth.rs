@@ -10,7 +10,7 @@ use operation_context::OperationContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::Failure;
-use crate::call::server_stopped;
+use crate::call::stopped_status;
 use crate::router::reject_with_budget;
 use crate::status::internal_status;
 
@@ -40,7 +40,7 @@ pub(crate) async fn admit_caller(
     mut request: Request,
 ) -> Result<Request, Response> {
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
     let result = {
         let authorization = request
@@ -51,7 +51,7 @@ pub(crate) async fn admit_caller(
         verifier.authenticate(authorization)
     };
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
     let caller = match result {
         Ok(caller) => caller,
@@ -73,7 +73,7 @@ pub(crate) async fn admit_caller(
         return Err(reject_with_budget(context, request, status).await);
     }
     if let Some(reason) = context.stopped() {
-        return Err(server_stopped(reason).into_http());
+        return Err(stopped_status(reason).into_http());
     }
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.headers_mut().remove(AUTHORIZATION);

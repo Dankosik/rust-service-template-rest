@@ -21,7 +21,7 @@ type FramePoll = Poll<Option<Result<Frame<Bytes>, tonic::Status>>>;
 #[derive(Default)]
 #[expect(dead_code, reason = "guards release resources on drop")]
 pub(crate) struct ClientGuards {
-    pub(crate) upload: Option<UploadGuard>,
+    pub(crate) upload_guard: Option<UploadGuard>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
 }
 
@@ -170,9 +170,10 @@ impl<B> StreamState<B> {
     }
 
     fn complete_stopped(&mut self, status: &tonic::Status) -> Option<StreamCompletion<B>> {
-        if let StreamPhase::Open(active) = &self.phase {
-            active.observation.record_local_stop(status);
-        }
+        let StreamPhase::Open(active) = &self.phase else {
+            return None;
+        };
+        active.observation.record_local_stop(status);
         let mut trailers = HeaderMap::new();
         let _ = status.add_header(&mut trailers);
         self.transition(
@@ -369,13 +370,13 @@ where
         let this = self.get_mut();
         this.reap_watcher(context);
         let mut state = this.state.lock();
-        let (polled, completion) = if let Some(status) = state.stopped_status() {
-            let (frame, completion) = state.end_stopped(&status);
+        let StreamPhase::Open(active) = &mut state.phase else {
+            return state.take_terminal();
+        };
+        let (polled, completion) = if let Some(reason) = active.lifetime.stopped() {
+            let (frame, completion) = state.end_stopped(&client_stopped(reason));
             (Ok(frame), completion)
         } else {
-            let StreamPhase::Open(active) = &mut state.phase else {
-                return state.take_terminal();
-            };
             store_waker(&mut active.waker, context.waker());
             let polled = {
                 let _entered = active.observation.span().enter();
@@ -436,50 +437,40 @@ impl<B> Drop for ClientResponseBody<B> {
 }
 
 enum UploadPhase {
-    Open(tonic::body::Body),
+    Open {
+        body: tonic::body::Body,
+        waker: Option<Waker>,
+    },
     Aborted,
     Done,
 }
 
-struct UploadState {
-    phase: UploadPhase,
-    waker: Option<Waker>,
-}
+pub(crate) struct UploadGuard(Arc<Mutex<UploadPhase>>);
+struct Upload(Arc<Mutex<UploadPhase>>);
 
-pub(crate) struct UploadGuard(Arc<Mutex<UploadState>>);
-struct Upload(Arc<Mutex<UploadState>>);
-
-pub(crate) fn upload(body: tonic::body::Body) -> (tonic::body::Body, Option<UploadGuard>) {
+pub(crate) fn guard_upload(body: tonic::body::Body) -> (tonic::body::Body, Option<UploadGuard>) {
     if body.is_end_stream() {
         return (body, None);
     }
-    let state = Arc::new(Mutex::new(UploadState {
-        phase: UploadPhase::Open(body),
-        waker: None,
-    }));
+    let phase = Arc::new(Mutex::new(UploadPhase::Open { body, waker: None }));
     (
-        tonic::body::Body::new(Upload(Arc::clone(&state))),
-        Some(UploadGuard(state)),
+        tonic::body::Body::new(Upload(Arc::clone(&phase))),
+        Some(UploadGuard(phase)),
     )
 }
 
 impl Drop for UploadGuard {
     fn drop(&mut self) {
         let (released, waker) = {
-            let mut state = self.0.lock();
-            match &state.phase {
-                UploadPhase::Open(body) => {
-                    let next = if body.is_end_stream() {
-                        UploadPhase::Done
+            let mut phase = self.0.lock();
+            match &mut *phase {
+                UploadPhase::Open { body, waker } => {
+                    let (next, waker) = if body.is_end_stream() {
+                        (UploadPhase::Done, None)
                     } else {
-                        UploadPhase::Aborted
+                        (UploadPhase::Aborted, waker.take())
                     };
-                    let waker = if matches!(next, UploadPhase::Aborted) {
-                        state.waker.take()
-                    } else {
-                        None
-                    };
-                    (Some(std::mem::replace(&mut state.phase, next)), waker)
+                    (Some(std::mem::replace(&mut *phase, next)), waker)
                 }
                 UploadPhase::Aborted | UploadPhase::Done => (None, None),
             }
@@ -499,29 +490,25 @@ impl Body for Upload {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut guard = self.0.lock();
-        let state = &mut *guard;
-        let polled = match &mut state.phase {
-            UploadPhase::Open(body) => {
-                store_waker(&mut state.waker, context.waker());
-                std::panic::catch_unwind(AssertUnwindSafe(|| Pin::new(body).poll_frame(context)))
+        let mut phase = self.0.lock();
+        let (polled, finished) = match &mut *phase {
+            UploadPhase::Open { body, waker } => {
+                store_waker(waker, context.waker());
+                let polled = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Pin::new(&mut *body).poll_frame(context)
+                }));
+                let finished = matches!(polled, Ok(Poll::Ready(None | Some(Err(_)))) | Err(_))
+                    || body.is_end_stream();
+                (polled, finished)
             }
             UploadPhase::Aborted => {
-                state.phase = UploadPhase::Done;
-                state.waker = None;
+                *phase = UploadPhase::Done;
                 return Poll::Ready(Some(Err(tonic::Status::cancelled("call cancelled"))));
             }
             UploadPhase::Done => return Poll::Ready(None),
         };
-        let finished = matches!(polled, Ok(Poll::Ready(None | Some(Err(_)))) | Err(_))
-            || matches!(&state.phase, UploadPhase::Open(body) if body.is_end_stream());
-        let released = if finished {
-            state.waker = None;
-            Some(std::mem::replace(&mut state.phase, UploadPhase::Done))
-        } else {
-            None
-        };
-        drop(guard);
+        let released = finished.then(|| std::mem::replace(&mut *phase, UploadPhase::Done));
+        drop(phase);
         drop(released);
         match polled {
             Ok(polled) => polled,
@@ -530,18 +517,18 @@ impl Body for Upload {
     }
 
     fn is_end_stream(&self) -> bool {
-        let state = self.0.lock();
-        match &state.phase {
-            UploadPhase::Open(body) => body.is_end_stream(),
+        let phase = self.0.lock();
+        match &*phase {
+            UploadPhase::Open { body, .. } => body.is_end_stream(),
             UploadPhase::Aborted => false,
             UploadPhase::Done => true,
         }
     }
 
     fn size_hint(&self) -> SizeHint {
-        let state = self.0.lock();
-        match &state.phase {
-            UploadPhase::Open(body) => body.size_hint(),
+        let phase = self.0.lock();
+        match &*phase {
+            UploadPhase::Open { body, .. } => body.size_hint(),
             UploadPhase::Aborted | UploadPhase::Done => SizeHint::with_exact(0),
         }
     }
@@ -632,7 +619,7 @@ mod tests {
 
     #[test]
     fn empty_upload_skips_guard_allocation() {
-        let (body, guard) = upload(tonic::body::Body::empty());
+        let (body, guard) = guard_upload(tonic::body::Body::empty());
         assert!(guard.is_none());
         assert!(body.is_end_stream());
     }
@@ -641,7 +628,7 @@ mod tests {
     async fn aborted_upload_yields_cancelled_error_before_end_of_stream() {
         let source = PendingFrames::stalled();
         let dropped = Arc::clone(&source.dropped);
-        let (mut outgoing, guard) = upload(tonic::body::Body::new(source));
+        let (mut outgoing, guard) = guard_upload(tonic::body::Body::new(source));
         assert!(guard.is_some());
         assert!(!outgoing.is_end_stream());
 
@@ -662,7 +649,7 @@ mod tests {
     async fn upload_panic_releases_source_and_resumes_unwind() {
         let dropped = Arc::new(AtomicBool::new(false));
         let (mut outgoing, guard) =
-            upload(tonic::body::Body::new(UnwindingBody(Arc::clone(&dropped))));
+            guard_upload(tonic::body::Body::new(UnwindingBody(Arc::clone(&dropped))));
         let mut cx = Context::from_waker(Waker::noop());
         let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
             Pin::new(&mut outgoing).poll_frame(&mut cx)
@@ -734,7 +721,7 @@ mod tests {
                 lifetime: OperationContext::new(None, child.clone()),
                 watch_stop: true,
                 guards: ClientGuards {
-                    upload: None,
+                    upload_guard: None,
                     cancel_on_drop: Some(child.drop_guard()),
                 },
                 on_status: None,
@@ -772,7 +759,7 @@ mod tests {
         let dropped = Arc::clone(&source.dropped);
         let upload_source = PendingFrames::stalled();
         let upload_dropped = Arc::clone(&upload_source.dropped);
-        let (mut outgoing, upload_guard) = upload(tonic::body::Body::new(upload_source));
+        let (mut outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload_source));
         let mut body = ClientResponseBody::start(
             source,
             ClientObservation::Transport(sample_call()),
@@ -783,7 +770,7 @@ mod tests {
                 ),
                 watch_stop: true,
                 guards: ClientGuards {
-                    upload: upload_guard,
+                    upload_guard,
                     cancel_on_drop: Some(cancellation.clone().drop_guard()),
                 },
                 on_status: None,
@@ -823,7 +810,7 @@ mod tests {
 
         let upload_source = PendingFrames::stalled();
         let upload_dropped = Arc::clone(&upload_source.dropped);
-        let (mut outgoing, upload_guard) = upload(tonic::body::Body::new(upload_source));
+        let (mut outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload_source));
 
         let lifetime = OperationContext::with_timeout(TEST_BUDGET);
         let mut body = ClientResponseBody::start(
@@ -833,7 +820,7 @@ mod tests {
                 lifetime,
                 watch_stop: true,
                 guards: ClientGuards {
-                    upload: upload_guard,
+                    upload_guard,
                     cancel_on_drop: None,
                 },
                 on_status: None,

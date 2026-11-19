@@ -163,7 +163,7 @@ impl Drop for Call {
     }
 }
 
-pub(crate) fn propagated_parent(
+pub(crate) fn attach_parent_or_fallback(
     span: &tracing::Span,
     headers: &http::HeaderMap,
 ) -> Option<opentelemetry::Context> {

@@ -27,7 +27,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::ClientError;
 use crate::call::{
     ClientCustody, ClientGuards, ClientObservation, StatusHook, attach_client_response,
-    client_deadline, client_stopped, upload,
+    client_deadline, client_stopped, guard_upload,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,23 +65,82 @@ pub enum ClientTimeout {
 }
 
 impl ClientTimeout {
-    fn deadlines(self, origin: Instant, caller: Option<Duration>) -> (Deadline, Option<Deadline>) {
+    fn deadlines(
+        self,
+        started_at: Instant,
+        caller_timeout: Option<Duration>,
+    ) -> (Deadline, Option<Deadline>) {
         let (Self::FullRpc(local) | Self::OpeningOnly(local)) = self;
-        let opening = Deadline::new(origin, caller.map_or(local, |budget| budget.min(local)));
+        let opening = Deadline::new(
+            started_at,
+            caller_timeout.map_or(local, |budget| budget.min(local)),
+        );
         let lifetime = match self {
             Self::FullRpc(_) => Some(opening),
-            Self::OpeningOnly(_) => caller.map(|budget| Deadline::new(origin, budget)),
+            Self::OpeningOnly(_) => caller_timeout.map(|budget| Deadline::new(started_at, budget)),
         };
         (opening, lifetime)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginScheme {
+    Http,
+    Https,
+}
+
+struct OriginParts<'a> {
+    scheme: OriginScheme,
+    host: &'a str,
+    port: u16,
+}
+
+impl<'a> OriginParts<'a> {
+    fn parse(uri: &'a http::Uri) -> Option<Self> {
+        if !matches!(uri.path(), "" | "/") || uri.query().is_some() {
+            return None;
+        }
+        let scheme_str = uri.scheme_str()?;
+        let scheme = match scheme_str {
+            "http" => OriginScheme::Http,
+            "https" => OriginScheme::Https,
+            _ => return None,
+        };
+        let authority = uri.authority()?;
+        let host = authority.host();
+        let port = shared_rules::uri::http_origin_port(scheme_str, authority.as_str(), host)?;
+        Some(Self { scheme, host, port })
+    }
+}
+
+#[derive(Clone)]
+struct ClientOrigin {
+    scheme: OriginScheme,
+    host: Arc<str>,
+    port: u16,
+}
+
+impl ClientOrigin {
+    fn from_parts(parts: &OriginParts<'_>) -> Self {
+        Self {
+            scheme: parts.scheme,
+            host: Arc::from(parts.host),
+            port: parts.port,
+        }
+    }
+
+    fn matches(&self, other: &OriginParts<'_>) -> bool {
+        self.scheme == other.scheme
+            && self.host.eq_ignore_ascii_case(other.host)
+            && self.port == other.port
     }
 }
 
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
-    uses_tls: bool,
     #[debug(skip)]
-    origin: http::Uri,
+    origin: ClientOrigin,
     #[debug(skip)]
     destination: Option<crate::observe::Destination>,
     timeout: ClientTimeout,
@@ -115,8 +174,8 @@ impl Client {
         if opening_limit.is_some_and(|limit| limit.get() > Semaphore::MAX_PERMITS) {
             return Err(ClientError::InvalidOpeningLimit);
         }
-        let (uri, tls) = parse_destination(destination, security)?;
-        let endpoint = Endpoint::from(uri.clone())
+        let (uri, origin, tls) = parse_destination(destination, security)?;
+        let endpoint = Endpoint::from(uri)
             .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
@@ -133,8 +192,7 @@ impl Client {
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
         Ok(Self {
-            uses_tls: tls.is_some(),
-            origin: uri,
+            origin,
             channel: Channel::new(GrpcConnector { http, tls }, endpoint),
             destination,
             timeout,
@@ -145,17 +203,12 @@ impl Client {
 
     #[must_use]
     pub const fn uses_tls(&self) -> bool {
-        self.uses_tls
+        matches!(self.origin.scheme, OriginScheme::Https)
     }
 
     #[must_use]
     pub fn matches_origin(&self, origin: &http::Uri) -> bool {
-        let (Some((scheme, host, port)), Some((other_scheme, other_host, other_port))) =
-            (origin_parts(&self.origin), origin_parts(origin))
-        else {
-            return false;
-        };
-        scheme == other_scheme && host.eq_ignore_ascii_case(other_host) && port == other_port
+        OriginParts::parse(origin).is_some_and(|other| self.origin.matches(&other))
     }
 
     pub fn prepare_call(&self, mut request: Request<Body>) -> Result<PreparedCall, tonic::Status> {
@@ -166,12 +219,11 @@ impl Client {
         }
         let (opening_before_parent, lifetime_before_parent) =
             self.timeout.deadlines(started_at, caller_timeout);
-        let parent = request.extensions().get::<OperationContext>();
-        let has_parent = parent.is_some();
-        let parent_deadline = parent.and_then(OperationContext::deadline);
-        let cancellation = parent.map_or_else(tokio_util::sync::CancellationToken::new, |parent| {
-            parent.cancellation().child_token()
-        });
+        let (has_parent, parent_deadline, cancellation) =
+            match request.extensions().get::<OperationContext>() {
+                Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
+                None => (false, None, tokio_util::sync::CancellationToken::new()),
+            };
         let opening = OperationContext::new(
             earliest(Some(opening_before_parent), parent_deadline),
             cancellation.clone(),
@@ -208,7 +260,7 @@ impl Client {
             lifetime,
             watch_stop,
             call,
-            guard: cancellation.drop_guard(),
+            cancel_on_drop: cancellation.drop_guard(),
             permit,
         })
     }
@@ -248,7 +300,7 @@ pub struct PreparedCall {
     #[debug(skip)]
     call: crate::observe::Call,
     #[debug(skip)]
-    guard: DropGuard,
+    cancel_on_drop: DropGuard,
     #[debug(skip)]
     permit: Option<OwnedSemaphorePermit>,
 }
@@ -293,12 +345,12 @@ impl PreparedCall {
             lifetime,
             watch_stop,
             call,
-            guard,
+            cancel_on_drop,
             permit,
         } = self;
         let (mut parts, body) = request.into_parts();
         let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
-        let (body, upload) = upload(body);
+        let (body, upload_guard) = guard_upload(body);
         let mut request = Request::from_parts(parts, body);
         let result = async {
             let outcome = tokio::select! {
@@ -338,8 +390,8 @@ impl PreparedCall {
                 lifetime,
                 watch_stop,
                 guards: ClientGuards {
-                    upload,
-                    cancel_on_drop: Some(guard),
+                    upload_guard,
+                    cancel_on_drop: Some(cancel_on_drop),
                 },
                 on_status,
             },
@@ -395,21 +447,10 @@ impl Service<http::Uri> for GrpcConnector {
     }
 }
 
-fn origin_parts(uri: &http::Uri) -> Option<(&str, &str, u16)> {
-    if !matches!(uri.path(), "" | "/") || uri.query().is_some() {
-        return None;
-    }
-    let scheme = uri.scheme_str()?;
-    let authority = uri.authority()?;
-    let host = authority.host();
-    let port = shared_rules::uri::http_origin_port(scheme, authority.as_str(), host)?;
-    Some((scheme, host, port))
-}
-
 fn parse_destination(
     raw: &str,
     security: ClientSecurity,
-) -> Result<(http::Uri, Option<TlsTarget>), ClientError> {
+) -> Result<(http::Uri, ClientOrigin, Option<TlsTarget>), ClientError> {
     if raw.contains('#')
         || shared_rules::uri::has_whitespace_or_control(raw)
         || shared_rules::uri::authority_has_userinfo(raw)
@@ -417,27 +458,25 @@ fn parse_destination(
         return Err(ClientError::InvalidDestination);
     }
     let uri = http::Uri::try_from(raw).map_err(|_| ClientError::InvalidDestination)?;
-    let (scheme, host, _) = origin_parts(&uri).ok_or(ClientError::InvalidDestination)?;
-    match security {
-        ClientSecurity::Plaintext => {
-            if scheme != "http" {
-                return Err(ClientError::DestinationSecurityMismatch);
-            }
-            Ok((uri, None))
-        }
-        ClientSecurity::Tls(material) => {
-            if scheme != "https" {
-                return Err(ClientError::DestinationSecurityMismatch);
-            }
-            let trimmed_host = host
+    let parts = OriginParts::parse(&uri).ok_or(ClientError::InvalidDestination)?;
+    let origin = ClientOrigin::from_parts(&parts);
+    match (security, parts.scheme) {
+        (ClientSecurity::Plaintext, OriginScheme::Http) => Ok((uri, origin, None)),
+        (ClientSecurity::Tls(material), OriginScheme::Https) => {
+            let trimmed_host = parts
+                .host
                 .strip_prefix('[')
                 .and_then(|inner| inner.strip_suffix(']'))
-                .unwrap_or(host);
+                .unwrap_or(parts.host);
             let server_name = rustls::pki_types::ServerName::try_from(trimmed_host)
                 .map_err(|_| ClientError::InvalidDestination)?
                 .to_owned();
             let config = crate::tls::client_tls_config(&material)?;
-            Ok((uri, Some((TlsConnector::from(config), server_name))))
+            Ok((uri, origin, Some((TlsConnector::from(config), server_name))))
+        }
+        (ClientSecurity::Plaintext, OriginScheme::Https)
+        | (ClientSecurity::Tls(_), OriginScheme::Http) => {
+            Err(ClientError::DestinationSecurityMismatch)
         }
     }
 }
