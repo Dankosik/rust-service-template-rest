@@ -24,7 +24,7 @@ use super::signals::Signals;
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
 const FORCED_LISTENER_JOIN: Duration = Duration::from_millis(500);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
-pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
+const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 const LOGGER_FLUSH_RESERVE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
@@ -504,9 +504,11 @@ mod tests {
             super::super::BUILD_INFO,
             TAIL,
         );
-        std::assert_matches!(
-            refused,
-            Err(service_config::Error::Validate(errors)) if errors.names("http.grace_period")
+        assert!(
+            refused
+                .unwrap_err()
+                .validation_errors()
+                .is_some_and(|errors| errors.names("http.grace_period"))
         );
     }
 
@@ -541,7 +543,7 @@ mod tests {
         });
         running.await.unwrap();
         let config = super::super::test_config(&[]);
-        let http_config = &config.http;
+        let http_config = config.http();
         let mut signals = Signals::install().unwrap();
         let outcome = run(Plan {
             http_config,
@@ -567,7 +569,7 @@ mod tests {
             panic!("cleanup defect")
         });
         let config = super::super::test_config(&[]);
-        let http_config = &config.http;
+        let http_config = config.http();
         let mut signals = Signals::install().unwrap();
         assert_eq!(
             run(Plan {
@@ -665,7 +667,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), entered.cancelled())
             .await
             .unwrap();
-        let mut http_config = super::super::test_config(&[]).http.clone();
+        let mut http_config = super::super::test_config(&[]).http().clone();
         http_config.drain_timeout = Duration::from_millis(30);
         let mut signals = Signals::install().unwrap();
         let shutdown = run(Plan {

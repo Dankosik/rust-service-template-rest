@@ -54,7 +54,7 @@ use self::background::{Background, BackgroundFailure, wait_for_failure};
 pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
 use self::shutdown::{Dependencies, Outcome, Serving};
 use self::signals::Signals;
-use crate::StartupRegistration;
+use crate::{RegistrationError, ServiceRegistration};
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -84,14 +84,14 @@ pub(crate) enum BootstrapError {
     Metrics(#[from] infra_telemetry::MetricsError),
     // template:begin cache:service-bootstrap-cache-errors
     #[error("cache startup: {0}")]
-    Cache(#[from] infra_cache::CacheError),
+    Cache(#[from] infra_cache::StartError),
     // template:end cache:service-bootstrap-cache-errors
     // template:begin object-storage:service-bootstrap-object-storage-errors
     #[error("object storage configuration: {0}")]
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
     #[error("startup admission: {0}")]
-    Admission(health::NotReady),
+    Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     // template:begin authn:bootstrap-authn-errors
@@ -108,7 +108,7 @@ pub(crate) enum BootstrapError {
     #[error("http contract composition: {0}")]
     HttpComposition(#[from] crate::api::ContractError),
     #[error("HTTP resource preparation failed")]
-    HttpResource(#[source] Box<dyn std::error::Error + Send + Sync>),
+    HttpResource(#[source] RegistrationError),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -140,7 +140,7 @@ pub(crate) enum BootstrapError {
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
     #[error("gRPC service registration: {0}")]
-    GrpcRegistration(#[source] Box<dyn std::error::Error + Send + Sync>),
+    GrpcRegistration(#[source] RegistrationError),
     // template:end grpc:bootstrap-grpc-error
     #[error(transparent)]
     Background(#[from] BackgroundFailure),
@@ -181,10 +181,7 @@ fn fail_to_stderr(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub(super) fn run_registered<I>(
-    args: I,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
-) -> ExitCode
+pub(super) fn run_registered<I>(args: I, registration: ServiceRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -203,7 +200,7 @@ where
         Err(err) => return fail_to_stderr(&err),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
+        .worker_threads(config.runtime().effective_worker_threads())
         .enable_all()
         .build()
     {
@@ -254,14 +251,14 @@ struct TelemetryHandles {
 )]
 async fn serve(
     config: Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
     exit: &mut RuntimeExit,
 ) -> Result<Outcome, BootstrapError> {
     let signals = exit
         .signals
         .insert(Signals::install().map_err(BootstrapError::Signals)?);
     let config = Box::new(config);
-    let http_config = config.http.clone();
+    let http_config = config.http().clone();
     let mut background = Background::new(CancellationToken::new());
     let mut background_failures = background.failure_observer();
     let mut dependencies = Dependencies::default();
@@ -345,8 +342,8 @@ async fn install_telemetry(
         .tracer_provider
         .insert(install_tracer_provider(&telemetry::tracing_options(config)).await?);
     handles.logger = Some(install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
+        level: &config.log().level,
+        format: match config.log().format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
@@ -398,7 +395,7 @@ fn finish_startup(
     if let Some(prepared) = started?
         && !signals.take_pending()?
     {
-        let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
+        let refresher = prepared.activate()?;
         serving.admitted = true;
         background.spawn_with_token("readiness", |stop| refresher.refresh_until(stop));
         tracing::info!("service_ready");
@@ -438,7 +435,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
 )]
 async fn start(
     config: &Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
     metrics: &Metrics,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
@@ -457,21 +454,20 @@ async fn start(
     let service_auth = service_auth::prepare(config)?;
     // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    if let Some(postgres) = &config.postgres {
+    if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
         probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
-    if let Some(settings) = &config.cache {
+    if let Some(settings) = config.cache() {
         dependencies.cache = Some(cache::open(settings).await?);
     }
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = config
-        .object_storage
-        .as_ref()
+        .object_storage()
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
@@ -481,9 +477,9 @@ async fn start(
     let readiness = Readiness::new(
         probes,
         RefreshPolicy::try_new(
-            config.health.refresh_interval,
-            config.health.probe_budget,
-            config.health.failure_threshold,
+            config.health().refresh_interval,
+            config.health().probe_budget,
+            config.health().failure_threshold,
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     );
@@ -496,7 +492,7 @@ async fn start(
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
         // template:begin webhooks:bootstrap-outbound-webhooks-state
         outbound_webhooks: infra_webhooks::outbound::Producer::new(
-            config.outbound_webhook_endpoints.iter().cloned(),
+            config.outbound_webhook_endpoints().iter().cloned(),
         ),
         // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
@@ -505,7 +501,7 @@ async fn start(
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if let Some(grpc_config) = &config.grpc {
+    let grpc_prepared = if let Some(grpc_config) = config.grpc() {
         Some(grpc::prepare(
             grpc_config,
             registration.grpc,
@@ -539,11 +535,8 @@ async fn start(
     )
     .await?;
     let app = match registration.http_resource {
-        Some(prepare) => {
-            let resource = prepare(config, &mut BackgroundRegistration { background })
-                .map_err(BootstrapError::HttpResource)?;
-            app.with_extension(resource)
-        }
+        Some(attach) => attach(app, config, &mut BackgroundRegistration { background })
+            .map_err(BootstrapError::HttpResource)?,
         None => app,
     };
     let listeners = BoundListeners::bind(
@@ -552,10 +545,7 @@ async fn start(
         grpc_prepared,
         // template:end grpc:bootstrap-grpc-bind-argument
     )?;
-    let mut prepared_readiness = readiness
-        .prepare()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    let mut prepared_readiness = readiness.prepare().await?;
 
     listeners.serve(
         app,
@@ -565,10 +555,7 @@ async fn start(
         serving,
     )?;
 
-    prepared_readiness
-        .ensure_fresh()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    prepared_readiness.ensure_fresh().await?;
     Ok(prepared_readiness)
 }
 
@@ -600,10 +587,10 @@ impl BoundListeners {
         grpc_prepared: Option<grpc::Prepared>,
         // template:end grpc:bootstrap-grpc-bind-input
     ) -> Result<Self, BootstrapError> {
-        let http = config.http.listener();
+        let http = config.http().listener();
         let http_listener = BoundListener::bind(http.addr)?;
         let diagnostics = config
-            .observability
+            .observability()
             .metrics
             .addr
             .map(BoundListener::bind)
@@ -685,7 +672,7 @@ async fn http_application(
     // template:end http-idempotency:bootstrap-http-idempotency-inputs
 ) -> Result<infra_http::Application, BootstrapError> {
     let contract = crate::api::contract()?;
-    let http = config.http.listener();
+    let http = config.http().listener();
     let options = HardenOptions {
         max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: http.request_timeout,
@@ -813,7 +800,7 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &shared_metrics(),
             &mut background,
             &mut Dependencies::default(),
@@ -881,7 +868,7 @@ mod tests {
         let mut serving = Serving::default();
         let result = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &metrics,
             &mut background,
             &mut dependencies,
@@ -904,9 +891,9 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,
@@ -1017,40 +1004,32 @@ mod tests {
                 )
         }
 
-        pub(super) fn registration(origin: String) -> super::StartupRegistration<()> {
-            super::StartupRegistration {
-                http_resource: None,
-                grpc: Some(Box::new(move |services, _, _| {
-                    let directory = Client::try_new(
-                        &origin,
-                        ClientSecurity::Plaintext,
-                        Duration::from_secs(5),
-                    )?;
-                    services.set_listener_layer(tower::util::MapResponseLayer::new(
-                        |mut response: axum::response::Response| {
-                            response
-                                .headers_mut()
-                                .insert("x-listener", "grpc".parse().unwrap());
-                            response
-                        },
-                    ));
-                    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-                    services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
-                        directory,
-                    ))))?;
-                    services.add_reflection()?;
-                    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                        services.allow_callers(
-                            &format!("/example.v1.EchoService/{method}"),
-                            &["orders"],
-                        )?;
-                    }
-                    for path in infra_grpc::REFLECTION_PATHS {
-                        services.allow_callers(path, &["orders"])?;
-                    }
-                    Ok(())
-                })),
-            }
+        pub(super) fn registration(origin: String) -> super::ServiceRegistration {
+            super::ServiceRegistration::default().with_grpc(move |services, _, _| {
+                let directory =
+                    Client::try_new(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))?;
+                services.set_listener_layer(tower::util::MapResponseLayer::new(
+                    |mut response: axum::response::Response| {
+                        response
+                            .headers_mut()
+                            .insert("x-listener", "grpc".parse().unwrap());
+                        response
+                    },
+                ));
+                services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+                services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
+                    directory,
+                ))))?;
+                services.add_reflection()?;
+                for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                    services
+                        .allow_callers(&format!("/example.v1.EchoService/{method}"), &["orders"])?;
+                }
+                for path in infra_grpc::REFLECTION_PATHS {
+                    services.allow_callers(path, &["orders"])?;
+                }
+                Ok(())
+            })
         }
 
         pub(super) async fn exercise_listener(
@@ -1239,9 +1218,9 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,

@@ -27,7 +27,7 @@ pub(super) fn bind_listeners(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
-    let http = config.http.listener();
+    let http = config.http().listener();
     let options = server_options(http);
     let app = HttpContract::default().with_probes("/")?.build(
         readiness.clone(),
@@ -40,7 +40,7 @@ pub(super) fn bind_listeners(
         .insert(app.serve(BoundListener::bind(http.addr)?, options));
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
-    if let Some(addr) = config.observability.metrics.addr {
+    if let Some(addr) = config.observability().metrics.addr {
         let routes = diagnostics_router(metrics.clone(), move || readiness.is_ready())
             .merge(infra_http::liveness_router());
         let diagnostics = resources
@@ -90,9 +90,9 @@ fn harden_options(http: &HttpListenerConfig, readiness: ReadinessReader) -> Hard
 
 pub(super) fn refresh_policy(config: &WorkerConfig) -> Result<RefreshPolicy, WorkerError> {
     RefreshPolicy::try_new(
-        config.health.refresh_interval,
-        config.health.probe_budget,
-        config.health.failure_threshold,
+        config.health().refresh_interval,
+        config.health().probe_budget,
+        config.health().failure_threshold,
     )
     .map_err(|err| service_config::ValidationError::new("health", err.to_string()).into())
 }

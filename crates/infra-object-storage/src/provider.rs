@@ -16,18 +16,18 @@ pub enum Provider {
     Railway {
         #[debug(skip)]
         endpoint: String,
-        region: String,
+        region: Option<String>,
     },
     S3Compatible {
         #[debug(skip)]
         endpoint: String,
-        region: String,
+        region: Option<String>,
         path_style: bool,
     },
     Local {
         #[debug(skip)]
         endpoint: String,
-        region: String,
+        region: Option<String>,
     },
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
             region,
             expected_bucket_owner,
         } => {
-            let region = signing_region(region, None)?;
+            let region = validate_region(region)?;
             if expected_bucket_owner.len() != 12
                 || !expected_bucket_owner
                     .bytes()
@@ -132,7 +132,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
             }
             Ok(ResolvedProvider::at_endpoint(
                 origin_without_path(&origin),
-                signing_region(region, Some("auto"))?,
+                optional_region(region.as_deref(), "auto")?,
                 false,
                 UploadChecksum::Never,
             ))
@@ -143,13 +143,13 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
             path_style,
         } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?),
-            signing_region(region, Some("us-east-1"))?,
+            optional_region(region.as_deref(), "us-east-1")?,
             *path_style,
             UploadChecksum::Never,
         )),
         Provider::Local { endpoint, region } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?),
-            signing_region(region, Some("us-east-1"))?,
+            optional_region(region.as_deref(), "us-east-1")?,
             true,
             UploadChecksum::Always,
         )),
@@ -190,11 +190,13 @@ fn origin_without_path(origin: &Url) -> String {
     origin[..url::Position::BeforePath].to_owned()
 }
 
-fn signing_region(region: &str, default: Option<&str>) -> Result<String, ConfigError> {
-    if region.is_empty() {
-        return default.map(str::to_owned).ok_or(ConfigError::Region);
-    }
-    let valid = region.len() <= 32
+fn optional_region(region: Option<&str>, default: &'static str) -> Result<String, ConfigError> {
+    region.map_or_else(|| Ok(default.to_owned()), validate_region)
+}
+
+fn validate_region(region: &str) -> Result<String, ConfigError> {
+    let valid = !region.is_empty()
+        && region.len() <= 32
         && region
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
@@ -340,7 +342,7 @@ mod tests {
         let admitted = resolve(
             &Provider::Railway {
                 endpoint: "https://t3.storageapi.dev".to_owned(),
-                region: String::new(),
+                region: None,
             },
             "evidence-bucket-jdhhd8oe18xi",
         )
@@ -362,20 +364,22 @@ mod tests {
             let refused = resolve(
                 &Provider::Railway {
                     endpoint: endpoint.to_owned(),
-                    region: "auto".to_owned(),
+                    region: Some("auto".to_owned()),
                 },
                 "evidence-bucket",
             );
             assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
         }
-        let refused = resolve(
-            &Provider::Railway {
-                endpoint: "https://t3.storageapi.dev".to_owned(),
-                region: "AMS 1".to_owned(),
-            },
-            "evidence-bucket",
-        );
-        assert_eq!(refused.unwrap_err(), ConfigError::Region);
+        for region in ["", "AMS 1"] {
+            let refused = resolve(
+                &Provider::Railway {
+                    endpoint: "https://t3.storageapi.dev".to_owned(),
+                    region: Some(region.to_owned()),
+                },
+                "evidence-bucket",
+            );
+            assert_eq!(refused.unwrap_err(), ConfigError::Region, "{region:?}");
+        }
     }
 
     #[test]
@@ -383,7 +387,7 @@ mod tests {
         let admitted = resolve(
             &Provider::Local {
                 endpoint: "http://127.0.0.1:7070".to_owned(),
-                region: String::new(),
+                region: None,
             },
             "evidence-bucket",
         )
@@ -403,7 +407,7 @@ mod tests {
         let admitted = resolve(
             &Provider::S3Compatible {
                 endpoint: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
-                region: "eu-central-003".to_owned(),
+                region: Some("eu-central-003".to_owned()),
                 path_style: false,
             },
             "evidence-bucket",
@@ -422,7 +426,7 @@ mod tests {
         let admitted = resolve(
             &Provider::S3Compatible {
                 endpoint: "https://ceph.internal.example:8443".to_owned(),
-                region: String::new(),
+                region: None,
                 path_style: true,
             },
             "evidence-bucket",
@@ -446,7 +450,7 @@ mod tests {
             let refused = resolve(
                 &Provider::S3Compatible {
                     endpoint: endpoint.to_owned(),
-                    region: String::new(),
+                    region: None,
                     path_style: false,
                 },
                 "evidence-bucket",
@@ -459,7 +463,7 @@ mod tests {
     fn buckets_are_dotless_dns_names() {
         let provider = Provider::Local {
             endpoint: "http://127.0.0.1:7070".to_owned(),
-            region: String::new(),
+            region: None,
         };
         for bucket in [
             "abc",

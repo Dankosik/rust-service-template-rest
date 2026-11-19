@@ -18,6 +18,7 @@ use crate::provider::{UploadChecksum, resolve};
 use crate::{
     ConfigError, ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey,
     ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
+    UnknownOutcome,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -44,7 +45,7 @@ fn access_key(access_key_id: &str, secret_access_key: &str) -> CredentialSource 
 fn credentials_are_required_and_redacted() {
     let mut missing_id = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
-        region: String::new(),
+        region: None,
     });
     missing_id.credentials = access_key(" ", "hunter2-secret");
     assert_eq!(
@@ -54,7 +55,7 @@ fn credentials_are_required_and_redacted() {
 
     let mut missing_secret = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
-        region: String::new(),
+        region: None,
     });
     missing_secret.credentials = access_key("AKIDEXAMPLE", "");
     assert_eq!(
@@ -96,12 +97,12 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
         },
         Provider::S3Compatible {
             endpoint: "https://ceph.internal.example".to_owned(),
-            region: String::new(),
+            region: None,
             path_style: true,
         },
         Provider::Local {
             endpoint: "http://127.0.0.1:1".to_owned(),
-            region: String::new(),
+            region: None,
         },
     ] {
         let mut other = options(provider);
@@ -118,7 +119,7 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
     for max_concurrency in [0, usize::MAX] {
         let mut refused = options(Provider::Local {
             endpoint: "http://127.0.0.1:1".to_owned(),
-            region: String::new(),
+            region: None,
         });
         refused.max_concurrency = max_concurrency;
         assert_eq!(
@@ -216,7 +217,7 @@ impl Stub {
     fn storage(&self, configure: impl FnOnce(&mut ObjectStorageOptions)) -> ObjectStorage {
         let mut options = options(Provider::Local {
             endpoint: self.endpoint.clone(),
-            region: String::new(),
+            region: None,
         });
         configure(&mut options);
         ObjectStorage::try_new(options).unwrap()
@@ -366,7 +367,7 @@ async fn check_service_reply(
         let expected = if within_limit {
             MutationError::NotApplied(MutationFailure::Rejected)
         } else {
-            MutationError::OutcomeUnknown(MutationFailure::Unavailable)
+            MutationError::OutcomeUnknown(UnknownOutcome::Unavailable)
         };
         assert_eq!(result, Err(expected), "{method} {status} {length}");
         assert_eq!(stub.seen().len(), 1, "mutation must not retry");
@@ -444,7 +445,7 @@ async fn failed_create_only_put_is_not_retried_and_is_unknown() {
         .await;
     assert_eq!(
         result,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 }
@@ -466,7 +467,7 @@ async fn mutations_make_one_attempt() {
     let storage = stub.storage(|_| {});
     assert_eq!(
         storage.delete(&parent, &key()).await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 
@@ -483,7 +484,7 @@ async fn mutations_make_one_attempt() {
                 PutOptions::overwrite()
             )
             .await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 }
@@ -547,7 +548,7 @@ async fn empty_stream_preparation_and_response_share_one_put_timeout() {
     stub.stop().await;
     assert_eq!(
         result,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(sent, 1, "the mutation must be dispatched exactly once");
     assert_eq!(follow_up, Ok(()));
@@ -674,7 +675,7 @@ async fn get_distinguishes_short_eof_from_an_interrupted_body() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut options = options(Provider::Local {
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
-            region: String::new(),
+            region: None,
         });
         options.operation_timeout = Duration::from_secs(30);
         let storage = ObjectStorage::try_new(options).unwrap();
@@ -838,7 +839,7 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
     let stub = Stub::start(|_, _| ok_empty()).await;
     let options = options(Provider::Local {
         endpoint: stub.endpoint.clone(),
-        region: String::new(),
+        region: None,
     });
     let resolved = resolve(&options.provider, &options.bucket).unwrap();
     let storage = ObjectStorage::build(
@@ -949,7 +950,7 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
     drop(listener);
     let mut options = options(Provider::Local {
         endpoint,
-        region: String::new(),
+        region: None,
     });
     options.operation_timeout = Duration::from_secs(5);
     let storage = ObjectStorage::try_new(options).unwrap();
@@ -966,7 +967,7 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
                 PutOptions::overwrite()
             )
             .await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
 }
 
@@ -1256,14 +1257,14 @@ async fn metrics_carry_only_operation_and_outcome() {
             .succeed();
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(Failure {
+            .fail(&Failure {
                 error: ObjectStorageError::NotFound,
                 error_type: "404".into(),
                 timeout_source: None,
             });
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(LocalFailure::ContentLength);
+            .fail(&LocalFailure::ContentLength.into());
     });
     let rendered = handle.render();
     assert!(
@@ -1362,7 +1363,7 @@ async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
         cancelled.cancel();
         assert_eq!(
             call.await.unwrap(),
-            Err(MutationError::OutcomeUnknown(MutationFailure::Stopped(
+            Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
                 Stopped::Cancelled
             )))
         );
@@ -1431,7 +1432,7 @@ async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
     let replacement = Stub::start(|_, _| object(b"{}", &[])).await;
     let mut replacement_options = options(Provider::Local {
         endpoint: replacement.endpoint.clone(),
-        region: String::new(),
+        region: None,
     });
     replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
     let reconstructed = ObjectStorage::try_new(replacement_options).unwrap();
@@ -1563,7 +1564,7 @@ fn tls_snapshot_storage(
 ) -> ObjectStorage {
     let mut options = options(Provider::Local {
         endpoint,
-        region: String::new(),
+        region: None,
     });
     options.operation_timeout = Duration::from_millis(250);
     let resolved = resolve(&options.provider, &options.bucket).unwrap();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::load::{Error, load_from};
+use crate::load::{ErrorKind, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::admit_with;
 use crate::{LoadOptions, ValidationErrors};
@@ -10,7 +10,7 @@ fn input(toml: &str) -> GrpcInput {
 }
 
 fn default_drain_budget() -> Duration {
-    load_env(&[]).http.effective_drain_budget()
+    load_env(&[]).http().effective_drain_budget()
 }
 
 fn admit(input: GrpcInput) -> Result<Option<GrpcConfig>, ValidationErrors> {
@@ -135,7 +135,7 @@ fn a_call_budget_must_fit_inside_the_shared_drain() {
     assert_eq!(refused_keys(over()), ["grpc.request_timeout"]);
 
     let config = load_env(&[("APP__HTTP__DRAIN_TIMEOUT", "40s")]);
-    admit_with(|violations| over().admit(Some(config.http.effective_drain_budget()), violations))
+    admit_with(|violations| over().admit(Some(config.http().effective_drain_budget()), violations))
         .unwrap();
     admit_with(|violations| over().admit(None, violations)).unwrap();
 }
@@ -215,7 +215,7 @@ fn grpc_listener_loads_from_the_environment_and_a_bad_limit_names_its_key() {
         env(&[listener.as_slice(), limits.as_slice()].concat()),
     )
     .unwrap();
-    let grpc = cfg.grpc.as_ref().unwrap();
+    let grpc = cfg.grpc().unwrap();
     assert_eq!(grpc.addr, "127.0.0.1:0".parse().unwrap());
     assert_matches!(grpc.security, GrpcListenerSecurity::Plaintext);
     assert_eq!(grpc.request_timeout, Duration::from_secs(3));
@@ -231,7 +231,12 @@ fn grpc_listener_loads_from_the_environment_and_a_bad_limit_names_its_key() {
         env(&[listener.as_slice(), over_drain.as_slice()].concat()),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("grpc.request_timeout"), "{err}");
+    assert!(
+        err.validation_errors()
+            .unwrap()
+            .names("grpc.request_timeout"),
+        "{err}"
+    );
 }
 
 #[rstest::rstest]
@@ -249,7 +254,7 @@ fn grpc_limits_reject_negative_toml_floats(#[case] key: &str) {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(err.to_string().contains(&format!("grpc.{key}")), "{err}");
 }
 

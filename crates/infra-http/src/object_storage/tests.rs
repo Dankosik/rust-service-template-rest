@@ -58,7 +58,7 @@ async fn pre_header_problems_preserve_route_policy_and_uncertain_writes() {
     }
 
     let refused = write_problem(NotApplied(F::Unavailable)).into_response();
-    let unknown = write_problem(OutcomeUnknown(F::Unavailable)).into_response();
+    let unknown = write_problem(OutcomeUnknown(UnknownOutcome::Unavailable)).into_response();
     assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(unknown.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!unknown.headers().contains_key(RETRY_AFTER));
@@ -110,7 +110,7 @@ fn file_route(
                 .unwrap()
                 .origin()
                 .ascii_serialization(),
-            region: String::new(),
+            region: None,
         },
         bucket: "file-bucket".to_owned(),
         credentials: CredentialSource::AccessKey {

@@ -13,7 +13,7 @@ pub(super) async fn open<'a>(
 ) -> Result<&'a PgPool, BootstrapError> {
     let raw = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
-    let local_development = config.app.is_local_development();
+    let local_development = config.app().is_local_development();
     let dsn = super::blocking_startup("postgres", move || {
         Dsn::admit_for_environment(
             raw.expose_secret(),
@@ -24,7 +24,7 @@ pub(super) async fn open<'a>(
     .await?;
     let options = PoolOptions {
         max_connections: postgres.max_connections,
-        application_name: &config.observability.otel.service_name,
+        application_name: &config.observability().otel.service_name,
         default_isolation: infra_postgres::Isolation::ServerDefault,
         session_settings_source: match postgres.session_budgets {
             service_config::PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,

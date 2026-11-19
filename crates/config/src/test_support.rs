@@ -2,7 +2,7 @@ use std::assert_matches;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::load::{Error, load_from};
+use crate::load::{ErrorKind, InputError, load_from};
 use crate::{BuildInfo, Config, LoadOptions};
 
 pub(crate) const BUILD: BuildInfo = BuildInfo {
@@ -53,14 +53,18 @@ pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key: found, .. } if found == key, "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::SecretInFile { key: found, .. }) if found == key,
+        "{err}"
+    );
 }
 
 // template:begin cache:test-support-unknown-env-key
 pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
     assert_matches!(
         load_from(&LoadOptions::default(), BUILD, env(&[(variable, "x")])),
-        Err(Error::Deserialize(_))
+        Err(crate::load::Error(ErrorKind::Deserialize(_)))
     );
 }
 // template:end cache:test-support-unknown-env-key

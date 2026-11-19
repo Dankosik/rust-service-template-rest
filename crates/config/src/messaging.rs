@@ -7,7 +7,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::app::local_development_only;
-use crate::de::{BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictString};
+use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictString};
 use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
@@ -34,7 +34,7 @@ pub(crate) struct MessagingInput {
     #[debug("{} servers", urls.len())]
     urls: Vec<String>,
     #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
     /// a platform that rotates it: the client reads the file again for every
@@ -82,28 +82,19 @@ pub(crate) struct MessagingInput {
     consumer_concurrency: NonZeroU32,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
-)]
-#[derive(Clone, derive_more::Debug, educe::Educe)]
-#[educe(Default)]
+#[derive(Clone, derive_more::Debug)]
 pub struct MessagingConfig {
     #[debug("{} servers", urls.len())]
     pub urls: Vec<String>,
     pub credentials: Option<MessagingCredentials>,
     pub root_ca_path: Option<PathBuf>,
-    pub allow_plaintext: bool,
+    pub plaintext_admitted: bool,
     pub tls_first: bool,
-    pub trusted_network: bool,
-    pub allow_unauthenticated: bool,
     pub source_stream: Option<String>,
-    #[educe(Default(expression = DEFAULT_MAX_PAYLOAD))]
     pub max_payload_bytes: ByteSize,
     pub consumer_durable: Option<String>,
     pub consumer_filter_subject: Option<String>,
     pub dlq_subject: Option<String>,
-    #[educe(Default(expression = NonZeroU32::MIN))]
     pub consumer_concurrency: NonZeroU32,
 }
 
@@ -130,14 +121,12 @@ impl MessagingInput {
             ))),
             (Some(inline), None) => Ok(Some(MessagingCredentials::Inline(inline))),
             (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
-            (None, None) => Ok(None),
+            (None, None) => Ok(self
+                .allow_unauthenticated
+                .then_some(MessagingCredentials::Unauthenticated)),
         };
-        validate_urls(
-            &self.urls,
-            self.tls_first,
-            self.allow_plaintext || self.trusted_network,
-            v,
-        );
+        let plaintext_admitted = self.allow_plaintext || self.trusted_network;
+        validate_urls(&self.urls, self.tls_first, plaintext_admitted, v);
         v.check(
             int_range(
                 "messaging.max_payload_bytes",
@@ -152,10 +141,8 @@ impl MessagingInput {
             urls: self.urls,
             credentials: credentials?,
             root_ca_path: self.root_ca_path,
-            allow_plaintext: self.allow_plaintext,
+            plaintext_admitted,
             tls_first: self.tls_first,
-            trusted_network: self.trusted_network,
-            allow_unauthenticated: self.allow_unauthenticated,
             source_stream: self.source_stream,
             max_payload_bytes: self.max_payload_bytes,
             consumer_durable: self.consumer_durable,
@@ -167,16 +154,11 @@ impl MessagingInput {
 }
 
 impl MessagingConfig {
-    #[must_use]
-    pub fn plaintext_admitted(&self) -> bool {
-        self.allow_plaintext || self.trusted_network
-    }
-
     pub fn producer_source_stream(&self) -> Result<&str, ValidationError> {
         if self.urls.is_empty() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
-        if self.credentials.is_none() && !self.allow_unauthenticated {
+        if self.credentials.is_none() {
             return Err(ValidationError::new(
                 "messaging.credentials",
                 "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
@@ -297,6 +279,7 @@ fn validate_broker_url(index: usize, raw: &str) -> Result<BrokerScheme, Validati
 pub enum MessagingCredentials {
     Inline(SecretString),
     File(PathBuf),
+    Unauthenticated,
 }
 
 #[derive(Clone, Copy, Debug)]

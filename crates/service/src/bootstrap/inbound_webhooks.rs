@@ -13,7 +13,7 @@ pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
 ) -> Result<WebhookState, BootstrapError> {
-    let webhooks = &config.inbound_webhooks;
+    let webhooks = config.inbound_webhooks();
     if webhooks.is_empty() {
         return Ok(WebhookState::inert());
     }

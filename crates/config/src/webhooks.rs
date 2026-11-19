@@ -4,24 +4,31 @@ use std::num::NonZeroU32;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
+use crate::de::{
+    BlankAsNoneVerbatim, Keep, Mode, ModeMarker, Skip, StrictCount, StrictString, When,
+};
 use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
+#[serde_with::serde_as]
 #[derive(Deserialize, educe::Educe)]
-#[educe(Default(bound(MaxConcurrent: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent> {
+#[educe(Default(bound = false))]
+#[serde(
+    bound(deserialize = "Endpoint: Deserialize<'de>"),
+    deny_unknown_fields,
+    default
+)]
+pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
-    max_concurrent_deliveries: MaxConcurrent,
+    #[serde(default)]
+    #[serde_as(as = "When<MaxConcurrent, Option<StrictCount>>")]
+    max_concurrent_deliveries: Option<NonZeroU32>,
+    #[serde(skip)]
+    _mode: ModeMarker<MaxConcurrent>,
 }
 
-#[serde_with::serde_as]
-#[derive(Deserialize)]
-#[serde(transparent)]
-struct MaxConcurrentDeliveries(#[serde_as(as = "crate::de::StrictCount")] NonZeroU32);
+pub(crate) type ServiceWebhooksInput = WebhooksFields<serde::de::IgnoredAny, Skip>;
 
-pub(crate) type ServiceWebhooksInput = WebhooksFields<serde::de::IgnoredAny, serde::de::IgnoredAny>;
-
-type WebhooksInput = WebhooksFields<WebhookEndpointConfig, Option<MaxConcurrentDeliveries>>;
+type WebhooksInput = WebhooksFields<WebhookEndpointConfig>;
 
 impl ServiceWebhooksInput {
     pub(crate) fn admit(self, violations: &mut Violations) -> Vec<String> {
@@ -49,7 +56,7 @@ impl From<WebhooksInput> for WebhooksConfig {
     fn from(input: WebhooksInput) -> Self {
         Self {
             endpoints: input.endpoints,
-            max_concurrent_deliveries: input.max_concurrent_deliveries.map(|value| value.0),
+            max_concurrent_deliveries: input.max_concurrent_deliveries,
         }
     }
 }
@@ -59,14 +66,14 @@ impl From<WebhooksInput> for WebhooksConfig {
 #[serde(deny_unknown_fields)]
 pub struct WebhookEndpointConfig {
     #[debug(skip)]
-    #[serde_as(as = "crate::de::StrictString")]
+    #[serde_as(as = "StrictString")]
     pub url: String,
-    #[serde_as(as = "crate::de::StrictSecret")]
+    #[serde_as(as = "StrictString")]
     pub secret: SecretString,
     /// Optional environment-only predecessor retained during a key rotation.
     /// Blank is absent.
     #[serde(default)]
-    #[serde_as(as = "crate::de::BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     pub previous_secret: Option<SecretString>,
 }
 

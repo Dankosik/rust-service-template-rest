@@ -32,21 +32,21 @@ pub(super) fn install_metrics() -> Result<Metrics, BootstrapError> {
 }
 
 pub(super) fn tracing_options(config: &Config) -> TracingOptions {
-    let otel = &config.observability.otel;
+    let otel = &config.observability().otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
         TracesSampler::AlwaysOff => ResolvedSampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => ResolvedSampler::TraceIdRatio(otel.traces_sampler_arg),
-        TracesSampler::ParentBasedTraceIdRatio => {
-            ResolvedSampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
+        TracesSampler::TraceIdRatio(ratio) => ResolvedSampler::TraceIdRatio(ratio),
+        TracesSampler::ParentBasedTraceIdRatio(ratio) => {
+            ResolvedSampler::ParentBasedTraceIdRatio(ratio)
         }
     };
     TracingOptions {
         service_name: otel.service_name.clone(),
-        service_version: config.app.version.clone(),
-        vcs_revision: config.app.commit.clone(),
-        instance_id: config.app.instance_id.clone(),
-        deployment_environment: config.app.env.clone(),
+        service_version: config.app().version.clone(),
+        vcs_revision: config.app().commit.clone(),
+        instance_id: config.app().instance_id.clone(),
+        deployment_environment: config.app().env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
         otlp_headers: otel.exporter.otlp_headers.clone(),
@@ -56,20 +56,20 @@ pub(super) fn tracing_options(config: &Config) -> TracingOptions {
 pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
     exporter.log();
     tracing::info!(
-        app.env = %config.app.env,
-        app.version = %config.app.version,
-        app.commit = %config.app.commit,
+        app.env = %config.app().env,
+        app.version = %config.app().version,
+        app.commit = %config.app().commit,
         runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
-        http.addr = %config.http.listener().addr,
-        http.request_timeout = ?config.http.listener().request_timeout,
-        http.drain_timeout = ?config.http.drain_timeout,
-        http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = ?config.observability.metrics.addr,
+        http.addr = %config.http().listener().addr,
+        http.request_timeout = ?config.http().listener().request_timeout,
+        http.drain_timeout = ?config.http().drain_timeout,
+        http.grace_period = ?config.http().grace_period,
+        observability.metrics.addr = ?config.observability().metrics.addr,
         // template:begin postgres:bootstrap-startup-log-postgres
-        postgres.enabled = config.postgres.is_some(),
+        postgres.enabled = config.postgres().is_some(),
         // template:end postgres:bootstrap-startup-log-postgres
         // template:begin service-auth:bootstrap-startup-log-service-auth
-        service_auth.mode = config.service_auth.mode(),
+        service_auth.mode = config.service_auth().mode(),
         // template:end service-auth:bootstrap-startup-log-service-auth
         tracing.exporter = exporter.as_str(),
         "service_starting"

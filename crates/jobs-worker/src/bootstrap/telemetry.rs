@@ -14,11 +14,12 @@ pub(super) async fn install_observability(
     resources: &mut Resources,
 ) -> Result<(Metrics, ExporterState), WorkerError> {
     let tracer_provider = resources
+        .telemetry
         .tracer_provider
         .insert(install_tracer_provider(&tracing_options(config, identity)).await?);
-    resources.logger = Some(install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
+    resources.telemetry.logger = Some(install_subscriber(&LoggingOptions {
+        level: &config.log().level,
+        format: match config.log().format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
@@ -53,23 +54,21 @@ pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
 }
 
 fn tracing_options(config: &WorkerConfig, identity: &str) -> TracingOptions {
-    let otel = &config.observability.otel;
+    let otel = &config.observability().otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,
         TracesSampler::AlwaysOff => infra_telemetry::ResolvedSampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => {
-            infra_telemetry::ResolvedSampler::TraceIdRatio(otel.traces_sampler_arg)
-        }
-        TracesSampler::ParentBasedTraceIdRatio => {
-            infra_telemetry::ResolvedSampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
+        TracesSampler::TraceIdRatio(ratio) => infra_telemetry::ResolvedSampler::TraceIdRatio(ratio),
+        TracesSampler::ParentBasedTraceIdRatio(ratio) => {
+            infra_telemetry::ResolvedSampler::ParentBasedTraceIdRatio(ratio)
         }
     };
     TracingOptions {
         service_name: identity.to_owned(),
-        service_version: config.app.version.clone(),
-        vcs_revision: config.app.commit.clone(),
-        instance_id: config.app.instance_id.clone(),
-        deployment_environment: config.app.env.clone(),
+        service_version: config.app().version.clone(),
+        vcs_revision: config.app().commit.clone(),
+        instance_id: config.app().instance_id.clone(),
+        deployment_environment: config.app().env.clone(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
         otlp_headers: otel.exporter.otlp_headers.clone(),
@@ -87,17 +86,17 @@ pub(super) fn log_startup_record(
     exporter.log();
     tracing::info!(
         service.name = %identity,
-        app.env = %config.app.env,
-        app.version = %config.app.version,
-        app.commit = %config.app.commit,
+        app.env = %config.app().env,
+        app.version = %config.app().version,
+        app.commit = %config.app().commit,
         runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
-        http.addr = %config.http.listener().addr,
-        http.drain_timeout = ?config.http.drain_timeout,
-        http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = ?config.observability.metrics.addr,
+        http.addr = %config.http().listener().addr,
+        http.drain_timeout = ?config.http().drain_timeout,
+        http.grace_period = ?config.http().grace_period,
+        observability.metrics.addr = ?config.observability().metrics.addr,
         // template:begin jobs:worker-bootstrap-log-jobs-fields
-        postgres.max_connections = config.postgres.as_ref().map(|postgres| postgres.max_connections.get()),
-        jobs.max_workers = config.jobs.max_workers.get(),
+        postgres.max_connections = config.postgres().map(|postgres| postgres.max_connections.get()),
+        jobs.max_workers = config.jobs().max_workers.get(),
         jobs.kinds = %super::jobs::kind_names(job_kinds),
         // template:end jobs:worker-bootstrap-log-jobs-fields
         tracing.exporter = exporter.as_str(),

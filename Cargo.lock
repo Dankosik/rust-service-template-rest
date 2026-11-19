@@ -5297,7 +5297,6 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "derive-where",
  "derive_more",
  "domain-events",
  "futures-util",
