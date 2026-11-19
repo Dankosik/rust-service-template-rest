@@ -18,12 +18,20 @@ git rev-parse --abbrev-ref HEAD
 git worktree list --porcelain   # or: wt list
 ```
 
+- **Treat the primary `main` checkout as read-only for mutable tasks.** If
+  `git rev-parse --abbrev-ref HEAD` is `main` and your task edits files (unless
+  the user explicitly asked to edit `main` directly), do not write into the
+  primary checkout; go straight to
+  [Section 2](#2-create-anchored-to-an-explicit-base) to create a sibling task
+  worktree anchored to `origin/main` and target all writes, checks, commits,
+  and PRs inside that new path. Read-only inspection stays in place.
 - **Detect an active linked worktree.** Compare
   `git rev-parse --path-format=absolute --git-dir` with
-  `git rev-parse --path-format=absolute --git-common-dir`: when they differ, you
-  are already inside a linked worktree (`--path-format=absolute` avoids false
-  positives from subdirectories). Stay there; do not spawn another worktree
-  unless delegating separate concurrent mutable sub-tasks under
+  `git rev-parse --path-format=absolute --git-common-dir`: when they differ
+  (and `HEAD` is on a task branch, not `main`), you are already inside a linked
+  task worktree (`--path-format=absolute` avoids false positives from
+  subdirectories). Stay there; do not spawn another worktree unless delegating
+  separate concurrent mutable sub-tasks under
   [Agent Harness](agent-harness.md) (always as sibling checkouts outside the
   repo root or via native harness isolation, never nested inside the current
   worktree).
@@ -71,6 +79,25 @@ git worktree add --no-track -b <type>/<slug> "${root}/../$(basename "${root}").<
   when `wt` hooks are unapproved/skipped), run `make agent-harness-sync` inside
   the new worktree so harness adapters and roles exist before starting work.
 <!-- template:end source-template:worktrees-harness-sync -->
+
+- **Recovering from a dirty or shared checkout (never ask the user):** never
+  include, revert, or ask the user what to do with unrelated uncommitted files
+  from another agent or session. If your edits already landed in a shared or
+  `main` checkout alongside unrelated dirty files:
+  1. Create a fresh sibling task worktree anchored to `origin/main` above.
+  2. Copy or apply **only** the paths you modified into that new worktree and
+     verify they are present there.
+  3. Restore **only** your own paths in the shared checkout
+     (`git checkout -- <your-paths>` for tracked files; remove only untracked
+     files you created), leaving every unrelated path untouched.
+  4. Continue validation, commit, and PR creation inside the new worktree.
+  If you are already on your own task branch with unrelated dirty files present,
+  stage strictly by explicit pathspec (`git add -- <your-paths>`).
+- **Local `main` commit guardrail:** enable the repository's `pre-commit` hook
+  once per clone (`git config core.hooksPath .githooks`, shared across all
+  worktrees) to block accidental direct commits to `main` while still allowing
+  fast-forward `sync-main` merges. Explicit overrides use
+  `ALLOW_MAIN_COMMIT=1` or `git commit --no-verify`.
 
 ## 3. Isolate Mutable State
 

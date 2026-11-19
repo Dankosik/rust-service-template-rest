@@ -54,10 +54,21 @@
 
 ### Branches and Worktrees
 
-- **Stay inside your checkout root and branch.** Verify
-  `git rev-parse --show-toplevel` and the active branch before editing. Keep all
-  writes inside that root, and never switch branches, `git reset --hard`, or
-  `git clean` in a dirty or shared checkout.
+- **Isolate mutable work from `main`; stay inside your task worktree.** Verify
+  `git rev-parse --show-toplevel` and the active branch before editing. Treat
+  the primary `main` checkout as read-only: unless the user explicitly asks to
+  edit `main` directly, before writing any file from a `main` checkout, fetch
+  `origin/main`, create a sibling task worktree per
+  [Branches and Worktrees](docs/worktrees.md#2-create-anchored-to-an-explicit-base),
+  and perform all edits, checks, commits, and PRs inside that worktree. Once in
+  a linked task worktree, keep all writes inside its root, and never switch
+  branches, `git reset --hard`, or `git clean` in a dirty or shared checkout.
+- **Own only your own diff; never ask the user about unrelated dirty files.**
+  Stage, commit, and ship only files changed for your task. If unrelated
+  uncommitted changes appear in a shared checkout, leave them untouched—never
+  include them in your commit or PR, never revert them, and never ask the user
+  what to do with them; isolate your own edits into a fresh task worktree from
+  `origin/main` or stage strictly by explicit file path.
 - **Never use `git stash`.** `refs/stash` is shared across all worktrees and
   contaminates parallel sessions; commit WIP to your own task branch instead.
 - **One branch per worktree, anchored to an explicit base.** Never branch from
@@ -158,7 +169,7 @@ fires:
 | Prompt for another session, phase, or entry skill | [Prompt Composition](docs/prompt-composition.md) |
 | Role carriers, multi-phase delegation, durable Goals, or model/effort tiers | [Agent Harness](docs/agent-harness.md) |
 | Slow builds, worktree `target/` layout, or build caching | [Build Speed](docs/build-speed.md) |
-| Creating, syncing, integrating, or retiring parallel branches or Git worktrees | [Branches and Worktrees](docs/worktrees.md) |
+| Editing from a `main` checkout, isolating unrelated dirty files, or creating, syncing, integrating, or retiring branches or Git worktrees | [Branches and Worktrees](docs/worktrees.md) |
 | Generated contracts (OpenAPI, gRPC, migrations, `.sqlx/`), gate or lint waivers, or container linters beyond [Validation budget](#validation-budget) | [Validation Routing](docs/validation-routing.md) |
 | CI jobs, tool pins, Dockerfile, image/release gates, or `main-red` issues | [CI/CD Production Readiness](docs/ci-cd-production-ready.md) ([Red main](docs/ci-cd-production-ready.md#red-main)); `rust-delivery-platform` |
 | Deployment policy for a derived service | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
