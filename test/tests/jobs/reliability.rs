@@ -2,11 +2,12 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{PgPool, in_tx};
+use infra_postgres::{Pool, in_tx};
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{
     self as reading, Channel, Error, Operation, PreparedRequest,
 };
+use sqlx::PgPool;
 use tokio::sync::Notify;
 
 use super::commit_proxy::{Boundary, CommitProxy, Fault};
@@ -21,7 +22,7 @@ fn operation(index: u128) -> Operation {
     }
 }
 
-async fn setup(pool: &PgPool) -> PgPool {
+async fn setup(pool: &PgPool) -> Pool {
     let admitted = super::template_pool(&integration_tests::dsn_for(pool).await, 4).await;
     reading::migrate(&admitted).await.expect("fixture schema");
     admitted
@@ -48,7 +49,7 @@ async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
     use tokio::process::Command;
 
     const LIMIT: usize = 128 * 1024 + 256;
-    reading::migrate(&pool).await.unwrap();
+    reading::migrate(&Pool::from(pool.clone())).await.unwrap();
     let db = integration_tests::url_for(&pool, integration_tests::DATABASE_URL).await;
     for (size, code, requests) in [(LIMIT + 1, 1, 0), (LIMIT, 0, 1)] {
         let mut batch = serde_json::to_vec(&[operation(11)]).unwrap();
@@ -224,7 +225,7 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
     super::close_pools(&[&admitted]).await;
 }
 
-async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
+async fn proxied_pool(pool: &PgPool) -> (CommitProxy, Pool) {
     let (proxy, proxied) = CommitProxy::start_for(pool).await;
     let admitted = super::template_pool(&proxied, 2).await;
     (proxy, admitted)

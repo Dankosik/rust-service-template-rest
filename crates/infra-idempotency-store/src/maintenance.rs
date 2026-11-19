@@ -1,15 +1,16 @@
 use std::time::Duration;
 
-use infra_postgres::{
+use infra_postgres::maintenance::{
     Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure,
-    PopulationSample, Tx, failure_cause, in_observation_tx, observed, run_scheduled_cleanup,
-    sqlstate,
+    PopulationSample, in_observation_tx, run_scheduled_cleanup,
 };
+use infra_postgres::{Tx, failure_cause, observed, sqlstate};
 use tokio_util::sync::CancellationToken;
 
 use crate::{READ_COMMITTED, Store};
 
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
+const HTTP_IDEMPOTENCY_CLEANUP: Cleanup = Cleanup::new("http_idempotency");
 
 const EXPIRED_RECORDS_BATCH: CleanupBatchOptions = CleanupBatchOptions {
     transaction: READ_COMMITTED,
@@ -32,7 +33,7 @@ pub enum StartupError {
 
 impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        let writable = observed("check idempotency session", async {
+        let writable = observed!("check idempotency session", async {
             let mut connection =
                 infra_postgres::acquire(&self.pool, "check idempotency startup").await?;
             sqlx::query_scalar!(
@@ -68,7 +69,7 @@ impl Store {
         &self,
         cancel: Option<&CancellationToken>,
     ) -> Result<CleanupPassResult, CleanupError> {
-        CleanupPass::start(Cleanup::HttpIdempotency)
+        CleanupPass::start(HTTP_IDEMPOTENCY_CLEANUP)
             .run_until_short_batch(
                 &self.pool,
                 cancel,
@@ -79,7 +80,7 @@ impl Store {
     }
 
     async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
-        let deleted = observed(
+        let deleted = observed!(
             "delete expired idempotency records",
             sqlx::query!(
                 "WITH batch AS ( \
@@ -108,7 +109,7 @@ impl Store {
             "Expired idempotency records the cleanup deleted."
         );
         run_scheduled_cleanup(
-            Cleanup::HttpIdempotency,
+            HTTP_IDEMPOTENCY_CLEANUP,
             CLEANUP_RUNS_METRIC,
             &cancel,
             || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
@@ -119,7 +120,7 @@ impl Store {
 
     async fn sample_expired_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
-            observed(
+            observed!(
                 "observe expired idempotency records",
                 sqlx::query_as!(
                     PopulationSample,

@@ -537,7 +537,7 @@ impl AttemptRun<'_> {
 fn prepare_handler(
     dispatch: &crate::kind::Dispatch,
     attempt: Attempt,
-    pool: infra_postgres::PgPool,
+    pool: infra_postgres::Pool,
     payload: &[u8],
 ) -> Result<HandlerFuture, HandlerOutcome> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -711,9 +711,11 @@ mod tests {
         let registered = registry
             .get(<DecodeProbe as crate::JobKind>::NAME.as_str())
             .unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool = infra_postgres::Pool::from(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap(),
+        );
         let attempt = || Attempt {
             fence: ClaimFence {
                 job_id: ID,
@@ -746,7 +748,10 @@ mod tests {
         };
         later.await.unwrap();
         assert!(ran.load(Ordering::Relaxed));
-        pool.close().await;
+        assert_eq!(
+            infra_postgres::close(&pool, Duration::from_secs(1)).await,
+            infra_postgres::CloseOutcome::Complete
+        );
     }
 
     #[test]

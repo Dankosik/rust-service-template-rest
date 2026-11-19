@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
-use infra_postgres::{
+use infra_postgres::maintenance::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, in_observation_tx, in_tx,
-    observed, set_statement_timeout,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx,
 };
+use infra_postgres::{Tx, in_tx, observed, set_statement_timeout};
 use metrics::Unit;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -30,13 +30,21 @@ const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
+const JOBS_CLEANUP: Cleanup = Cleanup::new("jobs");
+const FAILED_JOBS_POPULATION: MaintenancePopulation =
+    MaintenancePopulation::observed("failed_jobs");
+
 pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
-    let mut pass = CleanupPass::start(Cleanup::Jobs);
+    let mut pass = CleanupPass::start(JOBS_CLEANUP);
     let mut removed = 0u64;
     loop {
-        let batch = Box::pin(delete_batch(primary_group))
-            .await
-            .inspect_err(|_| pass.failed())?;
+        let batch = match Box::pin(delete_batch(primary_group)).await {
+            Ok(batch) => batch,
+            Err(error) => {
+                pass.failed();
+                return Err(error);
+            }
+        };
         pass.committed(batch);
         removed = removed.saturating_add(batch);
         if batch < u64::from(RETENTION_BATCH_ROWS) {
@@ -48,7 +56,7 @@ pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, O
 
 pub(crate) async fn run_retention(primary_group: &WorkerGroup, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
+        let mut schedule = CleanupSchedule::new(JOBS_CLEANUP);
         loop {
             schedule.next().await;
             match remove_expired(primary_group).await {
@@ -92,7 +100,7 @@ async fn delete_batch(primary_group: &WorkerGroup) -> Result<u64, OperationError
             RETAIN_COMPLETED_FOR as _,
             i64::from(RETENTION_BATCH_ROWS),
         );
-        Ok(observed("delete finished jobs", delete.execute(&mut *tx))
+        Ok(observed!("delete finished jobs", delete.execute(&mut *tx))
             .await?
             .rows_affected())
     })
@@ -174,8 +182,8 @@ enum Population {
 impl Population {
     const fn maintenance_population(self) -> MaintenancePopulation {
         match self {
-            Self::ExpiredCompleted => MaintenancePopulation::Cleanup(Cleanup::Jobs),
-            Self::Failed => MaintenancePopulation::FailedJobs,
+            Self::ExpiredCompleted => MaintenancePopulation::cleanup(JOBS_CLEANUP),
+            Self::Failed => FAILED_JOBS_POPULATION,
         }
     }
 }
@@ -189,7 +197,7 @@ async fn read_population(
         .map_err(|_| MaintenanceFailure::Permit)?;
     in_observation_tx(&primary_group.pool, async |tx| {
         Ok(match population {
-            Population::Failed => observed(
+            Population::Failed => observed!(
                 "observe failed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
@@ -200,7 +208,7 @@ async fn read_population(
                 .fetch_one(&mut *tx),
             )
             .await?,
-            Population::ExpiredCompleted => observed(
+            Population::ExpiredCompleted => observed!(
                 "observe completed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
@@ -254,7 +262,7 @@ async fn sample_once(
     kinds: &[&str],
 ) -> Result<Sample, OperationError> {
     in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
-        let rows = observed(
+        let rows = observed!(
             "sample jobs",
             sqlx::query_as!(
                 SampleRow,

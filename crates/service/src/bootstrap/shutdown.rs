@@ -10,7 +10,7 @@ use infra_cache::Cache;
 use infra_object_storage::ObjectStorage;
 // template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
-use infra_postgres::{CloseOutcome, PgPool};
+use infra_postgres::{CloseOutcome, Pool};
 // template:end postgres:shutdown-imports
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
@@ -107,7 +107,7 @@ impl Budget {
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
-    pub(crate) postgres: Option<PgPool>,
+    pub(crate) postgres: Option<Pool>,
     // template:end postgres:shutdown-dependencies-postgres-field
     // template:begin cache:service-shutdown-dependencies-cache-field
     pub(crate) cache: Option<Cache>,
@@ -593,7 +593,7 @@ mod tests {
         entered: CancellationToken,
         dropping: CancellationToken,
         held: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
-        pool: PgPool,
+        pool: Pool,
         released_before_close: CancellationToken,
     ) -> &'static str {
         let _guard = std::mem::DropGuard::new(held, move |held| {
@@ -609,6 +609,24 @@ mod tests {
         std::future::pending().await
     }
 
+    fn lazy_test_pool() -> Pool {
+        let dsn = infra_postgres::Dsn::admit(
+            "postgres://app:test@127.0.0.1:1/unused?sslmode=verify-full",
+        )
+        .unwrap();
+        infra_postgres::prepare_pool(
+            &dsn,
+            &infra_postgres::PoolOptions {
+                max_connections: std::num::NonZeroU32::MIN,
+                application_name: "shutdown-order-test",
+                default_isolation: infra_postgres::Isolation::ServerDefault,
+                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+                wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
+                notifications: false,
+            },
+        )
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forced_handler_releases_before_postgres_close_and_shutdown_stays_degraded() {
         use std::sync::{Arc, Mutex, mpsc};
@@ -622,10 +640,7 @@ mod tests {
         let (release, held) = mpsc::channel();
         let held = Arc::new(Mutex::new(held));
         let mut dependencies = Dependencies::default();
-        let pool = dependencies
-            .postgres
-            .insert(PgPool::connect_lazy("postgres://localhost/unused").unwrap())
-            .clone();
+        let pool = dependencies.postgres.insert(lazy_test_pool()).clone();
         let handler = {
             let entered = entered.clone();
             let dropping = dropping.clone();

@@ -9,11 +9,11 @@ use infra_jobs::{
     LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError,
     compare_live_payload, enqueue, enqueue_delayed, enqueue_unique,
 };
-use infra_postgres::{Dsn, PgPool, Tx, in_tx};
+use infra_postgres::{Dsn, Pool, SslPolicy, Tx, TxError, TxOptions, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
-use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -108,18 +108,22 @@ fn locked_multi_kind_registry() -> infra_jobs::Kinds {
     let mut kinds = KindsBuilder::new();
     kinds.register::<Probe>(Policy::default(), jobs::handle);
     kinds.register::<Stranded>(Policy::default(), |job: Job<Stranded>| async move {
+        let mut conn = infra_postgres::acquire(job.pool(), "stranded probe")
+            .await
+            .map_err(|_| JobError::retryable("probe acquire failed"))?;
         sqlx::query("INSERT INTO stranded_attempts (job_id) VALUES ($1::uuid)")
             .bind(job.id().to_string())
-            .execute(job.pool())
+            .execute(&mut *conn)
             .await
             .map_err(|_| JobError::retryable("probe write failed"))?;
+        drop(conn);
         job.cancellation().cancelled().await;
         Err(JobError::retryable("stranded test cancellation"))
     });
     kinds.validate().expect("the multi-kind registry")
 }
 
-fn start(pool: &PgPool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun {
+fn start(pool: &Pool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun {
     let engine = Engine::new(
         pool.clone(),
         registry,
@@ -138,29 +142,32 @@ fn start(pool: &PgPool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun 
     }
 }
 
-async fn open(pool: &PgPool, workers: u32) -> PgPool {
+async fn open(pool: &PgPool, workers: u32) -> Pool {
     super::template_pool(&dsn_for(pool).await, workers + 2).await
 }
 
-async fn proxied_pool(pool: &PgPool, workers: u32) -> (CommitProxy, PgPool) {
+async fn proxied_pool(pool: &PgPool, workers: u32) -> (CommitProxy, Pool) {
     let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, super::template_pool(&proxied, workers).await)
 }
 
-async fn prepare(pool: &PgPool) {
+async fn prepare(pool: &Pool) {
+    let mut conn = infra_postgres::acquire(pool, "prepare")
+        .await
+        .expect("pool connection");
     sqlx::query(jobs::CREATE_PROBE_ATTEMPTS)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .expect("the probe table");
 }
 
-async fn join(run: EngineRun, pools: &[&PgPool]) {
+async fn join(run: EngineRun, pools: &[&Pool]) {
     run.cancel.cancel();
     super::bounded("background tasks", run.tracker.wait()).await;
     super::close_pools(pools).await;
 }
 
-async fn finish(run: EngineRun, pools: &[&PgPool]) {
+async fn finish(run: EngineRun, pools: &[&Pool]) {
     run.started.stop_claiming();
     super::bounded("the engine drains", run.started.drained()).await;
     join(run, pools).await;
@@ -238,8 +245,16 @@ async fn an_expired_checkout_does_not_use_an_idle_connection(pool: PgPool) {
     );
     let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
     std::assert_matches!(
-        infra_postgres::acquire_until(&jobs, "expired checkout", deadline).await,
-        Err(sqlx::Error::PoolTimedOut)
+        infra_postgres::in_tx_with_acquire_deadline(
+            &jobs,
+            deadline,
+            TxOptions::default(),
+            async |_tx| -> Result<(), TxError> {
+                panic!("an expired checkout must not enter the transaction");
+            },
+        )
+        .await,
+        Err(TxError::Acquire(sqlx::Error::PoolTimedOut))
     );
     super::close_pools(&[&jobs]).await;
 }
@@ -278,7 +293,10 @@ async fn wait_for_dispatched_claim(pool: &PgPool) {
     .await;
 }
 
-async fn install_claim_transition_blocker(pool: &PgPool) {
+async fn install_claim_transition_blocker(pool: &Pool) {
+    let mut conn = infra_postgres::acquire(pool, "install_claim_transition_blocker")
+        .await
+        .expect("pool connection");
     sqlx::raw_sql(
         "CREATE FUNCTION test_block_claim_transition() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN \
@@ -292,16 +310,12 @@ async fn install_claim_transition_blocker(pool: &PgPool) {
          BEFORE UPDATE OF state ON background_jobs \
          FOR EACH ROW EXECUTE FUNCTION test_block_claim_transition();",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .expect("the claim transition blocker");
 }
 
 async fn hold_claim_transition(pool: &PgPool) -> Transaction<'_, Postgres> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
     let mut blocker = pool.begin().await.expect("the claim blocker transaction");
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(CLAIM_BLOCK_KEY)
@@ -311,7 +325,7 @@ async fn hold_claim_transition(pool: &PgPool) -> Transaction<'_, Postgres> {
     blocker
 }
 
-async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
+async fn enqueue_one(pool: &Pool, action: ProbeAction) -> String {
     let id = must(
         in_tx(pool, async |tx| -> Result<_, AttemptError> {
             Ok(enqueue(tx, &Probe { action }).await?)
@@ -322,7 +336,7 @@ async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
     id.to_string()
 }
 
-async fn enqueue_many(pool: &PgPool, action: ProbeAction, count: i64) -> Vec<String> {
+async fn enqueue_many(pool: &Pool, action: ProbeAction, count: i64) -> Vec<String> {
     must(
         in_tx(pool, async |tx| -> Result<Vec<String>, AttemptError> {
             let mut ids = Vec::new();
@@ -336,7 +350,10 @@ async fn enqueue_many(pool: &PgPool, action: ProbeAction, count: i64) -> Vec<Str
     )
 }
 
-async fn load(pool: &PgPool, id: &str) -> JobView {
+async fn load(pool: &Pool, id: &str) -> JobView {
+    let mut conn = infra_postgres::acquire(pool, "load")
+        .await
+        .expect("pool connection");
     let row = sqlx::query(
         "SELECT state, attempts, claim_generation, failure_reason, error_summary, \
          claim_expires_at IS NULL AS claim_cleared, finished_at IS NOT NULL AS finished, \
@@ -351,7 +368,7 @@ async fn load(pool: &PgPool, id: &str) -> JobView {
          FROM background_jobs WHERE id::text = $1",
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .expect("the job row");
     JobView {
@@ -370,15 +387,21 @@ async fn load(pool: &PgPool, id: &str) -> JobView {
     }
 }
 
-async fn attempts_of(pool: &PgPool, id: &str) -> Vec<i32> {
+async fn attempts_of(pool: &Pool, id: &str) -> Vec<i32> {
+    let mut conn = infra_postgres::acquire(pool, "attempts_of")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT attempt FROM probe_attempts WHERE job_id = $1::uuid ORDER BY seq")
         .bind(id)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .expect("probe attempts")
 }
 
-async fn attempt_started_us(pool: &PgPool, id: &str, attempt: i32) -> Option<i64> {
+async fn attempt_started_us(pool: &Pool, id: &str, attempt: i32) -> Option<i64> {
+    let mut conn = infra_postgres::acquire(pool, "attempt_started_us")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar(
         "SELECT (EXTRACT(EPOCH FROM started_at) * 1000000)::bigint \
          FROM probe_attempts WHERE job_id = $1::uuid AND attempt = $2 \
@@ -386,19 +409,25 @@ async fn attempt_started_us(pool: &PgPool, id: &str, attempt: i32) -> Option<i64
     )
     .bind(id)
     .bind(attempt)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .expect("attempt start")
 }
 
-async fn db_now_us(pool: &PgPool) -> i64 {
+async fn db_now_us(pool: &Pool) -> i64 {
+    let mut conn = infra_postgres::acquire(pool, "db_now_us")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint")
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .expect("database clock")
 }
 
-async fn set_not_before(pool: &PgPool, id: &str, seconds_ago: i64) {
+async fn set_not_before(pool: &Pool, id: &str, seconds_ago: i64) {
+    let mut conn = infra_postgres::acquire(pool, "set_not_before")
+        .await
+        .expect("pool connection");
     let updated = sqlx::query(
         "UPDATE background_jobs \
          SET not_before = statement_timestamp() - ($2 * interval '1 second') \
@@ -406,13 +435,13 @@ async fn set_not_before(pool: &PgPool, id: &str, seconds_ago: i64) {
     )
     .bind(id)
     .bind(seconds_ago)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .expect("not_before moves");
     assert_eq!(updated.rows_affected(), 1);
 }
 
-async fn completed(pool: &PgPool, id: &str) -> JobView {
+async fn completed(pool: &Pool, id: &str) -> JobView {
     until("the job completes", super::WAIT, async || {
         let view = load(pool, id).await;
         (view.state == "completed").then_some(view)
@@ -420,7 +449,7 @@ async fn completed(pool: &PgPool, id: &str) -> JobView {
     .await
 }
 
-async fn first_summary(pool: &PgPool, id: &str, bound: Duration) -> JobView {
+async fn first_summary(pool: &Pool, id: &str, bound: Duration) -> JobView {
     until("the attempt records a summary", bound, async || {
         let view = load(pool, id).await;
         view.error_summary.is_some().then_some(view)
@@ -432,7 +461,10 @@ fn probe_json(action: ProbeAction) -> String {
     serde_json::to_string(&Probe { action }).expect("probe payload")
 }
 
-async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, i64) {
+async fn stage_running(pool: &Pool, payload: &str, expired: bool) -> (String, i64) {
+    let mut conn = infra_postgres::acquire(pool, "stage_running")
+        .await
+        .expect("pool connection");
     let sql = if expired {
         "INSERT INTO background_jobs \
          (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
@@ -451,7 +483,7 @@ async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, 
     let row = sqlx::query(sql)
         .bind(Probe::NAME.as_str())
         .bind(payload)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .expect("a staged running job");
     (
@@ -460,7 +492,10 @@ async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, 
     )
 }
 
-async fn stage_expired_gate(pool: &PgPool) -> String {
+async fn stage_expired_gate(pool: &Pool) -> String {
+    let mut conn = infra_postgres::acquire(pool, "stage_expired_gate")
+        .await
+        .expect("pool connection");
     let row = sqlx::query(
         "INSERT INTO background_jobs \
          (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
@@ -471,7 +506,7 @@ async fn stage_expired_gate(pool: &PgPool) -> String {
     )
     .bind(Gate::NAME.as_str())
     .bind(serde_json::to_string(&Gate { token: 1 }).expect("gate payload"))
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .expect("an expired gate job");
     row.try_get("id").expect("id")
@@ -499,7 +534,7 @@ async fn x1_x3_two_engines_run_each_job_once(pool: PgPool) {
     until("every raced job completes", super::WAIT, async || {
         let completed: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'completed'")
-                .fetch_one(&pool_a)
+                .fetch_one(&pool)
                 .await
                 .expect("completed count");
         (completed == RACE_JOBS).then_some(())
@@ -507,16 +542,16 @@ async fn x1_x3_two_engines_run_each_job_once(pool: PgPool) {
     .await;
 
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-        .fetch_one(&pool_a)
+        .fetch_one(&pool)
         .await
         .expect("probe count");
     let distinct: i64 = sqlx::query_scalar("SELECT count(DISTINCT job_id) FROM probe_attempts")
-        .fetch_one(&pool_a)
+        .fetch_one(&pool)
         .await
         .expect("distinct jobs");
     let wrong_attempt: i64 =
         sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE attempt <> 1")
-            .fetch_one(&pool_a)
+            .fetch_one(&pool)
             .await
             .expect("attempt numbers");
     assert_eq!(rows, RACE_JOBS, "each job ran exactly once");
@@ -567,10 +602,9 @@ async fn x1_unknown_committed_claim_never_dispatches_a_handler(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) {
     let jobs = open(&pool, 1).await;
-    let locker = open(&pool, 1).await;
     prepare(&jobs).await;
     sqlx::query("CREATE TABLE stranded_attempts (job_id uuid NOT NULL)")
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .expect("the second-kind attempts table");
     let locked = enqueue_one(&jobs, ProbeAction::Succeed).await;
@@ -585,11 +619,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
             "the other-kind job commits",
         );
     }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
-    let mut hold = locker.begin().await.expect("the candidate lock begins");
+    let mut hold = pool.begin().await.expect("the candidate lock begins");
     sqlx::query("SELECT 1 FROM background_jobs WHERE id::text = $1 FOR UPDATE")
         .bind(&locked)
         .execute(&mut *hold)
@@ -601,7 +631,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
         super::WAIT,
         async || {
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
-                .fetch_one(&jobs)
+                .fetch_one(&pool)
                 .await
                 .expect("second-kind attempt count");
             (count == 1).then_some(())
@@ -613,7 +643,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     assert_eq!(locked_view.attempts, 0);
     assert_eq!(attempts_of(&jobs, &locked).await, Vec::<i32>::new());
     let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
-        .fetch_one(&jobs)
+        .fetch_one(&pool)
         .await
         .expect("second-kind attempt count");
     assert_eq!(dispatched, 1, "the only slot runs the next unlocked job");
@@ -623,7 +653,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     let end = run.started.cancel_and_finish(RELEASE_BUDGET).await;
     assert_eq!(end.cancelled, 1);
     assert!(!end.timed_out, "{end:?}");
-    join(run, &[&jobs, &locker]).await;
+    join(run, &[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -640,7 +670,7 @@ async fn x1_due_jobs_run_in_not_before_then_id_order(pool: PgPool) {
 
     until("every ordered job runs", super::WAIT, async || {
         let ran: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-            .fetch_one(&jobs)
+            .fetch_one(&pool)
             .await
             .expect("probe count");
         (ran == 5).then_some(())
@@ -649,16 +679,16 @@ async fn x1_due_jobs_run_in_not_before_then_id_order(pool: PgPool) {
 
     let expected: Vec<String> =
         sqlx::query_scalar("SELECT id::text FROM background_jobs ORDER BY not_before, id")
-            .fetch_all(&jobs)
+            .fetch_all(&pool)
             .await
             .expect("claim order");
     let actual: Vec<String> =
         sqlx::query_scalar("SELECT job_id::text FROM probe_attempts ORDER BY seq")
-            .fetch_all(&jobs)
+            .fetch_all(&pool)
             .await
             .expect("execution order");
     let by_id: Vec<String> = sqlx::query_scalar("SELECT id::text FROM background_jobs ORDER BY id")
-        .fetch_all(&jobs)
+        .fetch_all(&pool)
         .await
         .expect("id order");
     assert_ne!(expected, by_id, "not_before must change the order");
@@ -686,7 +716,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
             "SELECT count(*) FROM background_jobs WHERE kind = $1 AND state = 'completed'",
         )
         .bind(Probe::NAME.as_str())
-        .fetch_one(&jobs)
+        .fetch_one(&pool)
         .await
         .expect("completed probes");
         (completed == 3).then_some(())
@@ -722,7 +752,7 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
     until("two slots fill", super::WAIT, async || {
         let running: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'running'")
-                .fetch_one(&jobs)
+                .fetch_one(&pool)
                 .await
                 .expect("running count");
         (running == 2 && run.started.in_flight() == 2).then_some(())
@@ -733,14 +763,14 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
     absent_for(window, async || {
         let running: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'running'")
-                .fetch_one(&jobs)
+                .fetch_one(&pool)
                 .await
                 .expect("running count");
         let untouched: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM background_jobs \
              WHERE state = 'pending' AND attempts = 0 AND claim_generation = 0",
         )
-        .fetch_one(&jobs)
+        .fetch_one(&pool)
         .await
         .expect("untouched count");
         assert_eq!(running, 2, "a claim took more than the free slots");
@@ -758,7 +788,7 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool) {
-    let jobs = infra_postgres::prepare_pool_with_notifications(
+    let jobs = infra_postgres::prepare_pool(
         &dsn_for(&pool).await,
         &infra_postgres::PoolOptions {
             max_connections: NonZeroU32::new(3).unwrap(),
@@ -766,8 +796,8 @@ async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool)
             default_isolation: infra_postgres::Isolation::ReadCommitted,
             session_settings_source: infra_postgres::SessionSettingsSource::Startup,
             wait_order: infra_postgres::WaitOrder::Arrival,
+            notifications: false,
         },
-        false,
     );
     prepare(&jobs).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
@@ -790,7 +820,7 @@ async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool)
     );
     let view = completed(&jobs, &id).await;
     assert_eq!(view.attempts, 1);
-    assert_eq!(listening_sessions(&jobs).await, 0);
+    assert_eq!(listening_sessions(&pool).await, 0);
     finish(run, &[&jobs]).await;
 }
 
@@ -801,14 +831,14 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     let recorder = WakeRecorder::default();
     let _local = metrics::set_default_local_recorder(&recorder);
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
-    let listener = wake_listener_ready(&jobs, &recorder, 1).await;
+    let listener = wake_listener_ready(&pool, &recorder, 1).await;
     let mut clock = WakeClock::pause().await;
-    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME.as_str()]).await;
+    prove_empty_notification_rounds(&pool, &recorder, &mut clock, &[Probe::NAME.as_str()]).await;
     let id = clock
         .wait(
             "a due job and its wake commit",
             insert_notified(
-                &jobs,
+                &pool,
                 Probe::NAME.as_str(),
                 probe_json(ProbeAction::Succeed),
             ),
@@ -824,7 +854,7 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     let view = clock.wait("the claimed row", load(&jobs, &id)).await;
     assert_eq!(view.attempts, 1);
     assert_eq!(
-        clock.wait("the same listener", listening_pid(&jobs)).await,
+        clock.wait("the same listener", listening_pid(&pool)).await,
         Some(listener)
     );
     clock.resume().await;
@@ -1111,7 +1141,7 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
     let (proxy, worker) = proxied_pool(&pool, 1).await;
     let run = start(&worker, probe_registry(2, DEFAULT_TIMEOUT), 1);
     until("the wake listener subscribes", super::WAIT, || {
-        listening_pid(&worker)
+        listening_pid(&pool)
     })
     .await;
     run.started.stop_claiming();
@@ -1157,8 +1187,8 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     }
     url.set_username(&role).expect("a user name");
     url.set_password(Some("first")).expect("a password");
-    let dsn =
-        Dsn::admit_for_environment(url.as_str(), None, true).expect("the role's DSN is admitted");
+    let dsn = Dsn::admit_with(url.as_str(), None, SslPolicy::AllowLocalDevelopment)
+        .expect("the role's DSN is admitted");
     let jobs = super::template_pool(&dsn, 3).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let first = until("the engine listens", super::WAIT, async || {
@@ -1172,7 +1202,26 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     .execute(&pool)
     .await
     .expect("the rotation");
-    jobs.set_connect_options(jobs.connect_options().as_ref().clone().password("second"));
+    let before_options = jobs.connect_options();
+    let dir = tempfile::tempdir().expect("tempdir for rotated password");
+    let password_file = dir.path().join("password");
+    tokio::fs::write(&password_file, "second\n")
+        .await
+        .expect("rotated password file");
+    let refresh_cancel = CancellationToken::new();
+    let refresh = tokio::spawn(infra_postgres::refresh_password_periodically(
+        jobs.clone(),
+        password_file,
+        refresh_cancel.clone(),
+    ));
+    until(
+        "the pool installs the rotated password",
+        super::WAIT,
+        async || (!Arc::ptr_eq(&before_options, &jobs.connect_options())).then_some(()),
+    )
+    .await;
+    refresh_cancel.cancel();
+    refresh.await.expect("password refresh task exits");
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(first)
         .fetch_one(&pool)
@@ -1227,10 +1276,10 @@ async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
     let run = engine.start(&tracker, &cancel);
-    let listener = wake_listener_ready(&jobs, &recorder, 2).await;
+    let listener = wake_listener_ready(&pool, &recorder, 2).await;
     let mut clock = WakeClock::pause().await;
     prove_empty_notification_rounds(
-        &jobs,
+        &pool,
         &recorder,
         &mut clock,
         &[Probe::NAME.as_str(), Stranded::NAME.as_str()],
@@ -1239,7 +1288,7 @@ async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     let reserved_id = clock
         .wait(
             "the reserved job and its wake commit",
-            insert_notified(&jobs, Stranded::NAME.as_str(), r#"{"token":1}"#.to_owned()),
+            insert_notified(&pool, Stranded::NAME.as_str(), r#"{"token":1}"#.to_owned()),
         )
         .await;
     clock.advance_cooldown().await;
@@ -1252,12 +1301,12 @@ async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     assert_eq!(view.attempts, 1);
     assert_eq!(
         clock
-            .wait("the same shared listener", listening_pid(&jobs))
+            .wait("the same shared listener", listening_pid(&pool))
             .await,
         Some(listener)
     );
     clock.resume().await;
-    assert_eq!(listening_sessions(&jobs).await, 1);
+    assert_eq!(listening_sessions(&pool).await, 1);
 
     let ordinary_id = enqueue_one(&jobs, ProbeAction::Succeed).await;
     let by_ordinary = completed(&jobs, &ordinary_id).await.attempted_by;
@@ -1311,10 +1360,13 @@ fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Kinds {
     kinds.validate().expect("the capped registry")
 }
 
-async fn states(pool: &PgPool, kind: &str) -> Vec<String> {
+async fn states(pool: &Pool, kind: &str) -> Vec<String> {
+    let mut conn = infra_postgres::acquire(pool, "states")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT state FROM background_jobs WHERE kind = $1 ORDER BY state")
         .bind(kind)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .expect("the kind's job states")
 }
@@ -1353,13 +1405,9 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         "SELECT id::text FROM background_jobs WHERE kind = $1 AND state = 'running'",
     )
     .bind(Gate::NAME.as_str())
-    .fetch_one(&jobs)
+    .fetch_one(&pool)
     .await
     .expect("the capped running job");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
     let mut hold = pool.begin().await.expect("the completion row lock begins");
     sqlx::query("SELECT 1 FROM background_jobs WHERE id::text = $1 FOR UPDATE")
         .bind(&running)
@@ -1367,7 +1415,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         .await
         .expect("the capped completion is blocked");
     capped.open.add_permits(1);
-    super::wait_for_lock_waiter(&jobs).await;
+    super::wait_for_lock_waiter(&pool).await;
 
     absent_for(POLL_INTERVAL + POLL, async || {
         assert_eq!(
@@ -1435,9 +1483,9 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         )
         .await;
         absent_for(Duration::from_secs(2), async || {
-            assert_eq!(super::job_count(&jobs).await, 0);
+            assert_eq!(super::job_count(&pool).await, 0);
             let probes: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-                .fetch_one(&jobs)
+                .fetch_one(&pool)
                 .await
                 .expect("probe count");
             assert_eq!(probes, 0);
@@ -1556,7 +1604,7 @@ async fn assert_stale_completion_ignored(pool: &PgPool, advance_generation: bool
     )
     .bind(&id)
     .bind(advance_generation)
-    .execute(&jobs)
+    .execute(pool)
     .await
     .expect("the newer claim");
     assert_eq!(updated.rows_affected(), 1);
@@ -1742,7 +1790,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     let (proxy, replacement) = proxied_pool(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .expect("the business-effects table");
     let gate = Arc::new(TransactionGateState::default());
@@ -1772,13 +1820,13 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
-    .execute(&jobs)
+    .execute(&pool)
     .await
     .expect("restore pending work before reclaiming with the lost generation");
     assert_eq!(restored.rows_affected(), 1);
     sqlx::query("SELECT setval('background_jobs_claim_generation', $1, false)")
         .bind(original.claim_generation)
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .expect("the next claim repeats the lost generation");
     let replacement_gate = Arc::new(TransactionGateState::default());
@@ -1800,7 +1848,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
 
     super::bounded("the old executor drains", run.started.drained()).await;
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-        .fetch_one(&jobs)
+        .fetch_one(&pool)
         .await
         .expect("business effects count");
     assert_eq!(
@@ -1824,7 +1872,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     assert_eq!(done.attempts, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_effects")
-            .fetch_one(&jobs)
+            .fetch_one(&pool)
             .await
             .expect("committed business effects"),
         1,
@@ -1844,7 +1892,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
     let jobs = open(pool, 1).await;
     let (proxy, worker) = proxied_pool(pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
-        .execute(&jobs)
+        .execute(pool)
         .await
         .expect("the business-effects table");
     let gate = Arc::new(TransactionGateState {
@@ -1887,7 +1935,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
     .await;
     assert_eq!(proxy.fired(), Some(fault));
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-        .fetch_one(&jobs)
+        .fetch_one(pool)
         .await
         .expect("business effects count");
     match fault {
@@ -1904,7 +1952,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
             let retried = completed(&jobs, &id).await;
             assert_eq!(retried.attempts, 2);
             let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-                .fetch_one(&jobs)
+                .fetch_one(pool)
                 .await
                 .expect("retried business effects count");
             assert_eq!(effects, 1, "the rollback permits one later execution");
@@ -1932,7 +1980,6 @@ async fn x6_uncertain_rolled_back_complete_retries_the_business_closure_once(poo
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool) {
     let jobs = open(&pool, 1).await;
-    let locker = open(&pool, 1).await;
     let gate = Arc::new(GateState {
         entered: Notify::new(),
         open: Notify::new(),
@@ -1947,21 +1994,14 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     let run = start(&jobs, gate_registry(Arc::clone(&gate)), 1);
     super::bounded("the gate handler starts", gate.entered.notified()).await;
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
-    let mut hold = locker
-        .begin()
-        .await
-        .expect("the row-lock transaction begins");
+    let mut hold = pool.begin().await.expect("the row-lock transaction begins");
     sqlx::query("SELECT 1 FROM background_jobs WHERE id::text = $1 FOR UPDATE")
         .bind(&id)
         .execute(&mut *hold)
         .await
         .expect("the row is locked");
     gate.open.notify_one();
-    super::wait_for_lock_waiter(&jobs).await;
+    super::wait_for_lock_waiter(&pool).await;
 
     let pending = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
@@ -2005,7 +2045,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     assert_eq!(view.state, "completed");
     assert_eq!(view.attempts, 1);
     assert!(view.claim_cleared);
-    join(run, &[&jobs, &locker]).await;
+    join(run, &[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -2072,7 +2112,10 @@ async fn x6_spent_budget_fails_exhausted_without_running(pool: PgPool) {
     finish(run, &[&jobs]).await;
 }
 
-async fn stage_spent(pool: &PgPool, payload: &str, summary: Option<&str>) -> String {
+async fn stage_spent(pool: &Pool, payload: &str, summary: Option<&str>) -> String {
+    let mut conn = infra_postgres::acquire(pool, "stage_spent")
+        .await
+        .expect("pool connection");
     let row = sqlx::query(
         "INSERT INTO background_jobs (id, kind, payload, state, attempts, not_before, error_summary) \
          VALUES (gen_random_uuid(), $1, $2::jsonb, 'pending', 2, statement_timestamp() - interval '1 second', $3) \
@@ -2081,7 +2124,7 @@ async fn stage_spent(pool: &PgPool, payload: &str, summary: Option<&str>) -> Str
     .bind(Probe::NAME.as_str())
     .bind(payload)
     .bind(summary)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .expect("a spent job");
     row.try_get("id").expect("id")
@@ -2408,7 +2451,7 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
          RETURNING id::text AS id",
     )
     .bind(Probe::NAME.as_str())
-    .fetch_one(&jobs)
+    .fetch_one(&pool)
     .await
     .expect("the undecodable job");
     let id: String = row.try_get("id").expect("id");
@@ -2438,7 +2481,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
                 statement_timestamp() - interval '25 hours' \
          FROM generate_series(1, 1201) AS g",
     )
-    .execute(&jobs)
+    .execute(&pool)
     .await
     .expect("old completed rows");
     for kind in [Probe::NAME.as_str(), Stranded::NAME.as_str()] {
@@ -2448,14 +2491,14 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
         stage_live(&jobs, kind, false).await;
         stage_live(&jobs, kind, true).await;
     }
-    let before = super::job_count(&jobs).await;
+    let before = super::job_count(&pool).await;
     let engine = Engine::new(
         jobs.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::MIN,
     );
     let deleted = engine.remove_expired().await.expect("retention");
-    let after = super::job_count(&jobs).await;
+    let after = super::job_count(&pool).await;
     assert_eq!(deleted, 1201);
     let scrape = recorder.handle().render();
     for line in [
@@ -2474,14 +2517,14 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
         "SELECT count(*) FROM background_jobs \
          WHERE state = 'completed' AND finished_at <= statement_timestamp() - interval '24 hours'",
     )
-    .fetch_one(&jobs)
+    .fetch_one(&pool)
     .await
     .expect("old completed");
     let old_failed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM background_jobs \
          WHERE state = 'failed' AND finished_at <= statement_timestamp() - interval '7 days'",
     )
-    .fetch_one(&jobs)
+    .fetch_one(&pool)
     .await
     .expect("old failed");
     assert_eq!(old_completed, 0);
@@ -2499,12 +2542,15 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
 }
 
 async fn stage_terminal(
-    pool: &PgPool,
+    pool: &Pool,
     kind: &str,
     state: &str,
     reason: Option<&str>,
     seconds_ago: i64,
 ) {
+    let mut conn = infra_postgres::acquire(pool, "stage_terminal")
+        .await
+        .expect("pool connection");
     let inserted = sqlx::query(
         "INSERT INTO background_jobs \
          (id, kind, payload, state, failure_reason, finished_at, not_before) \
@@ -2516,13 +2562,16 @@ async fn stage_terminal(
     .bind(state)
     .bind(reason)
     .bind(seconds_ago)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .expect("a terminal row");
     assert_eq!(inserted.rows_affected(), 1);
 }
 
-async fn stage_live(pool: &PgPool, kind: &str, running: bool) {
+async fn stage_live(pool: &Pool, kind: &str, running: bool) {
+    let mut conn = infra_postgres::acquire(pool, "stage_live")
+        .await
+        .expect("pool connection");
     let sql = if running {
         "INSERT INTO background_jobs \
          (id, kind, payload, state, attempts, claim_generation, not_before, claim_expires_at) \
@@ -2537,25 +2586,31 @@ async fn stage_live(pool: &PgPool, kind: &str, running: bool) {
     };
     let inserted = sqlx::query(sql)
         .bind(kind)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .expect("a live row");
     assert_eq!(inserted.rows_affected(), 1);
 }
 
-async fn count_state(pool: &PgPool, state: &str) -> i64 {
+async fn count_state(pool: &Pool, state: &str) -> i64 {
+    let mut conn = infra_postgres::acquire(pool, "count_state")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = $1")
         .bind(state)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .expect("a state count")
 }
 
-async fn count_kind_state(pool: &PgPool, kind: &str, state: &str) -> i64 {
+async fn count_kind_state(pool: &Pool, kind: &str, state: &str) -> i64 {
+    let mut conn = infra_postgres::acquire(pool, "count_kind_state")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE kind = $1 AND state = $2")
         .bind(kind)
         .bind(state)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .expect("a kind count")
 }
@@ -2828,10 +2883,6 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::MIN,
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
     let mut blocker = pool.begin().await.expect("the table lock transaction");
     sqlx::query("LOCK TABLE background_jobs IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
@@ -2858,11 +2909,16 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
     }
     blocker.commit().await.expect("the table lock releases");
 
-    let statement_timeout: String =
-        sqlx::query_scalar("SELECT current_setting('statement_timeout')")
-            .fetch_one(&jobs)
+    let mut conn =
+        infra_postgres::acquire(&jobs, "verify statement_timeout after cancelled retention")
             .await
             .expect("a pool session after the cancelled retention");
+    let statement_timeout: String =
+        sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("a pool session after the cancelled retention");
+    drop(conn);
     assert_eq!(statement_timeout, "8s");
     super::close_pools(&[&jobs]).await;
 }

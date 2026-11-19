@@ -52,6 +52,13 @@ pub enum DsnError {
     PasswordFileEmpty,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SslPolicy {
+    #[default]
+    VerifyFull,
+    AllowLocalDevelopment,
+}
+
 #[derive(Clone)]
 pub struct Dsn {
     options: PgConnectOptions,
@@ -71,19 +78,15 @@ impl std::fmt::Debug for Dsn {
 
 impl Dsn {
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
-        Self::admit_with(raw, None)
+        Self::admit_with(raw, None, SslPolicy::VerifyFull)
     }
 
-    pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
-        Self::admit_for_environment(raw, password_file, false)
-    }
-
-    pub fn admit_for_environment(
+    pub fn admit_with(
         raw: &str,
         password_file: Option<&Path>,
-        local_development: bool,
+        ssl_policy: SslPolicy,
     ) -> Result<Self, DsnError> {
-        Self::admit_from(raw, password_file, local_development, |name| {
+        Self::admit_from(raw, password_file, ssl_policy, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
@@ -93,13 +96,13 @@ impl Dsn {
     where
         F: Fn(&str) -> bool,
     {
-        Self::admit_from(raw, None, true, is_env_set)
+        Self::admit_from(raw, None, SslPolicy::AllowLocalDevelopment, is_env_set)
     }
 
     fn admit_from<F>(
         raw: &str,
         password_file: Option<&Path>,
-        local_development: bool,
+        ssl_policy: SslPolicy,
         is_env_set: F,
     ) -> Result<Self, DsnError>
     where
@@ -126,7 +129,9 @@ impl Dsn {
         check_parameters(&url)?;
 
         let options = PgConnectOptions::from_url(&url).map_err(|_| DsnError::Unusable)?;
-        if !local_development && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
+        if ssl_policy == SslPolicy::VerifyFull
+            && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull)
+        {
             return Err(DsnError::ServerVerification);
         }
         if options.get_socket().is_some() {
@@ -390,7 +395,7 @@ mod tests {
             let raw = format!("postgres://app:pw@h:5432/app?sslmode={mode}");
             let dsn = parse(&raw).unwrap();
             assert_eq!(dsn.ssl_mode_name(), mode);
-            let production = Dsn::admit_from(&raw, None, false, |_| false);
+            let production = Dsn::admit_from(&raw, None, SslPolicy::VerifyFull, |_| false);
             if mode == "verify-full" {
                 assert!(production.is_ok());
             } else {
@@ -488,7 +493,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
         let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
-        let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), true, |_| false);
+        let admit = |raw: &str| {
+            Dsn::admit_from(raw, Some(&file), SslPolicy::AllowLocalDevelopment, |_| {
+                false
+            })
+        };
 
         assert_eq!(
             admit(without_password).err(),

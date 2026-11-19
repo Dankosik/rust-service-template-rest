@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use foldhash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
-use infra_postgres::{failure_cause, observed, sqlstate};
+use infra_postgres::{Pool, failure_cause, observed, sqlstate};
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
-use sqlx::postgres::{PgConnection, PgPool};
+use sqlx::postgres::PgConnection;
 
 use crate::MIGRATOR;
 
@@ -42,7 +42,7 @@ impl HistoryError {
     }
 }
 
-pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
+pub async fn verify_history(pool: &Pool) -> Result<(), HistoryError> {
     let mut stage = "acquire";
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
@@ -111,7 +111,7 @@ async fn history_table_exists_elsewhere(
         .rsplit_once('.')
         .map_or(table, |(_, name)| name)
         .trim_matches('"');
-    observed(
+    observed!(
         "SELECT pg_class",
         sqlx::query_scalar!(
             r#"SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r') AS "exists!""#,

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    BudgetedTx, Tx, TxError, TxMode, failure_cause, in_tx_with, in_tx_with_deadline, is_transient,
-    observed, sqlstate,
+    BudgetedTx, SavepointEnd, SavepointError, Tx, TxError, TxMode, failure_cause, in_tx_with,
+    in_tx_with_deadline, is_transient, observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgBindIterExt as _;
@@ -244,20 +244,30 @@ impl Store {
         if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
             return Err(Stop::Decided(decision));
         }
-        if T::NEEDS_SAVEPOINT {
-            tx.begin_command_savepoint()
-                .await
-                .map_err(|err| sql_failed(&err, "savepoint"))?;
-        }
-        let outcome = work(tx).await.map_err(Stop::RolledBack)?;
-        let written = match outcome {
-            WriteOutcome::Success(record) => Written::Success(record.into_record()),
-            WriteOutcome::TerminalRefusal(refusal) => {
-                let record = refusal.into_record();
-                tx.rollback_command_savepoint()
-                    .await
-                    .map_err(|err| sql_failed(&err, "rollback_command"))?;
-                Written::TerminalRefusal(record)
+        let written = if T::NEEDS_SAVEPOINT {
+            tx.with_savepoint(async |tx: &mut Tx<'_, M>| {
+                let outcome = work(tx).await.map_err(Stop::RolledBack)?;
+                Ok(match outcome {
+                    WriteOutcome::Success(record) => {
+                        SavepointEnd::Keep(Written::Success(record.into_record()))
+                    }
+                    WriteOutcome::TerminalRefusal(refusal) => {
+                        SavepointEnd::Rollback(Written::TerminalRefusal(refusal.into_record()))
+                    }
+                })
+            })
+            .await
+            .map_err(|error| match error {
+                SavepointError::Begin(err) => Stop::Failed(sql_failed(&err, "savepoint")),
+                SavepointError::Work(stop) => stop,
+                SavepointError::Rollback(err) => Stop::Failed(sql_failed(&err, "rollback_command")),
+            })?
+        } else {
+            match work(tx).await.map_err(Stop::RolledBack)? {
+                WriteOutcome::Success(record) => Written::Success(record.into_record()),
+                WriteOutcome::TerminalRefusal(refusal) => {
+                    Written::TerminalRefusal(refusal.into_record())
+                }
             }
         };
         write(tx, scope, fingerprint, written.record(), self.retention).await?;
@@ -540,9 +550,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool = infra_postgres::Pool::from(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap(),
+        );
         let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
@@ -567,7 +579,10 @@ mod tests {
             std::assert_matches!(attempted, Err(AttemptError::Internal));
             assert!(!ran);
         }
-        pool.close().await;
+        assert_eq!(
+            infra_postgres::close(&pool, Duration::from_secs(1)).await,
+            infra_postgres::CloseOutcome::Complete
+        );
     }
 
     #[test]

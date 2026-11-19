@@ -40,9 +40,8 @@ pub struct Registration<'a> {
 }
 
 // template:begin outbox:worker-postgres-messages-factory
-type PostgresMessageFactory = Box<
-    dyn FnOnce(infra_postgres::PgPool, &mut infra_messaging::Registry) -> Result<(), BuildError>,
->;
+type PostgresMessageFactory =
+    Box<dyn FnOnce(infra_postgres::Pool, &mut infra_messaging::Registry) -> Result<(), BuildError>>;
 // template:end outbox:worker-postgres-messages-factory
 
 impl<'a> Registration<'a> {
@@ -78,7 +77,7 @@ impl<'a> Registration<'a> {
     pub fn with_postgres_messages(
         &mut self,
         factory: impl FnOnce(
-            infra_postgres::PgPool,
+            infra_postgres::Pool,
             &mut infra_messaging::Registry,
         ) -> Result<(), BuildError>
         + 'static,

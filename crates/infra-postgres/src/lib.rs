@@ -1,7 +1,7 @@
 mod credentials;
 mod dsn;
 mod error;
-mod maintenance;
+pub mod maintenance;
 mod observe;
 mod pool;
 mod probe;
@@ -11,27 +11,20 @@ mod test_metrics;
 mod transaction;
 
 pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};
-pub use dsn::{Dsn, DsnError};
+pub use dsn::{Dsn, DsnError, SslPolicy};
 pub use error::{failure_cause, is_transient, sqlstate};
-pub use maintenance::{
-    Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, CleanupSchedule,
-    MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx, run_scheduled_cleanup,
-};
-pub use observe::{HISTOGRAMS, observed, record_metrics, record_metrics_periodically};
+pub use observe::{HISTOGRAMS, record_metrics, record_metrics_periodically};
 pub use pool::{
-    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, PoolOptions, SessionOptions,
-    SessionSettingsSource, WaitOrder, acquire, acquire_until, admit_pool, close, connect,
-    connect_session, format_pg_duration, notifications_enabled, prepare_pool,
-    prepare_pool_with_notifications,
+    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, Pool, PoolOptions, SessionOptions,
+    SessionSettingsSource, WaitOrder, acquire, admit_pool, close, connect, connect_session,
+    format_pg_duration, prepare_pool,
 };
 pub use probe::{PostgresProbe, SessionProperties, session_properties};
 pub use sqlx::Error as SqlError;
-pub use sqlx::postgres::PgPool;
 pub use transaction::{
-    BudgetedTx, Isolation, OperationDeadline, OperationDeadlineElapsed, Tx, TxError, TxMode,
-    TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline, in_tx_with_deadline,
-    set_statement_timeout,
+    BudgetedTx, Isolation, OperationDeadline, OperationDeadlineElapsed, SavepointEnd,
+    SavepointError, Tx, TxError, TxMode, TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline,
+    in_tx_with_deadline, set_statement_timeout,
 };
 
 #[doc(hidden)]

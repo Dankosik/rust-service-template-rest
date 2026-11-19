@@ -5,8 +5,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
-use infra_postgres::CleanupError;
-use sqlx::{Postgres, pool::PoolConnection, postgres::PgPool};
+use infra_postgres::Pool;
+use infra_postgres::maintenance::CleanupError;
+use sqlx::{Postgres, pool::PoolConnection};
 use tokio::sync::{Notify, Semaphore, SetOnce, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -109,7 +110,7 @@ impl From<infra_postgres::TxError> for OperationError {
 
 impl Engine {
     #[must_use]
-    pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
+    pub fn new(pool: Pool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self {
             primary_group: Arc::new(WorkerGroup::new(
                 pool,
@@ -240,7 +241,7 @@ impl Engine {
                 async move { maintenance::run_sampling(&group, &kinds, gauges, cancel).await }
             },
         );
-        if infra_postgres::notifications_enabled(&engine.primary_group.pool) {
+        if engine.primary_group.pool.notifications_enabled() {
             let engine = Arc::clone(&engine);
             let cancel = background.clone();
             spawn_guarded(
@@ -489,7 +490,7 @@ const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
 
 pub(crate) struct WorkerGroup {
     pub(crate) worker_id: uuid::Uuid,
-    pub(crate) pool: PgPool,
+    pub(crate) pool: Pool,
     pub(crate) registry: Kinds,
     max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
@@ -512,7 +513,7 @@ impl WorkerGroup {
     }
 
     fn new(
-        pool: PgPool,
+        pool: Pool,
         registry: Kinds,
         max_workers: NonZeroU32,
         worker_id: uuid::Uuid,
@@ -699,11 +700,17 @@ mod tests {
         const NAME: crate::KindName = crate::KindName::new("publisher");
     }
 
+    fn lazy_pool() -> Pool {
+        Pool::from(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn engine_debug_shows_registered_kinds_and_worker_limit() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool = lazy_pool();
         let mut kinds = crate::KindsBuilder::new();
         kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
             Ok(())
@@ -725,10 +732,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_suspended_attempt_keeps_the_first_stop_reason() {
         for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
-            pool.close().await;
+            let pool = lazy_pool();
+            assert_eq!(
+                infra_postgres::close(&pool, Duration::from_secs(1)).await,
+                infra_postgres::CloseOutcome::Complete
+            );
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(
                 crate::Policy {
@@ -806,9 +814,7 @@ mod tests {
         for (exit_after, observe_timeout_first, timed_out) in
             [(1, false, false), (2, true, true), (3, false, true)]
         {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
+            let pool = lazy_pool();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -855,9 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_groups_cannot_claim_the_same_kind() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool = lazy_pool();
         let kinds = || {
             let mut registry = crate::KindsBuilder::new();
             registry.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
@@ -880,9 +884,7 @@ mod tests {
                 .build()
                 .unwrap();
             let _entered = runtime.enter();
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
+            let pool = lazy_pool();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -948,9 +950,7 @@ mod tests {
     async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(gauges.recorder());
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool = lazy_pool();
         let entered = Arc::new(Notify::new());
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut kinds = crate::KindsBuilder::new();
@@ -1044,7 +1044,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), tracker.wait())
             .await
             .unwrap();
-        pool.close().await;
+        assert_eq!(
+            infra_postgres::close(&pool, Duration::from_secs(1)).await,
+            infra_postgres::CloseOutcome::Complete
+        );
     }
 
     #[test]

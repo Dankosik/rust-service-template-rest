@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 use infra_webhooks::inbound::route::WebhookState;
 use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing, SigningKey};
@@ -11,7 +11,7 @@ use super::BootstrapError;
 
 pub(super) fn prepare(
     config: &Config,
-    postgres_pool: Option<&PgPool>,
+    postgres_pool: Option<&Pool>,
 ) -> Result<WebhookState, BootstrapError> {
     let webhooks = config.inbound_webhooks();
     if webhooks.is_empty() {
@@ -69,7 +69,20 @@ mod tests {
                 ("APP__INBOUND_WEBHOOKS__SECRETS__B", second_key),
             ])
         };
-        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/app").unwrap();
+        let dsn =
+            infra_postgres::Dsn::admit("postgres://app:test@127.0.0.1:1/app?sslmode=verify-full")
+                .unwrap();
+        let pool = infra_postgres::prepare_pool(
+            &dsn,
+            &infra_postgres::PoolOptions {
+                max_connections: std::num::NonZeroU32::MIN,
+                application_name: "inbound-webhooks-test",
+                default_isolation: infra_postgres::Isolation::ReadCommitted,
+                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+                wait_order: infra_postgres::WaitOrder::Arrival,
+                notifications: false,
+            },
+        );
         let independent = config_for("AgICAgICAgICAgICAgICAgICAgICAgIC");
         assert!(prepare(&independent, Some(&pool)).is_ok());
         let overlap = config_for("whsec_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB");

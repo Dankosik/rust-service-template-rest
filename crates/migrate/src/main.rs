@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use infra_postgres::{Dsn, DsnError};
+use infra_postgres::{Dsn, DsnError, SslPolicy};
 use infra_telemetry::{
     LoggerGuard, LoggingFormat, LoggingOptions, install_panic_hook, install_subscriber,
 };
@@ -186,10 +186,14 @@ fn write_stderr_failure(message: &dyn std::fmt::Display) -> ExitCode {
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
     let postgres = config.postgres();
-    let dsn = Dsn::admit_for_environment(
+    let dsn = Dsn::admit_with(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),
-        config.app().is_local_development(),
+        if config.app().is_local_development() {
+            SslPolicy::AllowLocalDevelopment
+        } else {
+            SslPolicy::VerifyFull
+        },
     )?;
     tracing::event!(
         target: RECORD_TARGET,

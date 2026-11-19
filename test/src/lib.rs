@@ -15,7 +15,9 @@ pub mod reading_counter;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{CloseOutcome, Dsn, Isolation, PoolOptions, SessionSettingsSource};
+use infra_postgres::{
+    CloseOutcome, Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource, SslPolicy,
+};
 use sqlx::PgPool;
 use url::Url;
 
@@ -34,15 +36,19 @@ pub fn fixture_dir(name: &str) -> std::path::PathBuf {
 }
 
 pub async fn dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit_for_environment(url_for(pool, DATABASE_URL).await.as_str(), None, true)
-        .expect("DATABASE_URL must be an admitted DSN")
+    Dsn::admit_with(
+        url_for(pool, DATABASE_URL).await.as_str(),
+        None,
+        SslPolicy::AllowLocalDevelopment,
+    )
+    .expect("DATABASE_URL must be an admitted DSN")
 }
 
 pub async fn pooler_dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit_for_environment(
+    Dsn::admit_with(
         url_for(pool, PGBOUNCER_DATABASE_URL).await.as_str(),
         None,
-        true,
+        SslPolicy::AllowLocalDevelopment,
     )
     .expect("PGBOUNCER_DATABASE_URL must be an admitted DSN")
 }
@@ -64,7 +70,7 @@ pub async fn template_pool(
     application_name: &str,
     max_connections: u32,
     isolation: Isolation,
-) -> PgPool {
+) -> Pool {
     infra_postgres::connect(
         dsn,
         &PoolOptions {
@@ -73,13 +79,14 @@ pub async fn template_pool(
             default_isolation: isolation,
             session_settings_source: SessionSettingsSource::Startup,
             wait_order: infra_postgres::WaitOrder::Arrival,
+            notifications: true,
         },
     )
     .await
     .expect("the template pool connects")
 }
 
-pub async fn close_pools(pools: &[&PgPool]) {
+pub async fn close_pools(pools: &[&Pool]) {
     for pool in pools {
         assert_eq!(
             infra_postgres::close(pool, CLOSE_BUDGET).await,

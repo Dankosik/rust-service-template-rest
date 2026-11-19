@@ -1,11 +1,10 @@
 use std::{num::NonZeroU32, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
-use infra_postgres::{Dsn, Isolation, PoolOptions, SessionSettingsSource};
+use infra_postgres::{Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource, SslPolicy};
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{self, Error, Operation, PreparedRequest};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use tokio::io::AsyncReadExt;
 
 const ENDPOINT: &str = "reading-counter";
@@ -52,8 +51,12 @@ fn operation(raw: &str) -> Result<Operation, FixtureError> {
     Ok(value)
 }
 
-async fn open_pool() -> Result<PgPool, FixtureError> {
-    let dsn = Dsn::admit_for_environment(&std::env::var("DATABASE_URL")?, None, true)?;
+async fn open_pool() -> Result<Pool, FixtureError> {
+    let dsn = Dsn::admit_with(
+        &std::env::var("DATABASE_URL")?,
+        None,
+        SslPolicy::AllowLocalDevelopment,
+    )?;
     Ok(infra_postgres::connect(
         &dsn,
         &PoolOptions {
@@ -62,6 +65,7 @@ async fn open_pool() -> Result<PgPool, FixtureError> {
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,
             wait_order: infra_postgres::WaitOrder::Arrival,
+            notifications: true,
         },
     )
     .await?)
@@ -81,7 +85,7 @@ fn error_receipt(error: &Error) -> Value {
 }
 
 async fn accept_one(
-    pool: &PgPool,
+    pool: &Pool,
     operation: Operation,
     publication: &infra_messaging::PublicationRoute<Operation>,
     endpoint: &str,
@@ -111,7 +115,7 @@ async fn accept_one(
     }
 }
 
-async fn accept(pool: &PgPool, args: AcceptArgs) -> Result<bool, FixtureError> {
+async fn accept(pool: &Pool, args: AcceptArgs) -> Result<bool, FixtureError> {
     let operations = if let Some(path) = args.operations_file {
         const MAX_BATCH_BYTES: usize = 128 * 1024 + 256;
         let file = tokio::fs::File::open(path).await?;

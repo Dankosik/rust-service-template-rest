@@ -5,12 +5,12 @@ use infra_jobs::{
     EnqueueError, Enqueued, JobId, JobKind, KindName, LivePayloadComparison, MAX_DELAY,
     MAX_PAYLOAD_BYTES, compare_live_payload, enqueue, enqueue_delayed, enqueue_unique,
 };
-use infra_postgres::{Isolation, PgPool, Tx, TxError, TxOptions, in_tx, in_tx_with};
+use infra_postgres::{Isolation, Pool, Tx, TxError, TxOptions, in_tx, in_tx_with};
 use integration_tests::dsn_for;
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use sqlx::postgres::{PgConnection, PgListener};
+use sqlx::{PgPool, Row};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -121,11 +121,14 @@ fn isolation_name(isolation: Isolation) -> &'static str {
     }
 }
 
-async fn open(pool: &PgPool, max_connections: u32) -> PgPool {
+async fn open(pool: &PgPool, max_connections: u32) -> Pool {
     super::template_pool(&dsn_for(pool).await, max_connections).await
 }
 
-async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
+async fn stored_job(pool: &Pool, id: &str) -> StoredJob {
+    let mut conn = infra_postgres::acquire(pool, "stored_job")
+        .await
+        .expect("pool connection");
     let row = sqlx::query(
         "SELECT id::text AS id_text, kind, payload_text, payload IS NULL AS text_only, \
          unique_key IS NULL AS unique_key_is_null, state, attempts, claim_generation, \
@@ -137,7 +140,7 @@ async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
          FROM background_jobs WHERE id::text = $1",
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .expect("the committed job");
     let payload: String = row.try_get("payload_text").expect("canonical payload");
@@ -170,46 +173,55 @@ async fn stored_job(pool: &PgPool, id: &str) -> StoredJob {
     }
 }
 
-async fn rows_for_key(pool: &PgPool, kind: &str, key: &str) -> i64 {
+async fn rows_for_key(pool: &Pool, kind: &str, key: &str) -> i64 {
+    let mut conn = infra_postgres::acquire(pool, "rows_for_key")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE kind = $1 AND unique_key = $2")
         .bind(kind)
         .bind(key)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .expect("a key count")
 }
 
-async fn states_for_key(pool: &PgPool, key: &str) -> Vec<String> {
+async fn states_for_key(pool: &Pool, key: &str) -> Vec<String> {
+    let mut conn = infra_postgres::acquire(pool, "states_for_key")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar(
         "SELECT state FROM background_jobs WHERE kind = $1 AND unique_key = $2 ORDER BY state",
     )
     .bind(Note::NAME.as_str())
     .bind(key)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .expect("states")
 }
 
-async fn unkeyed(pool: &PgPool, kind: &str) -> i64 {
+async fn unkeyed(pool: &Pool, kind: &str) -> i64 {
+    let mut conn = infra_postgres::acquire(pool, "unkeyed")
+        .await
+        .expect("pool connection");
     sqlx::query_scalar(
         "SELECT count(*) FROM background_jobs WHERE kind = $1 AND unique_key IS NULL",
     )
     .bind(kind)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .expect("an unkeyed count")
 }
 
-async fn visible(pool: &PgPool, id: &str) -> bool {
+async fn visible<'e>(executor: impl sqlx::PgExecutor<'e>, id: &str) -> bool {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM background_jobs WHERE id::text = $1)")
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await
         .expect("visibility")
 }
 
 async fn write<K: JobKind>(
-    pool: &PgPool,
+    pool: &Pool,
     isolation: Isolation,
     payload: &K,
     unique_key: Option<&str>,
@@ -225,7 +237,7 @@ async fn write<K: JobKind>(
     .expect("enqueue commits")
 }
 
-async fn commit_note(pool: &PgPool, key: &str) -> JobId {
+async fn commit_note(pool: &Pool, key: &str) -> JobId {
     let enqueued = in_tx(pool, async |tx| -> Result<Enqueued, AttemptError> {
         enqueue_unique(
             tx,
@@ -243,7 +255,10 @@ async fn commit_note(pool: &PgPool, key: &str) -> JobId {
     created(enqueued)
 }
 
-async fn insert_terminal(pool: &PgPool, key: &str, failed: bool) {
+async fn insert_terminal(pool: &Pool, key: &str, failed: bool) {
+    let mut conn = infra_postgres::acquire(pool, "insert_terminal")
+        .await
+        .expect("pool connection");
     let sql = if failed {
         "INSERT INTO background_jobs \
          (id, kind, payload, unique_key, state, failure_reason, finished_at, not_before) \
@@ -259,13 +274,16 @@ async fn insert_terminal(pool: &PgPool, key: &str, failed: bool) {
         .bind(Note::NAME.as_str())
         .bind("{}")
         .bind(key)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .expect("the terminal holder");
     assert_eq!(inserted.rows_affected(), 1);
 }
 
-async fn insert_running(pool: &PgPool, key: &str) {
+async fn insert_running(pool: &Pool, key: &str) {
+    let mut conn = infra_postgres::acquire(pool, "insert_running")
+        .await
+        .expect("pool connection");
     let inserted = sqlx::query(
         "INSERT INTO background_jobs \
          (id, kind, payload, unique_key, state, attempts, claim_generation, not_before, claim_expires_at) \
@@ -276,7 +294,7 @@ async fn insert_running(pool: &PgPool, key: &str) {
         .bind(Note::NAME.as_str())
         .bind("{}")
         .bind(key)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .expect("the running holder");
     assert_eq!(inserted.rows_affected(), 1);
@@ -292,7 +310,10 @@ async fn claim_like(conn: &mut PgConnection, key: &str) {
     assert_eq!(updated.rows_affected(), 1, "the live holder was claimed");
 }
 
-async fn complete_holder(pool: &PgPool, key: &str) {
+async fn complete_holder(pool: &Pool, key: &str) {
+    let mut conn = infra_postgres::acquire(pool, "complete_holder")
+        .await
+        .expect("pool connection");
     let updated = sqlx::query(
         "UPDATE background_jobs \
          SET state = 'completed', finished_at = statement_timestamp() \
@@ -300,7 +321,7 @@ async fn complete_holder(pool: &PgPool, key: &str) {
     )
     .bind(Note::NAME.as_str())
     .bind(key)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .expect("the holder becomes terminal");
     assert_eq!(updated.rows_affected(), 1);
@@ -404,7 +425,7 @@ async fn after_snapshot(
 }
 
 fn spawn_snapshot_caller(
-    pool: PgPool,
+    pool: Pool,
     isolation: Isolation,
     key: String,
     seen_rows: i64,
@@ -470,7 +491,7 @@ async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) 
     assert!(row.failure_reason_is_null);
     assert!(row.error_summary_is_null);
     assert!(row.trace_context_is_null);
-    assert_eq!(super::job_count(&jobs).await, 1);
+    assert_eq!(super::job_count(&pool).await, 1);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -494,7 +515,7 @@ async fn e2_a_closure_error_after_enqueue_leaves_no_job(pool: PgPool) {
         "{}",
         result.as_ref().err().map_or_default(ToString::to_string)
     );
-    assert_eq!(super::job_count(&jobs).await, 0);
+    assert_eq!(super::job_count(&pool).await, 0);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -507,7 +528,7 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
              other int, \
              CONSTRAINT staged_other UNIQUE (other) DEFERRABLE INITIALLY DEFERRED)",
     )
-    .execute(&jobs)
+    .execute(&pool)
     .await
     .expect("the staged table");
 
@@ -532,9 +553,9 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
         }
         other => panic!("expected CommitFailed, got {other:?}"),
     }
-    assert_eq!(super::job_count(&jobs).await, 0);
+    assert_eq!(super::job_count(&pool).await, 0);
     let staged: i64 = sqlx::query_scalar("SELECT count(*) FROM staged")
-        .fetch_one(&jobs)
+        .fetch_one(&pool)
         .await
         .expect("the staged count");
     assert_eq!(staged, 0);
@@ -618,14 +639,16 @@ async fn denied_notify_preserves_the_business_receipt_and_connection(pool: PgPoo
     .execute(&pool)
     .await
     .unwrap();
+    let mut conn = infra_postgres::acquire(&jobs, "role switch").await.unwrap();
     sqlx::query("SET ROLE pg_write_all_data")
-        .execute(&jobs)
+        .execute(&mut *conn)
         .await
         .unwrap();
     let denied = sqlx::query("SELECT pg_catalog.pg_notify('background_jobs', 'control')")
-        .execute(&jobs)
+        .execute(&mut *conn)
         .await
         .unwrap_err();
+    drop(conn);
     assert_eq!(super::sqlstate(&denied).as_deref(), Some("42501"));
 
     let id = in_tx(&jobs, async |tx| -> Result<JobId, AttemptError> {
@@ -638,11 +661,15 @@ async fn denied_notify_preserves_the_business_receipt_and_connection(pool: PgPoo
     })
     .await
     .expect("business write and enqueue commit");
-    assert!(visible(&jobs, &id.to_string()).await);
-    let role: String = sqlx::query_scalar("SELECT current_user::text")
-        .fetch_one(&jobs)
+    let mut conn = infra_postgres::acquire(&jobs, "verify connection after denied notify")
         .await
         .unwrap();
+    assert!(visible(&mut *conn, &id.to_string()).await);
+    let role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
     assert_eq!(role, "pg_write_all_data");
     let accepted: String = sqlx::query_scalar("SELECT job_id FROM business_acceptance")
         .fetch_one(&pool)
@@ -661,7 +688,7 @@ async fn polling_only_producer_commits_without_sending_a_notification(pool: PgPo
         const NAME: KindName = KindName::new("test.wake.poll.only");
     }
 
-    let jobs = infra_postgres::prepare_pool_with_notifications(
+    let jobs = infra_postgres::prepare_pool(
         &dsn_for(&pool).await,
         &infra_postgres::PoolOptions {
             max_connections: std::num::NonZeroU32::MIN,
@@ -669,16 +696,20 @@ async fn polling_only_producer_commits_without_sending_a_notification(pool: PgPo
             default_isolation: Isolation::ReadCommitted,
             session_settings_source: infra_postgres::SessionSettingsSource::Startup,
             wait_order: infra_postgres::WaitOrder::Arrival,
+            notifications: false,
         },
-        false,
     );
     let mut listener = PgListener::connect_with(&pool).await.unwrap();
     listener.listen("background_jobs").await.unwrap();
     let id = created(write(&jobs, Isolation::ReadCommitted, &PollOnly, None).await);
-    sqlx::query("SELECT pg_notify('background_jobs', 'after_enqueue')")
-        .execute(&jobs)
+    let mut conn = infra_postgres::acquire(&jobs, "notify fence")
         .await
         .unwrap();
+    sqlx::query("SELECT pg_notify('background_jobs', 'after_enqueue')")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
     let next = tokio::time::timeout(Duration::from_secs(5), listener.recv())
         .await
         .unwrap()
@@ -727,7 +758,7 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
     .await
     .expect("the valid enqueue commits");
 
-    assert_eq!(super::job_count(&jobs).await, 1);
+    assert_eq!(super::job_count(&pool).await, 1);
     let row = stored_job(&jobs, &id.to_string()).await;
     assert_eq!(row.kind, Note::NAME.as_str());
     assert_eq!(row.id_text, id.to_string());
@@ -766,7 +797,7 @@ async fn optional_non_finite_jobs_refuse_before_effects_and_duplicate_keys(pool:
     })
     .await
     .expect("refusals leave a committable transaction");
-    assert_eq!(super::job_count(&jobs).await, 0);
+    assert_eq!(super::job_count(&pool).await, 0);
     let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv())
         .await
         .expect("notification fence arrives")
@@ -780,7 +811,7 @@ async fn optional_non_finite_jobs_refuse_before_effects_and_duplicate_keys(pool:
     let stored: String =
         sqlx::query_scalar("SELECT payload_text FROM background_jobs WHERE id::text = $1")
             .bind(id.to_string())
-            .fetch_one(&jobs)
+            .fetch_one(&pool)
             .await
             .expect("corrected payload bytes");
     assert_eq!(stored, r#"{"values":[null,1.5]}"#);
@@ -812,7 +843,7 @@ async fn optional_non_finite_jobs_refuse_before_effects_and_duplicate_keys(pool:
         rows_for_key(&jobs, OptionalReading::NAME.as_str(), key).await,
         1
     );
-    assert_eq!(super::job_count(&jobs).await, 1);
+    assert_eq!(super::job_count(&pool).await, 1);
     drop(listener);
     super::close_pools(&[&jobs]).await;
 }
@@ -887,7 +918,7 @@ async fn e4_a_read_only_transaction_returns_25006_and_writes_nothing(pool: PgPoo
         "{}",
         result.as_ref().err().map_or_default(ToString::to_string)
     );
-    assert_eq!(super::job_count(&jobs).await, 0);
+    assert_eq!(super::job_count(&pool).await, 0);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -919,8 +950,8 @@ async fn e5_a_one_hour_delay_is_the_statement_time_plus_one_hour(pool: PgPool) {
     })
     .await
     .expect("the delayed enqueue commits");
-    assert!(visible(&jobs, &id.to_string()).await);
-    assert_eq!(super::job_count(&jobs).await, 1);
+    assert!(visible(&pool, &id.to_string()).await);
+    assert_eq!(super::job_count(&pool).await, 1);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -952,8 +983,8 @@ async fn e5_a_sub_microsecond_delay_is_accepted(pool: PgPool) {
     })
     .await
     .expect("the truncated delay commits");
-    assert!(visible(&jobs, &id.to_string()).await);
-    assert_eq!(super::job_count(&jobs).await, 1);
+    assert!(visible(&pool, &id.to_string()).await);
+    assert_eq!(super::job_count(&pool).await, 1);
     super::close_pools(&[&jobs]).await;
 }
 
@@ -1190,11 +1221,11 @@ async fn e6_read_committed_inflight_insert_keeps_commit_and_rollback_oracles(poo
         if commits {
             let held_id = held.expect("the holder commits");
             assert_eq!(enqueued, Enqueued::Duplicate, "{label}");
-            assert!(visible(&jobs, &held_id.to_string()).await, "{label}");
+            assert!(visible(&pool, &held_id.to_string()).await, "{label}");
         } else {
             std::assert_matches!(held, Err(AttemptError::Rejected), "{label}");
             let id = created(enqueued);
-            assert!(visible(&jobs, &id.to_string()).await, "{label}");
+            assert!(visible(&pool, &id.to_string()).await, "{label}");
         }
     }
     super::close_pools(&[&jobs]).await;
@@ -1343,11 +1374,7 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
             action,
         );
         super::bounded("the snapshot", snapshot.notified()).await;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test holds a raw transaction open to keep a lock"
-        )]
-        let mut claim = jobs.begin().await.expect("the claim transaction");
+        let mut claim = pool.begin().await.expect("the claim transaction");
         claim_like(&mut claim, &key).await;
         go.notify_one();
         let result = super::join_after_lock_wait(

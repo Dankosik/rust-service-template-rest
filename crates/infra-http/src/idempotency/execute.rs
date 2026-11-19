@@ -455,8 +455,21 @@ mod tests {
     async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
         use futures_util::FutureExt as _;
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
-            .expect("lazy pool does no I/O");
+        let dsn = infra_postgres::Dsn::admit(
+            "postgres://test:test@127.0.0.1:1/unused?sslmode=verify-full",
+        )
+        .expect("valid lazy DSN");
+        let pool = infra_postgres::prepare_pool(
+            &dsn,
+            &infra_postgres::PoolOptions {
+                max_connections: std::num::NonZeroU32::MIN,
+                application_name: "idempotency-execute-test",
+                default_isolation: infra_postgres::Isolation::ReadCommitted,
+                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
+                wait_order: infra_postgres::WaitOrder::Arrival,
+                notifications: false,
+            },
+        );
         let budget = Duration::from_millis(200);
         for elapsed in [Duration::from_millis(100), Duration::from_millis(101)] {
             let origin = Instant::now()

@@ -1,7 +1,6 @@
 use std::{borrow::Cow, collections::BTreeSet, fmt, str::FromStr, time::Duration};
 
-use infra_postgres::{Tx, TxError, observed, set_statement_timeout};
-use sqlx::PgPool;
+use infra_postgres::{Pool, Tx, TxError, observed, set_statement_timeout};
 
 use crate::kind::{MAX_KIND_LEN, is_valid_kind_name};
 use crate::{JobId, StartupError};
@@ -294,7 +293,7 @@ impl fmt::Debug for OperatorError {
     }
 }
 
-pub async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
+pub async fn check_startup(pool: &Pool) -> Result<(), StartupError> {
     crate::session::check_startup(pool).await
 }
 
@@ -359,14 +358,14 @@ macro_rules! snapshot_query {
 
 async fn observe_time(tx: &mut Tx<'_>) -> Result<String, OperatorError> {
     set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
-    Ok(observed("observe jobs time", sqlx::query_scalar!(
+    Ok(observed!("observe jobs time", sqlx::query_scalar!(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
     ).fetch_one(&mut *tx)).await?)
 }
 
 pub async fn inspect_one(tx: &mut Tx<'_>, id: JobId) -> Result<OneInspection, OperatorError> {
     let observed_at = observe_time(tx).await?;
-    let row = observed(
+    let row = observed!(
         "inspect jobs",
         snapshot_query!("WHERE id = $1", id.0).fetch_optional(&mut *tx),
     )
@@ -404,7 +403,7 @@ async fn inspect_page(
 ) -> Result<PageInspection, OperatorError> {
     let observed_at = observe_time(tx).await?;
     let after = page.after.map_or(uuid::Uuid::nil(), |cursor| cursor.0.0);
-    let rows = observed(
+    let rows = observed!(
         "inspect jobs",
         snapshot_query!(
             "WHERE id > $1 ORDER BY id LIMIT $2",
@@ -456,7 +455,7 @@ async fn lock_failed_target(
     action: RecoveryAction,
 ) -> Result<(), OperatorError> {
     set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
-    let row = observed(
+    let row = observed!(
         "lock failed job",
         sqlx::query!(
             r#"
@@ -506,7 +505,7 @@ struct RedrivenRow {
 
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_failed_target(tx, target, RecoveryAction::Redrive).await?;
-    let row = observed(
+    let row = observed!(
         "redrive failed job",
         sqlx::query_as!(
             RedrivenRow,
@@ -542,7 +541,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
 
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
     lock_failed_target(tx, target, RecoveryAction::Discard).await?;
-    let result = observed("discard failed job", sqlx::query!(
+    let result = observed!("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version
     ).execute(&mut *tx)).await?;

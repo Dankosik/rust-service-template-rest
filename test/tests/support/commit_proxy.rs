@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use infra_postgres::{Dsn, PgPool};
+use infra_postgres::{Dsn, SslPolicy};
 use integration_tests::{DATABASE_URL, dsn_for, propagate_join_panic, url_for};
+use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -191,7 +192,7 @@ impl CommitProxy {
             .expect("the proxy address is a host");
         url.set_port(Some(proxy.address().port()))
             .expect("the proxy URL accepts a port");
-        let proxied = Dsn::admit_for_environment(url.as_str(), None, true)
+        let proxied = Dsn::admit_with(url.as_str(), None, SslPolicy::AllowLocalDevelopment)
             .expect("the proxied DSN is admitted");
         (proxy, proxied)
     }

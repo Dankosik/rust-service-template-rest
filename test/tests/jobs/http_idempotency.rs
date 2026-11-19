@@ -9,9 +9,10 @@ use infra_idempotency_store::{
     Store, SuccessRecord, WriteOutcome,
 };
 use infra_jobs::{JobKind, KindName, enqueue_unique};
-use infra_postgres::{Dsn, PgPool, Tx};
+use infra_postgres::{Dsn, Pool, Tx};
 use integration_tests::dsn_for;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tokio::sync::oneshot;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +31,7 @@ const WIDGET: u64 = 7;
 const DUPLICATE_WIDGET: u64 = 8;
 
 struct Replica {
-    pool: PgPool,
+    pool: Pool,
     store: Store,
 }
 

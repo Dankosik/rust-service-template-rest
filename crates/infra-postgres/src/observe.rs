@@ -3,12 +3,12 @@ use std::time::{Duration, Instant};
 
 use enum_map::{Enum, EnumMap};
 use metrics::{SharedString, Unit};
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::maintenance::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
+use crate::pool::{Pool, PoolPolicy};
 use crate::transaction::TxError;
 
 const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
@@ -105,7 +105,7 @@ pub(crate) fn describe() {
     );
 }
 
-pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
+pub fn record_metrics(pool: &Pool, pool_name: &'static str) {
     let size = f64::from(pool.size());
     #[expect(
         clippy::cast_precision_loss,
@@ -125,11 +125,11 @@ pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
     )
     .set((size - idle).max(0.0));
     metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
-        .set(f64::from(pool.options().get_max_connections()));
+        .set(f64::from(pool.max_connections()));
 }
 
 pub async fn record_metrics_periodically(
-    pool: PgPool,
+    pool: Pool,
     pool_name: &'static str,
     interval: Duration,
     cancel: CancellationToken,
@@ -181,7 +181,7 @@ macro_rules! observed {
     ($summary:literal, $statement:expr $(,)?) => {
         $crate::__statement_observation::observed_with_success_key(
             $summary,
-            Some({
+            {
                 use $crate::__statement_observation::{Key, Label, OPERATION_DURATION_METRIC};
 
                 static LABELS: [Label; 2] = [
@@ -191,22 +191,15 @@ macro_rules! observed {
                 static SUCCESS_KEY: Key =
                     Key::from_static_parts(OPERATION_DURATION_METRIC, &LABELS);
                 &SUCCESS_KEY
-            }),
+            },
             $statement,
         )
     };
 }
 
-pub fn observed<T>(
-    summary: &'static str,
-    statement: impl Future<Output = Result<T, sqlx::Error>>,
-) -> impl Future<Output = Result<T, sqlx::Error>> {
-    observed_with_success_key(summary, None, statement)
-}
-
 pub async fn observed_with_success_key<T>(
     summary: &'static str,
-    success_key: Option<&'static metrics::Key>,
+    success_key: &'static metrics::Key,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
     let span = if Span::current().is_none() {
@@ -230,18 +223,10 @@ pub async fn observed_with_success_key<T>(
     let (started, span) = std::mem::DropGuard::dismiss(guard);
     match &result {
         Ok(_) => {
-            let histogram = if let Some(key) = success_key {
-                metrics::with_recorder(|recorder| {
-                    recorder.register_histogram(key, &OPERATION_METADATA)
-                })
-            } else {
-                metrics::histogram!(
-                    OPERATION_DURATION_METRIC,
-                    "db.system.name" => "postgresql",
-                    "db.query.summary" => summary
-                )
-            };
-            histogram.record(started.elapsed());
+            metrics::with_recorder(|recorder| {
+                recorder.register_histogram(success_key, &OPERATION_METADATA)
+            })
+            .record(started.elapsed());
         }
         Err(error) => {
             let error_type = match sqlstate(error) {
@@ -340,7 +325,7 @@ impl PoolMetrics {
     }
 }
 
-pub(crate) fn transaction_span(pool: &PgPool) -> Span {
+pub(crate) fn transaction_span(pool: &Pool) -> Span {
     let target = pool.connect_options();
     tracing::info_span!(
         "postgres_transaction",
@@ -358,7 +343,7 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
-    metrics: Option<Arc<PoolMetrics>>,
+    policy: Arc<PoolPolicy>,
     phase: TransactionPhase,
 }
 
@@ -369,25 +354,20 @@ enum TransactionPhase {
 }
 
 impl TransactionObservation {
-    pub(crate) fn start(span: Span, metrics: Option<Arc<PoolMetrics>>) -> Self {
+    pub(crate) fn start(span: Span, policy: Arc<PoolPolicy>) -> Self {
         Self {
             started: Instant::now(),
             span,
-            metrics,
+            policy,
             phase: TransactionPhase::Running,
         }
     }
 
     pub(crate) fn record_connection_wait(&self) {
-        let elapsed = self.started.elapsed();
-        match &self.metrics {
-            Some(metrics) => metrics.connection_wait().record(elapsed),
-            None => metrics::histogram!(
-                CONNECTION_WAIT_METRIC,
-                "db.client.connection.pool.name" => "postgres"
-            )
-            .record(elapsed),
-        }
+        self.policy
+            .metrics()
+            .connection_wait()
+            .record(self.started.elapsed());
     }
 
     pub(crate) fn begin_commit(&mut self) {
@@ -426,11 +406,10 @@ impl Drop for TransactionObservation {
         };
         self.span
             .record("postgres.transaction.outcome", outcome.label());
-        let elapsed = self.started.elapsed();
-        match &self.metrics {
-            Some(metrics) => metrics.transaction_duration(outcome).record(elapsed),
-            None => outcome.duration_histogram().record(elapsed),
-        }
+        self.policy
+            .metrics()
+            .transaction_duration(outcome)
+            .record(self.started.elapsed());
     }
 }
 

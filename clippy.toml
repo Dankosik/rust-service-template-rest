@@ -176,16 +176,6 @@ disallowed-methods = [
     { path = "axum::routing::method_routing::head_service", reason = "HEAD follows GET unless the annotation documents HEAD" },
     { path = "axum::routing::method_routing::any", reason = "register only annotated methods" },
     { path = "axum::routing::method_routing::any_service", reason = "register only annotated methods" },
-    # A transaction opened on the pool itself skips the commit-outcome policy
-    # and the transaction signals `infra_postgres::in_tx` owns. Savepoints
-    # (`Connection::begin` on a borrowed connection) are not affected.
-    { path = "sqlx_core::pool::Pool::begin", reason = "open the transaction with infra_postgres::in_tx" },
-    { path = "sqlx_core::pool::Pool::begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
-    { path = "sqlx_core::pool::Pool::try_begin", reason = "open the transaction with infra_postgres::in_tx" },
-    { path = "sqlx_core::pool::Pool::try_begin_with", reason = "open the transaction with infra_postgres::in_tx_with" },
-    # Direct checkout bypasses named acquisition diagnostics.
-    { path = "sqlx_core::pool::Pool::acquire", reason = "acquire through infra_postgres::acquire or open infra_postgres::in_tx" },
-    { path = "sqlx_core::pool::Pool::try_acquire", reason = "acquire through infra_postgres::acquire or open infra_postgres::in_tx" },
 ]
 
 # The handle types behind the blocking calls above: a typed use is caught even

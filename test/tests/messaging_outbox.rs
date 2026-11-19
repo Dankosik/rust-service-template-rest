@@ -24,7 +24,7 @@ use infra_messaging::{
     ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingError, MessagingOptions,
     Registry, Route, TransportSecurity,
 };
-use infra_postgres::{Isolation, PgPool, TxError, in_tx};
+use infra_postgres::{Isolation, Pool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder};
@@ -35,7 +35,7 @@ use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use integration_tests::{close_pools, dsn_for, poll_until};
 use nats_test_support::{AckDroppingRelay, DroppedAck};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -269,7 +269,7 @@ fn consumer_options(fixture: &Fixture, durable: &str) -> MessagingOptions {
     options
 }
 
-async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
+async fn template_pool(pool: &PgPool, max_connections: u32) -> Pool {
     integration_tests::template_pool(
         &dsn_for(pool).await,
         APP,
@@ -286,7 +286,7 @@ struct EngineRun {
     _cancel_guard: DropGuard,
 }
 
-async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
+async fn start(pool: &Pool, registry: Kinds) -> EngineRun {
     start_engine(Engine::new(pool.clone(), registry, NonZeroU32::MIN)).await
 }
 
@@ -308,7 +308,7 @@ async fn start_engine(engine: Engine) -> EngineRun {
     }
 }
 
-async fn finish(run: EngineRun, pools: &[&PgPool]) {
+async fn finish(run: EngineRun, pools: &[&Pool]) {
     run.started.stop_claiming();
     timeout(WAIT, run.started.drained())
         .await
@@ -330,14 +330,17 @@ async fn close(messaging: Messaging) {
     );
 }
 
-async fn job(pool: &PgPool, key: &str) -> JobRow {
+async fn job(pool: &Pool, key: &str) -> JobRow {
+    let mut connection = infra_postgres::acquire(pool, "read outbox job")
+        .await
+        .expect("outbox job connection");
     let row = sqlx::query(
         "SELECT id::text AS id, state, attempts, failure_reason, error_summary \
          FROM background_jobs WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
     .bind(key)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .expect("outbox job is stored");
     JobRow {
@@ -357,10 +360,13 @@ struct JobRow {
     error_summary: Option<String>,
 }
 
-async fn outbox_count(pool: &PgPool) -> i64 {
+async fn outbox_count(pool: &Pool) -> i64 {
+    let mut connection = infra_postgres::acquire(pool, "count outbox jobs")
+        .await
+        .expect("outbox count connection");
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE kind = $1")
         .bind(OUTBOX_KIND)
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await
         .expect("outbox row count")
 }
@@ -494,7 +500,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         .expect("producer-only messaging admits the provisioned stream");
     let business = template_pool(&pool, 3).await;
     sqlx::query("CREATE TABLE business_effects (id text PRIMARY KEY)")
-        .execute(&business)
+        .execute(&pool)
         .await
         .expect("business table");
 
@@ -510,7 +516,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     std::assert_matches!(rollback, Err(Step::Refused));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM business_effects")
-            .fetch_one(&business)
+            .fetch_one(&pool)
             .await
             .expect("business effects after rollback"),
         0
@@ -592,7 +598,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM business_effects WHERE id = 'commit'")
-            .fetch_one(&business)
+            .fetch_one(&pool)
             .await
             .expect("committed business effect"),
         1
@@ -622,7 +628,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
 
 async fn verify_completed_identity(
     messaging: &Messaging,
-    business: &PgPool,
+    business: &Pool,
     reordered: &infra_messaging::PreparedEvent,
     same: &infra_messaging::PreparedEvent,
     job_id: &str,
@@ -634,11 +640,15 @@ async fn verify_completed_identity(
     );
     for retained in [true, false] {
         if !retained {
-            sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
-                .bind(job_id)
-                .execute(business)
+            let mut connection = infra_postgres::acquire(business, "age completed job")
                 .await
                 .unwrap();
+            sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
+                .bind(job_id)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            drop(connection);
             assert_eq!(cleanup.remove_expired().await.unwrap(), 1);
         }
         let conflicting = in_tx(business, async |tx| -> Result<_, Step> {
@@ -660,8 +670,11 @@ async fn verify_completed_identity(
         assert_eq!(duplicate, OutboxEnqueued::Duplicate);
         assert_eq!(outbox_count(business).await, i64::from(retained));
     }
+    let mut connection = infra_postgres::acquire(business, "count business effects")
+        .await
+        .unwrap();
     let business_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM business_effects")
-        .fetch_one(business)
+        .fetch_one(&mut *connection)
         .await
         .unwrap();
     assert_eq!(business_rows, 1);
@@ -807,8 +820,8 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
 
 async fn race_ordered_enqueues(
     fixture: &Fixture,
-    jobs: &PgPool,
-    competing: &PgPool,
+    jobs: &Pool,
+    competing: &Pool,
     aggregate: &'static str,
     first_id: &str,
     second_id: &str,
@@ -847,13 +860,16 @@ async fn race_ordered_enqueues(
         WAIT,
         POLL,
         async || {
+            let mut connection = infra_postgres::acquire(jobs, "observe lock")
+                .await
+                .expect("lock observation connection");
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity \
              WHERE datname = current_database() AND application_name = $1 \
                AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
             )
             .bind(APP)
-            .fetch_one(jobs)
+            .fetch_one(&mut *connection)
             .await
             .expect("concurrent lock observation");
             (waiting > 0).then_some(())
@@ -937,7 +953,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 
     sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() - interval '1 second' WHERE id::text = $1")
         .bind(&retrying.id)
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .expect("ambiguous intent is made due for its same-ID retry");
     let retry_messaging = fixture
@@ -1080,7 +1096,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
         )
         .bind(&id)
         .bind(generation)
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .expect("make a scheduled retry due");
         assert_eq!(updated.rows_affected(), 1);
@@ -1103,7 +1119,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
             )
             .bind(&id)
             .bind(generation)
-            .execute(&jobs)
+            .execute(&pool)
             .await
             .expect("stage the intervening retry history");
             assert_eq!(seeded.rows_affected(), 1);
@@ -1124,7 +1140,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
                 .bind(&id)
                 .bind(generation)
                 .bind(attempt)
-                .fetch_optional(&jobs)
+                .fetch_optional(&pool)
                 .await
                 .expect("read the stored delay from the transition's PostgreSQL clock")
             })
@@ -1263,7 +1279,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     };
     let publisher_a = template_pool(&pool, 3).await;
     let publisher_b = template_pool(&pool, 3).await;
-    let start_publisher = async |pool: &PgPool, messaging: &Messaging| {
+    let start_publisher = async |pool: &Pool, messaging: &Messaging| {
         let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap();
         start(pool, kinds).await
     };
@@ -1291,7 +1307,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     );
     let (id, generation): (String, String) = sqlx::query_as(
         "SELECT id::text, claim_generation::text FROM background_jobs WHERE kind=$1 AND unique_key=$2"
-    ).bind(OUTBOX_KIND).bind(event_key(first.message_id())).fetch_one(&jobs).await.unwrap();
+    ).bind(OUTBOX_KIND).bind(event_key(first.message_id())).fetch_one(&pool).await.unwrap();
     let target = RecoveryTarget::try_new(&id, OUTBOX_KIND, &generation).unwrap();
     let discard = in_tx(&jobs, async |tx| operator::discard(tx, &target).await).await;
     std::assert_matches!(discard, Err(OperatorError::Conflict));
@@ -1390,7 +1406,7 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .bind(event_key(intent.message_id()))
         .bind(id == "malformed-outer")
         .bind(&valid_body)
-        .execute(&jobs)
+        .execute(&pool)
         .await
         .unwrap();
         assert_eq!(changed.rows_affected(), 1);
@@ -1447,7 +1463,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     .await
     .expect("messaging consumer topology admits");
     let effects = template_pool(&pool, 3).await;
-    create_effect_store(&effects).await;
+    create_effect_store(&pool).await;
     let invoked = Arc::new(AtomicUsize::new(0));
     let registry = effect_registry(&fixture, &effects, &invoked);
     let cancel = CancellationToken::new();
@@ -1470,7 +1486,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         .expect("first publication ACKs");
     poll_until("first durable effect commits", WAIT, POLL, async || {
         let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM messaging_effects")
-            .fetch_one(&effects)
+            .fetch_one(&pool)
             .await
             .expect("effect count");
         (effects == 1).then_some(())
@@ -1498,12 +1514,12 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     assert_eq!(fixture.published().await, 2);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM messaging_effects")
-            .fetch_one(&effects)
+            .fetch_one(&pool)
             .await
             .expect("deduped effect count"),
         1
     );
-    assert_eq!(business_effects(&effects).await, 1);
+    assert_eq!(business_effects(&pool).await, 1);
     handle.drain();
     handle
         .finish(Instant::now() + CLOSE_BUDGET)
@@ -1529,7 +1545,7 @@ async fn create_effect_store(pool: &PgPool) {
         .expect("initial business value");
 }
 
-fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>) -> Registry {
+fn effect_registry(fixture: &Fixture, pool: &Pool, invoked: &Arc<AtomicUsize>) -> Registry {
     let effect_pool = pool.clone();
     let invoked = Arc::clone(invoked);
     let mut registry = fixture.registry.clone();
@@ -1573,7 +1589,7 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let fixture = Fixture::create().await;
     create_effect_store(&pool).await;
     let invocations = Arc::new(AtomicUsize::new(0));
-    let first_registry = effect_registry(&fixture, &pool, &invocations);
+    let first_registry = effect_registry(&fixture, &Pool::from(pool.clone()), &invocations);
     let mut second_registry = fixture.registry.clone();
     let reject_once = AtomicBool::new(true);
     let (accepted, mut recovered) = tokio::sync::mpsc::channel(1);
@@ -1705,7 +1721,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
     .await
     .expect("consumer connects through the settlement relay");
     let effects = template_pool(&pool, 3).await;
-    create_effect_store(&effects).await;
+    create_effect_store(&pool).await;
     let invoked = Arc::new(AtomicUsize::new(0));
     let cancel = CancellationToken::new();
     let consumer = messaging
@@ -1731,7 +1747,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         .unwrap();
     relay.wait_for_drop().await;
     assert_eq!(
-        business_effects(&effects).await,
+        business_effects(&pool).await,
         1,
         "the effect committed before settlement"
     );
@@ -1763,7 +1779,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         .finish(Instant::now() + WAIT)
         .await
         .expect("settlement work drains");
-    assert_eq!(business_effects(&effects).await, 1);
+    assert_eq!(business_effects(&pool).await, 1);
     assert_eq!(
         invoked.load(Ordering::SeqCst),
         match dropped {
@@ -1778,7 +1794,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
 }
 
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture
-fn webhook_receiver(pool: PgPool) -> Receiver {
+fn webhook_receiver(pool: Pool) -> Receiver {
     Receiver::new(
         pool,
         [(
@@ -1854,7 +1870,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
         .expect("producer-only messaging admits the fixture stream");
     let shared_pool = template_pool(&pool, 6).await;
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL)")
-        .execute(&shared_pool)
+        .execute(&pool)
         .await
         .expect("webhook effect table");
     let held = Arc::new(HeldWebhookConsumer::default());

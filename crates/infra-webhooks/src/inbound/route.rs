@@ -429,8 +429,10 @@ mod tests {
 
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
-            .expect("lazy pool opens no connection");
+        let pool = infra_postgres::Pool::from(
+            sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+                .expect("lazy pool opens no connection"),
+        );
         let keys = KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None)
             .expect("key");
         let state = WebhookState::active(Receiver::new(
@@ -510,8 +512,10 @@ mod tests {
             "WebhookState {\n    active: false,\n}"
         );
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
-            .expect("lazy pool opens no connection");
+        let pool = infra_postgres::Pool::from(
+            sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+                .expect("lazy pool opens no connection"),
+        );
         let active = WebhookState::active(Receiver::new(pool, []));
         assert_eq!(format!("{active:?}"), "WebhookState { active: true }");
         assert_eq!(

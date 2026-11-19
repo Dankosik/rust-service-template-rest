@@ -50,7 +50,7 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     if cancel.is_cancelled() {
         return;
     }
-    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
+    let mut observer = MaintenanceObserver::start(MaintenancePopulation::cleanup(cleanup));
     let passes = async {
         let mut schedule = CleanupSchedule::new(cleanup);
         while !cancel.is_cancelled() {

@@ -22,7 +22,7 @@ pub use enqueue::{
     EnqueueError, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES, compare_live_payload,
     enqueue, enqueue_delayed, enqueue_unique, json_payload_len,
 };
-pub use infra_postgres::CleanupError;
+pub use infra_postgres::maintenance::CleanupError;
 pub use kind::{
     DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind, KindError, KindName,
     Kinds, KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy, RetrySchedule,

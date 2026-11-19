@@ -2,11 +2,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enum_map::{Enum, EnumMap};
 use metrics::Unit;
-use sqlx::postgres::PgPool;
 
 use super::LOG_TARGET;
-use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, Cleanup};
-use crate::observe::observed;
+use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, Cleanup, is_valid_label};
+use crate::observed;
+use crate::pool::Pool;
 use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
 
 pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -14,16 +14,34 @@ pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaintenancePopulation {
+enum PopulationKind {
     Cleanup(Cleanup),
-    FailedJobs,
+    Observed(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaintenancePopulation(PopulationKind);
+
 impl MaintenancePopulation {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Cleanup(cleanup) => cleanup.label(),
-            Self::FailedJobs => "failed_jobs",
+    #[must_use]
+    pub const fn cleanup(cleanup: Cleanup) -> Self {
+        Self(PopulationKind::Cleanup(cleanup))
+    }
+
+    #[must_use]
+    pub const fn observed(label: &'static str) -> Self {
+        assert!(
+            is_valid_label(label),
+            "population label must be non-empty ASCII snake_case"
+        );
+        Self(PopulationKind::Observed(label))
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self.0 {
+            PopulationKind::Cleanup(cleanup) => cleanup.label(),
+            PopulationKind::Observed(label) => label,
         }
     }
 }
@@ -34,15 +52,23 @@ pub struct PopulationSample {
     pub oldest_at_unix_seconds: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MaintenanceFailure {
+    #[error("maintenance observation permit timed out")]
     Permit,
+    #[error("maintenance observation acquire failed")]
     Acquire,
+    #[error("maintenance observation begin failed")]
     Begin,
+    #[error("maintenance observation statement failed")]
     Statement,
+    #[error("maintenance observation commit failed")]
     CommitFailed,
+    #[error("maintenance observation commit outcome unknown")]
     CommitUnknown,
+    #[error("maintenance observation timed out")]
     TimedOut,
+    #[error("maintenance observation clock invalid")]
     ClockInvalid,
 }
 
@@ -210,7 +236,7 @@ impl MaintenanceObserver {
         for counter in this.observations.values() {
             counter.increment(0);
         }
-        if let MaintenancePopulation::Cleanup(cleanup) = population {
+        if let PopulationKind::Cleanup(cleanup) = population.0 {
             metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
                 .increment(0);
         }
@@ -393,7 +419,7 @@ impl Drop for MaintenanceAttempt<'_> {
 }
 
 pub async fn in_observation_tx<F>(
-    pool: &PgPool,
+    pool: &Pool,
     read: F,
 ) -> Result<PopulationSample, MaintenanceFailure>
 where
@@ -416,17 +442,17 @@ where
 }
 
 async fn set_observation_timeouts(tx: &mut Tx<'_>) -> Result<(), sqlx::Error> {
-    observed(
+    observed!(
         "set observation statement timeout",
         sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
     )
     .await?;
-    observed(
+    observed!(
         "set observation lock timeout",
         sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
     )
     .await?;
-    observed(
+    observed!(
         "set observation idle timeout",
         sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'").execute(&mut *tx),
     )

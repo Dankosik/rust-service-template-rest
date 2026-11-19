@@ -94,6 +94,7 @@ mod tests {
                 default_isolation: infra_postgres::Isolation::ReadCommitted,
                 session_settings_source: infra_postgres::SessionSettingsSource::Startup,
                 wait_order: infra_postgres::WaitOrder::Arrival,
+                notifications: true,
             },
         );
         let resources = Resources {
@@ -114,7 +115,10 @@ mod tests {
             ))
         );
         let received = received.await.unwrap();
-        pool.close().await;
+        assert_eq!(
+            infra_postgres::close(&pool, std::time::Duration::from_secs(1)).await,
+            infra_postgres::CloseOutcome::Complete
+        );
         assert!(
             received.is_closed(),
             "factory uses the retained native pool"

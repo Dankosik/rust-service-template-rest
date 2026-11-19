@@ -12,12 +12,11 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
 use infra_postgres::{
-    Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
+    Isolation, Pool, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use smallvec::SmallVec;
-use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
 use crate::StreamingBase64;
@@ -95,14 +94,14 @@ impl Verifier for KeyRing {
 
 #[derive(Clone)]
 pub struct Receiver {
-    pool: PgPool,
+    pool: Pool,
     endpoints: Arc<HashMap<String, Arc<dyn Verifier>>>,
 }
 
 impl Receiver {
     #[must_use]
     pub fn new(
-        pool: PgPool,
+        pool: Pool,
         endpoints: impl IntoIterator<Item = (String, Arc<dyn Verifier>)>,
     ) -> Self {
         Self {
@@ -407,9 +406,11 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://127.0.0.1:1/unreachable")
-            .expect("a lazy pool opens no connection");
+        let pool = Pool::from(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://127.0.0.1:1/unreachable")
+                .expect("a lazy pool opens no connection"),
+        );
         let verifier: Arc<dyn Verifier> = Arc::new(MustNotAuthenticate);
         let receiver = Receiver::new(pool, [("provider".to_owned(), verifier)]);
         let outcome = receiver

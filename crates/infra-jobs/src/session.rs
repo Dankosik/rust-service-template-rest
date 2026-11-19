@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use infra_postgres::observed;
-use sqlx::PgPool;
+use infra_postgres::{Pool, observed};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
@@ -17,10 +16,10 @@ pub enum StartupError {
 
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
-pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
+pub(crate) async fn check_startup(pool: &Pool) -> Result<(), StartupError> {
     let read = async {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
-        observed(
+        observed!(
             "check jobs session",
             infra_postgres::session_properties(&mut connection),
         )

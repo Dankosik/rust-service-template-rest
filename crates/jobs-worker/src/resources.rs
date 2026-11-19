@@ -7,7 +7,7 @@ use infra_jobs::Started;
 use infra_messaging::{ConsumerHandle, Messaging, MessagingStartup};
 // template:end messaging:worker-resources-messaging-import
 // template:begin jobs:worker-resources-postgres-import
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 // template:end jobs:worker-resources-postgres-import
 use infra_telemetry::{LoggerGuard, TracerProviderHandle};
 
@@ -59,8 +59,8 @@ pub(crate) struct Resources {
 
 // template:begin jobs:worker-resources-postgres-pool
 pub(crate) enum PoolResource {
-    Starting(PgPool),
-    Admitted(PgPool),
+    Starting(Pool),
+    Admitted(Pool),
 }
 // template:end jobs:worker-resources-postgres-pool
 

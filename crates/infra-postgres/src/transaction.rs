@@ -1,5 +1,6 @@
+use std::borrow::Cow;
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -9,16 +10,16 @@ use futures_util::{Stream, StreamExt as _, TryFutureExt as _, TryStreamExt as _}
 use smallvec::SmallVec;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
-    PgArguments, PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
+    PgArguments, PgConnection, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
-use sqlx::{Connection, Either, Execute, Executor, Row as _, SqlStr};
+use sqlx::{AssertSqlSafe, Connection, Either, Execute, Executor, Row as _, SqlStr};
 use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::error::{QUERY_CANCELED, STATEMENT_COMPLETION_UNKNOWN, sqlstate};
 use crate::observe::{self, TransactionObservation, TransactionOutcome};
 use crate::observed;
-use crate::pool::{acquire_for_transaction, format_pg_duration};
+use crate::pool::{Pool, acquire_for_transaction, format_pg_duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
@@ -50,7 +51,7 @@ pub struct Tx<'c, Mode = ()> {
     proven_alive: bool,
     mode: Mode,
     notifications: SmallVec<[Notification; 1]>,
-    command_savepoint_notification_count: Option<usize>,
+    next_savepoint: u32,
 }
 
 pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
@@ -66,21 +67,45 @@ pub struct OperationDeadline {
 #[error("postgres operation deadline elapsed before commit")]
 pub struct OperationDeadlineElapsed;
 
-pub trait TxMode: std::fmt::Debug + Send {
-    fn operation_deadline(&mut self) -> Option<&mut OperationDeadline>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavepointEnd<T> {
+    Keep(T),
+    Rollback(T),
 }
 
-impl TxMode for () {
+#[derive(Debug, thiserror::Error)]
+pub enum SavepointError<E> {
+    #[error("postgres savepoint: begin: {0}")]
+    Begin(#[source] sqlx::Error),
+    #[error(transparent)]
+    Work(E),
+    #[error("postgres savepoint: rollback: {0}")]
+    Rollback(#[source] sqlx::Error),
+}
+
+mod sealed {
+    pub trait TxMode: std::fmt::Debug + Send {
+        fn operation_deadline(&mut self) -> Option<&mut super::OperationDeadline>;
+    }
+}
+
+pub trait TxMode: sealed::TxMode {}
+
+impl sealed::TxMode for () {
     fn operation_deadline(&mut self) -> Option<&mut OperationDeadline> {
         None
     }
 }
 
-impl TxMode for OperationDeadline {
+impl TxMode for () {}
+
+impl sealed::TxMode for OperationDeadline {
     fn operation_deadline(&mut self) -> Option<&mut OperationDeadline> {
         Some(self)
     }
 }
+
+impl TxMode for OperationDeadline {}
 
 trait TxModeExt<E: From<TxError>>: TxMode {
     fn acquisition_failure(&self, error: TxError) -> E {
@@ -268,23 +293,39 @@ impl<M: TxMode> Tx<'_, M> {
         })
     }
 
-    pub async fn begin_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
-        if self.command_savepoint_notification_count.is_some() {
-            return Err(sqlx::Error::InvalidArgument(
-                "the transaction already owns a command savepoint".into(),
-            ));
+    pub async fn with_savepoint<T, E, F>(&mut self, f: F) -> Result<T, SavepointError<E>>
+    where
+        F: AsyncFnOnce(&mut Tx<'_, M>) -> Result<SavepointEnd<T>, E>,
+    {
+        let id = self.next_savepoint;
+        self.next_savepoint = id.checked_add(1).ok_or_else(|| {
+            SavepointError::Begin(sqlx::Error::InvalidArgument(
+                "transaction savepoint limit reached".into(),
+            ))
+        })?;
+        let saved_notifications = self.notifications.len();
+        self.execute(savepoint_sql(id, false))
+            .await
+            .map_err(SavepointError::Begin)?;
+        match f(self).await {
+            Ok(SavepointEnd::Keep(value)) => Ok(value),
+            Ok(SavepointEnd::Rollback(value)) => {
+                self.rollback_savepoint(id, saved_notifications)
+                    .await
+                    .map_err(SavepointError::Rollback)?;
+                Ok(value)
+            }
+            Err(error) => Err(SavepointError::Work(error)),
         }
-        self.command_savepoint_notification_count = Some(self.notifications.len());
-        self.execute("SAVEPOINT command_work").await?;
-        Ok(())
     }
 
-    pub async fn rollback_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
-        let notification_count = self.command_savepoint_notification_count.ok_or_else(|| {
-            sqlx::Error::InvalidArgument("the transaction has no command savepoint".into())
-        })?;
+    async fn rollback_savepoint(
+        &mut self,
+        id: u32,
+        saved_notifications: usize,
+    ) -> Result<(), sqlx::Error> {
         self.proven_alive = false;
-        let rollback = self.conn.execute("ROLLBACK TO SAVEPOINT command_work");
+        let rollback = self.conn.execute(savepoint_sql(id, true));
         if let Some(budget) = self.mode.operation_deadline() {
             budget
                 .remaining_ms_or_expire()
@@ -301,9 +342,18 @@ impl<M: TxMode> Tx<'_, M> {
             rollback.await?;
         }
         self.proven_alive = true;
-        self.notifications.truncate(notification_count);
+        self.notifications.truncate(saved_notifications);
         Ok(())
     }
+}
+
+fn savepoint_sql(id: u32, rollback: bool) -> AssertSqlSafe<Cow<'static, str>> {
+    AssertSqlSafe(match (id, rollback) {
+        (0, false) => Cow::Borrowed("SAVEPOINT _tx_sp_0"),
+        (0, true) => Cow::Borrowed("ROLLBACK TO SAVEPOINT _tx_sp_0"),
+        (id, false) => Cow::Owned(format!("SAVEPOINT _tx_sp_{id}")),
+        (id, true) => Cow::Owned(format!("ROLLBACK TO SAVEPOINT _tx_sp_{id}")),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -339,8 +389,7 @@ impl Notification {
 }
 
 fn dispatch_notifications(
-    pool: &PgPool,
-    notifications_enabled: bool,
+    pool: &Pool,
     mut guard: DiscardOnDrop,
     mut notifications: SmallVec<[Notification; 1]>,
 ) {
@@ -348,7 +397,7 @@ fn dispatch_notifications(
     static LAST_SENT: LazyLock<parking_lot::Mutex<foldhash::HashMap<NotificationKey, Instant>>> =
         LazyLock::new(|| parking_lot::Mutex::new(foldhash::HashMap::default()));
 
-    if notifications.is_empty() || !notifications_enabled {
+    if notifications.is_empty() || !pool.notifications_enabled() {
         return;
     }
     let now = Instant::now();
@@ -359,7 +408,7 @@ fn dispatch_notifications(
         return;
     }
     let closing = pool.close_event();
-    let return_in_task = pool.options().get_min_connections() == 0;
+    let return_in_task = pool.inner().options().get_min_connections() == 0;
     tokio::spawn(async move {
         guard.discard = true;
         let send = async {
@@ -575,7 +624,7 @@ impl TxOptions {
     }
 }
 
-pub async fn in_tx<T, E, F>(pool: &PgPool, f: F) -> Result<T, E>
+pub async fn in_tx<T, E, F>(pool: &Pool, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
@@ -583,7 +632,7 @@ where
     in_tx_with(pool, TxOptions::default(), f).await
 }
 
-pub async fn in_tx_with<T, E, F>(pool: &PgPool, options: TxOptions, f: F) -> Result<T, E>
+pub async fn in_tx_with<T, E, F>(pool: &Pool, options: TxOptions, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
     E: From<TxError>,
@@ -592,8 +641,8 @@ where
 }
 
 pub async fn in_tx_with_acquire_deadline<T, E, F>(
-    pool: &PgPool,
-    deadline: tokio::time::Instant,
+    pool: &Pool,
+    deadline: Instant,
     options: TxOptions,
     f: F,
 ) -> Result<T, E>
@@ -605,7 +654,7 @@ where
 }
 
 pub async fn in_tx_with_deadline<T, E, F>(
-    pool: &PgPool,
+    pool: &Pool,
     deadline: Instant,
     options: TxOptions,
     f: F,
@@ -623,9 +672,9 @@ where
 }
 
 async fn transaction<M: TxModeExt<E>, T, E, F>(
-    pool: &PgPool,
+    pool: &Pool,
     options: TxOptions,
-    acquire_deadline: Option<tokio::time::Instant>,
+    acquire_deadline: Option<Instant>,
     mode: M,
     f: F,
 ) -> Result<T, E>
@@ -634,12 +683,11 @@ where
     E: From<TxError>,
 {
     let span = observe::transaction_span(pool);
-    let mut observation =
-        TransactionObservation::start(span.clone(), crate::pool::pool_metrics(pool));
+    let mut observation = TransactionObservation::start(span.clone(), Arc::clone(pool.policy()));
     async {
         let acquired = Box::pin(acquire_for_transaction(pool, acquire_deadline)).await;
         observation.record_connection_wait();
-        let (connection, notifications_enabled) = acquired
+        let connection = acquired
             .map_err(TxError::Acquire)
             .inspect_err(|error| observation.record_failure(error))
             .map_err(|error| mode.acquisition_failure(error))?;
@@ -660,7 +708,7 @@ where
             proven_alive: true,
             mode,
             notifications: SmallVec::new(),
-            command_savepoint_notification_count: None,
+            next_savepoint: 0,
         };
         let result = f(&mut handle).await;
         handle.mode.check_expiry(&mut observation)?;
@@ -680,7 +728,7 @@ where
             .map_err(classify_commit)
             .inspect_err(|error| observation.record_failure(error))?;
         observation.end(TransactionOutcome::Committed);
-        dispatch_notifications(pool, notifications_enabled, guard, notifications);
+        dispatch_notifications(pool, guard, notifications);
         Ok(value)
     }
     .instrument(span)

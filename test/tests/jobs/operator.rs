@@ -5,10 +5,11 @@ use infra_jobs::operator::{
     RecoveryTarget,
 };
 use infra_jobs::{Enqueued, JobId, JobKind, KindName, enqueue_unique};
-use infra_postgres::{Isolation, PgPool, TxOptions, in_tx, in_tx_with};
+use infra_postgres::{Isolation, Pool, TxOptions, in_tx, in_tx_with};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -30,7 +31,7 @@ impl JobKind for Note {
     const NAME: KindName = KindName::new(KIND);
 }
 
-async fn open(pool: &PgPool) -> PgPool {
+async fn open(pool: &PgPool) -> Pool {
     super::template_pool(&dsn_for(pool).await, 3).await
 }
 
@@ -65,7 +66,7 @@ async fn stored(pool: &PgPool, target: &RecoveryTarget) -> Value {
         .expect("the durable job")
 }
 
-async fn inspect_one(pool: &PgPool, id: JobId) -> OneInspection {
+async fn inspect_one(pool: &Pool, id: JobId) -> OneInspection {
     in_tx_with(pool, READ_ONLY, async |tx| {
         operator::inspect_one(tx, id).await
     })
@@ -73,7 +74,7 @@ async fn inspect_one(pool: &PgPool, id: JobId) -> OneInspection {
     .expect("read-only inspection commits")
 }
 
-async fn inspect_failed(pool: &PgPool, page: PageQuery) -> PageInspection {
+async fn inspect_failed(pool: &Pool, page: PageQuery) -> PageInspection {
     in_tx_with(pool, READ_ONLY, async |tx| {
         operator::inspect_failed(tx, page).await
     })
@@ -82,7 +83,7 @@ async fn inspect_failed(pool: &PgPool, page: PageQuery) -> PageInspection {
 }
 
 async fn inspect_unhandled(
-    pool: &PgPool,
+    pool: &Pool,
     handled_kinds: &HandledKinds,
     page: PageQuery,
 ) -> PageInspection {
@@ -465,10 +466,6 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
     for discard in [false, true] {
         let target = failed(&pool, Uuid::new_v4(), "blocked-recovery").await;
         let before = stored(&pool, &target).await;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a raw independent transaction holds the row lock while the adapter is exercised"
-        )]
         let mut holder = pool.begin().await.unwrap();
         sqlx::query("SELECT id FROM background_jobs WHERE id::text = $1 FOR UPDATE")
             .bind(target.id().to_string())
@@ -492,10 +489,14 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
             .unwrap_err();
         assert_eq!(error.sqlstate().as_deref(), Some("57014"));
         assert_eq!(stored(&pool, &target).await, before);
-        let budget: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&jobs)
+        let mut connection = infra_postgres::acquire(&jobs, "show statement_timeout")
             .await
             .unwrap();
+        let budget: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
         assert_eq!(
             budget, "8s",
             "the failed transaction restores the session budget"
@@ -624,7 +625,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     super::close_pools(&[&jobs]).await;
 }
 
-async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
+async fn proxied_pool(pool: &PgPool) -> (CommitProxy, Pool) {
     let (proxy, dsn) = CommitProxy::start_for(pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     (proxy, jobs)
@@ -641,7 +642,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
     })
     .await;
     std::assert_matches!(result, Err(OperatorError::Stale));
-    assert_eq!(stored(&jobs, &target).await, before);
+    assert_eq!(stored(&pool, &target).await, before);
     for fault in [Fault::DropBeforeForward, Fault::ForwardThenDrop] {
         let target = failed(&pool, Uuid::new_v4(), "uncertain").await;
         let before = stored(&pool, &target).await;

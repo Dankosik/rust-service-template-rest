@@ -1,8 +1,9 @@
 use super::{
     Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, WorkerGroup, in_maintenance_tx,
-    observe_failure, observe_recovery, observed,
+    observe_failure, observe_recovery,
 };
 use crate::outbox::KIND;
+use infra_postgres::observed;
 use metrics::Unit;
 
 const OLDEST_UNCONFIRMED: &str = "jobs_outbox_oldest_unconfirmed_age_seconds";
@@ -69,7 +70,7 @@ struct OutboxSample {
 
 async fn read(primary_group: &WorkerGroup) -> Result<OutboxSample, OperationError> {
     in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
-        Ok(observed(
+        Ok(observed!(
             "sample outbox",
             sqlx::query_as!(
                 OutboxSample,

@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use metrics::Unit;
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use super::LOG_TARGET;
 use crate::error::{failure_cause, sqlstate};
+use crate::pool::Pool;
 use crate::transaction::{Tx, TxError, TxOptions, in_tx_with, set_statement_timeout};
 
 pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
@@ -19,18 +19,38 @@ const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
 const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cleanup {
-    Jobs,
-    HttpIdempotency,
-}
+pub struct Cleanup(&'static str);
 
 impl Cleanup {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Jobs => "jobs",
-            Self::HttpIdempotency => "http_idempotency",
-        }
+    #[must_use]
+    pub const fn new(label: &'static str) -> Self {
+        assert!(
+            is_valid_label(label),
+            "cleanup label must be non-empty ASCII snake_case"
+        );
+        Self(label)
     }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.0
+    }
+}
+
+pub(super) const fn is_valid_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,13 +198,13 @@ impl CleanupPass {
 
     pub async fn run_until_short_batch<F>(
         mut self,
-        pool: &PgPool,
+        pool: &Pool,
         cancel: Option<&CancellationToken>,
         options: &CleanupBatchOptions,
-        delete: F,
+        mut delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
-        F: Copy + AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -193,12 +213,13 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self.run_batch(pool, options, delete).await?;
+            let rows = self.run_batch(pool, options, &mut delete).await?;
             metrics::counter!(options.removed_metric).increment(rows);
             if rows < u64::from(options.limit) {
+                let removed_rows = self.removed_rows;
                 self.completed();
                 return Ok(CleanupPassResult {
-                    removed_rows: self.removed_rows,
+                    removed_rows,
                     end: PassEnd::Completed,
                 });
             }
@@ -207,21 +228,22 @@ impl CleanupPass {
 
     async fn run_batch<F>(
         &mut self,
-        pool: &PgPool,
+        pool: &Pool,
         options: &CleanupBatchOptions,
-        delete: F,
+        delete: &mut F,
     ) -> Result<u64, CleanupError>
     where
-        F: AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
+        let limit = options.limit;
         self.await_batch(
             options.failure_message,
             in_tx_with(
                 pool,
                 options.transaction,
-                async |tx| -> Result<u64, BatchError> {
+                async move |tx| -> Result<u64, BatchError> {
                     set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
-                    delete(tx, options.limit).await.map_err(BatchError::from)
+                    delete(tx, limit).await.map_err(BatchError::from)
                 },
             ),
         )
@@ -258,7 +280,7 @@ impl CleanupPass {
                 CleanupError::TimedOut
             }
         };
-        self.failed();
+        self.outcome = CleanupOutcome::Failed;
         Err(failure)
     }
 
@@ -269,11 +291,11 @@ impl CleanupPass {
         self.removed_rows = self.removed_rows.saturating_add(rows);
     }
 
-    pub fn completed(&mut self) {
+    pub fn completed(mut self) {
         self.outcome = CleanupOutcome::Completed;
     }
 
-    pub fn failed(&mut self) {
+    pub fn failed(mut self) {
         self.outcome = CleanupOutcome::Failed;
     }
 }

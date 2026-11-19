@@ -8,7 +8,7 @@ use infra_jobs::operator::{
     OperatorError, PageInspection, PageQuery, RecoveryTarget,
 };
 use infra_jobs::{JobId, StartupError};
-use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, PgPool, TxOptions};
+use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, Pool, SslPolicy, TxOptions};
 use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -144,7 +144,7 @@ impl Request {
         }
     }
 
-    async fn execute(&self, pool: &PgPool) -> Result<Executed, OperatorError> {
+    async fn execute(&self, pool: &Pool) -> Result<Executed, OperatorError> {
         const READ_ONLY: TxOptions = TxOptions {
             isolation: Isolation::ReadCommitted,
             read_only: true,
@@ -452,10 +452,15 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
             return request.failed_before_start(Cause::Signals).into();
         }
     };
-    let Ok(dsn) = Dsn::admit_for_environment(
+    let ssl_policy = if config.local_development {
+        SslPolicy::AllowLocalDevelopment
+    } else {
+        SslPolicy::VerifyFull
+    };
+    let Ok(dsn) = Dsn::admit_with(
         config.dsn.expose_secret(),
         config.password_file.as_deref(),
-        config.local_development,
+        ssl_policy,
     ) else {
         return request.failed_before_start(Cause::Dsn).into();
     };
@@ -463,6 +468,7 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
         config.session_budgets,
         NonZeroU32::MIN,
         "jobs-worker-operator",
+        false,
     );
     let pool = match bounded(
         &mut signals,
@@ -489,7 +495,7 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
 }
 
 async fn verify_and_execute(
-    pool: &PgPool,
+    pool: &Pool,
     signals: &mut Signals,
     request: &Request,
 ) -> Result<Executed, Failure> {

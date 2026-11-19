@@ -9,12 +9,12 @@ use std::time::{Duration, UNIX_EPOCH};
 use async_nats::jetstream::{self, stream};
 // template:end outbox:test-jobs-process-nats-imports-2
 use infra_jobs::{JobKind, enqueue};
-use infra_postgres::{PgPool, TxError, in_tx};
+use infra_postgres::{Pool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use integration_tests::poll_until;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
@@ -550,9 +550,12 @@ async fn prepare(pool: &PgPool) {
 }
 
 async fn enqueue_committed(pool: &PgPool, action: ProbeAction) -> String {
-    let id = in_tx(pool, async |tx| -> Result<_, TxError> {
-        Ok(enqueue(tx, &Probe { action }).await.expect("enqueue"))
-    })
+    let id = in_tx(
+        &Pool::from(pool.clone()),
+        async |tx| -> Result<_, TxError> {
+            Ok(enqueue(tx, &Probe { action }).await.expect("enqueue"))
+        },
+    )
     .await
     .expect("enqueue");
     id.to_string()
@@ -772,25 +775,28 @@ async fn outbox_age_reports_deferred_and_blocked_events_through_broker_refusal(p
         )
         .unwrap()
         .for_outbox(uuid::NonNilUuid::new(uuid::Uuid::from_u128(1)).unwrap());
-    in_tx(&pool, async |tx| -> Result<(), TxError> {
-        for (version, name) in [(1, "first"), (2, "second")] {
-            let event = publication
-                .prepare(&domain_events::Event {
-                    id: name.to_owned(),
-                    occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-                    payload: OutboxAgeEvent { name },
-                })
-                .unwrap();
-            assert_eq!(
-                event
-                    .enqueue_ordered(tx, "age-test", version)
-                    .await
-                    .unwrap(),
-                infra_messaging::outbox::OutboxEnqueued::Created
-            );
-        }
-        Ok(())
-    })
+    in_tx(
+        &Pool::from(pool.clone()),
+        async |tx| -> Result<(), TxError> {
+            for (version, name) in [(1, "first"), (2, "second")] {
+                let event = publication
+                    .prepare(&domain_events::Event {
+                        id: name.to_owned(),
+                        occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                        payload: OutboxAgeEvent { name },
+                    })
+                    .unwrap();
+                assert_eq!(
+                    event
+                        .enqueue_ordered(tx, "age-test", version)
+                        .await
+                        .unwrap(),
+                    infra_messaging::outbox::OutboxEnqueued::Created
+                );
+            }
+            Ok(())
+        },
+    )
     .await
     .unwrap();
     sqlx::query(
@@ -1016,9 +1022,7 @@ async fn worker_readiness_recovers_when_postgres_becomes_writable_again(pool: Pg
     let metrics = format!("http://{diagnostics}/metrics");
     assert_eq!(get(&ready).await.expect("initial readiness").0, 200);
 
-    let mut admin = infra_postgres::acquire(&pool, "change test database writability")
-        .await
-        .expect("a session that stays writable");
+    let mut admin = pool.acquire().await.expect("a session that stays writable");
     reconnect_worker_sessions(&mut admin, true).await;
     let switched_at: f64 =
         sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision")
@@ -1287,10 +1291,6 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .expect("completed backlog");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "uncommitted deletes hold row locks through both worker samples"
-    )]
     let mut locked = pool.begin().await.expect("hold sampled jobs");
     let deleted = sqlx::query(
         "DELETE FROM background_jobs WHERE id = $1 \
@@ -1359,10 +1359,6 @@ async fn worker_backlog_age_includes_expired_leases_without_pending_jobs(pool: P
     .await
     .expect("two expired leases and one live lease for the registered kind");
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the worker observes committed jobs while their locks prevent claim"
-    )]
     let mut locked = pool.begin().await.expect("hold running jobs");
     let locked_rows = sqlx::query("SELECT id FROM background_jobs FOR UPDATE")
         .fetch_all(&mut *locked)

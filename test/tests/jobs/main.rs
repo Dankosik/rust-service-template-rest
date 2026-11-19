@@ -27,7 +27,8 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{Dsn, Isolation, PgPool};
+use infra_postgres::{Dsn, Isolation, Pool};
+use sqlx::PgPool;
 
 pub(crate) use infra_postgres::sqlstate;
 
@@ -48,7 +49,7 @@ enum AttemptError {
     Tx(infra_postgres::TxError),
 }
 
-pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
+pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> Pool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ReadCommitted).await
 }
 

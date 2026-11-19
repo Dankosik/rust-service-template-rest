@@ -3,10 +3,11 @@ use metrics_util::debugging::DebuggingRecorder;
 use super::*;
 
 const RUNS_METRIC: &str = "test_cleanup_runs_total";
+const JOBS: Cleanup = Cleanup::new("jobs");
 
 #[tokio::test(start_paused = true)]
 async fn the_first_scheduled_pass_starts_at_once_and_the_next_waits_the_interval() {
-    let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
+    let mut schedule = CleanupSchedule::new(JOBS);
     schedule.next().await;
     let started = tokio::time::Instant::now();
     schedule.next().await;
@@ -23,7 +24,7 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
     let mut attempts = 0;
 
     run_scheduled_cleanup(
-        Cleanup::Jobs,
+        JOBS,
         RUNS_METRIC,
         &cancel,
         || {
@@ -42,4 +43,33 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
             .iter()
             .all(|(key, ..)| key.key().name() != "postgres_maintenance_observer_enabled")
     );
+}
+
+#[tokio::test]
+async fn scheduled_cleanup_borrowing_local_state_stays_send_for_spawn() {
+    fn assert_send<F: Future + Send>(future: F) -> F {
+        future
+    }
+
+    async fn run(state: String, cancel: CancellationToken) {
+        run_scheduled_cleanup(
+            JOBS,
+            RUNS_METRIC,
+            &cancel,
+            || async {
+                let _ = (&state, &cancel);
+                Ok::<_, ()>(PassEnd::Cancelled)
+            },
+            || async {
+                let _ = &state;
+                Err(MaintenanceFailure::Statement)
+            },
+        )
+        .await;
+        drop((state, cancel));
+    }
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_send(run("local".to_owned(), cancel)).await;
 }

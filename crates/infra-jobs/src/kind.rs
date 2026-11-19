@@ -7,11 +7,10 @@ use std::time::Duration;
 
 use compact_str::{CompactString, format_compact};
 use futures_util::future::BoxFuture;
-use infra_postgres::{Tx, observed};
+use infra_postgres::{Pool, Tx, observed};
 use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -99,7 +98,7 @@ pub(crate) struct Attempt {
     pub(crate) cancellation: CancellationToken,
 }
 
-pub struct Job<K, P = PgPool> {
+pub struct Job<K, P = Pool> {
     attempt: Attempt,
     payload: K,
     pool: P,
@@ -144,7 +143,7 @@ impl<K, P> Job<K, P> {
 
 impl<K> Job<K> {
     #[must_use]
-    pub const fn pool(&self) -> &PgPool {
+    pub const fn pool(&self) -> &Pool {
         &self.pool
     }
 }
@@ -593,7 +592,7 @@ pub(crate) enum Completion {
 pub(crate) type HandlerFuture = BoxFuture<'static, Result<Completion, JobError>>;
 
 pub(crate) type Dispatch =
-    dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
+    dyn Fn(Attempt, Pool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
 
 #[cfg(test)]
 mod tests {
@@ -635,10 +634,12 @@ mod tests {
         JobId(uuid::Uuid::try_parse(text).unwrap())
     }
 
-    fn lazy_pool() -> PgPool {
-        PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap()
+    fn lazy_pool() -> Pool {
+        Pool::from(
+            PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap(),
+        )
     }
 
     proptest::proptest! {
