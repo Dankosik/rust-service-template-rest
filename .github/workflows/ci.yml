@@ -78,6 +78,7 @@ jobs:
       migrations: ${{ steps.surfaces.outputs.migrations }}
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
+      documentation_part: ${{ steps.surfaces.outputs.documentation_part }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
       template_engine: ${{ steps.surfaces.outputs.template_engine }}
       # template:begin source-template:ci-initializer-outputs
@@ -1037,8 +1038,10 @@ jobs:
           tool: typos@${{ env.TYPOS_VERSION }}
       - name: Typos
         run: make typos
-      - name: Links
-        run: make docs-check
+      - name: Docs check (${{ needs.changes.outputs.documentation_part || 'all' }})
+        env:
+          DOCS_CHECK_PART: ${{ needs.changes.outputs.documentation_part || 'all' }}
+        run: make docs-check DOCS_CHECK_PART="${DOCS_CHECK_PART}"
 
   required:
     if: always()

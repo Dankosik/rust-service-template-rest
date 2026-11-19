@@ -23,10 +23,10 @@ and its selected profiles. CI and `make verify` use the same
   leaves heavy container/integration proofs and the source initializer matrix to
   CI (`status: partially_verified`), caching reusable local receipts under
   `<git-common-dir>/codex/verify` (`VERIFY_FORCE=1` bypasses reuse; failures
-  never auto-clean caches). Outside CI, `shell` (`make shellcheck`) and
-  `documentation` (`make docs-check`) use pinned Docker containers when Docker
-  is running and fall back to host `shellcheck` / `lychee` when Docker is
-  unavailable. Setting `REPOSITORY_CI ?= none` in
+  never auto-clean caches). Outside CI, `make shellcheck` and the link portion
+  of `make docs-check` use pinned Docker containers when Docker is running and
+  fall back to host `shellcheck` and `lychee` when it is unavailable. Setting
+  `REPOSITORY_CI ?= none` in
   [`make/service.mk`](../make/service.mk) runs heavy and CI-only checks locally
   under `ALLOW_HEAVY=1` and `ALLOW_FULL=1` (`ci_mode: none`).
 - **Execution guards:** `ALLOW_FULL=1` and `ALLOW_HEAVY=1` are explicit opt-ins

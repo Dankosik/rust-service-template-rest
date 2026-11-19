@@ -355,10 +355,15 @@ python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
 	$(RUFF) check --no-cache .
 
-# Offline on purpose: relative paths and #fragments are this repository's
-# contract; external URLs are not, and checking them would make the gate flaky.
-docs-check: ## Image-input watch coverage and relative Markdown links/fragments
-	python3 scripts/checks/image_inputs.py
+DOCS_CHECK_PART ?= all
+docs-check: export DOCS_CHECK_PART := $(DOCS_CHECK_PART)
+docs-check: ## Image inputs and offline links (DOCS_CHECK_PART=all|links|image-inputs)
+	@case "$$DOCS_CHECK_PART" in \
+		all|image-inputs) python3 scripts/checks/image_inputs.py ;; \
+		links) ;; \
+		*) echo "$@ expects DOCS_CHECK_PART=all|links|image-inputs" >&2; exit 2 ;; \
+	esac
+ifneq ($(DOCS_CHECK_PART),image-inputs)
 	@run_lychee() { \
 		root="$$1"; shift; \
 		if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
@@ -379,6 +384,7 @@ docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 		harness_md="$$(cd "$$stage" && find CLAUDE.md QWEN.md Grok.md .claude .qwen .cursor .grok .opencode .agents/agents .agents/rules -type f -name '*.md' 2>/dev/null)" && \
 		run_lychee "$$stage" $$harness_md; \
 	fi
+endif
 
 dockerfile-check: ## Native BuildKit Dockerfile checks
 	$(VALIDATION_LOCK) bash scripts/image/build.sh --check

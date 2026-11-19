@@ -442,7 +442,21 @@ def _build_plan(
             add_command("artifacts", artifact_graphs, "selected initialized release binary sets", "docker", display=f"make template-init-artifacts ARTIFACT_GRAPHS={artifact_graphs}", heavy=True, docker=True)
 
     if is_true("documentation"):
-        add_command("make", "docs-check", "Markdown changed", "docker", docker=True, host_fallback="lychee")
+        part = report.documentation_part
+        links_selected = bool(part & _surfaces.DocumentationPart.LINKS)
+        reason = {
+            _surfaces.DocumentationPart.LINKS: "relative documentation links selected",
+            _surfaces.DocumentationPart.IMAGE_INPUTS: "image-input watch coverage selected",
+            _surfaces.DocumentationPart.ALL: "relative documentation links and image-input watch coverage selected",
+        }[part]
+        add_command(
+            "make-vars",
+            f"docs-check DOCS_CHECK_PART={part.option}",
+            reason,
+            "docker" if links_selected else "cheap",
+            docker=links_selected,
+            host_fallback="lychee" if links_selected else None,
+        )
 
     if ci_mode == "none":
         if is_true("rust_source") or is_true("cargo_dependencies") or is_true("github_workflows"):

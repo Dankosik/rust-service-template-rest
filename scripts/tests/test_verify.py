@@ -58,6 +58,7 @@ def _clean_verify_env(**extra: str) -> dict[str, str]:
         "REPOSITORY_CI",
         "VERIFY_RUNTIME_IMAGE",
         "VERIFY_FORCE",
+        "VERIFY_DOCS_DETAIL",
         "BASE_REF",
         "CARGO_TARGET_DIR",
         "CARGO_BUILD_TARGET_DIR",
@@ -224,15 +225,46 @@ class SurfacesTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
-        verdicts = surfaces.classify_files(
+        report = surfaces.classify_report(
             self.source_fixture,
             ["assets/data.bin", "assets/extra.cfg"],
         )
+        verdicts = report.surfaces
         self.assertTrue(verdicts["rust_source"])
         self.assertTrue(verdicts["runtime_image"])
         self.assertTrue(verdicts["documentation"])
+        self.assertEqual(report.documentation_part.option, "all")
         self.assertFalse(verdicts["db_integration"])
         self.assertEqual(len(counter.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_documentation_detail_is_opt_in(self) -> None:
+        args = [sys.executable, str(VERIFY_DIR / "surfaces.py"), "--repo", str(self.source_fixture)]
+        output = self.temp / "documentation-output"
+        for paths, part in (
+            (["--files", "README.md"], "links"),
+            (["--files", "specs/payments/fixture.json", "docs/data.json"], "links"),
+            (["--files", ".railway/railway.ts", ".dockerignore"], "image-inputs"),
+            (["--files", "build/docker/Dockerfile"], "image-inputs"),
+            (["--files", "rust-toolchain.toml"], "image-inputs"),
+            (["--files", "scripts/checks/image_inputs.py", "scripts/tests/test_image_inputs.py"], "image-inputs"),
+            (["--files", "README.md", ".railway/railway.ts"], "all"),
+            (["--files", "make/template.mk"], "all"),
+            (["--files", ".editorconfig"], "none"),
+            (["--all"], "all"),
+        ):
+            with self.subTest(paths=paths):
+                default = subprocess.run(
+                    [*args, *paths], capture_output=True, text=True, env=_clean_verify_env(), check=True,
+                )
+                detail = subprocess.run(
+                    [*args, "--github-output", str(output), *paths],
+                    capture_output=True, text=True, env=_clean_verify_env(VERIFY_DOCS_DETAIL="1"), check=True,
+                )
+                self.assertNotIn("documentation_part=", default.stdout)
+                self.assertIn(f"documentation={'false' if part == 'none' else 'true'}\n", default.stdout)
+                self.assertEqual(detail.stdout, default.stdout + f"documentation_part={part}\n")
+                self.assertEqual(output.read_text(encoding="utf-8"), detail.stdout)
+                output.unlink()
 
     def test_quality_tooling_vs_rust_duplication_split(self) -> None:
         for rs_file in ("crates/config/build.rs", "crates/health/src/lib.rs", "test/tests/probes.rs"):
@@ -691,6 +723,7 @@ class SurfacesTests(unittest.TestCase):
         shutil.copy2(VERIFY_DIR / "surfaces.py", union_repo / "scripts/verify/surfaces.py")
         shutil.copy2(VERIFY_DIR / "changed_paths.py", union_repo / "scripts/verify/changed_paths.py")
         (union_repo / "scripts/legacy.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (union_repo / ".dockerignore").touch()
         (union_repo / "make").mkdir()
         (union_repo / "make/source.mk").touch()
         (union_repo / "scripts/template").mkdir()
@@ -711,6 +744,14 @@ class SurfacesTests(unittest.TestCase):
         self.assertTrue(union_report.classified)
         self.assertTrue(union_report.surfaces["shell"])
         self.assertTrue(union_report.surfaces["documentation"])
+        self.assertEqual(union_report.documentation_part.option, "links")
+        (union_repo / ".dockerignore").unlink()
+        deleted_inputs = surfaces.classify_union_report(union_repo, base_sha, [".dockerignore"])
+        self.assertEqual(deleted_inputs.documentation_part.option, "image-inputs")
+        (union_repo / ".railway").mkdir()
+        _git(union_repo, "mv", "README.md", ".railway/renamed.ts")
+        rename_union = surfaces.classify_union_report(union_repo, base_sha)
+        self.assertEqual(rename_union.documentation_part.option, "all")
         sync_union = surfaces.classify_union_report(union_repo, base_sha, [sync_path])
         self.assertTrue(sync_union.surfaces["initializer_source"])
         self.assertTrue(sync_union.surfaces["module_initializer"])
@@ -726,18 +767,57 @@ class SurfacesTests(unittest.TestCase):
 
         legacy_classifier = union_repo / "scripts/verify/surfaces.py"
         legacy_classifier.write_text(
-            'import sys\nprint("rust_source=true" if "old.rs" in sys.argv else "lint_config=true")\n',
+            'import sys\n'
+            'print("rust_source=true" if "old.rs" in sys.argv else "lint_config=true")\n'
+            'print("documentation=true" if ".dockerignore" in sys.argv else "documentation=false")\n'
+            'if "api/openapi/retired.yaml" in sys.argv: print("openapi=true")\n',
             encoding="utf-8",
         )
-        deleted = ("old.rs", "clippy.toml", "rustfmt.toml")
+        deleted = ("old.rs", "clippy.toml", "rustfmt.toml", ".dockerignore", "api/openapi/retired.yaml")
         for path in deleted:
+            (union_repo / path).parent.mkdir(parents=True, exist_ok=True)
             (union_repo / path).touch()
         _git(union_repo, "add", legacy_classifier.as_posix(), *deleted)
         _git(union_repo, "commit", "-qm", "base classifier predates profiling selection")
         for path in deleted:
             (union_repo / path).unlink()
             report = surfaces.classify_union_report(union_repo, "HEAD", [path])
-            self.assertEqual(report.surfaces["profiling"], path != "rustfmt.toml", path)
+            self.assertEqual(report.surfaces["profiling"], path in ("old.rs", "clippy.toml"), path)
+            self.assertEqual(report.documentation_part.option, "all" if path == ".dockerignore" else "none", path)
+            self.assertEqual(report.surfaces["openapi"], path == "api/openapi/retired.yaml", path)
+
+    def test_classifier_union_with_historical_shell_and_helper(self) -> None:
+        repo = self.derived_fixture
+        _git(repo, "init", "-q")
+        classifier = repo / "scripts/ci/changed-surfaces.sh"
+        classifier.parent.mkdir(parents=True)
+        classifier.write_text('root=$PWD\npython3 "${root}/scripts/lib/template_state.py"\n', encoding="utf-8")
+        helper = repo / "scripts/lib/template_state.py"
+        helper.parent.mkdir()
+        helper.write_text(
+            'import sys\n'
+            'if ".dockerignore" not in sys.stdin.read().splitlines(): raise SystemExit(7)\n'
+            'print("documentation=true")\n',
+            encoding="utf-8",
+        )
+        (repo / ".dockerignore").touch()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "historical classifier")
+        for path in (classifier, helper, repo / ".dockerignore"):
+            path.unlink()
+
+        args = [sys.executable, str(VERIFY_DIR / "surfaces.py"), "--repo", str(repo), "--union", "HEAD", "--files"]
+        report = subprocess.run(
+            [*args, ".dockerignore"],
+            capture_output=True, text=True, env=_clean_verify_env(VERIFY_DOCS_DETAIL="1"),
+        )
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertIn("documentation=true\n", report.stdout)
+        self.assertIn("documentation_part=all\n", report.stdout)
+
+        failed = subprocess.run([*args, "README.md"], capture_output=True, text=True)
+        self.assertEqual(failed.returncode, 7)
+        self.assertIn("base classifier failed: HEAD", failed.stderr)
 
 
 class AffectedCratesTests(unittest.TestCase):
@@ -963,7 +1043,7 @@ class VerifyRunnerTests(unittest.TestCase):
         (self.fixture / ".gitleaks.toml").write_text("", encoding="utf-8")
         (self.fixture / "Makefile").write_text(
             "check-instructions:\n\t@printf 'instructions ok\\n'\n"
-            "docs-check:\n\t@printf 'docs ok\\n'\n"
+            "docs-check:\n\t@printf 'docs part=%s\\n' '$(DOCS_CHECK_PART)'\n"
             "shellcheck:\n\t@printf 'shell ok\\n'\n"
             "quality-check-self-test:\n\t@printf 'quality self-test ok\\n'\n"
             "template-quality-projections:\n\t@printf 'quality projections ok\\n'\n",
@@ -1099,11 +1179,19 @@ class VerifyRunnerTests(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertEqual("  make profiling-check\n" in res.stdout, expected)
 
-        res = self._run_verify("--plan", "--files", "README.md")
-        self.assertEqual(res.returncode, 0)
-        self.assertIn("documentation=true", res.stdout)
-        self.assertIn("  make docs-check\n", res.stdout)
-        self.assertIn("requires_docker=true", res.stdout)
+        for paths, part, reason, docker in (
+            (["README.md"], "links", "relative documentation links selected", True),
+            ([".railway/railway.ts"], "image-inputs", "image-input watch coverage selected", False),
+            (["README.md", ".railway/railway.ts"], "all", "relative documentation links and image-input watch coverage selected", True),
+        ):
+            with self.subTest(paths=paths):
+                res = self._run_verify("--plan", "--files", *paths)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("documentation=true", res.stdout)
+                commands = self._plan_section(res.stdout, "commands")
+                self.assertEqual(commands.count("make docs-check"), 1)
+                self.assertIn(f"make docs-check DOCS_CHECK_PART={part}\n    because {reason}\n", commands)
+                self.assertIn(f"requires_docker={str(docker).lower()}", commands)
 
         res = self._run_verify("--plan", "--files", ".github/dependabot.yml")
         self.assertEqual(res.returncode, 0)
@@ -1245,6 +1333,12 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertEqual(sh_blocked.returncode, 2)
         self.assertIn("Docker is required", sh_blocked.stderr)
 
+        image_inputs = self._run_verify(
+            "--files", ".railway/railway.ts", VERIFY_FORCE="1", PATH=str(isolated_bin),
+        )
+        self.assertEqual(image_inputs.returncode, 0, image_inputs.stderr)
+        self.assertEqual(image_inputs.stdout.splitlines().count("docs part=image-inputs"), 1)
+
         # Add host shellcheck & lychee stubs -> succeeds locally (CI != "true")!
         for host_tool in ("shellcheck", "lychee"):
             stub = isolated_bin / host_tool
@@ -1267,6 +1361,7 @@ class VerifyRunnerTests(unittest.TestCase):
             PATH=str(isolated_bin),
         )
         self.assertEqual(docs_pass.returncode, 0, docs_pass.stderr)
+        self.assertEqual(docs_pass.stdout.splitlines().count("docs part=links"), 1)
         self.assertIn("result: pass\n", docs_pass.stdout)
 
         # Under CI="true", host fallback is disallowed -> blocks when Docker is unavailable!
