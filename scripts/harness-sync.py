@@ -1007,6 +1007,69 @@ def _check_single_skill(skill_dir: Path, *, source_template: bool) -> list[str]:
     return problems
 
 
+_WORKSPACE_CRATES_REF = ".agents/skills/rust-dependencies/references/workspace-crates.md"
+_WORKSPACE_CRATES_BULLET_RE = re.compile(
+    r"^- \*\*[^*]+\*\* \u2014 (?P<crates>`[^`]+`(?:, `[^`]+`)*):"
+)
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`]+)`")
+
+
+def _check_workspace_crates_reference(repo: Path, *, source_template: bool) -> list[str]:
+    ref_path = repo / _WORKSPACE_CRATES_REF
+    if not ref_path.exists() and not ref_path.is_symlink():
+        return []
+    if ref_path.is_symlink() or not ref_path.is_file():
+        return [f"{_WORKSPACE_CRATES_REF}: must be a regular file"]
+
+    declared: frozenset[str] | None = None
+    if source_template:
+        manifest_path = repo / "Cargo.toml"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return [f"{_WORKSPACE_CRATES_REF}: Cargo.toml is missing or not a regular file"]
+        try:
+            manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as err:
+            return [f"{_WORKSPACE_CRATES_REF}: failed to parse Cargo.toml: {err}"]
+
+        workspace = manifest.get("workspace")
+        deps = workspace.get("dependencies") if isinstance(workspace, dict) else None
+        if not isinstance(deps, dict):
+            return [f"{_WORKSPACE_CRATES_REF}: Cargo.toml lacks [workspace.dependencies]"]
+        declared = frozenset(deps)
+
+    try:
+        content = ref_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as err:
+        return [f"{_WORKSPACE_CRATES_REF}: unreadable: {err}"]
+    if "\r" in content:
+        return [f"{_WORKSPACE_CRATES_REF}: contains carriage returns (CRLF)"]
+
+    problems: list[str] = []
+    entries = 0
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if not line.startswith("- "):
+            continue
+        match = _WORKSPACE_CRATES_BULLET_RE.match(line)
+        if match is None:
+            problems.append(
+                f"{_WORKSPACE_CRATES_REF}:{lineno}: bullet must match '- **Task** — `crate`: note'"
+            )
+            continue
+        entries += 1
+        if declared is None:
+            continue
+        for crate in _BACKTICK_TOKEN_RE.findall(match.group("crates")):
+            if crate.startswith("std::"):
+                continue
+            if crate not in declared:
+                problems.append(
+                    f"{_WORKSPACE_CRATES_REF}:{lineno}: crate `{crate}` is not declared in Cargo.toml [workspace.dependencies]"
+                )
+    if entries == 0:
+        problems.append(f"{_WORKSPACE_CRATES_REF}: contains no crate entries")
+    return problems
+
+
 def _validate_skills(repo: Path) -> list[str]:
     skills_root = repo / ".agents/skills"
     if not skills_root.is_dir():
@@ -1023,6 +1086,7 @@ def _validate_skills(repo: Path) -> list[str]:
             _fail(f"{rel_dir} is a symlink; canonical skill directories must be real")
         problems.extend(_check_single_skill(entry, source_template=source_template))
         names.append(entry.name)
+    problems.extend(_check_workspace_crates_reference(repo, source_template=source_template))
     if not names:
         _fail(".agents/skills contains no skills")
     if problems:

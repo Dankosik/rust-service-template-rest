@@ -56,8 +56,11 @@ invariants, ordering, error modes, lifetimes, cost—broader than a signature),
   fan-out—prefer mapping feature-local errors onto existing `Code` variants, or
   surface the blast radius in `Shared mutated surfaces` and `Planning hooks`.
 - **Compile-reality honesty:** verify lints (`Cargo.toml`, `clippy.toml`),
-  `vendor/*/PATCHES.md`, and non-obvious `Cargo.lock` crate definitions
-  directly. Treat tricky bounds as verified **only** after reading their
+  `vendor/*/PATCHES.md`, [workspace utility
+  crates](../../../../.agents/skills/rust-dependencies/references/workspace-crates.md)
+  (before proposing custom codecs, retries, compact containers, or derive
+  boilerplate), and non-obvious `Cargo.lock` crate definitions directly. Treat
+  tricky bounds as verified **only** after reading their
   defining trait/macro source—`async fn` trait `!Send` (RPITIT across
   `tokio::spawn`), `&mut Tx<'_>` or guards across `.await` in Axum handlers,
   `dyn` object safety, `FromRequest` (last, body-consuming) vs
