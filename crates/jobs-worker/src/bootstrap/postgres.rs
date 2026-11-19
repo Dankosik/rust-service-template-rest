@@ -13,7 +13,7 @@ use crate::resources::{PoolResource, Resources};
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 const CREDENTIAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) fn pool_config(
+pub(super) fn validate_pool_config(
     config: &WorkerConfig,
     ordinary_jobs: bool,
 ) -> Result<Option<&PostgresConfig>, WorkerError> {

@@ -81,8 +81,8 @@ impl Request {
         }
     }
 
-    fn failed_before_start(&self, cause: Cause) -> FailureReceipt {
-        FailureReceipt {
+    fn failed_before_start(&self, cause: Cause) -> Failure {
+        Failure {
             outcome: if self.is_mutation() {
                 Outcome::Failed
             } else {
@@ -93,15 +93,15 @@ impl Request {
         }
     }
 
-    fn refused(&self, cause: Cause, detail: &'static str) -> FailureReceipt {
-        FailureReceipt {
+    fn refused(&self, cause: Cause, detail: &'static str) -> Failure {
+        Failure {
             detail: Some(FailureDetail::Admission { detail }),
             ..self.failed_before_start(cause)
         }
     }
 
-    fn failed_after_start(&self, cause: Cause) -> FailureReceipt {
-        FailureReceipt {
+    fn failed_after_start(&self, cause: Cause) -> Failure {
+        Failure {
             outcome: if self.is_mutation() {
                 Outcome::Unknown
             } else {
@@ -112,7 +112,7 @@ impl Request {
         }
     }
 
-    fn database_error(&self, error: &OperatorError) -> FailureReceipt {
+    fn database_error(&self, error: &OperatorError) -> Failure {
         let outcome = if self.is_mutation() {
             match error {
                 OperatorError::Missing => Outcome::Missing,
@@ -126,7 +126,7 @@ impl Request {
         } else {
             Outcome::Unavailable
         };
-        FailureReceipt {
+        Failure {
             outcome,
             cause: error.cause(),
             detail: Some(FailureDetail::Database {
@@ -220,7 +220,7 @@ enum Executed {
     Discarded,
 }
 
-struct FailureReceipt {
+struct Failure {
     outcome: Outcome,
     cause: &'static str,
     detail: Option<FailureDetail>,
@@ -234,12 +234,12 @@ enum FailureDetail {
 }
 
 struct Report {
-    result: Result<Executed, FailureReceipt>,
+    result: Result<Executed, Failure>,
     cleanup_incomplete: bool,
 }
 
-impl From<FailureReceipt> for Report {
-    fn from(failure: FailureReceipt) -> Self {
+impl From<Failure> for Report {
+    fn from(failure: Failure) -> Self {
         Self {
             result: Err(failure),
             cleanup_incomplete: false,
@@ -281,7 +281,7 @@ impl Report {
                 Some(ReceiptBody::Redriven { new_version }),
             ),
             Ok(Executed::Discarded) => (Outcome::Discarded, None),
-            Err(FailureReceipt {
+            Err(Failure {
                 outcome,
                 cause,
                 detail,
@@ -408,12 +408,12 @@ fn run_configured(config: &OperatorPostgresConfig, request: &Request) -> Report 
             return request.failed_before_start(Cause::Runtime).into();
         }
     };
-    let report = runtime.block_on(serve(config, request));
+    let report = runtime.block_on(run_request(config, request));
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     report
 }
 
-async fn serve(config: &OperatorPostgresConfig, request: &Request) -> Report {
+async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Report {
     let mut signals = match Signals::install() {
         Ok(signals) => signals,
         Err(error) => {
@@ -461,7 +461,7 @@ async fn verify_and_execute(
     pool: &PgPool,
     signals: &mut Signals,
     request: &Request,
-) -> Result<Executed, FailureReceipt> {
+) -> Result<Executed, Failure> {
     bounded(
         signals,
         migrate::HISTORY_VERIFY_BUDGET,
@@ -783,7 +783,7 @@ mod tests {
             })
         );
 
-        let sqlstate_failure: Report = FailureReceipt {
+        let sqlstate_failure: Report = Failure {
             outcome: Outcome::Failed,
             cause: "database",
             detail: Some(FailureDetail::Database {

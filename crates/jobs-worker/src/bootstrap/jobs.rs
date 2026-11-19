@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::{ValidationError, WorkerConfig};
 
-use super::{Ended, WorkerError, pending_end};
+use super::{Ended, WorkerError, check_pending_end};
 use crate::background::Background;
 use crate::resources::Resources;
 use crate::signals::Signals;
@@ -16,8 +16,8 @@ pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError
     }
 }
 
-pub(super) fn kind_names(registry: Option<&Kinds>) -> String {
-    registry.map_or_default(|registry| registry.names().collect::<Vec<_>>().join(","))
+pub(super) fn kind_names(kinds: Option<&Kinds>) -> String {
+    kinds.map_or_default(|kinds| kinds.names().collect::<Vec<_>>().join(","))
 }
 
 pub(super) fn validate_pool_capacity(
@@ -53,13 +53,13 @@ pub(super) fn validate_pool_capacity(
 
 pub(super) async fn build_engine(
     config: &WorkerConfig,
-    jobs: Option<Kinds>,
+    kinds: Option<Kinds>,
     resources: &Resources,
 ) -> Result<Option<Engine>, WorkerError> {
-    let engine = match jobs {
-        Some(registry) => Some(Engine::new(
+    let engine = match kinds {
+        Some(kinds) => Some(Engine::new(
             super::postgres::admitted_pool(resources)?,
-            registry,
+            kinds,
             config.jobs.max_workers,
         )),
         None => None,
@@ -78,14 +78,14 @@ pub(super) fn start_engine(
     resources: &mut Resources,
     background: &Background,
     signals: &mut Signals,
-) -> Option<Ended> {
-    let engine = engine?;
-    if let Some(ended) = pending_end(resources, background, signals) {
-        return Some(ended);
-    }
+) -> Result<(), Ended> {
+    let Some(engine) = engine else {
+        return Ok(());
+    };
+    check_pending_end(resources, background, signals)?;
     resources.started_engine = Some(engine.start(&background.tracker, &background.cancel));
     tracing::info!("jobs_claiming_started");
-    None
+    Ok(())
 }
 
 pub(super) async fn engine_failure(resources: &Resources) -> WorkerError {

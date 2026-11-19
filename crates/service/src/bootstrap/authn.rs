@@ -7,6 +7,8 @@ use super::background::Background;
 
 use super::BootstrapError;
 
+const ISSUER_KEY: &str = "authn.issuer";
+
 #[allow(
     unused_variables,
     clippy::unused_async,
@@ -27,7 +29,7 @@ pub(super) async fn prepare(
             jwks_uri,
             jwks_max_age,
         } => {
-            let issuer = issuer_url(mode, "authn.issuer", issuer)?;
+            let issuer = issuer_url(mode, issuer)?;
             let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
                 infra_bearerauthn::JwtOptions {
                     issuer,
@@ -62,14 +64,10 @@ pub(super) async fn prepare(
             cache_capacity,
             cache_ttl,
         } => {
-            let issuer = issuer_url(mode, "authn.issuer", issuer)?;
-            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint).map_err(
-                |source| BootstrapError::AuthenticationPreparation {
-                    mode,
-                    key: "authn.introspection_endpoint",
-                    source,
-                },
-            )?;
+            const INTROSPECTION_ENDPOINT_KEY: &str = "authn.introspection_endpoint";
+            let issuer = issuer_url(mode, issuer)?;
+            let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
+                .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))?;
             let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
                 .map_err(|_| {
                     service_config::ValidationError::new(
@@ -79,11 +77,10 @@ pub(super) async fn prepare(
                 })?;
             let cache =
                 infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
-                    .map_err(|source| BootstrapError::AuthenticationPreparation {
+                    .map_err(preparation_error(
                         mode,
-                        key: "authn.cache_capacity/authn.cache_ttl",
-                        source,
-                    })?;
+                        "authn.cache_capacity/authn.cache_ttl",
+                    ))?;
             infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
                 issuer,
                 audiences: audience.as_slice().to_vec(),
@@ -94,43 +91,53 @@ pub(super) async fn prepare(
                 cache: cache_enabled.then_some(cache),
             })
             .map(Some)
-            .map_err(|source| BootstrapError::AuthenticationPreparation {
-                mode,
-                key: "authn.introspection_endpoint",
-                source,
-            })
+            .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))
         }
         // template:end oidc-introspection:bootstrap-prepare-auth-introspection
         AuthnConfig::None => Ok(None),
     }
 }
 
-fn issuer_url(
+fn preparation_error(
     mode: &'static str,
     key: &'static str,
+) -> impl FnOnce(infra_bearerauthn::PreparationError) -> BootstrapError {
+    move |source| BootstrapError::AuthenticationPreparation { mode, key, source }
+}
+
+fn issuer_url(
+    mode: &'static str,
     value: &str,
 ) -> Result<infra_bearerauthn::IssuerUrl, BootstrapError> {
-    infra_bearerauthn::IssuerUrl::parse(value)
-        .map_err(|source| BootstrapError::AuthenticationPreparation { mode, key, source })
+    infra_bearerauthn::IssuerUrl::parse(value).map_err(preparation_error(mode, ISSUER_KEY))
 }
 
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
+const JWKS_URI_KEY: &str = "authn.jwks_uri";
+
 fn authentication_preparation_error(
     mode: &'static str,
     explicit_jwks_uri: bool,
     source: infra_bearerauthn::PreparationError,
 ) -> BootstrapError {
-    let key = authentication_key(source.phase(), explicit_jwks_uri);
-    BootstrapError::AuthenticationPreparation { mode, key, source }
+    let config_key = preparation_config_key(source.phase(), explicit_jwks_uri);
+    BootstrapError::AuthenticationPreparation {
+        mode,
+        key: config_key,
+        source,
+    }
 }
 
-fn authentication_key(
+fn preparation_config_key(
     phase: infra_bearerauthn::PreparationPhase,
     explicit_jwks_uri: bool,
 ) -> &'static str {
-    match (phase, explicit_jwks_uri) {
-        (infra_bearerauthn::PreparationPhase::Jwks, true) => "authn.jwks_uri",
-        _ => "authn.issuer",
+    match phase {
+        infra_bearerauthn::PreparationPhase::Jwks if explicit_jwks_uri => JWKS_URI_KEY,
+        infra_bearerauthn::PreparationPhase::Jwks
+        | infra_bearerauthn::PreparationPhase::Discovery
+        | infra_bearerauthn::PreparationPhase::Options
+        | infra_bearerauthn::PreparationPhase::Client => ISSUER_KEY,
     }
 }
 
@@ -141,11 +148,7 @@ fn jwks_endpoint(
     value
         .map(infra_bearerauthn::EndpointUrl::parse)
         .transpose()
-        .map_err(|source| BootstrapError::AuthenticationPreparation {
-            mode,
-            key: "authn.jwks_uri",
-            source,
-        })
+        .map_err(preparation_error(mode, JWKS_URI_KEY))
 }
 
 const fn jwt_algorithm(algorithm: JwtAlgorithm) -> infra_bearerauthn::JwtAlgorithm {
@@ -168,19 +171,19 @@ mod jwt_tests {
     #[test]
     fn a_jwks_failure_names_the_explicit_key_set_only() {
         assert_eq!(
-            authentication_key(PreparationPhase::Jwks, true),
+            preparation_config_key(PreparationPhase::Jwks, true),
             "authn.jwks_uri"
         );
         assert_eq!(
-            authentication_key(PreparationPhase::Jwks, false),
+            preparation_config_key(PreparationPhase::Jwks, false),
             "authn.issuer"
         );
         assert_eq!(
-            authentication_key(PreparationPhase::Discovery, true),
+            preparation_config_key(PreparationPhase::Discovery, true),
             "authn.issuer"
         );
         assert_eq!(
-            authentication_key(PreparationPhase::Options, true),
+            preparation_config_key(PreparationPhase::Options, true),
             "authn.issuer"
         );
     }

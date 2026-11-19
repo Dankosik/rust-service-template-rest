@@ -158,10 +158,10 @@ impl Dependencies {
 #[derive(Default)]
 pub(crate) struct Serving {
     pub(crate) readiness: Option<ReadinessControl>,
-    pub(crate) app_listener: Option<Server>,
-    pub(crate) diagnostics: Option<Server>,
+    pub(crate) http_server: Option<Server>,
+    pub(crate) diagnostics_server: Option<Server>,
     // template:begin grpc:shutdown-serving-grpc-field
-    pub(crate) grpc_listener: Option<Server>,
+    pub(crate) grpc_server: Option<Server>,
     // template:end grpc:shutdown-serving-grpc-field
     pub(crate) admitted: bool,
 }
@@ -207,12 +207,11 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         stop_serving(&mut serving, http_config, signals, &budget).await
     })
     .await;
-    let diagnostics_outcome = stage(
-        "diagnostics",
-        stop_diagnostics(serving.diagnostics.take(), &budget),
-    )
-    .await;
-    outcome = outcome.combine(diagnostics_outcome);
+    if let Some(diagnostics) = serving.diagnostics_server.take() {
+        let diagnostics_outcome =
+            stage("diagnostics", stop_diagnostics(diagnostics, &budget)).await;
+        outcome = outcome.combine(diagnostics_outcome);
+    }
     drop(serving);
 
     background.cancel();
@@ -225,10 +224,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     )
     .await;
     outcome = outcome.combine(forced_background_outcome);
-    let dependencies_outcome = stage("dependencies", async {
-        dependencies.close(dependency_deadline).await
-    })
-    .await;
+    let dependencies_outcome = stage("dependencies", dependencies.close(dependency_deadline)).await;
     outcome = outcome.combine(dependencies_outcome);
     finish_telemetry(tracer_provider, logger, signals, &budget, outcome).await
 }
@@ -278,61 +274,60 @@ async fn finish_telemetry(
 ) -> Outcome {
     let telemetry_deadline =
         budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK));
-    if let Some(logger) = &logger {
+    let log_reserve = if let Some(logger) = &logger {
         logger.begin_shutdown();
-    }
-    let log_reserve = if logger.is_some() {
         Duration::from_secs(1).min(telemetry_deadline.saturating_duration_since(Instant::now()))
     } else {
         Duration::ZERO
     };
     let trace_deadline = telemetry_deadline - log_reserve;
-    let trace_outcome = stage("telemetry", async {
-        let Some(provider) = tracer_provider else {
-            return Outcome::Graceful;
-        };
-        match provider.shutdown(trace_deadline).await {
-            ProviderShutdown::Completed => {
-                tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
-                Outcome::Graceful
-            }
-            ProviderShutdown::Incomplete(reasons) => {
-                tracing::warn!(
-                    reasons = reasons.bits(),
-                    reason_flags = ?reasons,
-                    "trace_shutdown_incomplete"
-                );
-                Outcome::Degraded
-            }
-        }
-    })
-    .await;
-    outcome = outcome.combine(trace_outcome);
+    if let Some(provider) = tracer_provider {
+        let trace_outcome = stage("telemetry", shutdown_tracer(provider, trace_deadline)).await;
+        outcome = outcome.combine(trace_outcome);
+    }
     if let Err(error) = signals.take_pending() {
-        outcome = Outcome::Degraded;
-        tracing::error!(%error, "signal_owner_failed");
+        outcome = signal_owner_failed(error);
     }
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = logger {
-        let logger_outcome = stage("logger", async {
-            let close =
-                tokio::task::spawn_blocking(move || logger.shutdown(telemetry_deadline.into_std()));
-            match tokio::time::timeout_at(telemetry_deadline, close).await {
-                Ok(Ok(LoggerShutdown::Completed(_))) => Outcome::Graceful,
-                _ => Outcome::Degraded,
-            }
-        })
-        .await;
+        let logger_outcome = stage("logger", shutdown_logger(logger, telemetry_deadline)).await;
         outcome = outcome.combine(logger_outcome);
     }
     outcome
 }
 
-async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> Outcome {
-    let Some(listener) = listener else {
-        return Outcome::Graceful;
-    };
-    match listener.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
+async fn shutdown_tracer(provider: TracerProviderHandle, deadline: Instant) -> Outcome {
+    match provider.shutdown(deadline).await {
+        ProviderShutdown::Completed => {
+            tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
+            Outcome::Graceful
+        }
+        ProviderShutdown::Incomplete(reasons) => {
+            tracing::warn!(
+                reasons = reasons.bits(),
+                reason_flags = ?reasons,
+                "trace_shutdown_incomplete"
+            );
+            Outcome::Degraded
+        }
+    }
+}
+
+async fn shutdown_logger(logger: LoggerGuard, deadline: Instant) -> Outcome {
+    let close = tokio::task::spawn_blocking(move || logger.shutdown(deadline.into_std()));
+    match tokio::time::timeout_at(deadline, close).await {
+        Ok(Ok(LoggerShutdown::Completed(_))) => Outcome::Graceful,
+        _ => Outcome::Degraded,
+    }
+}
+
+fn signal_owner_failed(error: super::signals::SignalError) -> Outcome {
+    tracing::error!(%error, "signal_owner_failed");
+    Outcome::Degraded
+}
+
+async fn stop_diagnostics(server: Server, budget: &Budget) -> Outcome {
+    match server.drain(budget.remaining(DIAGNOSTICS_SHUTDOWN)).await {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
         Ok(Drained::TimedOut { .. }) => tracing::warn!(
             reason = "scrape_outlived_shutdown_budget",
@@ -346,6 +341,23 @@ async fn stop_diagnostics(listener: Option<Server>, budget: &Budget) -> Outcome 
     Outcome::Graceful
 }
 
+async fn wait_readiness_propagation(delay: Duration, signals: &mut Signals) -> Outcome {
+    if delay.is_zero() {
+        return Outcome::Graceful;
+    }
+    tracing::info!(?delay, "readiness_propagation_wait");
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Outcome::Graceful,
+        signal = signals.wait() => match signal {
+            Ok(()) => {
+                tracing::warn!("second stop signal: skipping propagation delay");
+                Outcome::Graceful
+            }
+            Err(error) => signal_owner_failed(error),
+        },
+    }
+}
+
 async fn stop_serving(
     serving: &mut Serving,
     http_config: &HttpConfig,
@@ -356,37 +368,31 @@ async fn stop_serving(
         readiness.start_drain();
         tracing::info!("readiness_disabled");
     }
-    let drain_deadline = budget.stage_deadline(http_config.drain_timeout);
-    let mut outcome = Outcome::Graceful;
-    if serving.admitted {
-        let delay = budget.remaining(http_config.readiness_propagation_delay);
-        if !delay.is_zero() {
-            tracing::info!(?delay, "readiness_propagation_wait");
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {},
-                signal = signals.wait() => match signal {
-                    Ok(()) => tracing::warn!("second stop signal: skipping propagation delay"),
-                    Err(error) => {
-                        outcome = Outcome::Degraded;
-                        tracing::error!(%error, "signal_owner_failed");
-                    }
-                },
-            }
-        }
-    }
-    let wanted = if serving.admitted {
+    let overall_drain_deadline = budget.stage_deadline(http_config.drain_timeout);
+    let propagation_outcome = if serving.admitted {
+        wait_readiness_propagation(
+            budget.remaining(http_config.readiness_propagation_delay),
+            signals,
+        )
+        .await
+    } else {
+        Outcome::Graceful
+    };
+    let requested_drain = if serving.admitted {
         http_config.effective_drain_budget()
     } else {
         http_config.drain_timeout
     };
-    let graceful_deadline = budget.stage_deadline(wanted).min(drain_deadline);
+    let graceful_deadline = budget
+        .stage_deadline(requested_drain)
+        .min(overall_drain_deadline);
     let confirmation_deadline = budget
         .async_deadline
         .min(graceful_deadline + FORCED_LISTENER_JOIN);
     let drain_budget = graceful_deadline.saturating_duration_since(Instant::now());
     tracing::info!(budget = ?drain_budget, "drain_started");
-    let drain = drain_listener(
-        serving.app_listener.take(),
+    let drain = drain_server(
+        serving.http_server.take(),
         graceful_deadline,
         confirmation_deadline,
         &DrainEvents::HTTP,
@@ -395,8 +401,8 @@ async fn stop_serving(
     let drain = async {
         let (http_outcome, grpc_outcome) = tokio::join!(
             drain,
-            drain_listener(
-                serving.grpc_listener.take(),
+            drain_server(
+                serving.grpc_server.take(),
                 graceful_deadline,
                 confirmation_deadline,
                 &DrainEvents::GRPC
@@ -405,7 +411,7 @@ async fn stop_serving(
         http_outcome.combine(grpc_outcome)
     };
     // template:end grpc:shutdown-concurrent-grpc-drain
-    outcome.combine(drain.await)
+    propagation_outcome.combine(drain.await)
 }
 
 struct DrainEvents {
@@ -429,16 +435,16 @@ impl DrainEvents {
     // template:end grpc:shutdown-grpc-drain-events
 }
 
-async fn drain_listener(
-    listener: Option<Server>,
+async fn drain_server(
+    server: Option<Server>,
     graceful_deadline: Instant,
     confirmation_deadline: Instant,
     events: &DrainEvents,
 ) -> Outcome {
-    let Some(listener) = listener else {
+    let Some(server) = server else {
         return Outcome::Graceful;
     };
-    let (drained, residue) = listener
+    let (drained, residue) = server
         .drain_until(graceful_deadline, confirmation_deadline)
         .await;
     match drained {
@@ -657,7 +663,7 @@ mod tests {
             signals: &mut signals,
             deadline: Instant::now() + http_config.grace_period,
             serving: Serving {
-                app_listener: Some(server),
+                http_server: Some(server),
                 ..Serving::default()
             },
             background: Background::new(CancellationToken::new()),

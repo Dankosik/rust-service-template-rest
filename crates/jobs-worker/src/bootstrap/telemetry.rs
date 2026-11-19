@@ -80,7 +80,7 @@ pub(super) fn log_startup_record(
     config: &WorkerConfig,
     identity: &str,
     // template:begin jobs:worker-bootstrap-log-jobs-parameter
-    registry: Option<&infra_jobs::Kinds>,
+    job_kinds: Option<&infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-log-jobs-parameter
     exporter: &ExporterState,
 ) {
@@ -98,7 +98,7 @@ pub(super) fn log_startup_record(
         // template:begin jobs:worker-bootstrap-log-jobs-fields
         postgres.max_connections = config.postgres.as_ref().map(|postgres| postgres.max_connections.get()),
         jobs.max_workers = config.jobs.max_workers.get(),
-        jobs.kinds = %super::jobs::kind_names(registry),
+        jobs.kinds = %super::jobs::kind_names(job_kinds),
         // template:end jobs:worker-bootstrap-log-jobs-fields
         tracing.exporter = exporter.as_str(),
         "jobs_worker_starting"

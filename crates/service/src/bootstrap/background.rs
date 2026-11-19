@@ -27,11 +27,11 @@ impl BackgroundRegistration<'_> {
     ) -> infra_oauth2_client_credentials::ServiceTokens {
         let registration = registration.into();
         let (tokens, driver) = registration.service_tokens(target, origin);
-        let owner = tokens.clone();
+        let retained_tokens = tokens.clone();
         self.background
             .spawn_with_token("oauth_token_refresh", |stop| async move {
                 driver.run(stop.cancelled_owned()).await;
-                drop((registration, owner));
+                drop((registration, retained_tokens));
             });
         tokens
     }
@@ -145,11 +145,11 @@ impl Background {
         });
     }
 
-    pub(crate) fn observer(&self) -> watch::Receiver<Option<BackgroundFailure>> {
+    pub(crate) fn failure_observer(&self) -> watch::Receiver<Option<BackgroundFailure>> {
         self.failure.subscribe()
     }
 
-    pub(crate) fn failed(&self) -> Option<BackgroundFailure> {
+    pub(crate) fn failure(&self) -> Option<BackgroundFailure> {
         *self.failure.borrow()
     }
 
@@ -157,8 +157,8 @@ impl Background {
         self.tasks.is_empty()
     }
 
-    pub(crate) fn watch_listener(&mut self, name: &'static str, listener: &Server) {
-        let failure = listener.accept_failure();
+    pub(crate) fn watch_server(&mut self, name: &'static str, server: &Server) {
+        let failure = server.accept_failure();
         self.spawn_with_token(name, |cancel| async move {
             tokio::select! {
                 biased;
@@ -177,12 +177,12 @@ impl Background {
     }
 
     pub(super) async fn join_until(&mut self, deadline: Instant) -> JoinOutcome {
-        let mut failed = self.failed().is_some();
+        let mut join_failed = false;
         loop {
             match tokio::time::timeout_at(deadline, self.tasks.join_next()).await {
                 Ok(Some(Ok(()))) => {}
                 Ok(Some(Err(error))) => {
-                    failed = true;
+                    join_failed = true;
                     tracing::warn!(
                         panicked = error.is_panic(),
                         cancelled = error.is_cancelled(),
@@ -190,7 +190,7 @@ impl Background {
                     );
                 }
                 Ok(None) => {
-                    return if failed || self.failed().is_some() {
+                    return if join_failed || self.failure().is_some() {
                         JoinOutcome::Failed
                     } else {
                         JoinOutcome::Complete
@@ -209,7 +209,7 @@ pub(super) enum JoinOutcome {
     Unconfirmed,
 }
 
-pub(crate) async fn background_failure(
+pub(crate) async fn wait_for_failure(
     receiver: &mut watch::Receiver<Option<BackgroundFailure>>,
 ) -> BackgroundFailure {
     receiver
@@ -233,12 +233,11 @@ mod tests {
     async fn task_failure_is_sticky_before_join() {
         let cancel = CancellationToken::new();
         let mut background = Background::new(cancel.clone());
-        let mut observed = background.observer();
+        let mut observed = background.failure_observer();
         background.spawn("early", async {});
-        let failure =
-            tokio::time::timeout(Duration::from_secs(1), background_failure(&mut observed))
-                .await
-                .unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(1), wait_for_failure(&mut observed))
+            .await
+            .unwrap();
         assert_eq!(
             failure,
             BackgroundFailure {
@@ -261,7 +260,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let mut background = Background::new(cancel.clone());
-        let mut observed = background.observer();
+        let mut observed = background.failure_observer();
         let (reporter_tx, reporter_rx) = tokio::sync::oneshot::channel();
         let (release, finish) = tokio::sync::oneshot::channel();
         BackgroundRegistration {
@@ -279,7 +278,7 @@ mod tests {
         reporter.report();
         reporter.report();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), background_failure(&mut observed))
+            tokio::time::timeout(Duration::from_secs(1), wait_for_failure(&mut observed))
                 .await
                 .unwrap(),
             BackgroundFailure {
