@@ -1,7 +1,8 @@
 # Specification
 
-Use when structured work lacks a ready behavior delta. Own what must be true
-before selecting a mechanism.
+Use when structured work lacks a ready behavior delta. Define what affected
+users, operators, and downstream systems can rely on. Technical Design chooses
+the mechanism and its placement within those constraints.
 
 Consume the requester-meaning authority selected by [Phase
 Selection](../../spec-first-workflow.md#phase-selection), decision-changing
@@ -39,9 +40,8 @@ and outcomes.
 
 Then apply [Material Rule](#material-rule) to each materially affected rule so
 scope, policy, invariants, compatibility, truth/finality, failure,
-replay/recovery, and success meaning cannot diverge across two reasonable
-implementations. Recheck any outline conclusions invalidated by that detail;
-the completed contract remains the independent review boundary.
+replay/recovery, and success have a consistent meaning across implementations.
+Recheck any outline conclusions invalidated by that detail.
 
 ## Material Rule
 
@@ -52,13 +52,23 @@ normal/boundary/rejection/failure/recovery/compatibility outcomes, required or
 forbidden effects, identifiers/units/bounds, absence/default behavior, and the
 nearest feasible falsifier.
 
-If two reasonable implementations could satisfy the wording yet produce different
-user- or operator-visible results, resolve the fork from current authority, a
-Specification decision, or a bounded assumption with an objective reopen
-condition. Use plain prose unless a compact decision table, state model,
-quality scenario, decisive example, or literal schema/type fragment closes the
-ambiguity more precisely; keep only the decision-carrying part (mechanism and
-placement belong to Technical Design).
+For a change to existing behavior, compare the current and target outcomes for
+each materially affected consumer scenario. Identify which outcomes the current
+contract or evidence of supported use establishes as guarantees. If a guarantee
+changes or ends, state what authorizes the change and what a consumer using
+the former behavior will observe.
+
+Where reasonable readings yield different observable results, state the
+invariant if the contract permits both. Otherwise resolve the choice from
+current authority or within the limits delegated in
+[Intent](../interfaces/intent.md).
+Use a bounded assumption only when it preserves accepted requester meaning,
+and name the objective condition that would reopen it. Return an unresolved
+requester-owned choice to [Intake](intake.md).
+
+Use plain prose unless a compact decision table, state model, quality scenario,
+decisive example, or literal schema/type fragment closes the ambiguity more
+precisely.
 
 Return a compact behavioral contract and reference unchanged code, contracts,
 tests, mockups, or evidence. Persist `spec.md` only through

@@ -3,11 +3,12 @@
 Use when a result may move or reopen a macro phase, or cross an actor/session
 boundary.
 
-Move once the current owner is `ready`, every triggered decision has a
-disposition, required review permits movement, and the next owner has explicit
-product meaning, mechanism, ownership, and authority. Mark untriggered phases
-`skipped` directly, use inline movement within a session, and emit [Transition
-Result V1](#transition-result-v1) at durable macro-phase boundaries.
+Move once the current owner is `ready`, its triggered decisions have a
+disposition, required review permits movement, and the next owner has the
+accepted inputs and authority needed to make its own decisions. Mark
+untriggered phases `skipped` directly, use inline movement within a session,
+and emit [Transition Result V1](#transition-result-v1) at durable macro-phase
+boundaries.
 
 Carry only the current result, authoritative locators, movement evidence,
 candidate identity when relevant, proof boundary, exact blocker or next action,
