@@ -145,10 +145,17 @@ mod tests {
     async fn nested_command_sees_fingerprinted_wire_inputs_and_typed_path_captures() {
         async fn decode(request: Request) {
             let (parts, body) = request.into_parts();
-            let (mut input, _) = CommandInput::capture(
+            let (mut input, fingerprint) = CommandInput::capture(
                 parts,
                 &[HeaderName::from_static("x-choice")],
                 body.collect().await.unwrap(),
+            );
+            assert_eq!(
+                fingerprint.as_bytes(),
+                &const_hex::decode_to_array::<_, 32>(
+                    "1ddbafb4293070230eb56b5d60eb92c9df7019b7a0153a6eca7bcd7602e02c1f"
+                )
+                .unwrap()
             );
             assert_eq!(input.method(), Method::POST);
             assert_eq!(input.raw_path(), "/accounts/a%20b/widgets/12");

@@ -6,6 +6,8 @@ use http::header::{
     LOCATION,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
+use sqlx::{Postgres, Type};
 
 pub const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
@@ -27,6 +29,24 @@ pub(crate) struct HeaderPair {
     name: String,
     #[debug(skip)]
     value: Vec<u8>,
+}
+
+#[derive(sqlx::Encode)]
+pub(crate) struct HeaderPairRef<'a> {
+    name: &'a str,
+    value: &'a [u8],
+}
+
+impl Type<Postgres> for HeaderPairRef<'_> {
+    fn type_info() -> PgTypeInfo {
+        HeaderPair::type_info()
+    }
+}
+
+impl PgHasArrayType for HeaderPairRef<'_> {
+    fn array_type_info() -> PgTypeInfo {
+        HeaderPair::array_type_info()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -168,13 +188,11 @@ impl Record {
         is_terminal_refusal(self.status)
     }
 
-    pub(crate) fn encode_headers(&self) -> Vec<HeaderPair> {
-        replayable_headers(&self.headers)
-            .map(|(name, value)| HeaderPair {
-                name: name.as_str().to_owned(),
-                value: value.as_bytes().to_vec(),
-            })
-            .collect()
+    pub(crate) fn encode_headers(&self) -> impl Iterator<Item = HeaderPairRef<'_>> {
+        replayable_headers(&self.headers).map(|(name, value)| HeaderPairRef {
+            name: name.as_str(),
+            value: value.as_bytes(),
+        })
     }
 
     pub(crate) fn body(&self) -> &[u8] {
@@ -256,8 +274,12 @@ mod tests {
 
         assert_eq!(record.encode_status(), 201);
         assert_eq!(record.body(), b"stored");
+        let stored_headers: Vec<_> = record
+            .encode_headers()
+            .map(|header| pair(header.name, header.value))
+            .collect();
         assert_eq!(
-            record.encode_headers(),
+            stored_headers,
             [
                 pair("content-type", &[0xff]),
                 pair("content-language", b"en"),
@@ -265,10 +287,9 @@ mod tests {
                 pair("etag", b"\"v1\""),
             ]
         );
-        let (status, headers, body) =
-            Record::decode(record.encode_status(), record.encode_headers(), body)
-                .unwrap()
-                .into_parts();
+        let (status, headers, body) = Record::decode(record.encode_status(), stored_headers, body)
+            .unwrap()
+            .into_parts();
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(headers[CONTENT_TYPE].as_bytes(), &[0xff]);
         let languages: Vec<_> = headers

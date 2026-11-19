@@ -10,6 +10,7 @@ use infra_idempotency_store::{
     AttemptError, Attempted, Digest, RequestFingerprint, ScopeKey, Store,
 };
 use infra_postgres::{SqlError, failure_cause, sqlstate};
+use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
 
 use super::compose::wiring_failure;
@@ -48,14 +49,21 @@ pub(super) enum Outcome {
 
 impl Outcome {
     pub(super) fn record(self) {
+        static METADATA: Metadata<'static> =
+            Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
+
         macro_rules! outcomes {
             ($($variant:ident => $label:literal),* $(,)?) => {
                 match self {
-                    $(Self::$variant => metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => $label),)*
+                    $(Self::$variant => {
+                        static LABELS: [Label; 1] = [Label::from_static_parts("outcome", $label)];
+                        static KEY: Key = Key::from_static_parts(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, &LABELS);
+                        &KEY
+                    },)*
                 }
             };
         }
-        let counter = outcomes!(
+        let key = outcomes!(
             InvalidKey => "invalid_key",
             Unavailable => "unavailable",
             InProgress => "in_progress",
@@ -69,6 +77,7 @@ impl Outcome {
             NotStored => "not_stored",
             Abandoned => "abandoned",
         );
+        let counter = metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA));
         counter.increment(1);
     }
 }
