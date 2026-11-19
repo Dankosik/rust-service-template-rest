@@ -26,24 +26,23 @@ fixed inline unit uses a root-local Lead.
 
 ## Execution
 
-Load the current task packet and consumed outputs. Read the touched production
-code before its tests, then derive the task's tests from accepted behavior
-contracts rather than mirroring internal steps or copying bloated neighboring
-suites. Reuse sufficient tests, add only cases that catch realistic regressions
-existing types and checks would miss, and consolidate overlapping or obsolete
-tests around the strongest behavior check while preserving independent safety
-and integration guards. Select minimal fixtures, independent assertions, and
-the smallest proving layer locally under `rust-testing`—confirming when
-practical that new or consolidated guards fail for the broken behavior—without a
-preliminary matrix, approval, or separate test-planning task. Reopen only
-genuinely unresolved product behavior or architecture; a missing, flaky, or
-incorrect test stays with the executor.
+Read the task packet's Outcome and the outputs it consumes. Locate the code
+that owns the behavior and the entry point or downstream consumer that must
+observe the change. Implement the outcome along that path, including the
+wiring and cleanup the packet requires.
+
+Read the affected production code before its tests. Derive expectations from
+the accepted behavior and reuse tests that already protect it. Add coverage
+for realistic regressions the existing checks would miss. Preserve independent
+safety and integration guards when consolidating overlapping cases. The
+executor chooses the proving layer and cases while coding, fills coverage
+gaps, and fixes flaky or incorrect tests. For Rust, use
+[Rust Testing](../../../.agents/skills/rust-testing/SKILL.md) to select
+assertions and fixtures and check whether a test detects the intended regression.
 
 For a non-trivial fixture, reuse an existing valid fixture or producer when it
-stays minimal, or derive only the entities, relationships, and state transitions
-the asserted contract requires, removing unused fixture setup you touch. Keep
-that construction in test code, not a separate preparation artifact. Execution
-follows the feedback and final-validation boundaries below.
+stays minimal. Otherwise construct only the state the assertion needs. Keep
+fixture setup in test code and remove unused setup you touch.
 
 Implement directly when handoff costs more than it saves. Run independent tasks
 and useful subtask lanes in parallel when accepted interfaces are stable, writable owners and exclusive
@@ -60,9 +59,11 @@ callers stay inside implementation.
 Use bounded compile or type checks (`make lint-changed` or
 `cargo check -p <crate> --all-targets --locked` per [Validation
 budget](../../../AGENTS.md#validation-budget)), or one cheap local boundary
-probe when an unverified assumption could cause substantial rework. Repair
-observed in-scope defects before returning `Implemented`, and retain command
-results for reuse under the Evidence Contract.
+probe when an unverified assumption could cause substantial rework. A single
+focused test can serve as that probe. Repair observed in-scope defects before
+returning `Implemented`. If the probe exposed an in-scope defect and remains
+cheap and available, rerun it after repair before handing off. Retain results for reuse
+under the Evidence Contract.
 
 Establish shared contracts and generated sources before dependent lanes consume
 them: when parallel tasks or lanes share a new or changed Rust seam, land the
@@ -85,12 +86,13 @@ result before reassigning its writable scope.
 ## Final Validation
 
 Once every planned implementation task is `Implemented`, the changes are
-assembled, and all writers have joined, the delivery owner checks each material
-behavior change against its accepted source. Trace the change through the
-affected entry paths on the assembled candidate. For an
-addition or modification, check the target behavior. For a removal, check that
-the old behavior is unreachable on the paths from which it was withdrawn. For
-a requirement rename alone, check that its promised behavior still holds.
+assembled, and all writers have joined, the delivery owner starts from the
+accepted outcome. Trace each obligation for this candidate to its observable
+result on the affected paths, including behavior those paths must preserve.
+Then trace each material behavior change back to the accepted obligation it
+serves. For a removal, check that the old behavior is unreachable on the paths
+from which it was withdrawn. For a requirement rename alone, check that its
+promised behavior still holds.
 
 Select the checks for the changed surface from the [Validation
 budget](../../../AGENTS.md#validation-budget) and reconcile any task additions
