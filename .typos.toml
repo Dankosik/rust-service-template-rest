@@ -1,4 +1,4 @@
-# Source-code and contract spellcheck (`make typos`).
+# Source-code and contract spellcheck (`just typos`).
 # Service-owned so derived services can record domain terms without sync drift.
 
 [files]

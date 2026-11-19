@@ -7,9 +7,8 @@ an error or latency budget burning or the service gone; tickets cover lost
 capacity, crash loops, a starved runtime and work that stopped draining. Each alert carries a
 `severity` (`page` or `ticket`) and a `runbook_url` to its section below.
 [`env/monitoring/tests/service-rules.yml`](../env/monitoring/tests/service-rules.yml) proves
-every alert fires on its fault and stays silent otherwise; `make
-monitoring-rules` (`scripts/check-monitoring.sh`) runs it with the
-pinned `promtool`. Rules for a profile ship
+every alert fires on its fault and stays silent otherwise; `just
+monitoring-rules` runs it with the pinned `promtool` from `mise.toml`. Rules for a profile ship
 only with that profile.
 
 ## Install
@@ -39,7 +38,7 @@ the last change to that database's writers for the population.
    In that case include a reachable worker in normal fixtures and cover its
    disappearance with only the API present.
 2. Point `runbook_url` at this page in your repository.
-3. Check the configured files with `make monitoring-rules`, then load them
+3. Check the configured files with `just monitoring-rules`, then load them
    through `rule_files` or a `PrometheusRule`.
 4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
    The example inhibits burn-rate tickets while a page for the same alert

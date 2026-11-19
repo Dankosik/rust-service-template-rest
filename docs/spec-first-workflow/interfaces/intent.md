@@ -66,13 +66,11 @@ status: draft | ready
 
 ## Field Rules
 
-- **Lifecycle (`status`) & mechanical gate:** start at `draft` when persisting
+- **Lifecycle (`status`):** start at `draft` when persisting
   progress across multi-round grilling, handling a reopen, or preparing
-  confirmation; run `make intent-check TASK=<task>` on `draft`, flip to `ready`
-  only after the requester confirms shared understanding under
-  [Intake](../phases/intake.md) (or explicitly waived confirmation with zero
-  surviving high-risk branches or material assumptions), and re-run `make
-  intent-check TASK=<task>` after flipping to verify `ready` invariants.
+  confirmation; flip to `ready` only after the requester confirms shared
+  understanding under [Intake](../phases/intake.md) (or explicitly waived
+  confirmation with zero surviving high-risk branches or material assumptions).
   Downstream phases consume `intent.md` only at `status: ready`.
 - **Draft resumability:** while `status: draft`, you may include a temporary
   `## Remaining frontier` section listing unasked design-tree branches and

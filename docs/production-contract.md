@@ -322,7 +322,7 @@ Repeat for each deployment's token lifetime, resource validation policy and
 cache settings.
 
 ```sh
-RUST_TEST_NOCAPTURE=1 make test-integration-oauth
+RUST_TEST_NOCAPTURE=1 just test-integration-oauth
 ```
 <!-- template:end outbound-auth:production-keycloak-registration -->
 

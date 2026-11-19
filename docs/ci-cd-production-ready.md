@@ -6,8 +6,8 @@ and failed runs.
 
 [`.github/workflows/`](../.github/workflows),
 [`.github/actions/detect-changes/detect.py`](../.github/actions/detect-changes/detect.py),
-[`deny.toml`](../deny.toml), [`tools/versions.env`](../tools/versions.env), and
-[`Makefile`](../Makefile) are the source of truth for job names,
+[`deny.toml`](../deny.toml), [`mise.toml`](../mise.toml), and
+[`justfile`](../justfile) are the source of truth for job names,
 triggers, surface routing, tool pins, and gate commands. [AGENTS.md](../AGENTS.md#validation-budget)
 and [Validation Routing](validation-routing.md) own local verification; local
 passes never prove CI admission, container behavior, or a release.
@@ -34,12 +34,13 @@ passes never prove CI admission, container behavior, or a release.
 
 `vendor/<crate>` holds a crates.io archive wired via `[patch.crates-io]`, with
 provenance and retirement criteria in its `PATCHES.md`. Because Dependabot and
-`cargo-deny` skip path dependencies, `make dependency-drift` fails on registry
+`cargo-deny` skip path dependencies, `just vendor-drift --online` fails on registry
 bypasses, base-version OSV advisories or crates.io yanks, generator/runtime
 `prost`/`tonic` pin drift, or a missing `Upstream reviewed:` line,
 and the weekly `--upstream` workflow opens an issue for post-cooldown upstream
-releases and outdated `tools/versions.env` pins, including `GO_VERSION`
-(promtool tracks Prometheus 3.5 LTS).
+releases across vendored forks, `mise.toml` pins, and Dockerfile static-archive
+pins. CLI tool digests live in `mise.lock` (refresh with
+`mise lock --platform linux-x64 --platform linux-arm64 --platform macos-arm64 --platform macos-x64`).
 
 When `dependency-drift` names a fork:
 
@@ -49,7 +50,7 @@ When `dependency-drift` names a fork:
    behavior proof at its surviving owner.
 3. **Fixes worth taking:** Verify the `.crate` checksum, reapply the patch,
    update `PATCHES.md` and the standalone lockfile, and rerun
-   `make native-transport-regressions` plus the affected profile proof.
+   `just native-transport` plus the affected profile proof.
 4. **Nothing applies:** Update `Upstream reviewed: <version>` with a one-line
    reason, or backport urgent security fixes as exact upstream commits.
 
@@ -70,7 +71,7 @@ While `main-red` is open:
    a suspect commit and run `gh workflow run ci.yml --ref <branch>` (selects
    every surface); delete the temporary branch afterwards.
 2. **Fix forward:** Merge a PR making the failed jobs pass, reproducing
-   post-merge gates locally through their `make` targets.
+   post-merge gates locally through their `just` recipes.
 3. **Revert fallback:** If `main` stays red two hours after the issue opens, or
    two fix PRs fail, revert via PR. Never revert a migration that shipped in a
    `green` image; roll forward with a new migration.
@@ -113,9 +114,8 @@ condition.
 
 | Area | Why this design over alternatives |
 | --- | --- |
-| `tools/versions.env` + `<git-common-dir>/tools` + `taiki-e/install-action` | Plain `KEY=value` needs no parser (`mise` reopens only if tools outgrow Cargo + Go + Node + Docker); prebuilt binaries avoid ~6 min of CI Cargo tool compilation. |
-| Static `cargo-chef` & `cargo-auditable` archives in `Dockerfile` | Avoids 67 s of builder compilation on cold builds while embedding `pkg:cargo` dependency graphs for Trivy/CycloneDX SBOM admission (`grype`/`syft` and `cargo-cyclonedx` rejected to keep one scanner/SBOM container). |
-| `npm_config_ignore_scripts=true npx --yes`, `go run`, `uvx`/`pipx`, digest-pinned containers | Hardens tool downloads via `ignore-scripts`, the Go checksum DB, and OCI digests without custom per-tool installer scripts (`shellcheck` and `lychee` fall back to host binaries outside CI when Docker is unavailable). |
+| `mise.toml` + `justfile` + `jdx/mise-action` | One declarative manifest installs prebuilt verified binaries (`aqua:`/`github:`/`npm:`/`cargo:`) locally and per-job in CI, eliminating Go/Node host prerequisites, custom downloaders, and 6-way tool bootstrap. |
+| Static `cargo-chef`, `cargo-auditable`, and `cargo-about` archives in `Dockerfile` | Avoids builder compilation on cold builds while keeping `Dockerfile` as the single owner of build-stage archive digests (`grype`/`syft` and `cargo-cyclonedx` rejected to keep one scanner/SBOM container). |
 | `cargo-deny` (Linux targets, `all-features = true`, `[licenses] include-dev = true`, `multiple-versions = "deny"`) + `cargo-shear` + `typos-cli` + CodeQL Rust (`build-mode: none`) | Covers optional `hotpath`/`integration` features and dev licenses across shipped Linux targets, catches orphaned deps across profile projections (`cargo-machete`/`cargo-udeps` rejected) and identifier/contract typos (`typos-cli`), and excludes tests/`vendor/` examples in CodeQL (~15.5 → ~7 min). |
 | `cargo-nextest` + `cargo test --doc`; local-only `cargo-mutants` | Parallel test binaries cut serial `cargo test` wall time (127 s → 34–37 s locally); mutation testing (17 min on one module) stays an on-demand adequacy aid rather than a PR gate. |
 | Post-merge heavy proofs + `secrets`-gated short jobs + `green` diff base | Keeps PR feedback fast while bounding concurrent runner contention under a 20-runner cap and ensuring superseded `main` runs never skip unproved commits. |

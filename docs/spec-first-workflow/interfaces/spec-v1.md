@@ -105,5 +105,5 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
   - *Tautological:* Reusing an `Idempotency-Key` with a different body fails to
     return `409`.
   - *Wrong layer:* Unit test `test_idempotency_conflict` or
-    `make test-integration-db` fails.
+    `just test-integration-db` fails.
 - Label numeric bounds under [Research](../phases/research.md).

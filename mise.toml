@@ -1,0 +1,61 @@
+# Single manifest for pinned CLI tools and shared build/scan settings.
+# Run `mise install` locally; CI uses `jdx/mise-action` with per-job subsets.
+
+[env]
+PYTHONDONTWRITEBYTECODE = "1"
+npm_config_ignore_scripts = "true"
+npm_config_audit = "false"
+npm_config_fund = "false"
+npm_config_update_notifier = "false"
+REDOCLY_SUPPRESS_UPDATE_NOTICE = "true"
+REDOCLY_TELEMETRY = "off"
+
+BUILDX_VERSION = "0.39.0"
+BUILDKIT_IMAGE = "moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb"
+TRIVY_IMAGE = "aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+CARGO_MUTANTS_VERSION = "27.1.0"
+
+[tools]
+just = "1.59.0"
+cargo-nextest = "0.9.148"
+cargo-deny = "0.20.2"
+"github:Boshen/cargo-shear" = "1.14.0"
+typos = "1.52.0"
+zizmor = "1.31.1"
+gitleaks = "8.30.1"
+actionlint = "1.7.12"
+ruff = "0.17.4"
+lychee = "0.24.2"
+shellcheck = "0.11.0"
+promtool = "3.5.5"
+cosign = "3.1.4"
+"npm:@redocly/cli" = "2.53.3"
+
+# template:begin grpc:mise-grpc-tools
+buf = "1.75.0"
+# template:end grpc:mise-grpc-tools
+
+# template:begin postgres:mise-postgres-sqlx
+"cargo:sqlx-cli" = { version = "0.9.0", features = "postgres,rustls", default-features = false, locked = true }
+# template:end postgres:mise-postgres-sqlx
+
+[tools."github:oasdiff/oasdiff"]
+version = "1.32.1"
+
+[tools."github:oasdiff/oasdiff".platforms]
+macos-arm64 = { asset_pattern = "oasdiff_*_darwin_all.tar.gz" }
+macos-x64 = { asset_pattern = "oasdiff_*_darwin_all.tar.gz" }
+linux-x64 = { asset_pattern = "oasdiff_*_linux_amd64.tar.gz" }
+linux-arm64 = { asset_pattern = "oasdiff_*_linux_arm64.tar.gz" }
+
+# template:begin postgres:mise-postgres-squawk
+[tools."github:sbdchd/squawk"]
+version = "2.70.0"
+rename_exe = "squawk"
+
+[tools."github:sbdchd/squawk".platforms]
+macos-arm64 = { asset_pattern = "squawk-darwin-arm64" }
+macos-x64 = { asset_pattern = "squawk-darwin-x64" }
+linux-x64 = { asset_pattern = "squawk-linux-x64" }
+linux-arm64 = { asset_pattern = "squawk-linux-arm64" }
+# template:end postgres:mise-postgres-squawk

@@ -68,15 +68,14 @@ git worktree add --no-track -b <type>/<slug> "${root}/../$(basename "${root}").<
   hooks and aliases in `.config/wt.toml` require one-time user approval (`wt`
   prompts interactively on first use, or via `wt config approvals add`); agents
   must never self-approve them with `--yes` without explicit user authorization.
-  When hooks are unapproved or skipped (or when `wt` is absent), invoke the
-  underlying commands directly inside the new worktree (`wt step copy-ignored
-  --require-include` on CoW filesystems and `python3 scripts/worktree-sync.py`),
-  which require no approval.
+  When hooks are unapproved or skipped (or when `wt` is absent), invoke
+  `wt step copy-ignored --require-include` directly on CoW filesystems (no
+  approval required).
 <!-- template:begin source-template:worktrees-harness-sync -->
 - In source-template checkouts, generated harness files are gitignored. Once
   `.config/wt.toml` hooks are approved, `wt switch -c` runs
-  `make agent-harness-sync` in `pre-start`; after plain `git worktree add` (or
-  when `wt` hooks are unapproved/skipped), run `make agent-harness-sync` inside
+  `just agent-harness-sync` in `pre-start`; after plain `git worktree add` (or
+  when `wt` hooks are unapproved/skipped), run `just agent-harness-sync` inside
   the new worktree so harness adapters and roles exist before starting work.
 <!-- template:end source-template:worktrees-harness-sync -->
 
@@ -129,11 +128,9 @@ and host resources. Keep per-worktree state disjoint:
   or merge:
 
   ```bash
-  # Works in every shell and harness without Worktrunk setup (`--no-fetch` for offline check):
-  python3 scripts/worktree-sync.py drift
-
-  # Optional Worktrunk alias once `.config/wt.toml` is approved:
-  wt drift
+  git fetch origin main
+  git rev-list --left-right --count origin/main...HEAD
+  git diff --name-only origin/main...HEAD
   ```
 
   React by overlap severity (only the owning agent/session of that worktree
@@ -142,7 +139,7 @@ and host resources. Keep per-worktree state disjoint:
   | Drift status | Meaning | Action |
   | --- | --- | --- |
   | `disjoint` | `origin/main` touched unrelated files/crates | Finish the current slice; sync once before final validation, PR, or merge |
-  | `shared-or-same-crate` | `origin/main` touched shared manifests/contracts (`Cargo.toml`, `Cargo.lock`, `migrations/`, `api/`, `.sqlx/`, `Makefile`, `AGENTS.md`, or `config`/`health`/`contract`/`shared-rules` crates declared in `quality/architecture.json`) or another file in a crate you are editing | Sync at the next clean commit before building further on stale contracts |
+  | `shared-or-same-crate` | `origin/main` touched shared manifests/contracts (`Cargo.toml`, `Cargo.lock`, `migrations/`, `api/`, `.sqlx/`, `justfile`, `mise.toml`, `AGENTS.md`, or `config`/`health`/`contract`/`shared-rules` crates declared in `quality/architecture.json`) or another file in a crate you are editing | Sync at the next clean commit before building further on stale contracts |
   | `direct-overlap` | `origin/main` modified files already edited or untracked in this worktree | Stop expanding the diff and sync immediately |
 
 - **Choose `rebase` vs. `merge` by branch visibility:**
@@ -159,31 +156,23 @@ and host resources. Keep per-worktree state disjoint:
     `--theirs`.
   - Never hand-merge conflict markers in `Cargo.lock`, `api/openapi/service.yaml`,
     `crates/grpc-contracts`, or `.sqlx/`; resolve the canonical source first and
-    regenerate via Cargo / `make` (see [Validation Routing](validation-routing.md)).
+    regenerate via Cargo / `just` (see [Validation Routing](validation-routing.md)).
   - A clean text merge does not prove semantic compatibility: treat prior local
     test passes as stale after any non-trivial sync and re-run affected
     [Validation budget](../AGENTS.md#validation-budget) checks on the synced tree.
 - **Keep local `main` fresh after every PR merge.** Immediately after a PR
   merges into `origin/main`, update both `origin/main` and local `main` (so
-  `wt list` `^↕`, `wt switch`, and local diffs stay accurate) using strict
+  `wt list`, `wt switch`, and local diffs stay accurate) using strict
   fast-forward only—never `git fetch origin +main:main` or `git branch -f main`,
   and never modify a dirty `main` checkout:
 
   ```bash
-  # Works in every shell and harness without Worktrunk setup:
-  python3 scripts/worktree-sync.py sync-main
-
-  # Optional Worktrunk alias once `.config/wt.toml` is approved:
-  wt sync-main
+  git fetch origin main
+  # If `main` is not checked out anywhere:
+  git fetch . origin/main:main
+  # If `main` is checked out in a clean primary worktree:
+  git -C <main-worktree> merge --ff-only origin/main
   ```
-
-  Under the hood, `worktree-sync.py sync-main` fetches `origin`'s `main` into
-  `refs/remotes/origin/main` via `+refs/heads/main:refs/remotes/origin/main`,
-  checks fast-forward ancestry, and updates local `main` via
-  `git fetch . refs/remotes/origin/main:refs/heads/main` when `main` is not
-  checked out, or `git -C <main-worktree> merge --ff-only
-  refs/remotes/origin/main` when `main` is checked out and clean (refusing
-  dirty, ahead, diverged, unborn, or prunable `main` checkouts).
 
 - **Integrate serially and frequently.** Land completed branches one at a time
   onto the integration tip instead of letting parallel branches diverge for
@@ -201,8 +190,8 @@ worktree and local branch are retired. Follow
    `gh pr merge <PR> --squash` (this repository enables GitHub's
    `deleteBranchOnMerge`, so GitHub deletes the remote branch without `gh`
    switching the temporary worktree onto `main`).
-2. **Refresh local `main` from outside the task worktree:** run
-   `python3 scripts/worktree-sync.py sync-main` (or `wt sync-main`).
+2. **Refresh local `main` from outside the task worktree** using strict
+   fast-forward (`git fetch origin main` + `git -C <main-worktree> merge --ff-only origin/main` when clean).
 3. **Confirm the checkout is clean and idle:** `git status --short` is empty,
    and no live session, background process, or build lock uses the checkout.
 4. **Retire the merged worktree and local branch immediately—never `rm -rf`:**
@@ -213,24 +202,12 @@ worktree and local branch are retired. Follow
      ```
      `--foreground` blocks so you can verify removal; `wt remove` refuses dirty
      trees without `-f` and deletes the local branch when its commits or
-     squash-merged content are integrated into `main` (retaining unmerged
-     branches without `-D`, though a clean worktree on an unmerged branch is
-     still removed—verify the PR merged first).
-   - **Plain Git or squash-merged PR where `wt remove` reports
-     `retained_unmerged`** (for example, when later commits on `main` edited the
-     same lines): run from outside the worktree (`--pr <PR>` is optional for
-     ancestry merges and required for squash-merged PRs):
+     squash-merged content are integrated into `main`.
+   - **Plain Git:** run from outside the worktree once the merge is verified:
      ```bash
-     python3 scripts/worktree-sync.py retire <branch> [--pr <PR>]
+     git worktree remove <worktree-path>
+     git branch -d <branch>   # or -D only after verifying the squash-merged PR
      ```
-     `retire` refuses the primary worktree, default or target base branch,
-     symbolic refs, duplicate or nested checkouts, locked/dirty/in-progress
-     checkouts, and invocations from inside the target worktree; verifies merge
-     provenance via Git ancestry (`merge-base --is-ancestor`) or exact GitHub PR
-     proof (`state == "MERGED"`, matching `headRefName`, `baseRefName`,
-     `headRefOid == local SHA`, and `mergeCommit.oid` present in `origin/main`);
-     removes the worktree; deletes the verified local branch; and prunes the
-     deleted remote-tracking ref.
    - **Harness-managed worktree:** use the harness's retirement operation.
 
 **Periodic stale sweeps are one-way doors.** To preview older merged worktrees

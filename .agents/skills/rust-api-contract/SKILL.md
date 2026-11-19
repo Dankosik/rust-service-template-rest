@@ -7,7 +7,7 @@ description: "Observable contract. Use when a REST or OpenAPI change can alter s
 
 **Observable contract.** Identify every client-visible distinction—success and failure status, body shape or absence, media type, headers, defaults, security, ordering, and retry outcome—and trace the change through both runtime execution and the published OpenAPI document.
 
-**Code-first authority.** Keep `utoipa` annotations and types composed in `crates/service/src/api.rs` as the single source of truth, regenerate `api/openapi/service.yaml` with `make openapi-generate`, and inspect the schema diff alongside the drift test. Align operation and schema doc comments with actual served behavior because they ship as product documentation.
+**Code-first authority.** Keep `utoipa` annotations and types composed in `crates/service/src/api.rs` as the single source of truth, regenerate `api/openapi/service.yaml` with `just openapi-generate`, and inspect the schema diff alongside the drift test. Align operation and schema doc comments with actual served behavior because they ship as product documentation.
 
 **Security declarations.** Evaluate security across inherited defaults and explicit route overrides, verifying both the OpenAPI scheme and the runtime enforcement path under the active authentication profile. Preserve intentionally public operations and route unsupported or ambiguous auth combinations through the existing finalizer.
 

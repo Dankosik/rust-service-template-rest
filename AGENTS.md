@@ -1,7 +1,7 @@
 # AGENTS.md
 
 - **Code is truth; Markdown is policy.** Code, `Cargo.toml`/`Cargo.lock`, SQL
-  migrations, `api/` schemas, `Makefile`, and CI workflows own repository facts.
+  migrations, `api/` schemas, `justfile`, `mise.toml`, and CI workflows own repository facts.
   Markdown owns only [Authority](#authority), accepted task artifacts,
   [Rust Change Surface](#rust-change-surface), operational runbooks, and
   non-code decision reasons (`Why` / `Reopen if`). When prose disagrees with
@@ -89,8 +89,7 @@
   force-remove dirty or unmerged work, or touch another session's worktree or
   branch. Retire only your own clean, preserved worktree when no live session,
   process, or lock uses it, via its owning manager (`wt remove --foreground`,
-  `scripts/worktree-sync.py retire`, `git worktree remove`, or harness
-  teardown).
+  `git worktree remove`, or harness teardown).
 
 ### Decision Ownership
 
@@ -164,7 +163,7 @@ fires:
 | --- | --- |
 | Crate/binary layout, dependency direction, composition root, routes, typed config, readiness, adapters, schema, lifecycle, or persistence | [Repository Architecture](docs/repo-architecture.md) |
 | Lasting technical decision, or reversing a rejected choice (only if `Reopen if` holds or user asks; update record) | `docs/decisions/` or [Backend Library Selection](docs/backend-library-selection.md) |
-| Agent instructions, tool descriptions, roles, or skills | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; run `make check-instructions` |
+| Agent instructions, tool descriptions, roles, or skills | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; run `just check-instructions` (source template) |
 | Compaction, interruption, or handoff resume | [Resume](docs/spec-first-workflow/shared/resume.md) |
 | Prompt for another session, phase, or entry skill | [Prompt Composition](docs/prompt-composition.md) |
 | Role carriers, multi-phase delegation, durable Goals, or model/effort tiers | [Agent Harness](docs/agent-harness.md) |
@@ -196,6 +195,16 @@ fires:
   preconditions through the canonical failure path. Keep a fallback, shim, or
   legacy path only for an accepted requirement with one owner, observable
   activation, proof, and a removal condition; otherwise delete it.
+- **Script and automation boundaries.** Keep `scripts/` strictly for real
+  service build, test, contract, and container automation (stdlib Python 3.11+
+  only; no Bash wrappers, no third-party deps, soft cap ~250 LOC per file;
+  recipes ≤ 15 lines stay in `justfile`). Keep template-only tooling under
+  `template/`, CI-only glue under `.github/actions/`, Docker-build scripts under
+  `build/docker/`, and personal or agent-workflow helpers out of service repos.
+  Pin all CLI tools in `mise.toml` (no bespoke downloaders or registry
+  scrapers), never write regex compilers over human/LLM Markdown prose, and pair
+  every script with its profile removal entry and co-located test in
+  `scripts/tests/`.
 
 ## Rust Change Surface
 
@@ -220,18 +229,19 @@ Finish ordinary local Rust work once the change, matching build, relevant tests,
 in-scope defect repairs, and any triggered final review pass. Report unverified
 behavior explicitly.
 
-Select commands from [`Makefile`](Makefile):
+Select commands from [`justfile`](justfile) (pinned tools in [`mise.toml`](mise.toml)):
 
 | Changed surface | Local validation |
 | --- | --- |
-| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>` |
-| Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
-| Observed database behavior (transaction, lock, commit, migration, or readiness) | `make test-integration-db` (plus `make migration-check` / `make migration-validate` on migration edits) when PostgreSQL is retained |
-| Formatting or lint configuration | `make fmt-check` and `make lint` |
-| Documentation or agent instructions | Static consistency review; `make docs-check` for relative links/fragments; `make check-instructions` for skills, roles, and generated carriers |
-| Full-repository check | `make check` |
+| One crate's behavior or tests | `just build` and `just test-package <crate>` |
+| Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `just build` and `just test` |
+| Observed database behavior (transaction, lock, commit, migration, or readiness) | `just test-integration-db` (plus `just migration-check` / `just migration-validate` on migration edits) when PostgreSQL is retained |
+| Formatting or lint configuration | `just fmt-check` and `just lint` |
+| Repository scripts | `just python-lint` and `just scripts-test` |
+| Documentation or agent instructions | Static consistency review; `just docs-check` for relative links/fragments; `just check-instructions` in the source template |
+| Full-repository check | `just check` |
 
-- **Fast edit loop.** Type-check while editing (`make lint-package PKG=<crate>`
+- **Fast edit loop.** Type-check while editing (`just lint-package <crate>`
   or `cargo check -p <crate> --all-targets --locked`); run the table's commands
   once compiling.
 - **Lockfile and hygiene.** Run Cargo checks with `--locked`; update

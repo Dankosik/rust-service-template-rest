@@ -100,7 +100,7 @@ check, not unrelated proof.
 
 The Delivery Owner selects one non-overlapping plan for the local criterion and
 explicit additions. One result may support several claims. Running full
-`make check` is not an automatic completion gate.
+`just check` is not an automatic completion gate.
 When expanded verification is explicitly required, select its matching canonical
 leaves or aggregate without duplicating covered checks. Heavy execution still
 needs its existing authorization and guards.

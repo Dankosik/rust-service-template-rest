@@ -1,13 +1,9 @@
-# Project hooks and aliases for Worktrunk (`wt`). See docs/worktrees.md.
+# Project hooks for Worktrunk (`wt`). See docs/worktrees.md.
 
 [pre-start]
 # template:begin source-template:wt-harness-sync
 # Materialize gitignored harness files in source-template checkouts.
-harness = "make agent-harness-sync"
+harness = "just agent-harness-sync"
 # template:end source-template:wt-harness-sync
 # Warm per-worktree `/target/` via CoW reflink from `.worktreeinclude` before agents run Cargo.
 copy = "wt step copy-ignored --require-include"
-
-[aliases]
-sync-main = 'python3 "$(git rev-parse --show-toplevel)/scripts/worktree-sync.py" sync-main {{ args }}'
-drift = 'python3 "$(git rev-parse --show-toplevel)/scripts/worktree-sync.py" drift {{ args }}'

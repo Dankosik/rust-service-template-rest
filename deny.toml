@@ -1,5 +1,5 @@
 # cargo-deny policy: advisories, licenses, bans, and sources over the locked
-# dependency graph. `make deny` runs every check; CI runs it on the
+# dependency graph. `just deny` runs every check; CI runs it on the
 # `cargo_dependencies` and `dependency_policy` surfaces and on schedule,
 # because the advisory database moves without a commit.
 # Decisions: docs/ci-cd-production-ready.md.

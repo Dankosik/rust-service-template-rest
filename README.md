@@ -36,10 +36,10 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity
 
    ```sh
    cargo fetch --locked
-   make template-init SERVICE_NAME=catalog-api \
-     REPOSITORY=https://github.com/example/catalog-api \
-     DESCRIPTION='Catalog API' CODEOWNER=@example/platform \
-     AGENT_HARNESS=claude
+   just template-init --service-name catalog-api \
+     --repository https://github.com/example/catalog-api \
+     --description 'Catalog API' --codeowner @example/platform \
+     --agent-harness claude
    ```
 
    The initializer renames the service, keeps the profiles you select, and
@@ -65,7 +65,7 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity
 <!-- template:begin source-template:readme-harness-sync -->
 This template repository does not commit the generated agent files
 (`CLAUDE.md`, `.claude/`, `.agents/agents/` and the other harness folders).
-After you clone or pull it, run `make agent-harness-sync` so your agent finds
+After you clone or pull it, run `just agent-harness-sync` so your agent finds
 its instructions and subagents. To change a subagent, edit `.agents/roles` or
 `.agents/role-classes`, then run the same command; the next sync overwrites
 direct edits to generated files. A service created from the template commits
@@ -176,20 +176,21 @@ deleted; selected ones stay inert until configured.
 
 ## Run it
 
-Needs Git, Python 3.11+, GNU Make and rustup.
+Needs Git, Python 3.11+, [mise](https://mise.jdx.dev) (installs `just` and all pinned CLIs via `mise install`), and rustup.
 
 ```sh
-make build && make test && make run
+mise install
+just build && just test && just run
 curl http://127.0.0.1:8080/health/ready
 ```
 
-`make help` lists every command.
+`just` lists every command.
 
 ## Documentation
 
 Code is the source of truth: the committed OpenAPI document in `api/openapi/`,
 typed configuration in `crates/config`, SQL migrations in `migrations/`, CI
-workflows in `.github/workflows/`, and `make help`. Markdown records only
+workflows in `.github/workflows/`, `mise.toml`, and `justfile`. Markdown records only
 policies, runbooks, and non-code decision reasons:
 
 [Architecture](docs/repo-architecture.md) ·

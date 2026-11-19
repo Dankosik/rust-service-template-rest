@@ -140,7 +140,7 @@ fn committed_document_matches_the_generator() {
             .to_string();
         panic!(
             "api/openapi/service.yaml differs from the generated document; run \
-             `make openapi-generate` and review the diff:\n{diff}"
+             `just openapi-generate` and review the diff:\n{diff}"
         );
     }
 }

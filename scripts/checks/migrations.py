@@ -13,24 +13,15 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from scripts import lib
+
 MIGRATION_RE = re.compile(r"^([0-9]+)_.+\.sql$")
 MAX_I64 = (1 << 63) - 1
 SQUAWK_EXCLUDES = "require-lock-timeout,require-statement-timeout,prefer-bigint-over-smallint"
 
 
-class MigrationCheckError(RuntimeError):
-    def __init__(self, message: str, exit_code: int = 1) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
-
-
-def _git(repo: Path, args: Sequence[str]) -> bytes:
-    res = subprocess.run(["git", "-C", os.fspath(repo), *args], capture_output=True, check=False)
-    if res.returncode != 0:
-        detail = res.stderr.decode("utf-8", errors="replace").strip()
-        raise MigrationCheckError(detail or f"git {' '.join(args)} failed", exit_code=1)
-    return res.stdout
+class MigrationCheckError(lib.ScriptError):
+    pass
 
 
 def _is_migration(rel_path: str) -> bool:
@@ -61,7 +52,7 @@ def _resolve_base(repo: Path, base_ref: str | None) -> tuple[str, str, bool]:
     if mb.returncode == 0 and mb.stdout.strip():
         sha = mb.stdout.strip()
         return sha, f"merge-base:{sha}", False
-    sha = _git(repo, ["rev-parse", f"{base_ref}^{{commit}}"]).decode().strip()
+    sha = lib.git("rev-parse", f"{base_ref}^{{commit}}", cwd=repo).strip()
     return sha, f"base:{sha}", False
 
 
@@ -70,9 +61,10 @@ def check_history(repo: Path, migration_dir: str, base_ref: str | None) -> tuple
         raise MigrationCheckError(f"configured directory does not exist: {migration_dir}", exit_code=2)
 
     base, scope, include_untracked = _resolve_base(repo, base_ref)
-    raw_status = _git(
-        repo,
-        ["diff", "--name-status", "-z", "--find-renames", "--find-copies", base, "--", f"{migration_dir}/"],
+    raw_status = lib.git(
+        "diff", "--name-status", "-z", "--find-renames", "--find-copies", base, "--", f"{migration_dir}/",
+        cwd=repo,
+        binary=True,
     )
     tokens = raw_status.split(b"\0")
     added: list[str] = []
@@ -104,11 +96,11 @@ def check_history(repo: Path, migration_dir: str, base_ref: str | None) -> tuple
 
     base_files = [
         raw.decode("utf-8", "surrogateescape")
-        for raw in _git(repo, ["ls-tree", "-r", "--name-only", "-z", base, "--", f"{migration_dir}/"]).split(b"\0")
+        for raw in lib.git("ls-tree", "-r", "--name-only", "-z", base, "--", f"{migration_dir}/", cwd=repo, binary=True).split(b"\0")
         if raw
     ]
     if include_untracked:
-        untracked = _git(repo, ["ls-files", "-z", "--others", "--exclude-standard", "--", f"{migration_dir}/"])
+        untracked = lib.git("ls-files", "-z", "--others", "--exclude-standard", "--", f"{migration_dir}/", cwd=repo, binary=True)
         added.extend(raw.decode("utf-8", "surrogateescape") for raw in untracked.split(b"\0") if raw)
 
     added_unique = sorted(set(added))
@@ -138,52 +130,31 @@ def check_history(repo: Path, migration_dir: str, base_ref: str | None) -> tuple
     return [p for p in added_unique if _is_migration(p) and (repo / p).is_file()], scope
 
 
-def _squawk_version(repo: Path) -> str:
-    versions_file = repo / "tools/versions.env"
-    if not versions_file.is_file():
-        versions_file = ROOT / "tools/versions.env"
-    for line in versions_file.read_text(encoding="utf-8").splitlines():
-        if line.startswith("SQUAWK_CLI_VERSION="):
-            return line.split("=", 1)[1].strip()
-    raise MigrationCheckError("SQUAWK_CLI_VERSION missing from tools/versions.env", exit_code=2)
-
-
 def lint_migrations(repo: Path, added_files: Sequence[str]) -> None:
     if not added_files:
         return
     transactional: list[str] = []
     outside_tx: list[str] = []
     for rel in added_files:
-        head = (repo / rel).read_bytes()[:17]
-        if head == b"-- no-transaction":
+        if (repo / rel).read_bytes()[:17] == b"-- no-transaction":
             outside_tx.append(rel)
         else:
             transactional.append(rel)
 
     custom = os.environ.get("MIGRATION_LINTER", "").strip()
-    env = os.environ.copy()
     if custom:
         cmd_base = shlex.split(custom)
     else:
-        npx = shutil.which("npx")
-        if npx is None:
-            raise MigrationCheckError("Node.js (npx) is required for squawk-cli", exit_code=2)
-        env.update(
-            {
-                "npm_config_ignore_scripts": "true",
-                "npm_config_prefer_offline": "true",
-                "npm_config_audit": "false",
-                "npm_config_fund": "false",
-                "npm_config_update_notifier": "false",
-            }
-        )
-        cmd_base = [npx, "--yes", f"squawk-cli@{_squawk_version(repo)}"]
+        squawk = shutil.which("squawk")
+        if squawk is None:
+            raise MigrationCheckError("squawk is required; run `mise install`", exit_code=2)
+        cmd_base = [squawk]
 
     common_flags = ["--pg-version", "14", "--exclude", SQUAWK_EXCLUDES]
     for mode_flag, files in (("--assume-in-transaction", transactional), ("--no-assume-in-transaction", outside_tx)):
         if not files:
             continue
-        res = subprocess.run([*cmd_base, *common_flags, mode_flag, *files], cwd=repo, env=env, check=False)
+        res = subprocess.run([*cmd_base, *common_flags, mode_flag, *files], cwd=repo, check=False)
         if res.returncode != 0:
             raise MigrationCheckError(
                 "migration lint failed; fix the SQL or add `-- squawk-ignore <rule>` with a reason",
@@ -194,7 +165,7 @@ def lint_migrations(repo: Path, added_files: Sequence[str]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path(os.environ.get("MIGRATION_REPO_ROOT") or ROOT))
+    parser.add_argument("--repo", type=Path, default=Path(os.environ.get("MIGRATION_REPO_ROOT") or lib.ROOT))
     parser.add_argument("--dir", dest="migration_dir", default=os.environ.get("MIGRATION_DIR") or "migrations")
     parser.add_argument("--base", default=os.environ.get("BASE_REF") or None)
     args = parser.parse_args(argv)
@@ -202,7 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         added, scope = check_history(args.repo.resolve(), args.migration_dir, args.base)
         print(f"migration history is append-only ({scope})")
         lint_migrations(args.repo.resolve(), added)
-    except MigrationCheckError as exc:
+    except lib.ScriptError as exc:
         print(f"migration-check: {exc}", file=sys.stderr)
         return exc.exit_code
     return 0

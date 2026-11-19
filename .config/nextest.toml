@@ -1,4 +1,4 @@
-# `make test`, `make test-package` and `make test-changed` read this file.
+# `just test` and `just test-package` read this file.
 # Container-backed suites run through `cargo test`, not nextest.
 
 [profile.default]

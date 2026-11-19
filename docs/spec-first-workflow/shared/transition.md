@@ -63,7 +63,7 @@ overview in the user's language—each task's `T<ID>`, one-line deliverable,
 non-default shape tag when present, `Depends on`, `Completion` target, plus
 execution waves (showing the initial Ready Frontier, parallel waves vs
 shared-lock serialization) and any carried `CONCERNS` or `Reopen if` risks directly from Planning's handoff summary (`movement_evidence` /
-`make ledger-check` output)—so the user can verify slicing, granularity, and
+execution wave summary)—so the user can verify slicing, granularity, and
 real parallelism at a glance.
 Follow with one message to send in a new session there, in their language, with
 the actual ledger path, such as “Implement the plan in

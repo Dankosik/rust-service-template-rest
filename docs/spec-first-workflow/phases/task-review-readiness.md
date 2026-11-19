@@ -12,9 +12,8 @@ when the ledger has three or more tasks, three or more mutated crates, a wide
 refactor or a rollout document. Otherwise one fresh `Full` reviewer covers both
 axes. Each reviewer runs only the assigned checks.
 
-Planning gives each reviewer its mode, method, fixed ledger and packets, and current
-`make ledger-check TASK=<task>` output (run it if the receipt is missing or
-stale). Only the Axis 1 or Full brief includes upstream inputs, declined-hook reasons
+Planning gives each reviewer its mode, method, and fixed ledger and packets.
+Only the Axis 1 or Full brief includes upstream inputs, declined-hook reasons
 and Planning concern closure locators. Axis 2 reconstructs the plan
 from candidate files, cited sources and primary code. In Full mode apply that
 same evidence boundary to the Axis 2 checks.

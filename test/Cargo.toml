@@ -13,7 +13,7 @@ workspace = true
 
 # template:begin postgres:test-integration-feature
 [features]
-# Non-Docker targets run with `make test`. `integration` targets require a live
+# Non-Docker targets run with `just test`. `integration` targets require a live
 # DATABASE_URL and PGBOUNCER_DATABASE_URL in front of the same server, plus
 # NATS_URL when messaging/outbox is retained.
 integration = []
