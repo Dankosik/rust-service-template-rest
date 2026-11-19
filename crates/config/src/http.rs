@@ -6,23 +6,14 @@ use bytesize::ByteSize;
 use serde::Deserialize;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
+use crate::de::{Keep, Mode, ModeMarker, StrictDuration, When};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-pub(crate) struct ReadinessPropagationDelay(
-    #[serde_as(as = "crate::de::StrictDuration")]
-    #[educe(Default(expression = Duration::from_secs(15)))]
-    Duration,
-);
-
-pub(crate) type HttpInput = HttpFields<ReadinessPropagationDelay>;
+pub(crate) type HttpInput = HttpFields;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShutdownTail {
@@ -42,9 +33,9 @@ impl ShutdownTail {
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default(bound(Propagation: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct HttpFields<Propagation> {
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct HttpFields<Propagation: Mode = Keep> {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
     /// all-interfaces (`0.0.0.0`). Hostnames are refused.
     #[serde_as(as = "crate::de::ListenAddr")]
@@ -52,30 +43,32 @@ pub(crate) struct HttpFields<Propagation> {
     addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL.
     /// `drain_timeout` plus the process's [`ShutdownTail`] must fit inside it.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(45)))]
     grace_period: Duration,
     /// Bound for the HTTP drain. In the service this includes
     /// `readiness_propagation_delay`. The worker budgets its drain separately.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(25)))]
     drain_timeout: Duration,
     /// Time the service keeps serving after readiness flips off so a load
     /// balancer observes `/health/ready` failing before the listener stops
     /// accepting connections. The worker ignores this field.
-    readiness_propagation_delay: Propagation,
+    #[serde_as(as = "When<Propagation, StrictDuration>")]
+    #[educe(Default(expression = Duration::from_secs(15)))]
+    readiness_propagation_delay: Duration,
     /// Time limit for reading a complete HTTP/1.1 request head. It also bounds
     /// keep-alive idle time. Set it above the upstream load balancer's idle
     /// timeout to avoid 502s when it reuses a connection the listener closed.
     /// The default clears the common 60s timeout. Google Cloud load balancers
     /// hold backend connections for 600s.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(75)))]
     header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
     /// reads. Features that stream responses own the lifetime of their bodies
     /// and any resources held after the response head.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
     /// Read-buffer ceiling for one request head. Overflow answers with a
@@ -95,7 +88,7 @@ pub(crate) struct HttpFields<Propagation> {
     max_in_flight: u32,
     /// Longest wait for a handler slot. It consumes part of the request budget
     /// and cannot outlast `request_timeout`. Zero sheds at once.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
@@ -108,12 +101,14 @@ pub(crate) struct HttpFields<Propagation> {
     /// Age after which a connection is told to finish and close, so its client
     /// reconnects and is balanced again. Each connection's age is spread by
     /// up to 10% either way. Zero leaves connection age unbounded.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     max_connection_age: Duration,
     #[serde_as(as = "crate::de::StrictBool")]
     access_log_health_probes: bool,
     #[serde_as(as = "crate::de::StrictBool")]
     trust_trace_context: bool,
+    #[serde(skip)]
+    _mode: ModeMarker<Propagation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,7 +196,7 @@ fn validate_grace_and_drain(
     DrainTimeoutBasis::Usable
 }
 
-impl<Propagation> HttpFields<Propagation> {
+impl<Propagation: Mode> HttpFields<Propagation> {
     fn admit_listener(
         &self,
         drain_budget: Option<Duration>,
@@ -253,7 +248,7 @@ impl HttpInput {
         v: &mut Violations,
     ) -> (HttpConfig, Option<Duration>) {
         let drain_basis = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        let readiness_propagation_delay = self.readiness_propagation_delay.0;
+        let readiness_propagation_delay = self.readiness_propagation_delay;
         let drain_budget = match drain_basis {
             DrainTimeoutBasis::Unusable => None,
             DrainTimeoutBasis::Usable if readiness_propagation_delay >= self.drain_timeout => {
@@ -284,7 +279,7 @@ impl HttpInput {
 }
 
 // template:begin worker:worker-http-config
-pub(crate) type WorkerHttpInput = HttpFields<serde::de::IgnoredAny>;
+pub(crate) type WorkerHttpInput = HttpFields<crate::de::Skip>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerHttpConfig {
@@ -404,7 +399,7 @@ mod tests {
     #[test]
     fn propagation_delay_must_leave_drain_budget() {
         let input = HttpInput {
-            readiness_propagation_delay: ReadinessPropagationDelay(Duration::from_secs(25)),
+            readiness_propagation_delay: Duration::from_secs(25),
             ..HttpInput::default()
         };
         assert!(
@@ -468,9 +463,9 @@ mod tests {
             ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "not a duration"),
         ]);
-        assert_eq!(loaded.http.drain_timeout, Duration::from_secs(1));
+        assert_eq!(loaded.http().drain_timeout, Duration::from_secs(1));
         assert_eq!(
-            loaded.http.listener().request_timeout,
+            loaded.http().listener().request_timeout,
             Duration::from_secs(8)
         );
     }

@@ -6,7 +6,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::app::local_development_only;
-use crate::de::{BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictDuration};
+use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{Rejected, Violations, duration_range, int_range, optional_pair};
 
 #[serde_with::serde_as]
@@ -19,7 +19,7 @@ pub(crate) struct CacheInput {
     /// Set `APP__CACHE__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the

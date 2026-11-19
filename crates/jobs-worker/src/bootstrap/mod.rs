@@ -161,13 +161,13 @@ pub(crate) async fn serve(
     };
     let deadline = *deadline.insert(shutdown::stop_deadline(
         signals.first_stop(),
-        config.http.grace_period,
+        config.http().grace_period,
     ));
     if let Ended::Failure(error) = &ended {
         report_worker_failure(error, resources.telemetry.logger.is_some());
     }
     let outcome = shutdown::run(shutdown::Plan {
-        http: &config.http,
+        http: config.http(),
         resources,
         background,
         signals,
@@ -322,13 +322,13 @@ async fn prepare(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
-    let identity = worker_identity(&config.observability.otel.service_name);
+    let identity = worker_identity(&config.observability().otel.service_name);
     let (metrics, exporter_state) =
         telemetry::install_observability(config, &identity, resources).await?;
     raise_open_file_limit(config.finite_listener_connection_caps());
     install_panic_hook();
     // template:begin webhooks:worker-bootstrap-webhook-tls
-    if !config.webhooks.endpoints.is_empty() {
+    if !config.webhooks().endpoints.is_empty() {
         infra_outbound_http::prepare_tls().await?;
     }
     // template:end webhooks:worker-bootstrap-webhook-tls

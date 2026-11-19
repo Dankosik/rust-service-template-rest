@@ -5,35 +5,37 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 use crate::ValidationError;
+use crate::de::{BlankAsNone, Keep, Mode, ModeMarker, StrictString, When};
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::{Violations, missing, validate_endpoint_id};
 
+#[serde_with::serde_as]
 #[derive(Deserialize, educe::Educe)]
-#[educe(Default(bound(Secrets: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct InboundWebhooksFields<Endpoint, Secrets> {
+#[educe(Default(bound = false))]
+#[serde(
+    bound(deserialize = "Endpoint: Deserialize<'de>"),
+    deny_unknown_fields,
+    default
+)]
+pub(crate) struct InboundWebhooksFields<Endpoint, Secrets: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
-    secrets: Secrets,
+    #[serde(default)]
+    #[serde_as(as = "When<Secrets, BTreeMap<_, StrictString>>")]
+    secrets: BTreeMap<String, SecretString>,
+    #[serde(skip)]
+    _mode: ModeMarker<Secrets>,
 }
 
-#[serde_with::serde_as]
-#[derive(Default, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct SecretMap(
-    #[serde_as(as = "BTreeMap<_, crate::de::StrictSecret>")] BTreeMap<String, SecretString>,
-);
-
-pub(crate) type InboundWebhooksInput =
-    InboundWebhooksFields<InboundWebhookEndpointInput, SecretMap>;
+pub(crate) type InboundWebhooksInput = InboundWebhooksFields<InboundWebhookEndpointInput>;
 
 #[serde_with::serde_as]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InboundWebhookEndpointInput {
-    #[serde_as(as = "crate::de::StrictString")]
+    #[serde_as(as = "StrictString")]
     active_key: String,
     #[serde(default)]
-    #[serde_as(as = "crate::de::BlankAsNone")]
+    #[serde_as(as = "BlankAsNone")]
     previous_key: Option<String>,
 }
 
@@ -57,7 +59,7 @@ impl InboundWebhooksInput {
     ) -> BTreeMap<String, InboundWebhookEndpointConfig> {
         validate_endpoints(&self.endpoints, postgres_enabled, violations);
         let mut keys = BTreeMap::new();
-        for (reference, secret) in self.secrets.0 {
+        for (reference, secret) in self.secrets {
             violations.check(validate_key_ref(
                 &format!("inbound_webhooks.secrets.{reference}"),
                 &reference,
@@ -116,7 +118,7 @@ fn resolve_key(
 
 // template:begin worker:worker-inbound-webhooks
 pub(crate) type WorkerInboundWebhooksInput =
-    InboundWebhooksFields<WorkerEndpointInput, serde::de::IgnoredAny>;
+    InboundWebhooksFields<WorkerEndpointInput, crate::de::Skip>;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]

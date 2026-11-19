@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn default_budgets_leave_one_and_a_half_seconds() {
         let config = worker_config(&[]).unwrap();
-        let http = &config.http;
+        let http = config.http();
         assert_eq!(
             http.grace_period
                 .checked_sub(http.drain_timeout)
@@ -626,9 +626,11 @@ mod tests {
     fn grace_budget_boundary_is_drain_plus_tail() {
         worker_config(&[("APP__HTTP__GRACE_PERIOD", "43.5s")]).unwrap();
         let refused = worker_config(&[("APP__HTTP__GRACE_PERIOD", "43.499999999s")]);
-        std::assert_matches!(
-            refused,
-            Err(service_config::Error::Validate(errors)) if errors.names("http.grace_period")
+        assert!(
+            refused
+                .unwrap_err()
+                .validation_errors()
+                .is_some_and(|errors| errors.names("http.grace_period"))
         );
     }
 
@@ -687,7 +689,7 @@ mod tests {
         let tracker = background.tracker.clone();
         let failures = background.subscribe_failures();
         let config = worker_config(&[]).unwrap();
-        let http = &config.http;
+        let http = config.http();
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
@@ -717,7 +719,7 @@ mod tests {
         let tracker = background.tracker.clone();
         let failures = background.subscribe_failures();
         let config = worker_config(&[]).unwrap();
-        let http = &config.http;
+        let http = config.http();
         let mut signals = Signals::install().unwrap();
         let started = Instant::now();
         let outcome = tokio::time::timeout(

@@ -72,8 +72,8 @@
     },
     {
       "path": "crates/config/src/observability.rs",
-      "old": "service_name: \"service\".to_owned(),",
-      "template": "service_name: \"{service_name}\".to_owned(),",
+      "old": "const DEFAULT_SERVICE_NAME: &str = \"service\";",
+      "template": "const DEFAULT_SERVICE_NAME: &str = \"{service_name}\";",
       "count": 1,
       "encoding": "rust_string"
     },

@@ -13,7 +13,7 @@ pub(crate) struct WorkerInput {
     log: LogConfig,
     runtime: RuntimeConfig,
     health: HealthConfig,
-    observability: ObservabilityConfig,
+    observability: crate::observability::ObservabilityInput,
     http: crate::http::WorkerHttpInput,
     // template:begin jobs:worker-input-postgres-field
     postgres: crate::postgres::PostgresInput,
@@ -46,7 +46,7 @@ impl WorkerInput {
             self.health.validate(v);
             self.log.validate(v);
             self.runtime.validate(v);
-            self.observability.validate(v);
+            let observability = self.observability.admit(v);
             // template:begin messaging:worker-messaging-admit
             let messaging = self.messaging.admit(self.app.is_local_development(), v);
             // template:end messaging:worker-messaging-admit
@@ -59,12 +59,12 @@ impl WorkerInput {
             // template:begin webhooks:worker-webhooks-validate
             self.webhooks.validate(v);
             // template:end webhooks:worker-webhooks-validate
-            Ok(WorkerConfig(WorkerSections {
+            Ok(WorkerConfig {
                 app: self.app,
                 log: self.log,
                 runtime: self.runtime,
                 health: self.health,
-                observability: self.observability,
+                observability,
                 http,
                 // template:begin jobs:worker-postgres-admitted-field
                 postgres: postgres?,
@@ -81,44 +81,106 @@ impl WorkerInput {
                 // template:begin inbound-webhooks:worker-inbound-webhooks-admitted-field
                 inbound_webhook_endpoints,
                 // template:end inbound-webhooks:worker-inbound-webhooks-admitted-field
-            }))
+            })
         })
     }
 }
 
-#[derive(Clone, Debug, derive_more::Deref)]
-pub struct WorkerConfig(WorkerSections);
+#[derive(Clone, Debug)]
+pub struct WorkerConfig {
+    app: AppConfig,
+    log: LogConfig,
+    runtime: RuntimeConfig,
+    health: HealthConfig,
+    observability: ObservabilityConfig,
+    http: WorkerHttpConfig,
+    // template:begin jobs:worker-config-postgres-field
+    postgres: Option<crate::PostgresConfig>,
+    // template:end jobs:worker-config-postgres-field
+    // template:begin jobs:worker-config-jobs-field
+    jobs: crate::JobsConfig,
+    // template:end jobs:worker-config-jobs-field
+    // template:begin messaging:worker-config-messaging-field
+    messaging: crate::MessagingConfig,
+    // template:end messaging:worker-config-messaging-field
+    // template:begin webhooks:worker-config-webhooks-field
+    webhooks: crate::WebhooksConfig,
+    // template:end webhooks:worker-config-webhooks-field
+    // template:begin inbound-webhooks:worker-config-inbound-webhooks-field
+    inbound_webhook_endpoints: std::collections::BTreeSet<String>,
+    // template:end inbound-webhooks:worker-config-inbound-webhooks-field
+}
 
 impl WorkerConfig {
+    #[must_use]
+    pub const fn app(&self) -> &AppConfig {
+        &self.app
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> &LogConfig {
+        &self.log
+    }
+
+    #[must_use]
+    pub const fn runtime(&self) -> &RuntimeConfig {
+        &self.runtime
+    }
+
+    #[must_use]
+    pub const fn health(&self) -> &HealthConfig {
+        &self.health
+    }
+
+    #[must_use]
+    pub const fn observability(&self) -> &ObservabilityConfig {
+        &self.observability
+    }
+
+    #[must_use]
+    pub const fn http(&self) -> &WorkerHttpConfig {
+        &self.http
+    }
+
+    // template:begin jobs:worker-config-postgres-accessor
+    #[must_use]
+    pub const fn postgres(&self) -> Option<&crate::PostgresConfig> {
+        self.postgres.as_ref()
+    }
+    // template:end jobs:worker-config-postgres-accessor
+
+    // template:begin jobs:worker-config-jobs-accessor
+    #[must_use]
+    pub const fn jobs(&self) -> &crate::JobsConfig {
+        &self.jobs
+    }
+    // template:end jobs:worker-config-jobs-accessor
+
+    // template:begin messaging:worker-config-messaging-accessor
+    #[must_use]
+    pub const fn messaging(&self) -> &crate::MessagingConfig {
+        &self.messaging
+    }
+    // template:end messaging:worker-config-messaging-accessor
+
+    // template:begin webhooks:worker-config-webhooks-accessor
+    #[must_use]
+    pub const fn webhooks(&self) -> &crate::WebhooksConfig {
+        &self.webhooks
+    }
+    // template:end webhooks:worker-config-webhooks-accessor
+
+    // template:begin inbound-webhooks:worker-config-inbound-webhooks-accessor
+    #[must_use]
+    pub const fn inbound_webhook_endpoints(&self) -> &std::collections::BTreeSet<String> {
+        &self.inbound_webhook_endpoints
+    }
+    // template:end inbound-webhooks:worker-config-inbound-webhooks-accessor
+
     #[must_use]
     pub fn finite_listener_connection_caps(&self) -> u64 {
         crate::finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct WorkerSections {
-    pub app: AppConfig,
-    pub log: LogConfig,
-    pub runtime: RuntimeConfig,
-    pub health: HealthConfig,
-    pub observability: ObservabilityConfig,
-    pub http: WorkerHttpConfig,
-    // template:begin jobs:worker-config-postgres-field
-    pub postgres: Option<crate::PostgresConfig>,
-    // template:end jobs:worker-config-postgres-field
-    // template:begin jobs:worker-config-jobs-field
-    pub jobs: crate::JobsConfig,
-    // template:end jobs:worker-config-jobs-field
-    // template:begin messaging:worker-config-messaging-field
-    pub messaging: crate::MessagingConfig,
-    // template:end messaging:worker-config-messaging-field
-    // template:begin webhooks:worker-config-webhooks-field
-    pub webhooks: crate::WebhooksConfig,
-    // template:end webhooks:worker-config-webhooks-field
-    // template:begin inbound-webhooks:worker-config-inbound-webhooks-field
-    pub inbound_webhook_endpoints: std::collections::BTreeSet<String>,
-    // template:end inbound-webhooks:worker-config-inbound-webhooks-field
 }
 
 #[cfg(test)]
