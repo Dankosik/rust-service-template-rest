@@ -62,7 +62,10 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
     true
 }
 
-pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
+pub const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
+
+static OPERATION_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
 pub(crate) const OPERATION_DURATION_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
@@ -171,8 +174,37 @@ pub(crate) async fn observe_acquisition<T>(
 
 const CANCELLED: &str = "cancelled";
 
-pub async fn observed<T>(
+#[macro_export]
+macro_rules! observed {
+    ($summary:literal, $statement:expr $(,)?) => {
+        $crate::__statement_observation::observed_with_success_key(
+            $summary,
+            Some({
+                use $crate::__statement_observation::{Key, Label, OPERATION_DURATION_METRIC};
+
+                static LABELS: [Label; 2] = [
+                    Label::from_static_parts("db.system.name", "postgresql"),
+                    Label::from_static_parts("db.query.summary", $summary),
+                ];
+                static SUCCESS_KEY: Key =
+                    Key::from_static_parts(OPERATION_DURATION_METRIC, &LABELS);
+                &SUCCESS_KEY
+            }),
+            $statement,
+        )
+    };
+}
+
+pub fn observed<T>(
     summary: &'static str,
+    statement: impl Future<Output = Result<T, sqlx::Error>>,
+) -> impl Future<Output = Result<T, sqlx::Error>> {
+    observed_with_success_key(summary, None, statement)
+}
+
+pub async fn observed_with_success_key<T>(
+    summary: &'static str,
+    success_key: Option<&'static metrics::Key>,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
     let span = if Span::current().is_none() {
@@ -195,12 +227,20 @@ pub async fn observed<T>(
     let result = statement.instrument(span).await;
     let (started, span) = std::mem::DropGuard::dismiss(guard);
     match &result {
-        Ok(_) => metrics::histogram!(
-            OPERATION_DURATION_METRIC,
-            "db.system.name" => "postgresql",
-            "db.query.summary" => summary
-        )
-        .record(started.elapsed()),
+        Ok(_) => {
+            let histogram = if let Some(key) = success_key {
+                metrics::with_recorder(|recorder| {
+                    recorder.register_histogram(key, &OPERATION_METADATA)
+                })
+            } else {
+                metrics::histogram!(
+                    OPERATION_DURATION_METRIC,
+                    "db.system.name" => "postgresql",
+                    "db.query.summary" => summary
+                )
+            };
+            histogram.record(started.elapsed());
+        }
         Err(error) => {
             let error_type = match sqlstate(error) {
                 Some(code) => {

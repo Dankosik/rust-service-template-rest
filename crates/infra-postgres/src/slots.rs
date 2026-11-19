@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
-use tokio::time::Instant;
+use tokio::time::{Instant, error::Elapsed, timeout_at};
 
 /// A queue that has not emptied for this long is standing: its oldest
 /// waiters have probably been given up on by their callers, so a freed slot
@@ -98,18 +98,17 @@ impl Slots {
         })
     }
 
-    pub(crate) fn try_take(self: &Arc<Self>) -> Option<Slot> {
-        let mut state = self.state.lock();
-        state.free = state.free.checked_sub(1)?;
-        Some(Slot(Arc::clone(self)))
-    }
-
-    pub(super) async fn take(self: &Arc<Self>, queue: Queue) -> Slot {
+    pub(super) async fn take(
+        self: Arc<Self>,
+        queue: Queue,
+        deadline: Instant,
+    ) -> Result<Slot, Elapsed> {
         let (id, granted) = {
             let mut state = self.state.lock();
             if let Some(free) = state.free.checked_sub(1) {
                 state.free = free;
-                return Slot(Arc::clone(self));
+                drop(state);
+                return Ok(Slot(self));
             }
             let id = state.next_waiter;
             state.next_waiter += 1;
@@ -123,9 +122,9 @@ impl Slots {
             (id, granted)
         };
         let mut wait = DropGuard::new(granted, |_receiver| self.cancel_wait(queue, id));
-        let _ = (&mut *wait).await;
+        let _ = timeout_at(deadline, &mut *wait).await?;
         let _receiver = DropGuard::dismiss(wait);
-        Slot(Arc::clone(self))
+        Ok(Slot(self))
     }
 
     fn release(&self) {
@@ -175,22 +174,29 @@ mod tests {
         future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
+    async fn take(slots: &Arc<Slots>, queue: Queue) -> Slot {
+        Arc::clone(slots)
+            .take(queue, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_free_slot_is_taken_without_waiting() {
         let slots = Slots::new(2);
-        let first = slots.try_take();
-        let second = poll(pin!(slots.take(Queue::Regular)));
-        assert!(first.is_some());
+        let first = poll(pin!(take(&slots, Queue::Regular)));
+        let second = poll(pin!(take(&slots, Queue::Regular)));
+        assert!(first.is_ready());
         assert!(second.is_ready());
-        assert!(slots.try_take().is_none());
+        assert!(poll(pin!(take(&slots, Queue::Regular))).is_pending());
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_young_queue_is_served_in_arrival_order() {
         let slots = Slots::new(1);
-        let held = slots.try_take();
-        let mut older = pin!(slots.take(Queue::Regular));
-        let mut newer = pin!(slots.take(Queue::Regular));
+        let held = take(&slots, Queue::Regular).await;
+        let mut older = pin!(take(&slots, Queue::Regular));
+        let mut newer = pin!(take(&slots, Queue::Regular));
         assert!(poll(older.as_mut()).is_pending());
         assert!(poll(newer.as_mut()).is_pending());
 
@@ -203,14 +209,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_queue_that_emptied_starts_young_again() {
         let slots = Slots::new(1);
-        let held = slots.try_take();
+        let held = take(&slots, Queue::Regular).await;
         {
-            let mut gone = pin!(slots.take(Queue::Regular));
+            let mut gone = pin!(take(&slots, Queue::Regular));
             assert!(poll(gone.as_mut()).is_pending());
             tokio::time::advance(STANDING_AFTER * 2).await;
         }
-        let mut older = pin!(slots.take(Queue::Regular));
-        let mut newer = pin!(slots.take(Queue::Regular));
+        let mut older = pin!(take(&slots, Queue::Regular));
+        let mut newer = pin!(take(&slots, Queue::Regular));
         assert!(poll(older.as_mut()).is_pending());
         assert!(poll(newer.as_mut()).is_pending());
 
@@ -222,24 +228,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_abandoned_wait_leaves_the_slot_free() {
         let slots = Slots::new(1);
-        let held = slots.try_take();
+        let held = take(&slots, Queue::Regular).await;
         {
-            let mut abandoned = pin!(slots.take(Queue::Regular));
+            let mut abandoned = pin!(take(&slots, Queue::Regular));
             assert!(poll(abandoned.as_mut()).is_pending());
         }
 
         drop(held);
 
-        assert!(slots.try_take().is_some());
+        assert!(poll(pin!(take(&slots, Queue::Regular))).is_ready());
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_slot_granted_to_a_wait_dropped_unpolled_is_passed_on() {
         let slots = Slots::new(1);
-        let held = slots.try_take();
-        let mut next = pin!(slots.take(Queue::Regular));
+        let held = take(&slots, Queue::Regular).await;
+        let mut next = pin!(take(&slots, Queue::Regular));
         {
-            let mut granted_then_dropped = pin!(slots.take(Queue::Regular));
+            let mut granted_then_dropped = pin!(take(&slots, Queue::Regular));
             assert!(poll(granted_then_dropped.as_mut()).is_pending());
             assert!(poll(next.as_mut()).is_pending());
             drop(held);
@@ -251,14 +257,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn probe_waiters_precede_standing_newest_first_waiters_and_never_strand_slots() {
         let slots = Slots::new(1);
-        let held = slots.try_take();
-        let mut oldest = pin!(slots.take(Queue::Regular));
+        let held = take(&slots, Queue::Regular).await;
+        let mut oldest = pin!(take(&slots, Queue::Regular));
         assert!(poll(oldest.as_mut()).is_pending());
         tokio::time::advance(STANDING_AFTER + Duration::from_millis(1)).await;
-        let mut probe = pin!(slots.take(Queue::Probe));
+        let mut probe = pin!(take(&slots, Queue::Probe));
         assert!(poll(probe.as_mut()).is_pending());
-        let mut newer = pin!(slots.take(Queue::Regular));
-        let mut newest = pin!(slots.take(Queue::Regular));
+        let mut newer = pin!(take(&slots, Queue::Regular));
+        let mut newest = pin!(take(&slots, Queue::Regular));
         assert!(poll(newer.as_mut()).is_pending());
         assert!(poll(newest.as_mut()).is_pending());
 
@@ -272,11 +278,11 @@ mod tests {
         };
 
         {
-            let mut abandoned_probe = pin!(slots.take(Queue::Probe));
+            let mut abandoned_probe = pin!(take(&slots, Queue::Probe));
             assert!(poll(abandoned_probe.as_mut()).is_pending());
         }
         {
-            let mut granted_then_dropped_probe = pin!(slots.take(Queue::Probe));
+            let mut granted_then_dropped_probe = pin!(take(&slots, Queue::Probe));
             assert!(poll(granted_then_dropped_probe.as_mut()).is_pending());
             drop(probe_slot);
         }
@@ -295,6 +301,6 @@ mod tests {
             panic!("the oldest waiter was not served");
         };
         drop(oldest_slot);
-        assert!(slots.try_take().is_some());
+        assert!(poll(pin!(take(&slots, Queue::Regular))).is_ready());
     }
 }

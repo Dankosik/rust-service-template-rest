@@ -5,18 +5,19 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use futures_util::{Stream, StreamExt as _, TryFutureExt as _};
+use futures_util::{Stream, StreamExt as _, TryFutureExt as _, TryStreamExt as _};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
     PgArguments, PgConnection, PgPool, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
-use sqlx::{Connection, Either, Execute, Executor, SqlStr};
+use sqlx::{Connection, Either, Execute, Executor, Row as _, SqlStr};
 use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::error::{QUERY_CANCELED, STATEMENT_COMPLETION_UNKNOWN, sqlstate};
-use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
-use crate::pool::{acquire, acquire_until, format_pg_duration};
+use crate::observe::{self, TransactionObservation, TransactionOutcome};
+use crate::observed;
+use crate::pool::{acquire_for_transaction, format_pg_duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
@@ -160,7 +161,7 @@ impl OperationDeadline {
             .remaining_ms_or_expire()
             .await
             .ok_or_else(deadline_elapsed_error)?;
-        let result = sqlx::query_as::<_, (String, bool)>(
+        let result = sqlx::query(
             "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
              WHERE name = 'statement_timeout') \
              SELECT set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
@@ -168,9 +169,13 @@ impl OperationDeadline {
         )
         .bind(remaining_ms)
         .bind(self.armed_timeout_ms)
+        .try_map(|row: PgRow| {
+            let _: &str = row.try_get(0usize)?;
+            row.try_get::<bool, _>(1usize)
+        })
         .fetch_one(conn)
         .await;
-        let (_, deadline_controls_statement_timeout) = self.observe_cancellation(result).await?;
+        let deadline_controls_statement_timeout = self.observe_cancellation(result).await?;
         self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
         self.remaining_ms_or_expire()
             .await
@@ -334,6 +339,7 @@ impl Notification {
 
 fn dispatch_notifications(
     pool: &PgPool,
+    notifications_enabled: bool,
     mut guard: DiscardOnDrop,
     mut notifications: Vec<Notification>,
 ) {
@@ -341,7 +347,7 @@ fn dispatch_notifications(
     static LAST_SENT: parking_lot::Mutex<BTreeMap<NotificationKey, Instant>> =
         parking_lot::Mutex::new(BTreeMap::new());
 
-    if notifications.is_empty() || !crate::notifications_enabled(pool) {
+    if notifications.is_empty() || !notifications_enabled {
         return;
     }
     let now = Instant::now();
@@ -352,12 +358,13 @@ fn dispatch_notifications(
         return;
     }
     let closing = pool.close_event();
+    let return_in_task = pool.options().get_min_connections() == 0;
     tokio::spawn(async move {
         guard.discard = true;
         let send = async {
             for notification in notifications {
                 let NotificationKey { channel, payload } = notification.key;
-                observed(
+                observed!(
                     "post-commit notification",
                     sqlx::query!("SELECT pg_notify($1, $2)", channel, payload)
                         .execute(&mut *guard.connection),
@@ -370,7 +377,12 @@ fn dispatch_notifications(
             biased;
             () = closing => {}
             result = tokio::time::timeout_at(now + SEND_BUDGET, send) => match result {
-                Ok(Ok(())) => guard.discard = false,
+                Ok(Ok(())) => {
+                    guard.discard = false;
+                    if return_in_task {
+                        guard.connection.return_to_pool().await;
+                    }
+                }
                 Ok(Err(error)) => {
                     guard.discard = !matches!(error, sqlx::Error::Database(_));
                     tracing::warn!(error.type = crate::failure_cause(&error), "postgres_notification_failed");
@@ -383,7 +395,7 @@ fn dispatch_notifications(
 }
 
 pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result<(), sqlx::Error> {
-    observed(
+    observed!(
         "set statement timeout",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, true)",
@@ -401,29 +413,42 @@ type DriverStream<'e, T> = BoxStream<'e, Result<T, sqlx::Error>>;
 impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     type Database = Postgres;
 
+    fn execute<'e, 'q: 'e, E>(self, query: E) -> DriverFuture<'e, PgQueryResult>
+    where
+        'c: 'e,
+        E: 'q + Execute<'q, Postgres>,
+    {
+        Box::pin(
+            self.fetch_many(query)
+                .try_filter_map(|step| std::future::ready(Ok(step.left())))
+                .try_collect(),
+        )
+    }
+
     fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> DriverStream<'e, Either<PgQueryResult, PgRow>>
     where
         'c: 'e,
         E: 'q + Execute<'q, Postgres>,
     {
         self.proven_alive = false;
-        let statement = if let Some(budget) = self.mode.operation_deadline() {
-            let conn = &mut *self.conn;
-            Box::pin(
+        let proof_to_restore = Some(&mut self.proven_alive);
+        let conn = &mut *self.conn;
+        if let Some(budget) = self.mode.operation_deadline() {
+            return Box::pin(
                 async move {
                     budget.arm(conn).await?;
-                    Ok(conn
-                        .fetch_many(SingleStatement(query))
-                        .then(move |item| budget.observe_cancellation(item)))
+                    let statement = Proving {
+                        statement: conn.fetch_many(SingleStatement(query)),
+                        proof_to_restore,
+                    };
+                    Ok(statement.then(move |item| budget.observe_cancellation(item)))
                 }
                 .try_flatten_stream(),
-            ) as DriverStream<'_, _>
-        } else {
-            self.conn.fetch_many(query)
-        };
+            );
+        }
         Box::pin(Proving {
-            statement,
-            proof_to_restore: Some(&mut self.proven_alive),
+            statement: conn.fetch_many(query),
+            proof_to_restore,
         })
     }
 
@@ -610,17 +635,9 @@ where
     let span = observe::transaction_span(pool);
     let mut observation = TransactionObservation::start(span.clone());
     async {
-        let acquired = Box::pin(async {
-            match acquire_deadline {
-                Some(acquire_deadline) => {
-                    acquire_until(pool, "transaction", acquire_deadline).await
-                }
-                None => acquire(pool, "transaction").await,
-            }
-        })
-        .await;
+        let acquired = Box::pin(acquire_for_transaction(pool, acquire_deadline)).await;
         observation.record_connection_wait();
-        let connection = acquired
+        let (connection, notifications_enabled) = acquired
             .map_err(TxError::Acquire)
             .inspect_err(|error| observation.record_failure(error))
             .map_err(|error| mode.acquisition_failure(error))?;
@@ -661,7 +678,7 @@ where
             .map_err(classify_commit)
             .inspect_err(|error| observation.record_failure(error))?;
         observation.end(TransactionOutcome::Committed);
-        dispatch_notifications(pool, guard, notifications);
+        dispatch_notifications(pool, notifications_enabled, guard, notifications);
         Ok(value)
     }
     .instrument(span)

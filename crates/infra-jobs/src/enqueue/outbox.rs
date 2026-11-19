@@ -36,7 +36,7 @@ pub async fn enqueue<T: JobKind>(
     let (aggregate_key, version) = order.unzip();
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    let inserted = observed(
+    let inserted = observed!(
         "enqueue outbox event",
         sqlx::query!(
             r#"
@@ -151,7 +151,7 @@ async fn compare_receipt(
     order: Option<(&str, i64)>,
 ) -> Result<ReceiptComparison, EnqueueError> {
     let (aggregate_key, version) = order.unzip();
-    let same = observed(
+    let same = observed!(
         "compare outbox receipt",
         sqlx::query_scalar!(
             r#"

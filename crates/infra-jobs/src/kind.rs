@@ -402,7 +402,7 @@ async fn run_transactional<K: JobKind>(
         async move |tx| {
             handler.run(job, tx).await.map_err(TransactionFailure)?;
             let complete = crate::attempt::complete_query(fence);
-            let completed = observed("complete job", complete.execute(&mut *tx))
+            let completed = observed!("complete job", complete.execute(&mut *tx))
                 .await
                 .map_err(|error| TransactionFailure::completion(&error))?;
             if completed.rows_affected() == 0 {

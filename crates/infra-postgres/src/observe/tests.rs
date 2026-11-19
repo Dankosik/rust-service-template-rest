@@ -240,11 +240,16 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
 
 #[tokio::test]
 async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
+    async fn read_widget() -> Result<i32, sqlx::Error> {
+        crate::observed!("read widget", async { Ok(7) }).await
+    }
+
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    assert_eq!(observed("read widget", async { Ok(7) }).await.unwrap(), 7);
-    let rejected = observed("write widget", async {
+    assert_eq!(read_widget().await.unwrap(), 7);
+    assert_eq!(observed("read widget", async { Ok(8) }).await.unwrap(), 8);
+    let rejected = crate::observed!("write widget", async {
         Err::<(), _>(crate::error::tests::database("23505"))
     })
     .await;
@@ -258,22 +263,38 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     assert!(lost.is_err());
     let abandoned = tokio::time::timeout(
         Duration::from_millis(1),
-        observed(
+        crate::observed!(
             "slow widget",
             std::future::pending::<Result<(), sqlx::Error>>(),
         ),
     )
     .await;
     assert!(abandoned.is_err());
+
+    let success = Key::from_parts(
+        "db_client_operation_duration_seconds",
+        &[
+            ("db.system.name", "postgresql"),
+            ("db.query.summary", "read widget"),
+        ],
+    );
+    {
+        let next_recorder = DebuggingRecorder::new();
+        let _recorder = metrics::set_default_local_recorder(&next_recorder);
+        assert_eq!(read_widget().await.unwrap(), 7);
+        let snapshot = next_recorder.snapshotter().snapshot().into_hashmap();
+        assert_eq!(
+            crate::test_metrics::histogram_len(&snapshot, &success),
+            Some(1)
+        );
+    }
+
     let snapshot = snapshotter.snapshot().into_hashmap();
+    assert_eq!(
+        crate::test_metrics::histogram_len(&snapshot, &success),
+        Some(2)
+    );
     for target in [
-        Key::from_parts(
-            OPERATION_DURATION_METRIC,
-            &[
-                ("db.system.name", "postgresql"),
-                ("db.query.summary", "read widget"),
-            ],
-        ),
         Key::from_parts(
             OPERATION_DURATION_METRIC,
             &[
