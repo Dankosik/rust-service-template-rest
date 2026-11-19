@@ -50,7 +50,7 @@ mod tests {
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
     use crate::bootstrap::messaging::RetainedMessages;
-    use crate::resources::{PoolResource, Resources};
+    use crate::resources::{Dependencies, PoolResource, Resources};
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
@@ -97,7 +97,10 @@ mod tests {
             },
         );
         let resources = Resources {
-            pool: Some(PoolResource::Admitted(pool.clone())),
+            dependencies: Dependencies {
+                pool: Some(PoolResource::Admitted(pool.clone())),
+                ..Dependencies::default()
+            },
             ..Resources::default()
         };
         let mut messages = RetainedMessages {

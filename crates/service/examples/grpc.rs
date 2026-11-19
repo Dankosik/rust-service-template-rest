@@ -9,7 +9,7 @@ fn register(
     services: &mut Services,
     _state: &service::AppState,
     _background: &mut service::BackgroundRegistration<'_>,
-) -> Result<(), infra_grpc::Error> {
+) -> Result<(), service::RegistrationError> {
     echo::register(services, |services, path| {
         // template:begin service-auth:grpc-example-caller-rules
         services.allow_callers(path, &["example-caller"])?;
@@ -17,6 +17,7 @@ fn register(
         let _ = (services, path);
         Ok(())
     })
+    .map_err(Into::into)
 }
 
 pub(crate) fn main() -> ExitCode {

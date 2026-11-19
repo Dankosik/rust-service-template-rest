@@ -14,9 +14,10 @@ pub(super) async fn install_observability(
     resources: &mut Resources,
 ) -> Result<(Metrics, ExporterState), WorkerError> {
     let tracer_provider = resources
+        .telemetry
         .tracer_provider
         .insert(install_tracer_provider(&tracing_options(config, identity)).await?);
-    resources.logger = Some(install_subscriber(&LoggingOptions {
+    resources.telemetry.logger = Some(install_subscriber(&LoggingOptions {
         level: &config.log.level,
         format: match config.log.format {
             LogFormat::Json => LoggingFormat::Json,

@@ -89,13 +89,14 @@ pub(super) async fn connect_messaging(
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
     let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
     let BrokerResource::Starting(startup) = resources
+        .dependencies
         .broker
         .insert(BrokerResource::Starting(Box::new(startup)))
     else {
         return Err(MessagingError::Connection.into());
     };
     let messaging = startup.admit().await?;
-    resources.broker = Some(BrokerResource::Admitted(messaging.clone()));
+    resources.dependencies.broker = Some(BrokerResource::Admitted(messaging.clone()));
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
@@ -153,12 +154,12 @@ pub(super) fn start_consumer(
     resources: &mut Resources,
     background: &Background,
 ) {
-    resources.consumer = Some(consumer.start(&background.cancel));
+    resources.work.consumer = Some(consumer.start(&background.cancel));
     tracing::info!("messaging_consuming_started");
 }
 
 pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {
-    match &resources.consumer {
+    match &resources.work.consumer {
         Some(consumer) => WorkerError::ConsumerStopped(consumer.failed().await),
         None => std::future::pending().await,
     }

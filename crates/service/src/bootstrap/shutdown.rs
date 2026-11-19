@@ -24,7 +24,7 @@ use super::signals::Signals;
 const DIAGNOSTICS_SHUTDOWN: Duration = Duration::from_secs(2);
 const FORCED_LISTENER_JOIN: Duration = Duration::from_millis(500);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(5);
-pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
+const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 const LOGGER_FLUSH_RESERVE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN

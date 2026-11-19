@@ -54,7 +54,7 @@ use self::background::{Background, BackgroundFailure, wait_for_failure};
 pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
 use self::shutdown::{Dependencies, Outcome, Serving};
 use self::signals::Signals;
-use crate::StartupRegistration;
+use crate::{RegistrationError, ServiceRegistration};
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -91,7 +91,7 @@ pub(crate) enum BootstrapError {
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
     #[error("startup admission: {0}")]
-    Admission(health::NotReady),
+    Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     // template:begin authn:bootstrap-authn-errors
@@ -108,7 +108,7 @@ pub(crate) enum BootstrapError {
     #[error("http contract composition: {0}")]
     HttpComposition(#[from] crate::api::ContractError),
     #[error("HTTP resource preparation failed")]
-    HttpResource(#[source] Box<dyn std::error::Error + Send + Sync>),
+    HttpResource(#[source] RegistrationError),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -140,7 +140,7 @@ pub(crate) enum BootstrapError {
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
     #[error("gRPC service registration: {0}")]
-    GrpcRegistration(#[source] Box<dyn std::error::Error + Send + Sync>),
+    GrpcRegistration(#[source] RegistrationError),
     // template:end grpc:bootstrap-grpc-error
     #[error(transparent)]
     Background(#[from] BackgroundFailure),
@@ -181,10 +181,7 @@ fn fail_to_stderr(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub(super) fn run_registered<I>(
-    args: I,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
-) -> ExitCode
+pub(super) fn run_registered<I>(args: I, registration: ServiceRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -254,7 +251,7 @@ struct TelemetryHandles {
 )]
 async fn serve(
     config: Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
     exit: &mut RuntimeExit,
 ) -> Result<Outcome, BootstrapError> {
     let signals = exit
@@ -398,7 +395,7 @@ fn finish_startup(
     if let Some(prepared) = started?
         && !signals.take_pending()?
     {
-        let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
+        let refresher = prepared.activate()?;
         serving.admitted = true;
         background.spawn_with_token("readiness", |stop| refresher.refresh_until(stop));
         tracing::info!("service_ready");
@@ -438,7 +435,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
 )]
 async fn start(
     config: &Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
     metrics: &Metrics,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
@@ -539,11 +536,8 @@ async fn start(
     )
     .await?;
     let app = match registration.http_resource {
-        Some(prepare) => {
-            let resource = prepare(config, &mut BackgroundRegistration { background })
-                .map_err(BootstrapError::HttpResource)?;
-            app.with_extension(resource)
-        }
+        Some(attach) => attach(app, config, &mut BackgroundRegistration { background })
+            .map_err(BootstrapError::HttpResource)?,
         None => app,
     };
     let listeners = BoundListeners::bind(
@@ -552,10 +546,7 @@ async fn start(
         grpc_prepared,
         // template:end grpc:bootstrap-grpc-bind-argument
     )?;
-    let mut prepared_readiness = readiness
-        .prepare()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    let mut prepared_readiness = readiness.prepare().await?;
 
     listeners.serve(
         app,
@@ -565,10 +556,7 @@ async fn start(
         serving,
     )?;
 
-    prepared_readiness
-        .ensure_fresh()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    prepared_readiness.ensure_fresh().await?;
     Ok(prepared_readiness)
 }
 
@@ -813,7 +801,7 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &shared_metrics(),
             &mut background,
             &mut Dependencies::default(),
@@ -881,7 +869,7 @@ mod tests {
         let mut serving = Serving::default();
         let result = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &metrics,
             &mut background,
             &mut dependencies,
@@ -1017,40 +1005,32 @@ mod tests {
                 )
         }
 
-        pub(super) fn registration(origin: String) -> super::StartupRegistration<()> {
-            super::StartupRegistration {
-                http_resource: None,
-                grpc: Some(Box::new(move |services, _, _| {
-                    let directory = Client::try_new(
-                        &origin,
-                        ClientSecurity::Plaintext,
-                        Duration::from_secs(5),
-                    )?;
-                    services.set_listener_layer(tower::util::MapResponseLayer::new(
-                        |mut response: axum::response::Response| {
-                            response
-                                .headers_mut()
-                                .insert("x-listener", "grpc".parse().unwrap());
-                            response
-                        },
-                    ));
-                    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-                    services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
-                        directory,
-                    ))))?;
-                    services.add_reflection()?;
-                    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                        services.allow_callers(
-                            &format!("/example.v1.EchoService/{method}"),
-                            &["orders"],
-                        )?;
-                    }
-                    for path in infra_grpc::REFLECTION_PATHS {
-                        services.allow_callers(path, &["orders"])?;
-                    }
-                    Ok(())
-                })),
-            }
+        pub(super) fn registration(origin: String) -> super::ServiceRegistration {
+            super::ServiceRegistration::default().with_grpc(move |services, _, _| {
+                let directory =
+                    Client::try_new(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))?;
+                services.set_listener_layer(tower::util::MapResponseLayer::new(
+                    |mut response: axum::response::Response| {
+                        response
+                            .headers_mut()
+                            .insert("x-listener", "grpc".parse().unwrap());
+                        response
+                    },
+                ));
+                services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+                services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
+                    directory,
+                ))))?;
+                services.add_reflection()?;
+                for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                    services
+                        .allow_callers(&format!("/example.v1.EchoService/{method}"), &["orders"])?;
+                }
+                for path in infra_grpc::REFLECTION_PATHS {
+                    services.allow_callers(path, &["orders"])?;
+                }
+                Ok(())
+            })
         }
 
         pub(super) async fn exercise_listener(
