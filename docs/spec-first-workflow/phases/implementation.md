@@ -52,7 +52,8 @@ Complete this step only when the ledger is `ready`, controls are confirmed, and
 Inspect eligible tasks in `tasks.md` and read `Mutable owners` and `Exclusive
 locks` from each ready packet before dispatching. Start every task whose
 `Depends on` contracts or integrated code, disjoint `Mutable owners` and
-`Exclusive locks`, and authority are met (breaking ties by priority; leaving
+`Exclusive locks`, and authority are met (breaking ties by priority in
+`tasks.md` order; leaving
 `[acceptance]` and `[effect:<action>]` gates for Final Validation or release).
 
 - **Fresh Lead per task:** dispatch one fresh `acceptance-unit-lead` per ready

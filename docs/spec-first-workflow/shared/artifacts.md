@@ -23,7 +23,9 @@ Task artifacts preserve accepted behavior, design, and scope; current workflow
 owners govern execution timing. Keep at most one active coordination record:
 when persisted, `workflow-plan.md` holds pre-ledger coordination and is deleted
 once Planning finalizes a ready `tasks.md` (carrying any active execution
-instructions into `Global constraints`).
+instructions into `Global constraints`) or closes a reviewed no-implementation
+result (carrying any active instructions for a named external `next_owner` into
+`Transition Result V1`).
 
 When new guidance or a mid-task decision changes scope, contracts, completion
 criteria, or execution policy, reconcile it against work already underway:

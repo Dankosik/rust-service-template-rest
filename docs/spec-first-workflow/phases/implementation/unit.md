@@ -68,10 +68,11 @@ and changed crates compile cleanly.
 Verify every gate before emitting [Implementation
 Result](../../interfaces/acceptance-result-v1.md#implementation-result):
 
-- [ ] `Outcome`, `Observable claim`, preserved `G<n>` invariants, and
-  failure/rejection paths are wired end-to-end; generated contracts are
-  regenerated; superseded code/tests in `Boundary -> In scope` are removed;
-  zero placeholders (`todo!()`, `unimplemented!()`).
+- [ ] `Outcome`, active `Observable claim` (or `Outcome` alone when `Observable
+  claim` is `superseded at assembly by T<contract>`), preserved `G<n>`
+  invariants, and failure/rejection paths are wired end-to-end; generated
+  contracts are regenerated; superseded code/tests in `Boundary -> In scope`
+  are removed; zero placeholders (`todo!()`, `unimplemented!()`).
 - [ ] Own `git diff` inspected: every edited path lies inside granted `Mutable
   owners` / `Exclusive locks`; zero stray files, debug logs, explanatory
   comments, or non-test `unwrap`/`expect`/`panic!`.

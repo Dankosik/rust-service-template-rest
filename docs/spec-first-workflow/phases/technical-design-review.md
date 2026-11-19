@@ -113,7 +113,8 @@ sections while still reporting upstream gaps found in the same pass.*
    shared identifier (config key, error code, metric/span name,
    wire/event/job/column name); if `Shared mutated surfaces` omits a shared
    lock path or uses prose instead of canonical repo-relative paths; if
-   `Planning hooks` suggests a `shared seam` with `<2` parallel consumers; or
+   `Planning hooks` suggests a `shared-contract` without `≥2` lock-disjoint
+   parallel consumers; or
    if `design/` prescribes task slicing, function bodies, brittle private `.rs`
    file trees, or test cases/fixtures/proving layers/commands/unmandated live
    gates ([Evidence Contract](../shared/evidence-contract.md#design-proof)).

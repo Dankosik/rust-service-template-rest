@@ -52,8 +52,8 @@ Carried concerns: <bounded review CONCERNS or unresolved spec concerns; omit whe
 
 - **Verified anchors:** <source-verified `path::Symbol`, `crate@version::item`, and schema/config anchors, plus any uncached crate in `Reopen if`>
 - **Pinned shared identifiers:** <exact new/changed config keys, error codes, metric/span names, wire/event/job/table/column names, or cross-unit symbols; omit when none>
-- **Shared mutated surfaces:** <canonical repo-relative lock paths actually mutated—e.g. `Cargo.toml`, `Cargo.lock`, `api/openapi/service.yaml`, `api/proto/`, `migrations/`, `.sqlx/`, `quality/architecture.json`, `crates/config/`, `crates/service/src/`, `crates/jobs-worker/src/`, `crates/migrate/src/`, `make/template.mk`, `template-owned.paths`, `scripts/template/profiles.json`, or shared crate `lib.rs`—or `none`>
-- **Planning hooks:** <`prefactor`, `shared seam` (≥2 parallel consumers only), `integration-first`, or `expand -> migrate -> contract`; omit when none>
+- **Shared mutated surfaces:** <narrowest canonical repo-relative shared files or ordered directories actually mutated—e.g. `Cargo.toml`, `Cargo.lock`, `api/openapi/service.yaml`, `api/proto/`, `migrations/`, `.sqlx/`, `quality/architecture.json`, `make/template.mk`, `template-owned.paths`, `scripts/template/profiles.json`, shared `docs/decisions/*.md`, or specific shared wiring files like `crates/config/src/app.rs`, `crates/service/src/api.rs`, `crates/service/src/bootstrap/mod.rs`, `crates/jobs-worker/src/bootstrap/mod.rs`, `crates/migrate/src/lib.rs`, or a crate `lib.rs`—or `none`>
+- **Planning hooks:** <`prefactor`, `shared-contract` (≥2 lock-disjoint parallel consumers only), `integration-first`, or `expand -> migrate -> contract`; omit when none>
 
 ## Assumptions and reopen triggers
 
