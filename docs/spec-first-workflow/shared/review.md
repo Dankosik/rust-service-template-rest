@@ -90,7 +90,7 @@ The phase adapter owns lenses and threshold, while the artifact, ledger, or
 | --- | --- |
 | Standalone research synthesis | [Research](../phases/research.md#review) |
 | Completed specification | [Specification Review](../phases/specification-review.md) |
-| Technical and Rust-ownership design | [Technical Design Review](../phases/technical-design-review.md) |
+| Technical design (system and Rust architecture) | [Technical Design Review](../phases/technical-design-review.md) |
 | Planning result | [Task Review / Readiness](../phases/task-review-readiness.md) |
 | Single-unit final delivery or explicit standalone implementation review | [Implementation Review](../phases/implementation-review.md) |
 | Integrated implementation candidate | [Implementation Review](../phases/implementation-review.md#integrated-candidate) |

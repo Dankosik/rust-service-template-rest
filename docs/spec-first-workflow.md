@@ -40,7 +40,7 @@ phases under [Transition](spec-first-workflow/shared/transition.md#cross-phase-c
 | Macro phase | Possible owners |
 | --- | --- |
 | Definition | Specification, supporting Research, required review of the fixed macro result |
-| Technical Design | supporting Research, System / Integration Design, Rust Code / Ownership Design, required Technical Design Review |
+| Technical Design | Technical Design (supporting Research, System Design, Rust Architecture), required Technical Design Review |
 | Planning | Planning and required Task Review / Readiness |
 | Implementation | Parallel implementation, then final validation and any required delivery review |
 
@@ -63,8 +63,7 @@ Evaluate these triggers before loading a phase owner:
 | New structured work lacks a complete [Intent](spec-first-workflow/interfaces/intent.md), or outcome, scope, authority, observable success, or first owner is ambiguous | [Intake](spec-first-workflow/phases/intake.md) |
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
 | Structured work lacks a reviewed behavioral contract ([Specification V1](spec-first-workflow/interfaces/spec-v1.md)) | [Specification](spec-first-workflow/phases/specification.md) |
-| Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery behavior, or rollout mechanism | [System / Integration Design](spec-first-workflow/phases/system-integration-design.md) |
-| Rust placement is open, or a choice changes which module enforces an invariant, what its callers must guarantee, or which module may depend on another, even with fixed files | [Rust Code / Ownership Design](spec-first-workflow/phases/rust-code-ownership-design.md) |
+| Structured work lacks a reviewed technical design ([Design V1](spec-first-workflow/interfaces/design-v1.md)) because Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery or rollout mechanism, or Rust placement, invariant ownership, caller obligations, or dependency direction (even with fixed files) | [Technical Design](spec-first-workflow/phases/technical-design.md) |
 | Preparation needs a ready ledger for handoff, or structured work lacks a ready ledger | [Planning](spec-first-workflow/phases/planning.md) |
 | The user starts a ready plan in a new session, or an accepted inline unit or active implementation task is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 

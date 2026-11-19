@@ -13,7 +13,7 @@ Task-local artifacts live under `specs/<task>/`:
 | --- | --- | --- |
 | New structured work completes requester interview | [`intent.md`](../interfaces/intent.md) | Requester meaning synthesized after interview |
 | Behavior delta must survive | [`spec.md`](../interfaces/spec-v1.md) | Observable behavior delta, preserved guarantees, falsifiers, assumptions, carried concerns |
-| A later phase needs a decision about a system mechanism, Rust ownership, or file placement | `design/` | Selected system and ownership decisions |
+| A later phase needs a decision about a system mechanism, Rust ownership, or file placement | [`design/design.md`](../interfaces/design-v1.md) (`design/`) | Selected system decisions, seams, semantic owners, shared surfaces, carried concerns |
 | Several units/dependencies or durable execution state exist | `tasks.md`, `tasks/<ID>-<slug>.md` | Index order/status/results and each task's outcome/boundary/acceptance |
 | Evidence must be reused or refreshed | `research/*.md` | Findings, limits, conflicts, decision effect |
 | Deployment/migration/backfill has a real sequence | `rollout.md` | Operational gates, recovery, observables |
