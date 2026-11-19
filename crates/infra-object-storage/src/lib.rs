@@ -34,7 +34,9 @@ pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
 use self::error::{Call, Failure, LocalFailure};
-pub use self::error::{ConfigError, MutationError, MutationFailure, ObjectStorageError};
+pub use self::error::{
+    ConfigError, MutationError, MutationFailure, ObjectStorageError, UnknownOutcome,
+};
 pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
@@ -250,13 +252,12 @@ impl ObjectStorage {
     ) -> Result<(), MutationError> {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(Operation::Put);
-        let mut dispatched_outcomes = None;
         let result = async {
-            Self::check_mutation_stopped(&context)?;
+            check_mutation_active(&context)?;
             if body.len > self.inner.max_object_bytes {
                 return Err(Failure::TOO_LARGE);
             }
-            let _permit = self.admit_mutation()?;
+            let _permit = self.try_admit().ok_or(Failure::BUSY)?;
             let PutBody {
                 len,
                 stream,
@@ -265,7 +266,7 @@ impl ObjectStorage {
             } = within(&context, body.normalize_empty_stream())
                 .await
                 .map_err(|interrupted| {
-                    Failure::mutation_stopped(interrupted.stopped, MutationError::NotApplied)
+                    Failure::mutation_not_applied_stopped(interrupted.stopped)
                 })??;
             let checksum = self
                 .inner
@@ -298,10 +299,11 @@ impl ObjectStorage {
                 .config_override(call_config)
                 .interceptor(ResponseLimit::SuccessBody)
                 .send();
+            let mut dispatched = false;
             let result = within_mutation(&context, async {
-                if let Some(outcomes) = outcomes {
+                if let Some(outcomes) = &outcomes {
                     outcomes.dispatched();
-                    dispatched_outcomes = Some(outcomes);
+                    dispatched = true;
                 }
                 request.await
             })
@@ -309,22 +311,23 @@ impl ObjectStorage {
             if let Ok((answer, _)) = &result {
                 guard.record_request_ids(answer);
             }
-            error::interpret_put_result(&result, call, source.mismatched())
+            let outcome = error::interpret_put_result(&result, call, source.mismatched());
+            if dispatched
+                && let Some(outcomes) = &outcomes
+                && !matches!(
+                    outcome,
+                    Err(Failure {
+                        error: MutationError::OutcomeUnknown(_),
+                        ..
+                    })
+                )
+            {
+                outcomes.settled();
+            }
+            outcome
         }
         .await;
-        let outcome = match result {
-            Ok(()) => {
-                guard.succeed();
-                Ok(())
-            }
-            Err(failure) => Err(guard.fail_mutation(&failure)),
-        };
-        if let Some(dispatched_outcomes) = dispatched_outcomes
-            && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
-        {
-            dispatched_outcomes.settled();
-        }
-        outcome
+        guard.finish_mutation(result)
     }
 
     pub async fn get(
@@ -335,8 +338,8 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(Operation::Get);
         let opened = async {
-            Self::check_stopped(&context)?;
-            let permit = self.admit()?;
+            check_active(&context)?;
+            let permit = self.try_admit().ok_or(LocalFailure::Busy)?;
             let request = Box::pin(
                 self.inner
                     .client
@@ -349,9 +352,9 @@ impl ObjectStorage {
                     .config_override(self.operation_config(&context, Call::Read))
                     .send(),
             );
-            let result =
+            let reply =
                 Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
-            let output = result.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
+            let output = reply.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
             let metadata = download_metadata(&output, self.inner.max_object_bytes)?;
             Ok((metadata, output.body, permit))
         }
@@ -375,8 +378,8 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(Operation::Head);
         let result = async {
-            Self::check_stopped(&context)?;
-            let _permit = self.admit()?;
+            check_active(&context)?;
+            let _permit = self.try_admit().ok_or(LocalFailure::Busy)?;
             let request = self
                 .inner
                 .client
@@ -388,9 +391,9 @@ impl ObjectStorage {
                 .config_override(self.operation_config(&context, Call::Read))
                 .interceptor(ResponseLimit::SuccessBody)
                 .send();
-            let result =
+            let reply =
                 Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
-            let output = result.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
+            let output = reply.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
             ObjectMetadata::from_response_fields(
                 output.content_length(),
                 output.content_type(),
@@ -399,13 +402,7 @@ impl ObjectStorage {
             )
         }
         .await;
-        match result {
-            Ok(metadata) => {
-                guard.succeed();
-                Ok(metadata)
-            }
-            Err(failure) => Err(guard.fail(&failure)),
-        }
+        guard.finish_read(result)
     }
 
     pub async fn delete(
@@ -416,8 +413,8 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let mut guard = self.start_observation(Operation::Delete);
         let result = async {
-            Self::check_mutation_stopped(&context)?;
-            let _permit = self.admit_mutation()?;
+            check_mutation_active(&context)?;
+            let _permit = self.try_admit().ok_or(Failure::BUSY)?;
             let request = self
                 .inner
                 .client
@@ -429,18 +426,12 @@ impl ObjectStorage {
                 .config_override(self.operation_config(&context, Call::UnconditionalMutation))
                 .interceptor(ResponseLimit::SuccessBody)
                 .send();
-            let (result, stopped_on_reply) = within_mutation(&context, request).await?;
-            guard.record_request_ids(&result);
-            error::interpret_delete_result(&result, stopped_on_reply)
+            let (reply, stopped_on_reply) = within_mutation(&context, request).await?;
+            guard.record_request_ids(&reply);
+            error::interpret_delete_result(&reply, stopped_on_reply)
         }
         .await;
-        match result {
-            Ok(()) => {
-                guard.succeed();
-                Ok(())
-            }
-            Err(failure) => Err(guard.fail_mutation(&failure)),
-        }
+        guard.finish_mutation(result)
     }
 
     pub async fn presign_get(
@@ -452,7 +443,7 @@ impl ObjectStorage {
         let context = CallContext::new(parent, self.inner.operation_timeout);
         let guard = self.start_observation(Operation::PresignGet);
         let result = async {
-            Self::check_stopped(&context)?;
+            check_active(&context)?;
             if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
                 return Err(LocalFailure::PresignExpiry.into());
             }
@@ -467,9 +458,9 @@ impl ObjectStorage {
                 .customize()
                 .config_override(self.operation_config(&context, Call::Read))
                 .presigned(config);
-            let result = within(&context, request).await?;
-            Self::check_stopped(&context)?;
-            match result {
+            let reply = within(&context, request).await?;
+            check_active(&context)?;
+            match reply {
                 Ok(request) if request.headers().next().is_some() => {
                     Err(LocalFailure::PresignedHeaders.into())
                 }
@@ -478,13 +469,7 @@ impl ObjectStorage {
             }
         }
         .await;
-        match result {
-            Ok(url) => {
-                guard.succeed();
-                Ok(url)
-            }
-            Err(failure) => Err(guard.fail(&failure)),
-        }
+        guard.finish_read(result)
     }
 
     fn start_observation(&self, operation: Operation) -> OperationGuard {
@@ -498,16 +483,8 @@ impl ObjectStorage {
         )
     }
 
-    fn admit(&self) -> Result<OwnedSemaphorePermit, Failure> {
-        Arc::clone(&self.inner.admission)
-            .try_acquire_owned()
-            .map_err(|_| LocalFailure::Busy.into())
-    }
-
-    fn admit_mutation(&self) -> Result<OwnedSemaphorePermit, Failure<MutationError>> {
-        Arc::clone(&self.inner.admission)
-            .try_acquire_owned()
-            .map_err(|_| Failure::BUSY)
+    fn try_admit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.inner.admission).try_acquire_owned().ok()
     }
 
     fn checked_read_reply<R: RequestId + RequestIdExt>(
@@ -517,25 +494,8 @@ impl ObjectStorage {
     ) -> Result<R, Failure> {
         let reply = result?;
         guard.record_request_ids(&reply);
-        Self::check_stopped(context)?;
+        check_active(context)?;
         Ok(reply)
-    }
-
-    fn check_stopped(context: &CallContext) -> Result<(), Failure> {
-        if let Some(stopped) = context.stopped() {
-            return Err(Failure::stopped(stopped));
-        }
-        Ok(())
-    }
-
-    fn check_mutation_stopped(context: &CallContext) -> Result<(), Failure<MutationError>> {
-        if let Some(stopped) = context.stopped() {
-            return Err(Failure::mutation_stopped(
-                stopped,
-                MutationError::NotApplied,
-            ));
-        }
-        Ok(())
     }
 
     fn operation_config(&self, context: &CallContext, call: Call) -> aws_sdk_s3::config::Builder {
@@ -545,6 +505,20 @@ impl ObjectStorage {
             .timeout_config(timeout)
             .retry_config(retry)
     }
+}
+
+fn check_active(context: &CallContext) -> Result<(), Failure> {
+    if let Some(stopped) = context.stopped() {
+        return Err(Failure::stopped(stopped));
+    }
+    Ok(())
+}
+
+fn check_mutation_active(context: &CallContext) -> Result<(), Failure<MutationError>> {
+    if let Some(stopped) = context.stopped() {
+        return Err(Failure::mutation_not_applied_stopped(stopped));
+    }
+    Ok(())
 }
 
 fn download_metadata(

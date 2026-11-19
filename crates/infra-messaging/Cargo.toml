@@ -50,8 +50,7 @@ async-nats = { workspace = true, features = ["jetstream", "server_2_10", "aws-lc
 # deliberately has no direct queue SQL or pool ownership.
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
-base64 = { workspace = true }
-serde_with = { workspace = true, features = ["std", "base64"] }
+base64 = { workspace = true, features = ["alloc"] }
 simdutf8 = { workspace = true, features = ["std"] }
 uuid = { workspace = true }
 # template:end outbox:messaging-outbox-dependencies

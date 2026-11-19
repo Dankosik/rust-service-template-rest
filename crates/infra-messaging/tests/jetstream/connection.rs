@@ -156,8 +156,7 @@ fn trust_options(servers: Vec<String>) -> MessagingOptions {
         servers,
         credentials: None,
         root_ca_path: None,
-        allow_plaintext: true,
-        tls_first: false,
+        security: TransportSecurity::AllowPlaintext,
         source_stream: "events".to_owned(),
         max_payload_bytes: 1024,
         consumer: None,
@@ -246,7 +245,7 @@ fn info(discovered: &str, max_payload: usize) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn direct_tls_first_admission_refuses_plaintext_even_when_it_is_allowed() {
+async fn direct_tls_first_admission_refuses_plaintext_seeds() {
     for servers in [
         vec!["nats://127.0.0.1:1".to_owned()],
         vec![
@@ -255,7 +254,7 @@ async fn direct_tls_first_admission_refuses_plaintext_even_when_it_is_allowed() 
         ],
     ] {
         let mut options = trust_options(servers);
-        options.tls_first = true;
+        options.security = TransportSecurity::TlsFirst;
         let failure = Messaging::connect(
             options,
             Instant::now() + Duration::from_secs(5),
@@ -293,7 +292,11 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
             serve_until_topology(socket, Some(info("http://untrusted.invalid", 1_048_576))).await;
         });
         let mut options = trust_options(seeds);
-        options.allow_plaintext = mixed;
+        options.security = if mixed {
+            TransportSecurity::AllowPlaintext
+        } else {
+            TransportSecurity::Tls
+        };
         options.root_ca_path = Some(root.path().to_owned());
         let cancel = CancellationToken::new();
         let mut connect = tokio::spawn(Messaging::connect(
@@ -405,8 +408,11 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
             }
         });
         let mut options = trust_options(vec![seed]);
-        options.allow_plaintext = !tls_first;
-        options.tls_first = tls_first;
+        options.security = if tls_first {
+            TransportSecurity::TlsFirst
+        } else {
+            TransportSecurity::AllowPlaintext
+        };
         options.root_ca_path = tls_first.then(|| root.path().to_owned());
         let cancel = CancellationToken::new();
         let mut connect = tokio::spawn(Messaging::connect(
@@ -455,8 +461,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
         None,
         1024,
     );
-    options.allow_plaintext = false;
-    options.tls_first = true;
+    options.security = TransportSecurity::TlsFirst;
     options.root_ca_path = Some(root_path.clone());
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(options, deadline(), cancel.clone())

@@ -2,6 +2,50 @@ use operation_context::Stopped;
 
 use crate::namespace::Operation;
 
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum StartError {
+    #[error("cache.max_concurrency must allow application commands and leave one maintenance slot")]
+    InvalidConcurrency,
+    #[error("cache key or value size limit is outside the supported range")]
+    InvalidSizeLimit,
+    #[error("cache DSN is invalid")]
+    InvalidDsn,
+    #[error("cache address is unsupported")]
+    UnsupportedAddress,
+    #[error("cache plaintext is refused")]
+    PlaintextRefused,
+    #[error("cache unauthenticated connection is refused")]
+    UnauthenticatedRefused,
+    #[error("cache DSN must not carry a password when cache.password_file is set")]
+    PasswordInDsn,
+    #[error("cache password file could not be read ({kind})")]
+    PasswordFile { kind: std::io::ErrorKind },
+    #[error("cache password file is empty")]
+    PasswordFileEmpty,
+    #[error("cache insecure TLS is refused")]
+    InsecureTlsRefused,
+    #[error("cache root CA requires TLS")]
+    CaRequiresTls,
+    #[error("cache root CA file could not be read ({kind})")]
+    CaFile { kind: std::io::ErrorKind },
+    #[error("cache root CA is invalid")]
+    InvalidCa,
+    #[error("cache client certificate requires TLS")]
+    ClientCertificateRequiresTls,
+    #[error("cache client certificate file could not be read ({kind})")]
+    ClientCertificateFile { kind: std::io::ErrorKind },
+    #[error("cache client certificate is invalid")]
+    InvalidClientCertificate,
+    #[error("cache client key file could not be read ({kind})")]
+    ClientKeyFile { kind: std::io::ErrorKind },
+    #[error("cache client key is invalid or does not match the client certificate")]
+    InvalidClientKey,
+    #[error("cache client could not be built")]
+    ClientBuild,
+    #[error("cache startup admission timed out")]
+    AdmissionTimedOut,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OperationError {
     #[error("cache key exceeds the configured size limit")]
@@ -15,11 +59,19 @@ pub enum OperationError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum UnknownOutcome {
+    #[error("cache unavailable")]
+    Unavailable,
+    #[error("cache operation stopped by caller ({0:?})")]
+    Stopped(Stopped),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MutationError {
     #[error("cache mutation was not applied: {0}")]
     NotApplied(#[source] OperationError),
     #[error("cache mutation outcome is unknown: {0}")]
-    OutcomeUnknown(#[source] OperationError),
+    OutcomeUnknown(#[source] UnknownOutcome),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -56,6 +108,15 @@ impl CommandFailure {
             Self::Failed(ErrorType::ValueTooLarge) => OperationError::ValueTooLarge,
             Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
                 OperationError::Unavailable
+            }
+        }
+    }
+
+    fn unknown_outcome(self) -> UnknownOutcome {
+        match self {
+            Self::Stopped(stopped) => UnknownOutcome::Stopped(stopped),
+            Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
+                UnknownOutcome::Unavailable
             }
         }
     }
@@ -113,7 +174,7 @@ impl From<CommandError> for MutationError {
         match error {
             CommandError::NotApplied(failure) => Self::NotApplied(failure.operation_error()),
             CommandError::OutcomeUnknown(failure) => {
-                Self::OutcomeUnknown(failure.operation_error())
+                Self::OutcomeUnknown(failure.unknown_outcome())
             }
         }
     }

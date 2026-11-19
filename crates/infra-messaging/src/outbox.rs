@@ -11,7 +11,7 @@ use infra_postgres::{Tx, TxMode};
 use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use time::OffsetDateTime;
+use time::UtcDateTime;
 use uuid::NonNilUuid;
 
 use crate::error::{PublishError, PublishRejection};
@@ -248,22 +248,28 @@ fn publication_job_error(error: PublishError) -> JobError {
 struct InvalidBase64;
 
 mod base64_payload {
-    use std::borrow::Cow;
+    use std::fmt;
 
-    use base64::{display::Base64Display, engine::general_purpose::STANDARD};
+    use base64::alphabet::STANDARD;
+    use base64::display::Base64Display;
+    use base64::engine::{DecodePaddingMode, Engine as _, GeneralPurpose, GeneralPurposeConfig};
     use bytes::Bytes;
-    use serde::de::IntoDeserializer as _;
+    use serde::de::{self, Visitor};
     use serde::{Deserializer, Serializer};
-    use serde_with::{As, BorrowCow, base64::Base64};
 
     use super::InvalidBase64;
+
+    const ENGINE: GeneralPurpose = GeneralPurpose::new(
+        &STANDARD,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
 
     pub(super) fn serialize<S: Serializer>(
         source: &Result<Bytes, InvalidBase64>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match source {
-            Ok(bytes) => serializer.collect_str(&Base64Display::new(bytes, &STANDARD)),
+            Ok(bytes) => serializer.collect_str(&Base64Display::new(bytes, &ENGINE)),
             Err(InvalidBase64) => Err(serde::ser::Error::custom("payload is not base64")),
         }
     }
@@ -271,11 +277,24 @@ mod base64_payload {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
-        let encoded: Cow<'de, str> = As::<BorrowCow>::deserialize(deserializer)?;
-        Ok(
-            As::<Base64>::deserialize(encoded.as_ref().into_deserializer())
-                .map_err(|_: serde::de::value::Error| InvalidBase64),
-        )
+        struct PayloadVisitor;
+
+        impl Visitor<'_> for PayloadVisitor {
+            type Value = Result<Bytes, InvalidBase64>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a base64-encoded string")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(ENGINE
+                    .decode(value)
+                    .map(Bytes::from)
+                    .map_err(|_| InvalidBase64))
+            }
+        }
+
+        deserializer.deserialize_str(PayloadVisitor)
     }
 }
 
@@ -326,11 +345,11 @@ impl PublishDomainEvent {
             payload: Ok(Bytes::new()),
         }
     }
-    fn validate(&self) -> Result<(OffsetDateTime, &Bytes), &'static str> {
+    fn validate(&self) -> Result<(UtcDateTime, &Bytes), &'static str> {
         if self.format_version != FORMAT_VERSION {
             return Err("outbox_format_unsupported");
         }
-        let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
+        let occurred_at = UtcDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
             .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond))
             .map_err(|_| "outbox_timestamp_invalid")?;
         let payload = self
@@ -366,7 +385,7 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use bytes::Bytes;
-    use time::OffsetDateTime;
+    use time::UtcDateTime;
 
     use super::{
         FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
@@ -400,7 +419,7 @@ mod tests {
                 publication_id: self.publication_id.clone(),
                 event_type: self.event_type.clone(),
                 schema_version: 1,
-                occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                occurred_at: UtcDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
                 payload: self.payload.clone(),
             })
             .expect("fixture parts are valid")
@@ -437,6 +456,13 @@ mod tests {
             Bytes::from_static(b"{}"),
         )))
         .unwrap();
+
+        let mut unpadded = baseline.clone();
+        unpadded["payload_base64"] = serde_json::Value::String("e30".to_owned());
+        let stored: PublishDomainEvent =
+            serde_json::from_value(unpadded).expect("unpadded base64 decodes as an outbox job");
+        let (_, payload) = stored.validate().expect("unpadded base64 remains valid");
+        assert_eq!(payload.as_ref(), b"{}");
 
         let mut corrupt = baseline.clone();
         corrupt["payload_base64"] = serde_json::Value::String("not-base64".to_owned());

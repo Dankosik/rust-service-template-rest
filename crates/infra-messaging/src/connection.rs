@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation, within_operation_budget};
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
-use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
+use crate::messaging::{CloseOutcome, Credentials, MessagingOptions, TransportSecurity};
 
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
@@ -35,8 +35,13 @@ impl NativeConnection {
             .to_server_addrs()
             .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
             .collect();
+        let (require_tls, tls_first) = match options.security {
+            TransportSecurity::Tls => (true, false),
+            TransportSecurity::TlsFirst => (true, true),
+            TransportSecurity::AllowPlaintext => (false, false),
+        };
         let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
-        if options.tls_first && !all_tls {
+        if tls_first && !all_tls {
             return Err(MessagingError::Configuration(
                 "TLS-first requires every configured server to use TLS",
             ));
@@ -52,7 +57,7 @@ impl NativeConnection {
             .initial_connect_deadline(connect_deadline)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
-            .require_tls(!options.allow_plaintext)
+            .require_tls(require_tls)
             .event_callback(move |event| {
                 report_connection_event(&event);
                 if matches!(event, async_nats::Event::Closed) {
@@ -60,7 +65,7 @@ impl NativeConnection {
                 }
                 std::future::ready(())
             });
-        if options.tls_first {
+        if tls_first {
             connect = connect.tls_first();
         } else if any_tls {
             connect = connect.ignore_discovered_servers();

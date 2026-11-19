@@ -71,7 +71,7 @@ pub(crate) enum WorkerError {
     Registration(#[from] BuildError),
     // template:begin webhooks:worker-bootstrap-webhook-tls-error
     #[error("outbound webhook TLS preparation failed ({0})")]
-    WebhookTls(#[source] infra_outbound_http::BuildError),
+    WebhookTls(#[from] infra_outbound_http::BuildError),
     // template:end webhooks:worker-bootstrap-webhook-tls-error
     #[error("background task {0} stopped without a stop signal")]
     BackgroundStopped(&'static str),
@@ -116,7 +116,7 @@ pub(crate) enum WorkerError {
     #[error(transparent)]
     HttpContract(#[from] infra_http::FinalizeError),
     #[error("startup admission: {0}")]
-    Admission(health::NotReady),
+    Admission(#[from] health::NotReady),
 }
 
 #[derive(Debug)]
@@ -164,7 +164,7 @@ pub(crate) async fn serve(
         config.http.grace_period,
     ));
     if let Ended::Failure(error) = &ended {
-        report_worker_failure(error, resources.logger.is_some());
+        report_worker_failure(error, resources.telemetry.logger.is_some());
     }
     let outcome = shutdown::run(shutdown::Plan {
         http: &config.http,
@@ -217,17 +217,14 @@ async fn start_worker(
     background: &Background,
     resources: &mut Resources,
 ) -> Result<(), Ended> {
-    let prepared = {
-        let preparation = prepare(config, register, background, resources);
-        tokio::pin!(preparation);
-        tokio::select! {
-            biased;
-            result = signals.wait() => Err(signal_ended(result)),
-            task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
-            result = &mut preparation => result.map_err(Ended::Failure),
-        }
-    }
-    .map_err(|ended| pending_failure(resources, background).map_or(ended, Ended::Failure))?;
+    let prepared = tokio::select! {
+        biased;
+        result = signals.wait() => Err(signal_ended(result)),
+        task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
+        result = prepare(config, register, background, resources) => result.map_err(Ended::Failure),
+    };
+    let prepared = prepared
+        .map_err(|ended| pending_failure(resources, background).map_or(ended, Ended::Failure))?;
     check_pending_end(resources, background, signals)?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
     if let Some(engine) = prepared.engine {
@@ -332,9 +329,7 @@ async fn prepare(
     install_panic_hook();
     // template:begin webhooks:worker-bootstrap-webhook-tls
     if !config.webhooks.endpoints.is_empty() {
-        infra_outbound_http::prepare_tls()
-            .await
-            .map_err(WorkerError::WebhookTls)?;
+        infra_outbound_http::prepare_tls().await?;
     }
     // template:end webhooks:worker-bootstrap-webhook-tls
     let mut capabilities = register_capabilities(config, register, background)?;
@@ -418,7 +413,7 @@ async fn prepare_readiness(
     let readiness = Readiness::new(probes, listeners::refresh_policy(config)?);
     let reader = resources.readiness.insert(readiness.control()).reader();
     listeners::bind_listeners(config, metrics, reader, background, resources)?;
-    readiness.prepare().await.map_err(WorkerError::Admission)
+    Ok(readiness.prepare().await?)
 }
 
 struct RetainedCapabilities {

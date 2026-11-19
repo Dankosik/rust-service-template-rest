@@ -20,7 +20,7 @@ pub(super) struct Prepared {
 
 pub(super) fn prepare(
     grpc: &GrpcConfig,
-    registration: Option<crate::GrpcResourceRegistration>,
+    registration: Option<crate::GrpcRegistration>,
     state: &crate::AppState,
     // template:begin grpc-authn:bootstrap-grpc-bearer-parameter
     bearer: Option<&infra_bearerauthn::Verifier>,

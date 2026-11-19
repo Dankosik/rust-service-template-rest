@@ -1158,7 +1158,7 @@ fn registered_background_fixture() {
         return;
     };
     let control = std::env::var(BACKGROUND_CONTROL).expect("fixture control address");
-    let code = service::run_with_grpc_resource(
+    let code = service::run_with_grpc(
         [std::ffi::OsString::from("background-fixture")],
         move |services, _, background| {
             register_background_fixture(services, background, scenario, control).map_err(Into::into)

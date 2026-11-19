@@ -3,7 +3,7 @@ use std::time::Duration;
 use health::Probe;
 use infra_messaging::{
     Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
-    Registry as MessagingRegistry,
+    Registry as MessagingRegistry, TransportSecurity,
 };
 use service_config::{MessagingCredentials, WorkerConfig};
 use tokio::time::Instant;
@@ -89,13 +89,14 @@ pub(super) async fn connect_messaging(
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
     let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
     let BrokerResource::Starting(startup) = resources
+        .dependencies
         .broker
         .insert(BrokerResource::Starting(Box::new(startup)))
     else {
         return Err(MessagingError::Connection.into());
     };
     let messaging = startup.admit().await?;
-    resources.broker = Some(BrokerResource::Admitted(messaging.clone()));
+    resources.dependencies.broker = Some(BrokerResource::Admitted(messaging.clone()));
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
@@ -121,6 +122,13 @@ fn messaging_options(
     consumer: Option<ConsumerOptions>,
 ) -> Result<MessagingOptions, WorkerError> {
     let messaging = &config.messaging;
+    let security = if messaging.tls_first {
+        TransportSecurity::TlsFirst
+    } else if messaging.plaintext_admitted() {
+        TransportSecurity::AllowPlaintext
+    } else {
+        TransportSecurity::Tls
+    };
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
@@ -129,8 +137,7 @@ fn messaging_options(
             MessagingCredentials::File(path) => Credentials::File(path.clone()),
         }),
         root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.plaintext_admitted(),
-        tls_first: messaging.tls_first,
+        security,
         source_stream: source_stream.to_owned(),
         max_payload_bytes: max_payload_bytes(config)?,
         consumer,
@@ -147,12 +154,12 @@ pub(super) fn start_consumer(
     resources: &mut Resources,
     background: &Background,
 ) {
-    resources.consumer = Some(consumer.start(&background.cancel));
+    resources.work.consumer = Some(consumer.start(&background.cancel));
     tracing::info!("messaging_consuming_started");
 }
 
 pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {
-    match &resources.consumer {
+    match &resources.work.consumer {
         Some(consumer) => WorkerError::ConsumerStopped(consumer.failed().await),
         None => std::future::pending().await,
     }

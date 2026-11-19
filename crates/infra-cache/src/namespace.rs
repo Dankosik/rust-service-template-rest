@@ -11,7 +11,7 @@ use crate::error::{CommandError, ErrorType};
 use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, SuccessOutcome};
 use crate::{Cache, MutationError, OperationError, SetError};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Namespace(&'static str);
 
 impl Namespace {
@@ -24,8 +24,21 @@ impl Namespace {
         }
     }
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         self.0
+    }
+}
+
+impl AsRef<str> for Namespace {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for Namespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -74,6 +87,11 @@ impl CacheLookup {
             namespace,
             source_reserve,
         }
+    }
+
+    #[must_use]
+    pub const fn namespace(&self) -> Option<&CacheNamespace> {
+        self.namespace.as_ref()
     }
 
     pub async fn lookup(

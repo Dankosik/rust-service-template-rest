@@ -245,7 +245,7 @@ impl OperationGuard {
         failure.error
     }
 
-    pub(crate) fn fail_mutation(self, failure: &Failure<MutationError>) -> MutationError {
+    fn fail_mutation(self, failure: &Failure<MutationError>) -> MutationError {
         let outcome = match failure.error {
             MutationError::OutcomeUnknown(_) => FailureOutcome::Unknown,
             MutationError::NotApplied(reason) => match reason {
@@ -260,6 +260,32 @@ impl OperationGuard {
         };
         DropGuard::dismiss(self.0).record_failure(outcome, failure);
         failure.error
+    }
+
+    pub(crate) fn finish_read<T>(
+        self,
+        result: Result<T, Failure>,
+    ) -> Result<T, ObjectStorageError> {
+        match result {
+            Ok(value) => {
+                self.succeed();
+                Ok(value)
+            }
+            Err(failure) => Err(self.fail(&failure)),
+        }
+    }
+
+    pub(crate) fn finish_mutation<T>(
+        self,
+        result: Result<T, Failure<MutationError>>,
+    ) -> Result<T, MutationError> {
+        match result {
+            Ok(value) => {
+                self.succeed();
+                Ok(value)
+            }
+            Err(failure) => Err(self.fail_mutation(&failure)),
+        }
     }
 }
 

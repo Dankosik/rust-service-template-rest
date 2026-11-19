@@ -55,7 +55,7 @@ pub(super) async fn admit_pool(
     })
     .await?;
     migrate::verify_history(&pool).await?;
-    resources.pool = Some(PoolResource::Admitted(pool));
+    resources.dependencies.pool = Some(PoolResource::Admitted(pool));
     Ok(())
 }
 
@@ -75,7 +75,7 @@ async fn open_pool(
     );
     let pool =
         infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
-    resources.pool = Some(PoolResource::Starting(pool.clone()));
+    resources.dependencies.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
@@ -143,7 +143,7 @@ fn application_name(service_name: &str) -> String {
 }
 
 pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    match resources.pool.as_ref() {
+    match resources.dependencies.pool.as_ref() {
         Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
         Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
     }
@@ -229,12 +229,12 @@ mod tests {
                     }
                 }
             });
-            assert!(resources.pool.is_none());
+            assert!(resources.dependencies.pool.is_none());
             if !result_ready {
                 release.send(()).unwrap();
             }
             drop(runtime);
-            assert!(resources.pool.is_none());
+            assert!(resources.dependencies.pool.is_none());
             assert!(probe(&resources).is_none());
             assert!(background.tracker.is_empty());
         }
@@ -256,7 +256,7 @@ mod tests {
             "postgres credential preparation task failed"
         );
         assert!(std::error::Error::source(&error).is_none());
-        assert!(resources.pool.is_none());
+        assert!(resources.dependencies.pool.is_none());
     }
 
     #[test]

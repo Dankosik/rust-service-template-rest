@@ -3,7 +3,7 @@ use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
 use compact_str::CompactString;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
+use time::{OffsetDateTime, UtcDateTime};
 
 use crate::error::EnvelopeError;
 use crate::prepared::{PreparedEvent, Publication};
@@ -46,7 +46,7 @@ pub struct InboundEnvelope {
     pub(crate) message_id: String,
     pub(crate) event_type: CompactString,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: Bytes,
 }
 
@@ -54,7 +54,7 @@ pub(crate) struct InboundEnvelopeRef<'a> {
     pub(crate) message_id: &'a str,
     pub(crate) event_type: &'a str,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: &'a [u8],
 }
 
@@ -166,7 +166,7 @@ impl InboundEnvelope {
         self.schema_version
     }
     #[must_use]
-    pub const fn occurred_at(&self) -> OffsetDateTime {
+    pub const fn occurred_at(&self) -> UtcDateTime {
         self.occurred_at
     }
     #[must_use]
@@ -302,7 +302,7 @@ pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeE
     (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES).ok_or(EnvelopeError::HeadersTooLarge)
 }
 
-pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {
+pub(crate) fn format_timestamp(value: UtcDateTime) -> Result<String, EnvelopeError> {
     let bytes = format_timestamp_bytes(value)?;
     str::from_utf8(&bytes)
         .map(str::to_owned)
@@ -310,28 +310,26 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, Envelope
 }
 
 pub(crate) fn format_timestamp_bytes(
-    value: OffsetDateTime,
+    value: UtcDateTime,
 ) -> Result<ArrayVec<u8, 40>, EnvelopeError> {
     let mut buf = ArrayVec::new();
     value
-        .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format_into(&mut buf, &Rfc3339).ok())
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
+        .format_into(&mut buf, &Rfc3339)
+        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)?;
     Ok(buf)
 }
 
-pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), EnvelopeError> {
+pub(crate) fn validate_outbound_created_at(value: UtcDateTime) -> Result<(), EnvelopeError> {
     if is_zero_time(value) {
         return Err(EnvelopeError::CreatedAtRequired);
     }
     value
-        .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())
-        .map(drop)
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)
+        .format_into(&mut std::io::sink(), &Rfc3339)
+        .map(|_| ())
+        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)
 }
 
-fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
+fn parse_timestamp(value: &str) -> Result<UtcDateTime, EnvelopeError> {
     const SEPARATOR_INDEX: usize = "YYYY-MM-DD".len();
     if value.len() > IDENTITY_MAX_BYTES
         || value
@@ -343,19 +341,19 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
     }
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
-        .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
+        .and_then(OffsetDateTime::checked_to_utc)
         .ok_or(EnvelopeError::CreatedAtInvalid)
 }
 
 #[must_use]
-pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
+pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
     let mut id = String::with_capacity(prefix.len() + SHA256_HEX_LEN);
     id.push_str(prefix);
     id.push_str(const_hex::Buffer::<32>::new().format(digest));
     id
 }
 
-pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
+pub(crate) fn is_zero_time(value: UtcDateTime) -> bool {
     value.year() == 1 && value.ordinal() == 1 && value.time() == time::Time::MIDNIGHT
 }
 
@@ -534,14 +532,21 @@ mod tests {
         use time::macros::datetime;
 
         let crosses_into_range = datetime!(-0001-12-31 23:30 -01:00);
-        assert_eq!(validate_outbound_created_at(crosses_into_range), Ok(()));
+        let utc_in_range = crosses_into_range.to_utc();
+        assert_eq!(validate_outbound_created_at(utc_in_range), Ok(()));
         assert_eq!(
-            format_timestamp(crosses_into_range).as_deref(),
+            format_timestamp(utc_in_range).as_deref(),
             Ok("0000-01-01T00:30:00Z")
         );
+        assert!(dead_letter_id("SOURCE", 1, crosses_into_range, "event-1").is_ok());
+
         let crosses_out_of_range = datetime!(0000-01-01 00:30 +01:00);
         assert_eq!(
-            validate_outbound_created_at(crosses_out_of_range),
+            validate_outbound_created_at(crosses_out_of_range.to_utc()),
+            Err(EnvelopeError::CreatedAtOutOfRange)
+        );
+        assert_eq!(
+            dead_letter_id("SOURCE", 1, crosses_out_of_range, "event-1"),
             Err(EnvelopeError::CreatedAtOutOfRange)
         );
     }

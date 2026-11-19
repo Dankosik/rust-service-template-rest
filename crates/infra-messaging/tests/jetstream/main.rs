@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use health::Probe as _;
 use infra_messaging::{
     ConsumerError, ConsumerOptions, Credentials, HandlerError, Messaging, MessagingOptions,
-    PublishError, Registry, Route,
+    PublishError, Registry, Route, TransportSecurity,
 };
 use operation_context::{Deadline, OperationContext};
 use tokio::sync::{Notify, oneshot};
@@ -267,8 +267,7 @@ fn options_with_servers(
         servers,
         credentials: None,
         root_ca_path: None,
-        allow_plaintext: true,
-        tls_first: false,
+        security: TransportSecurity::AllowPlaintext,
         source_stream: fixture.stream.clone(),
         max_payload_bytes,
         consumer,

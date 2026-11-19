@@ -74,12 +74,12 @@ pub(super) async fn build_engine(
 }
 
 pub(super) fn start_engine(engine: Engine, resources: &mut Resources, background: &Background) {
-    resources.started_engine = Some(engine.start(&background.tracker, &background.cancel));
+    resources.work.started_engine = Some(engine.start(&background.tracker, &background.cancel));
     tracing::info!("jobs_claiming_started");
 }
 
 pub(super) async fn engine_failure(resources: &Resources) -> WorkerError {
-    match &resources.started_engine {
+    match &resources.work.started_engine {
         Some(engine) => {
             engine.failed().await;
             WorkerError::EngineStopped

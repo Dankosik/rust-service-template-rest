@@ -31,11 +31,19 @@ pub enum ObjectStorageError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum UnknownOutcome {
+    #[error("object storage unavailable")]
+    Unavailable,
+    #[error("object storage operation stopped: {0:?}")]
+    Stopped(Stopped),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MutationError {
     #[error("object storage mutation was not applied: {0}")]
     NotApplied(#[source] MutationFailure),
     #[error("object storage mutation outcome is unknown: {0}")]
-    OutcomeUnknown(#[source] MutationFailure),
+    OutcomeUnknown(#[source] UnknownOutcome),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -150,28 +158,30 @@ impl Failure<MutationError> {
         Self::with_error_type(MutationError::NotApplied(reason), error_type)
     }
 
-    pub(crate) fn mutation_stopped(
-        stopped: CallStop,
-        outcome: fn(MutationFailure) -> MutationError,
-    ) -> Self {
+    pub(crate) const fn mutation_not_applied_stopped(stopped: CallStop) -> Self {
         let reason = match stopped {
             CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
             CallStop::Timeout => MutationFailure::Unavailable,
         };
-        Self::with_stop(outcome(reason), stopped)
+        Self::with_stop(MutationError::NotApplied(reason), stopped)
+    }
+
+    pub(crate) const fn mutation_unknown_stopped(stopped: CallStop) -> Self {
+        let reason = match stopped {
+            CallStop::Parent(stopped) => UnknownOutcome::Stopped(stopped),
+            CallStop::Timeout => UnknownOutcome::Unavailable,
+        };
+        Self::with_stop(MutationError::OutcomeUnknown(reason), stopped)
     }
 }
 
 impl From<Interrupted> for Failure<MutationError> {
     fn from(interrupted: Interrupted) -> Self {
-        Self::mutation_stopped(
-            interrupted.stopped,
-            if interrupted.polled {
-                MutationError::OutcomeUnknown
-            } else {
-                MutationError::NotApplied
-            },
-        )
+        if interrupted.polled {
+            Self::mutation_unknown_stopped(interrupted.stopped)
+        } else {
+            Self::mutation_not_applied_stopped(interrupted.stopped)
+        }
     }
 }
 
@@ -290,7 +300,7 @@ where
     if kind == FailureKind::Timeout
         && let Some(stopped @ CallStop::Parent(Stopped::Deadline)) = stopped_on_reply
     {
-        return Failure::mutation_stopped(stopped, MutationError::OutcomeUnknown);
+        return Failure::mutation_unknown_stopped(stopped);
     }
     Failure {
         error: classify_mutation(kind, call),
@@ -361,7 +371,9 @@ fn classify_mutation(kind: FailureKind<'_>, call: Call) -> MutationError {
         FailureClass::PreconditionFailed => F::AlreadyExists,
         FailureClass::Conflict => F::Conflict,
         FailureClass::Unavailable => F::Unavailable,
-        FailureClass::OutcomeUnknown => return MutationError::OutcomeUnknown(F::Unavailable),
+        FailureClass::OutcomeUnknown => {
+            return MutationError::OutcomeUnknown(UnknownOutcome::Unavailable);
+        }
         FailureClass::Rejected | FailureClass::NotFound => F::Rejected,
     };
     MutationError::NotApplied(reason)
@@ -430,7 +442,7 @@ mod tests {
     use super::MutationError::{NotApplied, OutcomeUnknown};
     use super::{
         Call, DeleteObjectError, FailureKind, MutationFailure, ObjectStorageError, SdkFailure,
-        classify_mutation, classify_read, from_sdk_mutation,
+        UnknownOutcome, classify_mutation, classify_read, from_sdk_mutation,
     };
     use crate::call::CallContext;
 
@@ -438,7 +450,7 @@ mod tests {
     fn classification_separates_not_applied_from_unknown() {
         use MutationFailure as F;
         let status = |status, code| FailureKind::Status { status, code };
-        let unknown = OutcomeUnknown(F::Unavailable);
+        let unknown = OutcomeUnknown(UnknownOutcome::Unavailable);
         let rejected = NotApplied(F::Rejected);
         let unavailable = NotApplied(F::Unavailable);
         let cases = [
@@ -520,7 +532,7 @@ mod tests {
         for error in &errors {
             assert_eq!(
                 from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
-                OutcomeUnknown(MutationFailure::Unavailable)
+                OutcomeUnknown(UnknownOutcome::Unavailable)
             );
         }
 
@@ -529,11 +541,11 @@ mod tests {
         for error in &errors {
             assert_eq!(
                 from_sdk_mutation(error, Unconditional, false, parent_limited.stopped()).error,
-                OutcomeUnknown(MutationFailure::Stopped(Stopped::Deadline))
+                OutcomeUnknown(UnknownOutcome::Stopped(Stopped::Deadline))
             );
             assert_eq!(
                 from_sdk_mutation(error, Unconditional, false, locally_limited.stopped()).error,
-                OutcomeUnknown(MutationFailure::Unavailable)
+                OutcomeUnknown(UnknownOutcome::Unavailable)
             );
             assert_eq!(
                 from_sdk_mutation(error, Unconditional, true, parent_limited.stopped()).error,
@@ -565,7 +577,7 @@ mod tests {
     fn errors_display_no_provider_detail() {
         for rendered in [
             ObjectStorageError::NotFound.to_string(),
-            OutcomeUnknown(MutationFailure::Unavailable).to_string(),
+            OutcomeUnknown(UnknownOutcome::Unavailable).to_string(),
             ObjectStorageError::Integrity.to_string(),
         ] {
             assert!(rendered.starts_with("object"), "{rendered}");
