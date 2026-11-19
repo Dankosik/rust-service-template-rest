@@ -79,11 +79,11 @@ pub(crate) struct DeadLetterTopology {
 }
 
 impl DeadLetterTopology {
-    pub(crate) fn admit_routes(
+    pub(crate) fn admit_max_subject_bytes(
         &self,
         registry: &Registry,
         filter: &str,
-        server_limit: usize,
+        server_max_payload_bytes: usize,
     ) -> Result<usize, MessagingError> {
         let bounds_unavailable = || {
             refusal_failure(
@@ -116,12 +116,12 @@ impl DeadLetterTopology {
                 i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
             ));
         }
-        if bounds.total > server_limit {
+        if bounds.total > server_max_payload_bytes {
             return Err(refusal_failure(
                 "server",
                 Refusal::ServerMaxPayload,
                 bounds.total,
-                i64::try_from(server_limit).ok(),
+                i64::try_from(server_max_payload_bytes).ok(),
             ));
         }
         if let Some(limit) = self
@@ -141,17 +141,17 @@ impl DeadLetterTopology {
 
 pub(crate) async fn admit_topology(
     options: &MessagingOptions,
-    envelope_limit: usize,
+    envelope_limit_bytes: usize,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
     deadline: Instant,
     cancel: &CancellationToken,
 ) -> Result<TopologyAdmission, MessagingError> {
-    validate_server(client, envelope_limit).map_err(|refusal| {
+    validate_server(client, envelope_limit_bytes).map_err(|refusal| {
         refusal_failure(
             "server",
             refusal,
-            envelope_limit,
+            envelope_limit_bytes,
             i64::try_from(client.server_info().max_payload).ok(),
         )
     })?;
@@ -165,23 +165,45 @@ pub(crate) async fn admit_topology(
     .await?;
     let source_config = &source.cached_info().config;
     validate_stream_publication(source_config)
-        .map_err(|refusal| refusal_failure("source_stream", refusal, envelope_limit, None))?;
-    let mut admission = TopologyAdmission {
-        consumer: None,
+        .map_err(|refusal| refusal_failure("source_stream", refusal, envelope_limit_bytes, None))?;
+    let consumer = match &options.consumer {
+        Some(consumer) => Some(
+            admit_consumer_topology(
+                consumer,
+                &options.source_stream,
+                source_config.max_message_size,
+                envelope_limit_bytes,
+                jetstream,
+                deadline,
+                cancel,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    Ok(TopologyAdmission {
+        consumer,
         // template:begin outbox:messaging-outbox-topology-value
         outbox_source: validate_outbox_source(source_config),
         // template:end outbox:messaging-outbox-topology-value
-    };
-    let Some(consumer) = &options.consumer else {
-        return Ok(admission);
-    };
-    let raw_source_limit = source_config.max_message_size;
-    let source_max_message_bytes =
-        source_message_limit(raw_source_limit, envelope_limit).map_err(|refusal| {
+    })
+}
+
+async fn admit_consumer_topology(
+    consumer: &ConsumerOptions,
+    source_stream: &str,
+    raw_source_limit: i32,
+    envelope_limit_bytes: usize,
+    jetstream: &async_nats::jetstream::Context,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<ConsumerAdmission, MessagingError> {
+    let source_max_message_bytes = source_message_limit(raw_source_limit, envelope_limit_bytes)
+        .map_err(|refusal| {
             refusal_failure(
                 "source_stream",
                 refusal,
-                envelope_limit,
+                envelope_limit_bytes,
                 Some(raw_source_limit.into()),
             )
         })?;
@@ -189,11 +211,11 @@ pub(crate) async fn admit_topology(
         Some(name) => name.clone(),
         None => stream_name_for_subject(jetstream, &consumer.dlq_subject, deadline, cancel).await?,
     };
-    if dead_letter_name == options.source_stream {
+    if dead_letter_name == source_stream {
         return Err(refusal_failure(
             "dead_letter_stream",
             Refusal::DeadLetterIsSource,
-            envelope_limit,
+            envelope_limit_bytes,
             None,
         ));
     }
@@ -206,8 +228,9 @@ pub(crate) async fn admit_topology(
     )
     .await?;
     let dead_letter_config = &dead_letter.cached_info().config;
-    validate_stream_publication(dead_letter_config)
-        .map_err(|refusal| refusal_failure("dead_letter_stream", refusal, envelope_limit, None))?;
+    validate_stream_publication(dead_letter_config).map_err(|refusal| {
+        refusal_failure("dead_letter_stream", refusal, envelope_limit_bytes, None)
+    })?;
     if !wire::valid_subject(&consumer.dlq_subject)
         || !dead_letter_config
             .subjects
@@ -217,11 +240,11 @@ pub(crate) async fn admit_topology(
         return Err(refusal_failure(
             "dead_letter_stream",
             Refusal::DeadLetterSubjectMismatch,
-            envelope_limit,
+            envelope_limit_bytes,
             None,
         ));
     }
-    admission.consumer = Some(ConsumerAdmission {
+    Ok(ConsumerAdmission {
         options: consumer.clone(),
         dead_letter: DeadLetterTopology {
             stream: dead_letter_name,
@@ -230,13 +253,12 @@ pub(crate) async fn admit_topology(
                 .ok()
                 .and_then(NonZeroUsize::new),
         },
-    });
-    Ok(admission)
+    })
 }
 
-fn source_message_limit(raw: i32, envelope_limit: usize) -> Result<usize, Refusal> {
+fn source_message_limit(raw: i32, envelope_limit_bytes: usize) -> Result<usize, Refusal> {
     match usize::try_from(raw) {
-        Ok(limit) if limit > envelope_limit => Err(Refusal::StreamMessageSize),
+        Ok(limit) if limit > envelope_limit_bytes => Err(Refusal::StreamMessageSize),
         Ok(limit @ 1..) => Ok(limit),
         _ => Err(Refusal::StreamMessageSizeUnset),
     }
@@ -344,13 +366,19 @@ pub(crate) async fn recheck_outbox_source(
         MessagingError::Cancelled | MessagingError::TimedOut { .. } => {
             PublishRejection::ContextStopped
         }
-        _ => PublishRejection::BrokerRefused,
+        MessagingError::Configuration(_)
+        | MessagingError::Connection
+        | MessagingError::Authentication
+        | MessagingError::Topology
+        | MessagingError::OutboxSource(_)
+        | MessagingError::Unavailable
+        | MessagingError::Bounds => PublishRejection::BrokerRefused,
     })?;
     let config = &source.cached_info().config;
     validate_stream_publication(config)
         .and_then(|()| validate_outbox_source(config))
         .map_err(|refusal| {
-            report_refusal("source_stream", refusal, shared.envelope_limit, None);
+            report_refusal("source_stream", refusal, shared.envelope_limit_bytes, None);
             PublishRejection::BrokerRefused
         })?;
     if shared.refuses_work() {
@@ -368,17 +396,12 @@ async fn get_stream(
     cancel: &CancellationToken,
 ) -> Result<Stream, MessagingError> {
     bounded_operation(deadline, cancel, async {
-        jetstream
-            .get_stream(name)
-            .await
-            .map_err(|error| get_stream_failure(&error, role))
+        jetstream.get_stream(name).await.map_err(|error| {
+            let broker = stream_broker_error(&error);
+            topology_failure("get_stream", Some(role), &error, broker.as_ref())
+        })
     })
     .await
-}
-
-fn get_stream_failure(error: &GetStreamError, role: &'static str) -> MessagingError {
-    let broker = stream_broker_error(error);
-    topology_failure("get_stream", Some(role), error, broker.as_ref())
 }
 
 #[warn(clippy::wildcard_enum_match_arm)]
@@ -651,7 +674,7 @@ fn report_refusal(
 
 pub(crate) fn validate_server(
     client: &async_nats::Client,
-    envelope_limit: usize,
+    envelope_limit_bytes: usize,
 ) -> Result<(), Refusal> {
     let info = client.server_info();
     let (major, minor, patch) = MIN_SERVER_VERSION;
@@ -664,7 +687,7 @@ pub(crate) fn validate_server(
     if !info.headers {
         return Err(Refusal::HeadersUnsupported);
     }
-    if info.max_payload < envelope_limit {
+    if info.max_payload < envelope_limit_bytes {
         return Err(Refusal::ServerMaxPayload);
     }
     Ok(())

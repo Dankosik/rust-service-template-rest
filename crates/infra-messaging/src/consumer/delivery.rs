@@ -373,7 +373,14 @@ impl DeliveryHandler {
                     sequence: info.stream_sequence,
                 })
             }
-            PublishError::Rejected(_) | PublishError::Ambiguous => {
+            PublishError::Rejected(
+                PublishRejection::InvalidEnvelope(_)
+                | PublishRejection::Unavailable
+                | PublishRejection::ContextStopped
+                | PublishRejection::WindowFull
+                | PublishRejection::BrokerRefused,
+            )
+            | PublishError::Ambiguous => {
                 redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
                 Ok(())
             }

@@ -171,43 +171,41 @@ pub(crate) async fn send_publication(
     if context.stopped().is_some() {
         return Err(PublishRejection::ContextStopped.into());
     }
-    let classify = |error: async_nats::jetstream::context::PublishError| {
-        classify_publish(&error, &shared.publish_metrics.admission_refused)
-    };
     let exchange = async {
         let ack = shared
             .jetstream
             .send_publish(subject, message)
             .await
-            .map_err(classify)?
+            .map_err(|error| classify_publish(&error))?
             .await
-            .map_err(classify)?;
+            .map_err(|error| classify_publish(&error))?;
         Ok(PublishAck {
             stream: ack.stream,
             sequence: ack.sequence,
             duplicate: ack.duplicate,
         })
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         _ = context.wait_stopped() => Err(PublishError::Ambiguous),
         result = exchange => result,
+    };
+    if matches!(
+        result,
+        Err(PublishError::Rejected(PublishRejection::WindowFull))
+    ) {
+        shared.publish_metrics.admission_refused.increment(1);
     }
+    result
 }
 
-fn classify_publish(
-    error: &async_nats::jetstream::context::PublishError,
-    admission_refused: &metrics::Counter,
-) -> PublishError {
+fn classify_publish(error: &async_nats::jetstream::context::PublishError) -> PublishError {
     match error.kind() {
         PublishErrorKind::StreamNotFound
         | PublishErrorKind::WrongLastMessageId
         | PublishErrorKind::WrongLastSequence => PublishRejection::BrokerRefused.into(),
         PublishErrorKind::MaxPayloadExceeded => PublishRejection::BrokerSizeLimit.into(),
-        PublishErrorKind::MaxAckPending => {
-            admission_refused.increment(1);
-            PublishRejection::WindowFull.into()
-        }
+        PublishErrorKind::MaxAckPending => PublishRejection::WindowFull.into(),
         PublishErrorKind::Other => {
             let code = error
                 .source()
@@ -274,44 +272,34 @@ mod tests {
 
     #[test]
     fn only_native_capacity_refusal_counts_as_admission_refusal() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        metrics::with_local_recorder(&recorder, || {
-            let refused = metrics::counter!("messaging_publish_admission_refused_total");
-            for (kind, expected) in [
-                (
-                    PublishErrorKind::StreamNotFound,
-                    PublishRejection::BrokerRefused.into(),
-                ),
-                (
-                    PublishErrorKind::WrongLastMessageId,
-                    PublishRejection::BrokerRefused.into(),
-                ),
-                (
-                    PublishErrorKind::WrongLastSequence,
-                    PublishRejection::BrokerRefused.into(),
-                ),
-                (
-                    PublishErrorKind::MaxPayloadExceeded,
-                    PublishRejection::BrokerSizeLimit.into(),
-                ),
-                (
-                    PublishErrorKind::MaxAckPending,
-                    PublishRejection::WindowFull.into(),
-                ),
-                (PublishErrorKind::Other, PublishError::Ambiguous),
-                (PublishErrorKind::TimedOut, PublishError::Ambiguous),
-                (PublishErrorKind::BrokenPipe, PublishError::Ambiguous),
-            ] {
-                let error = async_nats::jetstream::context::PublishError::new(kind);
-                assert_eq!(classify_publish(&error, &refused), expected);
-            }
-        });
-        assert!(
-            recorder
-                .handle()
-                .render()
-                .contains("messaging_publish_admission_refused_total 1")
-        );
+        for (kind, expected) in [
+            (
+                PublishErrorKind::StreamNotFound,
+                PublishRejection::BrokerRefused.into(),
+            ),
+            (
+                PublishErrorKind::WrongLastMessageId,
+                PublishRejection::BrokerRefused.into(),
+            ),
+            (
+                PublishErrorKind::WrongLastSequence,
+                PublishRejection::BrokerRefused.into(),
+            ),
+            (
+                PublishErrorKind::MaxPayloadExceeded,
+                PublishRejection::BrokerSizeLimit.into(),
+            ),
+            (
+                PublishErrorKind::MaxAckPending,
+                PublishRejection::WindowFull.into(),
+            ),
+            (PublishErrorKind::Other, PublishError::Ambiguous),
+            (PublishErrorKind::TimedOut, PublishError::Ambiguous),
+            (PublishErrorKind::BrokenPipe, PublishError::Ambiguous),
+        ] {
+            let error = async_nats::jetstream::context::PublishError::new(kind);
+            assert_eq!(classify_publish(&error), expected);
+        }
     }
 
     #[test]

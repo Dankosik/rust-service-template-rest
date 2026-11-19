@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
-use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,10 +9,15 @@ use parking_lot::Mutex;
 use crate::messaging::Shared;
 use crate::topology::{classify_topology, validate_server};
 
+const PUBLISH_WORK_IN_FLIGHT: &str = "messaging_publish_work_in_flight";
+const PUBLISH_WORK_LAST_OBSERVED_SECONDS: &str =
+    "messaging_publish_work_last_observed_timestamp_seconds";
+const PUBLISH_CAPACITY: &str = "messaging_publish_capacity";
+
 static PUBLISH_SLOTS: Mutex<BTreeMap<String, BTreeSet<usize>>> = Mutex::new(BTreeMap::new());
 
 #[derive(Debug)]
-pub(crate) struct PublishWork {
+pub(crate) struct PublishWorkMetrics {
     connection: String,
     slot: usize,
     capacity: metrics::Gauge,
@@ -21,7 +25,7 @@ pub(crate) struct PublishWork {
     last_observed: metrics::Gauge,
 }
 
-impl PublishWork {
+impl PublishWorkMetrics {
     pub(crate) fn register(capacity: usize, connection: &str) -> Self {
         let slot = {
             let mut active = PUBLISH_SLOTS.lock();
@@ -35,18 +39,11 @@ impl PublishWork {
         let connection = connection.to_owned();
         let mut labels = vec![metrics::Label::new("connection", connection.clone())];
         if slot > 0 {
-            let mut slot_buf = fmt::NumBuffer::new();
-            labels.push(metrics::Label::new(
-                "connection_slot",
-                slot.format_into(&mut slot_buf).to_owned(),
-            ));
+            labels.push(metrics::Label::new("connection_slot", slot.to_string()));
         }
-        let in_flight = metrics::gauge!("messaging_publish_work_in_flight", labels.iter());
-        let last_observed = metrics::gauge!(
-            "messaging_publish_work_last_observed_timestamp_seconds",
-            labels.iter()
-        );
-        let capacity_gauge = metrics::gauge!("messaging_publish_capacity", labels);
+        let in_flight = metrics::gauge!(PUBLISH_WORK_IN_FLIGHT, labels.iter());
+        let last_observed = metrics::gauge!(PUBLISH_WORK_LAST_OBSERVED_SECONDS, labels.iter());
+        let capacity_gauge = metrics::gauge!(PUBLISH_CAPACITY, labels);
         in_flight.set(f64::NAN);
         last_observed.set(0.0);
         #[expect(
@@ -77,7 +74,7 @@ impl PublishWork {
     }
 }
 
-impl Drop for PublishWork {
+impl Drop for PublishWorkMetrics {
     fn drop(&mut self) {
         self.in_flight.set(f64::NAN);
         self.last_observed.set(0.0);
@@ -105,7 +102,9 @@ impl Probe for MessagingProbe {
     }
 
     async fn check(&self) -> Result<(), ProbeError> {
-        self.shared.publish_work.observe(&self.shared.jetstream);
+        self.shared
+            .publish_work_metrics
+            .observe(&self.shared.jetstream);
         self.check_local_state()?;
         match self
             .shared
@@ -149,14 +148,16 @@ impl MessagingProbe {
                 "messaging connection is unavailable",
             ));
         }
-        validate_server(&self.shared.connection.client, self.shared.envelope_limit).map_err(
-            |refusal| {
-                ProbeError::format(format_args!(
-                    "messaging server admission is unavailable ({})",
-                    refusal.error_type()
-                ))
-            },
+        validate_server(
+            &self.shared.connection.client,
+            self.shared.envelope_limit_bytes,
         )
+        .map_err(|refusal| {
+            ProbeError::format(format_args!(
+                "messaging server admission is unavailable ({})",
+                refusal.error_type()
+            ))
+        })
     }
 }
 
@@ -164,18 +165,15 @@ pub(crate) fn describe_metrics() {
     use metrics::{Unit, describe_gauge};
 
     describe_gauge!(
-        "messaging_publish_work_in_flight",
+        PUBLISH_WORK_IN_FLIGHT,
         "Last observed native publication permits, including abandoned ACK cleanup; NaN before observation"
     );
     describe_gauge!(
-        "messaging_publish_work_last_observed_timestamp_seconds",
+        PUBLISH_WORK_LAST_OBSERVED_SECONDS,
         Unit::Seconds,
         "Unix time of the native publication observation; zero before observation"
     );
-    describe_gauge!(
-        "messaging_publish_capacity",
-        "Fixed native publication permit capacity"
-    );
+    describe_gauge!(PUBLISH_CAPACITY, "Fixed native publication permit capacity");
 }
 
 #[cfg(test)]
@@ -186,8 +184,8 @@ mod tests {
     fn same_name_publishers_keep_separate_capacity_and_reuse_retired_series() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let _work = PublishWork::register(17, "worker-a");
-            let other = PublishWork::register(256, "worker-a");
+            let _work = PublishWorkMetrics::register(17, "worker-a");
+            let other = PublishWorkMetrics::register(256, "worker-a");
             let handle = recorder.handle();
             let scrape = handle.render();
             assert!(
@@ -205,7 +203,7 @@ mod tests {
             assert!(scrape.contains(&other_capacity("256")));
             drop(other);
             assert!(handle.render().contains(&other_capacity("NaN")));
-            let _replacement = PublishWork::register(32, "worker-a");
+            let _replacement = PublishWorkMetrics::register(32, "worker-a");
             assert!(handle.render().contains(&other_capacity("32")));
         });
     }

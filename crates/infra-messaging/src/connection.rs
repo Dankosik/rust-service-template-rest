@@ -15,6 +15,7 @@ use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
 
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
+const CONNECTION_EVENTS_TOTAL: &str = "messaging_connection_events_total";
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeConnection {
@@ -99,7 +100,7 @@ impl NativeConnection {
             if !client.wait_closed().await {
                 return CloseOutcome::UnobservedClose;
             }
-            if closed_event.wait_for(|submitted| *submitted).await.is_ok() {
+            if closed_event.wait_for(|closed| *closed).await.is_ok() {
                 CloseOutcome::Complete
             } else {
                 CloseOutcome::UnobservedClose
@@ -115,13 +116,17 @@ impl NativeConnection {
                 result = drain => result,
             }
         };
-        if outcome != CloseOutcome::Complete {
-            client.force_close();
-            if outcome == CloseOutcome::UnobservedClose && Instant::now() < deadline {
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {}
-                    _ = tokio::time::timeout_at(deadline, client.wait_closed()) => {}
+        match outcome {
+            CloseOutcome::Complete => {}
+            CloseOutcome::WaitInterrupted => client.force_close(),
+            CloseOutcome::UnobservedClose => {
+                client.force_close();
+                if Instant::now() < deadline {
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {}
+                        _ = tokio::time::timeout_at(deadline, client.wait_closed()) => {}
+                    }
                 }
             }
         }
@@ -141,7 +146,7 @@ async fn connect_options(
             .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
         Some(Credentials::File(path)) => {
             let file = bounded_operation(deadline, cancel, async {
-                CredentialsFile::admit(path.clone())
+                CredentialsFile::admit(path)
                     .await
                     .map_err(credentials_failure)
             })
@@ -260,7 +265,7 @@ fn report_connection_event(event: &async_nats::Event) {
             })),
         ),
     };
-    metrics::counter!("messaging_connection_events_total", "result" => result).increment(1);
+    metrics::counter!(CONNECTION_EVENTS_TOTAL, "result" => result).increment(1);
     match log {
         Log::Silent => {}
         Log::Info => tracing::info!(result, "messaging_connection"),
@@ -272,7 +277,7 @@ fn report_connection_event(event: &async_nats::Event) {
 
 pub(crate) fn describe_metrics() {
     metrics::describe_counter!(
-        "messaging_connection_events_total",
+        CONNECTION_EVENTS_TOTAL,
         "Broker connection events by result"
     );
 }
