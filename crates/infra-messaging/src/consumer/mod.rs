@@ -100,6 +100,7 @@ impl health::Probe for ConsumerProbe {
     }
 }
 
+#[derive(Clone, Copy)]
 struct PullLimits {
     messages: usize,
     bytes: usize,
@@ -356,8 +357,9 @@ impl Consumer {
                 PullMode::SingleRetainedMessage => PullTarget::SingleRetainedMessage,
             };
             let budget = self.pull_budget(target, limits);
-            let messages = match self.open_batch(&budget, deliveries, stop).await? {
-                BatchOpen::Ready(messages) => messages,
+            let opened = self.open_batch(&budget, deliveries, stop).await?;
+            let messages = match opened {
+                BatchOpen::Ready(messages) => *messages,
                 BatchOpen::Retry => continue 'pulls,
                 BatchOpen::Stop => break 'pulls,
             };
@@ -437,7 +439,7 @@ impl Consumer {
                 }
                 result = &mut request => {
                     let error_kind = match result {
-                        Ok(Ok(messages)) => return Ok(BatchOpen::Ready(messages)),
+                        Ok(Ok(messages)) => return Ok(BatchOpen::Ready(Box::new(messages))),
                         Ok(Err(error)) => batch_create_error_kind(error.kind()),
                         Err(_) => "local_timeout",
                     };
@@ -535,7 +537,6 @@ impl Consumer {
             .receive_batch(&mut messages, deliveries, stop, force, budget)
             .await;
         match &result {
-            Ok(BatchEnd::Filled) => {}
             Ok(BatchEnd::Stopped | BatchEnd::Incomplete(_)) => {
                 release_prefetched_messages(
                     messages,
@@ -557,7 +558,7 @@ impl Consumer {
                 )
                 .await;
             }
-            Err(_) => {}
+            Ok(BatchEnd::Filled) | Err(_) => {}
         }
         result
     }
@@ -649,13 +650,14 @@ enum PullMode {
     SingleRetainedMessage,
 }
 
+#[derive(Clone, Copy)]
 enum PullTarget {
     Normal { active_deliveries: usize },
     SingleRetainedMessage,
 }
 
 enum BatchOpen {
-    Ready(pull::Batch),
+    Ready(Box<pull::Batch>),
     Retry,
     Stop,
 }
