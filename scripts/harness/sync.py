@@ -432,6 +432,9 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     if not role_names:
         _fail(".agents/roles contains no canonical role files")
 
+    implementation = "../../docs/spec-first-workflow/phases/implementation.md"
+    lead_method = f"Apply [Implementation as Acceptance-Unit Lead]({implementation}#acceptance-unit-lead)\n"
+    orchestrator_method = f"Apply [Implementation as Ledger Orchestrator]({implementation}#carrier)\n"
     lead_tail = (
         "Apply the fixed unit packet and its named Method. Return\n"
         "`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.\n"
@@ -439,31 +442,31 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     rendered[".claude/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"tools: {CLAUDE_MUTABLE_TOOLS}\nmodel: inherit\neffort: high\n---\n\n"
-        "Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [Claude Code adapter](../../docs/agent-harness/claude-code.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".qwen/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"model: inherit\ntools:\n{QWEN_MUTABLE_TOOLS}\n---\n\n"
-        "Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [Qwen Code adapter](../../docs/agent-harness/qwen-code.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".cursor/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         "model: grok-4.6[effort=xhigh]\nreadonly: false\n---\n\n"
-        "Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [Cursor adapter](../../docs/agent-harness/cursor.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".grok/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         "agents_md: true\npermission_mode: bypassPermissions\nprompt_mode: full\n---\n\n"
-        "Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [Grok Build adapter](../../docs/agent-harness/grok-build.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".grok/agents"]["orchestrator.md"] = (
         f'---\nname: orchestrator\ndescription: "{ORCH_DESC}"\n'
         "agents_md: true\npermission_mode: bypassPermissions\nprompt_mode: full\n---\n\n"
-        "Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)\n"
+        f"{orchestrator_method}"
         "and [Grok Build adapter](../../docs/agent-harness/grok-build.md).\n"
     ).encode("utf-8")
     rendered[".opencode/agents"]["acceptance-unit-lead.md"] = (
@@ -471,7 +474,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         'permission:\n  task:\n    "*": deny\n    worker-agent: allow\n    specialist-agent: allow\n'
         "    evidence-agent: allow\n    reviewer-agent: allow\n    adjudicator-agent: allow\n"
         "  question: deny\n---\n\n"
-        "Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [OpenCode adapter](../../docs/agent-harness/opencode.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".opencode/agents"]["orchestrator.md"] = (
@@ -479,19 +482,19 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         'permission:\n  task:\n    "*": deny\n    acceptance-unit-lead: allow\n    worker-agent: allow\n'
         "    specialist-agent: allow\n    evidence-agent: allow\n    reviewer-agent: allow\n"
         "    adjudicator-agent: allow\n---\n\n"
-        "Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)\n"
+        f"{orchestrator_method}"
         "and [OpenCode adapter](../../docs/agent-harness/opencode.md).\n"
     ).encode("utf-8")
     rendered[".agents/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"tools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: false\nsubagent: true\n---\n\n"
-        "Load [Acceptance-Unit Lead](../skills/acceptance-unit-lead/SKILL.md)\n"
+        f"{lead_method}"
         f"and [Antigravity adapter](../../docs/agent-harness/antigravity.md).\n{lead_tail}"
     ).encode("utf-8")
     rendered[".agents/agents"]["orchestrator.md"] = (
         f'---\nname: orchestrator\ndescription: "{ORCH_DESC}"\n'
         f"tools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: true\nsubagent: false\n---\n\n"
-        "Load [Ledger Orchestrator](../skills/orchestrator/SKILL.md)\n"
+        f"{orchestrator_method}"
         "and [Antigravity adapter](../../docs/agent-harness/antigravity.md).\n"
     ).encode("utf-8")
 

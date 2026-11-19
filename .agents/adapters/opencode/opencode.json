@@ -18,12 +18,8 @@
       "prompt": "{file:.opencode/rules/harness.md}",
       "permission": {
         "skill": {
-          "acceptance-unit-lead": "deny",
-          "agent-prompt-composer": "deny",
           "grilling": "deny",
           "idea-refine": "deny",
-          "planning-and-task-breakdown": "deny",
-          "spec-document-designer": "deny",
           "spec-first-brainstorming": "deny"
         }
       }
@@ -31,12 +27,8 @@
     "plan": {
       "permission": {
         "skill": {
-          "acceptance-unit-lead": "deny",
-          "agent-prompt-composer": "deny",
           "grilling": "deny",
           "idea-refine": "deny",
-          "planning-and-task-breakdown": "deny",
-          "spec-document-designer": "deny",
           "spec-first-brainstorming": "deny"
         }
       }
