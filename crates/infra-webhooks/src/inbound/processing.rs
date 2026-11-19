@@ -27,20 +27,14 @@ impl<C: Consumer> Consumer for Arc<C> {
     }
 }
 
+type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>>;
+
 trait ErasedConsumer: Send + Sync + 'static {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>>;
+    fn process<'a>(&'a self, tx: &'a mut Tx<'_>, incoming: &'a Incoming) -> ProcessFuture<'a>;
 }
 
 impl<C: Consumer> ErasedConsumer for C {
-    fn process<'a>(
-        &'a self,
-        tx: &'a mut Tx<'_>,
-        incoming: &'a Incoming,
-    ) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'a>> {
+    fn process<'a>(&'a self, tx: &'a mut Tx<'_>, incoming: &'a Incoming) -> ProcessFuture<'a> {
         Box::pin(Consumer::process(self, tx, incoming))
     }
 }

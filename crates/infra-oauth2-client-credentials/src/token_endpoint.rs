@@ -132,7 +132,7 @@ impl TokenEndpoint {
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
         let request = self.token_request(grant)?;
-        let http_response = self.http.execute_buffered(request, context.clone()).await;
+        let http_response = self.http.execute_buffered(context.clone(), request).await;
         let token_response = classify_token_response(http_response)?;
         token_from_response(&token_response, started, grant.expected_issued_type())
     }

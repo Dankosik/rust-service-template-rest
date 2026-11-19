@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{PreparedReadiness, Probe, Readiness, RefreshPolicy};
+use health::{BoxedProbe, PreparedReadiness, Readiness, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options};
 use infra_telemetry::{
@@ -446,7 +446,7 @@ async fn start(
         unused_mut,
         reason = "profiles without PostgreSQL or messaging have no probe"
     )]
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    let mut probes: Vec<BoxedProbe> = Vec::new();
     // template:begin authn:bootstrap-authn-prepare
     let bearer = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
@@ -456,7 +456,9 @@ async fn start(
     // template:begin postgres:bootstrap-postgres-startup
     if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
-        probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
+        probes.push(BoxedProbe::new(infra_postgres::PostgresProbe::new(
+            pool.clone(),
+        )));
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup

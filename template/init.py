@@ -304,6 +304,80 @@ def _prune_workspace_dependencies(root: Path) -> None:
     cargo_path.write_text("".join(kept_lines), encoding="utf-8")
 
 
+def _prune_architecture_policy(staged: Path) -> None:
+    policy_path = staged / "quality/architecture.json"
+    if not policy_path.is_file():
+        return
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    members: dict[str, dict[str, Any]] = policy["members"]
+    kept_members = {path: cfg for path, cfg in members.items() if (staged / path).is_file()}
+
+    name_to_manifest: dict[str, str] = {}
+    parsed_manifests: dict[str, dict[str, Any]] = {}
+    for rel in kept_members:
+        parsed = tomllib.loads((staged / rel).read_text(encoding="utf-8"))
+        parsed_manifests[rel] = parsed
+        name_to_manifest[parsed["package"]["name"]] = rel
+
+    normal_edges: set[tuple[str, str]] = set()
+    for src, parsed in parsed_manifests.items():
+        dep_tables = [parsed.get("dependencies", {})]
+        for cond in parsed.get("target", {}).values():
+            if isinstance(cond, dict) and isinstance(cond.get("dependencies"), dict):
+                dep_tables.append(cond["dependencies"])
+        for deps in dep_tables:
+            for key, spec in deps.items():
+                pkg_name = spec.get("package", key) if isinstance(spec, dict) else key
+                target = name_to_manifest.get(pkg_name)
+                if target is not None:
+                    normal_edges.add((src, target))
+
+    for path, cfg in kept_members.items():
+        if "allow_dependents" in cfg:
+            active_deps = [m for m in cfg["allow_dependents"].get("members", ()) if (m, path) in normal_edges]
+            if active_deps:
+                cfg["allow_dependents"]["members"] = active_deps
+            else:
+                del cfg["allow_dependents"]
+        if "allow_members" in cfg:
+            active_targets = {t: v for t, v in cfg["allow_members"].items() if (path, t) in normal_edges}
+            if active_targets:
+                cfg["allow_members"] = active_targets
+            else:
+                del cfg["allow_members"]
+
+    active_roles = {cfg["role"] for cfg in kept_members.values()}
+    scaffold_roles = {"feature", "feature-provider"}
+    kept_roles: dict[str, dict[str, Any]] = {}
+    for role_name, rcfg in policy["roles"].items():
+        if role_name not in active_roles and role_name not in scaffold_roles:
+            continue
+        role_copy = dict(rcfg)
+        if "allow_roles" in role_copy:
+            role_copy["allow_roles"] = [
+                r for r in role_copy["allow_roles"] if r in active_roles or r in scaffold_roles
+            ]
+        if "allow_members" in role_copy:
+            role_members = [p for p, cfg in kept_members.items() if cfg["role"] == role_name]
+            if role_members:
+                active = {
+                    t: v
+                    for t, v in role_copy["allow_members"].items()
+                    if t in kept_members and any((src, t) in normal_edges for src in role_members)
+                }
+            else:
+                active = {t: v for t, v in role_copy["allow_members"].items() if t in kept_members}
+            if active:
+                role_copy["allow_members"] = active
+            else:
+                del role_copy["allow_members"]
+        kept_roles[role_name] = role_copy
+
+    policy["members"] = kept_members
+    policy["roles"] = kept_roles
+    policy_path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+
+
 def _prune_mise_lock(staged: Path) -> None:
     mise_toml = staged / "mise.toml"
     mise_lock = staged / "mise.lock"
@@ -423,6 +497,7 @@ def project_tree(
         raise InitError(f"harness sync failed: {exc}")
 
     _prune_workspace_dependencies(staged)
+    _prune_architecture_policy(staged)
     _prune_mise_lock(staged)
     if run_cargo:
         _prune_cargo_lock_and_generate(staged, inputs)

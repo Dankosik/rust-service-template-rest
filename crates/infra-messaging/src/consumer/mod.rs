@@ -79,24 +79,22 @@ pub struct Consumer {
 
 struct ConsumerProbe(Weak<AtomicBool>);
 
-#[health::async_trait]
 impl health::Probe for ConsumerProbe {
     fn name(&self) -> &'static str {
         "messaging_consumer"
     }
 
-    async fn check(&self) -> Result<(), health::ProbeError> {
-        let ready = self
-            .0
-            .upgrade()
-            .ok_or_else(|| health::ProbeError::from_static("messaging consumer stopped"))?;
-        if ready.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(health::ProbeError::from_static(
+    fn check(&self) -> impl Future<Output = Result<(), health::ProbeError>> + Send {
+        let outcome = match self.0.upgrade() {
+            Some(ready) if ready.load(Ordering::Acquire) => Ok(()),
+            Some(_) => Err(health::ProbeError::from_static(
                 "messaging durable is unavailable",
-            ))
-        }
+            )),
+            None => Err(health::ProbeError::from_static(
+                "messaging consumer stopped",
+            )),
+        };
+        std::future::ready(outcome)
     }
 }
 

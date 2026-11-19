@@ -51,7 +51,7 @@ tonic-types = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry = { workspace = true }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
 
 [dev-dependencies]
 grpc-contracts = { workspace = true }
@@ -77,4 +77,4 @@ infra-serviceauth = { workspace = true, features = ["test-support"] }
 tls-test-support = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 # template:end service-auth:grpc-service-auth-test-dependencies
-tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "sync", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "test-util"] }

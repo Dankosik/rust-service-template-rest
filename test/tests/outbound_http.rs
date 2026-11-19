@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use infra_outbound_http::{BuildError, Bytes, Client, Limits, Request, Url};
-use tokio::time::Instant;
+use operation_context::OperationContext;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -29,7 +29,10 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
         .body(Bytes::new())
         .unwrap();
     let response = client
-        .execute(request, Instant::now() + Duration::from_secs(1))
+        .execute(
+            &OperationContext::with_timeout(Duration::from_secs(1)),
+            request,
+        )
         .await
         .expect("mock response through bounded client");
     assert_eq!(response.body().as_ref(), b"ok");

@@ -249,7 +249,7 @@ impl Fixture {
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
-            .execute(request, deadline(Duration::from_secs(10)))
+            .execute(&timeout_context(Duration::from_secs(10)), request)
             .await
     }
 
@@ -270,9 +270,9 @@ impl Fixture {
     ) -> Result<Response<Bytes>, Error> {
         client
             .execute(
+                &timeout_context(Duration::from_secs(10)),
                 request,
                 &subject(subject_token),
-                deadline(Duration::from_secs(10)),
             )
             .await
     }
@@ -505,8 +505,8 @@ fn prepare_registration(options: Options) -> Registration {
     Registration::prepare_for_test_http(options).unwrap()
 }
 
-fn deadline(after: Duration) -> Instant {
-    Instant::now() + after
+fn timeout_context(after: Duration) -> OperationContext {
+    OperationContext::with_timeout(after)
 }
 
 fn token_context() -> infra_outbound_http::RequestContext {

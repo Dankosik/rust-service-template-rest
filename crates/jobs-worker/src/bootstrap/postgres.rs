@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use health::Probe;
+use health::BoxedProbe;
 use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
@@ -146,9 +146,9 @@ pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError
     }
 }
 
-pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
+pub(super) fn probe(resources: &Resources) -> Option<BoxedProbe> {
     let pool = admitted_pool(resources).ok()?;
-    Some(Box::new(PostgresProbe::writable_primary(pool)))
+    Some(BoxedProbe::new(PostgresProbe::writable_primary(pool)))
 }
 
 #[cfg(test)]

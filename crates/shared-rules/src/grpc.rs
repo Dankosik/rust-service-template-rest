@@ -16,7 +16,7 @@ pub const ERROR_TYPE_ATTR: &str = "error.type";
 
 pub const MAX_TIMEOUT_DIGITS: usize = 8;
 const MAX_TIMEOUT_VALUE: u64 = 99_999_999;
-pub const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
+const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
 
 const TIMEOUT_UNITS: [(u8, u128); 6] = [
     (b'n', Duration::from_nanos(1).as_nanos()),

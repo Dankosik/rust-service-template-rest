@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use http_body_util::{BodyExt as _, Full, Limited};
 use operation_context::{Deadline, OperationContext, Stopped};
-use tokio::time::Instant;
 use tracing::Instrument as _;
 
 pub use bytes::Bytes;
@@ -165,32 +164,20 @@ impl Client {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_buffered(request, context)
+        self.execute_buffered(context, request)
             .await
             .map_err(ExchangeError::into_error)
     }
 
     pub async fn execute_buffered(
         &self,
-        request: Request<Bytes>,
         context: impl Into<RequestContext>,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, ExchangeError> {
-        self.prepare_scoped(request, context.into())
+        self.prepare_scoped(context.into(), request)
             .map_err(ExchangeError::BeforeResponse)?
             .send_with_response(|| true, |_| {}, buffer_response)
             .await
@@ -198,21 +185,21 @@ impl Client {
 
     pub async fn execute_with_response_status(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
-        self.prepare(request, context)?
+        self.prepare(context, request)?
             .send(|| true, on_status)
             .await
     }
 
     pub async fn execute_for_headers(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<http::response::Parts, Error> {
-        self.prepare(request, context)?
+        self.prepare(context, request)?
             .send_with_response(
                 || true,
                 |_| {},
@@ -224,16 +211,16 @@ impl Client {
 
     pub fn prepare(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<PreparedRequest<'_>, Error> {
-        self.prepare_scoped(request, context.into())
+        self.prepare_scoped(context.into(), request)
     }
 
     fn prepare_scoped(
         &self,
-        mut request: Request<Bytes>,
         context: RequestContext,
+        mut request: Request<Bytes>,
     ) -> Result<PreparedRequest<'_>, Error> {
         let context = context.for_request(
             Deadline::after(self.limits.operation_timeout),
