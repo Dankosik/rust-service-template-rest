@@ -8,12 +8,13 @@ qualifying **one-way door** open fork.
 ## Steps
 
 1. **Frame the neutral problem space.** Summarize hard constraints, `Domain
-   Vocabulary`, dependency categories, and [Rust
+   Vocabulary`, and—when Rust Architecture triggered—dependency categories and
+   [Rust
    Architecture](rust-architecture.md#vocabulary-and-deep-module-discipline)
-   vocabulary from step 1. Describe **only the problem**—constraints, existing
-   call site, and consumer need via a short **grounding code sketch**—keeping
-   the brief free of proposed mechanisms, new types, or new crates so each lane
-   invents from scratch.
+   vocabulary. Describe **only the problem**—constraints, existing call site or
+   runtime entry, and consumer need via a short grounding code sketch or flow
+   context—keeping the brief free of proposed mechanisms, new types, or new
+   crates so each lane invents from scratch.
 
 2. **Dispatch 3 parallel fresh `specialist-agent` lanes with contrasting
    pressures** *(use 2 only for a strictly binary fork between two concrete

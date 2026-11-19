@@ -37,5 +37,5 @@ compatibility of serialized rows/`JSONB`, cache (`infra-cache`), job
 (`infra-jobs`), and event (`infra-messaging`) payloads.
 
 When `expand -> migrate -> contract` applies, state explicitly whether
-`Contract` lands in the **same release** (compile/blast-radius refactor) or a
-**later release** (rolling mixed-version deploy boundary in `rollout.md`).
+`Contract` lands in **`same-release`** (compile/blast-radius refactor) or
+**`multi-release`** (rolling mixed-version deploy boundary in `rollout.md`).
