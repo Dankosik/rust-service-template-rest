@@ -1,6 +1,6 @@
 # Specification V1
 
-`specs/<task>/spec.md` is the reviewed behavioral contract for one structured
+`specs/<task>/spec.md` records the behavioral contract for one structured
 task (scope owned by [Specification](../phases/specification.md)).
 
 ```markdown
@@ -29,13 +29,13 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 ### R1 — <short rule name>
 
 <Observable rule, invariant, labeled numeric target, or state-transition / precedence table. Breaking changes include `Authorization:`, `Former-caller outcome:`, and `Mixed-version overlap:`.>
-<Optional: **Open to Technical Design:** permitted variation or unfixed new identifier spelling preserving the invariant.>
+<When applicable: **Open to Technical Design:** …>
 
 - **Falsifier:** <plausible broken behavior at the highest external seam: concrete state + trigger -> wrong external outcome instead of promised outcome>
 
 ### Boundary scenarios
 
-<Optional: 1–3 `Given -> When -> Then` scenarios when rules interact at seams.>
+<Given -> When -> Then>
 
 ## Preserved guarantees
 
@@ -54,7 +54,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 ## Blocked decisions
 
-<Include only while `status: blocked`; remove once resolved.>
+<For a requester decision, use the question form below. For a contradicted premise or missing external evidence, record the discrepancy, primary locator and required input.>
 
 - **B1 — <question in requester language, worded so "yes" accepts recommendation when supported>:** <primary evidence> | **Options & consequences:** <A vs B> | **Recommendation:** <choice and reason, or none when balanced>
   - *Follow-up if `<option>` (Intake-only, hold until answered):* <dependent child fork; omit when none>
@@ -62,25 +62,31 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 ## Field Rules
 
-- **Lifecycle & ID stability:** start at `draft`; flip to `ready` only after
-  [Specification Review](../phases/specification-review.md) permits handoff and
-  bounded `CONCERNS` appear in `Carried concerns`. Use `blocked` with `Blocked
-  decisions` on a blocked handoff. On reopen, keep surviving `R<n>`/`G<n>` IDs
+- **Lifecycle & ID stability:** submit a closed draft for independent review.
+  Set `ready` when review permits handoff, carrying any surviving bounded
+  concerns with owner and closing action. Include `Blocked decisions` only in a persisted blocked spec. On reopen, keep surviving `R<n>`/`G<n>` IDs
   stable (retire deleted IDs rather than renumbering) and re-verify prior
   `Carried concerns`.
+- **Observable boundary:** pin externally relied-on rules, trust and failure
+  guarantees, and identifiers fixed by Intent, existing code/config, API or
+  external standards. Pin new client wire identifiers when callers require
+  the spelling. On the owning rule, mark permitted behavioral variation and
+  unfixed identifier spellings `Open to Technical Design:`. Keep internal
+  mechanisms, task slicing and test authoring with their downstream owners.
+  Drop an inferred restriction if another design can satisfy every accepted
+  guarantee without it.
 - **Proportionality, highest seams & anchored tables:** size `spec.md` to real
   risk (a focused fix may need `R1`–`R2`) and prefer existing highest external
   seams. Give each coherent behavioral unit one `R<n>` or `G<n>` anchor. When
-  states or ≥2 conditions interact, make a compact state-transition or
+  a changed rule depends on interacting states or conditions, make a compact state-transition or
   precedence table the body of its owning `R<n>` (never float unanchored rules
   outside `R<n>` or duplicate tables in prose), and add 1–3 `Boundary scenarios`
   when rules interact at seams. Inline a small external wire/payload shape only
   when external callers pin it; link unchanged code, `api/`, migrations, and
   `research/*.md` instead of copying them.
 - **Task-adaptive sections & guarantee discipline:** omit empty optional
-  sections (`Carried concerns`, `Terminology`, `Current baseline` on greenfield,
-  `Boundary scenarios`, `Decisions, assumptions, and reopen triggers`, `Blocked
-  decisions`). Always keep `Actors and surfaces`, `Behavior delta` (`None —
+  sections (`Terminology`, `Current baseline` on greenfield,
+  `Boundary scenarios`, `Decisions, assumptions, and reopen triggers`). Always keep `Actors and surfaces`, `Behavior delta` (`None —
   behavior-preserving change` only when zero functional, operational, or
   quantitative delta exists), `Preserved guarantees` (`None — verified
   greenfield surface` when greenfield), and `Non-goals`. Place authorized
@@ -100,8 +106,4 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
     return `409`.
   - *Wrong layer:* Unit test `test_idempotency_conflict` or
     `make test-integration-db` fails.
-- **Steelman, triggers & quantities:** compare every `Delegated decision`
-  against the strongest serious alternative (never a strawman), write objective
-  `Reopen if` conditions, and label numeric bounds per
-  [Research](../phases/research.md) (`measured`, `external limit`, `forecast`,
-  `accepted target`, `assumption`).
+- Label numeric bounds under [Research](../phases/research.md).
