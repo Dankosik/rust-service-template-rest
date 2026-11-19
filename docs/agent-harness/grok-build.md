@@ -10,6 +10,12 @@ a deeper native route.
 
 ## Native Map
 
+- For each preparation phase, start a fresh Grok primary session in the
+  coordinator's checkout with `--prompt-file` carrying the phase brief and
+  `--output-format json` for the result.
+  Preserve the authorized permission settings. Omit `--resume`, `--continue`,
+  and `--fork-session`. Keep the returned session identity for same-phase
+  follow-ups.
 - The ordinary Grok primary session is the root carrier (`--agent orchestrator`
   is optional). Bind `LEDGER_ORCHESTRATOR` under
   [Implementation](../spec-first-workflow/phases/implementation.md#carrier), or

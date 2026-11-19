@@ -32,13 +32,14 @@ or dependency admission through its owner and review.
 
 ## Cross-Phase Continuation
 
-For an outcome spanning phases, the root coordinator retains the accepted
-outcome and active phase identity. Dispatch one selected phase actor through
-the [Agent Harness](../../agent-harness.md), wait for its reviewed Transition
-Result, re-read the authoritative result, and open the next applicable owner.
-A ready phase handoff continues the request without technical confirmation.
-Persist coordination only under [Artifacts](artifacts.md); phase results remain
-the decision authority.
+After Intake, the root coordinator dispatches one applicable preparation phase
+at a time in a [fresh phase session](../../agent-harness.md#context-and-lifetime)
+through the selected adapter. Include the intent path in the phase brief.
+Wait for its reviewed Transition Result,
+re-read the authoritative artifacts, and continue through Planning or the
+user's earlier stopping point. Return a change in requester meaning to Intake
+and reopen only the results it invalidates. Persist coordination only under
+[Artifacts](artifacts.md). Phase results remain the decision authority.
 
 The phase actor owns its decision, artifact, repair, and movement evidence. When
 native nesting cannot support a needed specialist or independent reviewer, the
@@ -47,19 +48,25 @@ result. This request is not phase movement; only the phase actor returns its
 reviewed Transition Result. The coordinator does not substitute its own review
 or decision for the actor's.
 
-At ready Planning, select [Implementation](../phases/implementation.md)'s carrier.
-For a persisted ledger, the existing root may bind as `LEDGER_ORCHESTRATOR`
-when its authorized native controls suffice; that role becomes the sole ledger
-writer. For a fixed unit, dispatch its Acceptance-Unit Lead. Preserve the
-separate phase, review, and acceptance owners without requiring a new
-user-visible task. If no authorized carrier supports the required next action,
-report the exact capability gap and retain the resumable result.
+If the harness cannot provide the required fresh session, apply
+[Parent-Owned Recovery](#parent-owned-recovery) and preserve the resumable
+result. When replacing a coordinator during recovery, transfer its continuation
+state and result-delivery route to a single successor.
 
-Keep one active continuation coordinator. If an authorized separate Orchestrator
-takes over, transfer the current continuation state to it; the former coordinator
-does not add a second routine polling or status-relay loop. Preserve a usable
-result-delivery route and resume supervision for a terminal result, required
-intervention, or explicit user request. Leads and reviewers retain their roles.
+## Implementation Handoff
+
+When Planning returns a reviewed, ready `tasks.md`, leave the ledger and its
+inputs available in the same checkout. Tell the user that planning is complete
+and give them one message to send in a new session there, in their language,
+with the actual ledger path, such as “Implement the plan in
+`specs/order-export/tasks.md`.” Include the selected adapter's native invocation
+in the handoff when needed. End the planning session's work here. Only the
+user starts the implementation session.
+
+If Planning proves there is no implementation work, report that outcome.
+If the plan is blocked, return the missing input and its owner under
+[Parent-Owned Recovery](#parent-owned-recovery). Offer the launch message only
+for a ready ledger.
 
 ## Parent-Owned Recovery
 

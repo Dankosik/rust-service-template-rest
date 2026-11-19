@@ -977,7 +977,10 @@ async fn presign_is_bounded_and_redacted() {
     let mut storage = stub.storage(|_| {});
     std::sync::Arc::get_mut(&mut storage.inner)
         .unwrap()
-        .expected_bucket_owner = Some("123456789012".to_owned());
+        .amazon_s3 = Some(crate::AmazonS3Target {
+        cloud_region: "us-east-1".to_owned(),
+        expected_bucket_owner: "123456789012".to_owned(),
+    });
     let url = storage
         .presign_get(&parent, &key(), Duration::from_mins(1))
         .await

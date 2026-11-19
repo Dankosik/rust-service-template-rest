@@ -53,7 +53,7 @@ pub enum LoggingError {
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
-    let filter = directive_filter(options.level)?;
+    let filter = admission_filter(options.level)?;
     if tracing::dispatcher::has_been_set()
         && tracing::dispatcher::get_default(|current| !current.is::<NoSubscriber>())
     {
@@ -181,7 +181,7 @@ where
     }
 }
 
-fn directive_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
+fn admission_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
     let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
     let inner = match static_targets(directive) {
         Some(targets) => DirectiveFilter::Targets(targets),

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read as _};
@@ -50,33 +51,67 @@ pub(super) struct CollectorConfig {
     pub(super) headers: HashMap<String, String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingScope {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SettingScope {
     Typed,
     Signal,
     Common,
 }
 
-#[derive(Clone, Copy)]
 struct Setting<'a> {
     scope: SettingScope,
     name: &'static str,
-    raw: &'a OsStr,
+    raw: Cow<'a, OsStr>,
 }
 
-impl<'a> Setting<'a> {
-    fn borrowed((scope, name, raw): &'a (SettingScope, &'static str, OsString)) -> Self {
-        Self {
-            scope: *scope,
-            name,
-            raw,
-        }
-    }
-
-    fn text(self) -> Result<&'a str, TracingError> {
+impl Setting<'_> {
+    fn text(&self) -> Result<&str, TracingError> {
         self.raw
             .to_str()
             .ok_or(TracingError::NonUnicode { name: self.name })
+    }
+}
+
+fn typed_setting<'a>(raw: Option<&'a str>, name: &'static str) -> Option<Setting<'a>> {
+    raw.filter(|value| !value.trim().is_empty())
+        .map(|raw| Setting {
+            scope: SettingScope::Typed,
+            name,
+            raw: Cow::Borrowed(OsStr::new(raw)),
+        })
+}
+
+struct StandardEnv {
+    signal_endpoint: Option<Setting<'static>>,
+    common_endpoint: Option<Setting<'static>>,
+    headers: Option<Setting<'static>>,
+}
+
+impl StandardEnv {
+    fn from_env(env: &impl Fn(&str) -> Option<OsString>) -> Self {
+        let setting = |scope: SettingScope, name: &'static str| {
+            Some(Setting {
+                scope,
+                name,
+                raw: Cow::Owned(env(name).and_then(non_blank)?),
+            })
+        };
+        Self {
+            signal_endpoint: setting(SettingScope::Signal, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT),
+            common_endpoint: setting(SettingScope::Common, OTEL_EXPORTER_OTLP_ENDPOINT),
+            headers: [
+                (SettingScope::Signal, OTEL_EXPORTER_OTLP_TRACES_HEADERS),
+                (SettingScope::Common, OTEL_EXPORTER_OTLP_HEADERS),
+            ]
+            .into_iter()
+            .find_map(|(scope, name)| setting(scope, name)),
+        }
+    }
+
+    fn endpoint(&self) -> Option<&Setting<'static>> {
+        self.signal_endpoint
+            .as_ref()
+            .or(self.common_endpoint.as_ref())
     }
 }
 
@@ -92,50 +127,26 @@ impl CollectorConfig {
         trust: &CollectorTrust,
         env: &impl Fn(&str) -> Option<OsString>,
     ) -> Result<Option<Self>, TracingError> {
-        let setting = |scope: SettingScope, name: &'static str| {
-            Some((scope, name, env(name).and_then(non_blank)?))
-        };
-        let signal = setting(SettingScope::Signal, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
-        let common = setting(SettingScope::Common, OTEL_EXPORTER_OTLP_ENDPOINT);
-        let signal = signal.as_ref().map(Setting::borrowed);
-        let common = common.as_ref().map(Setting::borrowed);
-        let standard_headers = [
-            (SettingScope::Signal, OTEL_EXPORTER_OTLP_TRACES_HEADERS),
-            (SettingScope::Common, OTEL_EXPORTER_OTLP_HEADERS),
-        ]
-        .into_iter()
-        .find_map(|(scope, name)| setting(scope, name));
-        let standard_headers = standard_headers.as_ref().map(Setting::borrowed);
-        let typed = options
-            .otlp_endpoint
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(|raw| Setting {
-                scope: SettingScope::Typed,
-                name: TYPED_ENDPOINT,
-                raw: OsStr::new(raw),
-            });
-        let typed_headers = options
-            .otlp_headers
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .filter(|value| !value.trim().is_empty())
-            .map(|raw| Setting {
-                scope: SettingScope::Typed,
-                name: TYPED_HEADERS,
-                raw: OsStr::new(raw),
-            });
-        if typed.is_some()
-            && let Some(Setting { name, .. }) = standard_headers
+        let standard = StandardEnv::from_env(env);
+        let typed_endpoint = typed_setting(options.otlp_endpoint.as_deref(), TYPED_ENDPOINT);
+        let typed_headers = typed_setting(
+            options
+                .otlp_headers
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            TYPED_HEADERS,
+        );
+        if typed_endpoint.is_some()
+            && let Some(headers) = &standard.headers
         {
-            return Err(TracingError::AmbientCredential { name });
+            return Err(TracingError::AmbientCredential { name: headers.name });
         }
-        if typed_headers.is_some() && typed.is_none() {
+        if typed_headers.is_some() && typed_endpoint.is_none() {
             return Err(TracingError::UnboundCredential {
                 name: TYPED_HEADERS,
             });
         }
-        let headers = typed_headers.or(standard_headers);
+        let headers = typed_headers.as_ref().or(standard.headers.as_ref());
         let mut credentials = headers
             .map(|header| Credential {
                 scope: header.scope,
@@ -148,7 +159,7 @@ impl CollectorConfig {
                     .flatten()
                     .map(TrustFile::credential),
             );
-        let Some(endpoint) = typed.or(signal).or(common) else {
+        let Some(endpoint) = typed_endpoint.as_ref().or_else(|| standard.endpoint()) else {
             return match credentials.next() {
                 Some(credential) => Err(TracingError::UnboundCredential {
                     name: credential.name,
@@ -157,29 +168,7 @@ impl CollectorConfig {
             };
         };
         let url = collector_url(endpoint)?;
-        if let Some(file) = &trust.certificate
-            && url.scheme() != "https"
-        {
-            return Err(TracingError::InsecureCollector {
-                name: file.variable,
-            });
-        }
-        for credential in credentials {
-            if url.scheme() != "https" {
-                return Err(TracingError::InsecureCollector {
-                    name: credential.name,
-                });
-            }
-            if credential.scope != SettingScope::Typed {
-                verify_standard_recipient(
-                    credential,
-                    signal.or(common),
-                    common,
-                    endpoint.scope,
-                    &url,
-                )?;
-            }
-        }
+        verify_collector_security(&url, endpoint.scope, &standard, trust, credentials)?;
         Ok(Some(Self {
             source: if endpoint.scope == SettingScope::Typed {
                 EndpointSource::Typed
@@ -192,23 +181,48 @@ impl CollectorConfig {
     }
 }
 
+fn verify_collector_security(
+    url: &reqwest::Url,
+    selected_scope: SettingScope,
+    standard: &StandardEnv,
+    trust: &CollectorTrust,
+    mut credentials: impl Iterator<Item = Credential>,
+) -> Result<(), TracingError> {
+    if url.scheme() != "https"
+        && let Some(name) = trust
+            .certificate
+            .as_ref()
+            .map(|file| file.variable)
+            .or_else(|| credentials.next().map(|credential| credential.name))
+    {
+        return Err(TracingError::InsecureCollector { name });
+    }
+    for credential in credentials.filter(|credential| credential.scope != SettingScope::Typed) {
+        verify_standard_recipient(credential, standard, selected_scope, url)?;
+    }
+    Ok(())
+}
+
 fn verify_standard_recipient(
     credential: Credential,
-    standard_endpoint: Option<Setting<'_>>,
-    common_endpoint: Option<Setting<'_>>,
+    standard: &StandardEnv,
     selected_scope: SettingScope,
     destination: &reqwest::Url,
 ) -> Result<(), TracingError> {
     let name = credential.name;
-    let standard_endpoint = standard_endpoint.ok_or(TracingError::UnboundCredential { name })?;
+    let standard_endpoint = standard
+        .endpoint()
+        .ok_or(TracingError::UnboundCredential { name })?;
     if standard_endpoint.scope != selected_scope
         && collector_url(standard_endpoint)? != *destination
     {
         return Err(TracingError::UnboundCredential { name });
     }
     if credential.scope == SettingScope::Common
-        && let Some(common_endpoint) =
-            common_endpoint.filter(|common| common.scope != standard_endpoint.scope)
+        && let Some(common_endpoint) = standard
+            .common_endpoint
+            .as_ref()
+            .filter(|common| common.scope != standard_endpoint.scope)
         && collector_url(common_endpoint)? != *destination
     {
         return Err(TracingError::UnboundCredential { name });
@@ -216,7 +230,7 @@ fn verify_standard_recipient(
     Ok(())
 }
 
-fn collector_url(setting: Setting<'_>) -> Result<reqwest::Url, TracingError> {
+fn collector_url(setting: &Setting<'_>) -> Result<reqwest::Url, TracingError> {
     let name = setting.name;
     let raw = setting.text()?;
     let invalid = || TracingError::InvalidEndpoint { name };
@@ -242,20 +256,15 @@ fn collector_url(setting: Setting<'_>) -> Result<reqwest::Url, TracingError> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TrustFile {
+    pub(super) scope: SettingScope,
     pub(super) variable: &'static str,
     pub(super) path: PathBuf,
 }
 
 impl TrustFile {
     fn credential(&self) -> Credential {
-        let scope = match self.variable {
-            OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE | OTEL_EXPORTER_OTLP_CLIENT_KEY => {
-                SettingScope::Common
-            }
-            _ => SettingScope::Signal,
-        };
         Credential {
-            scope,
+            scope: self.scope,
             name: self.variable,
         }
     }
@@ -306,9 +315,15 @@ pub(super) struct CollectorTrust {
 
 impl CollectorTrust {
     pub(super) fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Self {
-        let file = |variables: [&'static str; 2]| {
-            variables.into_iter().find_map(|variable| {
+        let file = |[signal, common]: [&'static str; 2]| {
+            [
+                (SettingScope::Signal, signal),
+                (SettingScope::Common, common),
+            ]
+            .into_iter()
+            .find_map(|(scope, variable)| {
                 Some(TrustFile {
+                    scope,
                     variable,
                     path: env(variable).and_then(non_blank)?.into(),
                 })
@@ -429,7 +444,7 @@ pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duratio
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
-fn parse_headers(setting: Setting<'_>) -> Result<HashMap<String, String>, TracingError> {
+fn parse_headers(setting: &Setting<'_>) -> Result<HashMap<String, String>, TracingError> {
     let raw = setting.text()?;
     let mut headers = HashMap::new();
     for (index, entry) in raw.split(',').enumerate() {

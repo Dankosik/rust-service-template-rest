@@ -146,7 +146,7 @@ async fn run_kind_sampling(shared: &Shared, kinds: &[&str]) -> ! {
 }
 
 async fn run_population_sampling(shared: &Shared) -> ! {
-    let mut observers = [Population::Completed, Population::Failed].map(|population| {
+    let mut observers = [Population::ExpiredCompleted, Population::Failed].map(|population| {
         (
             population,
             MaintenanceObserver::start(population.maintenance_population()),
@@ -162,14 +162,14 @@ async fn run_population_sampling(shared: &Shared) -> ! {
 
 #[derive(Clone, Copy)]
 enum Population {
-    Completed,
+    ExpiredCompleted,
     Failed,
 }
 
 impl Population {
     const fn maintenance_population(self) -> MaintenancePopulation {
         match self {
-            Self::Completed => MaintenancePopulation::Cleanup(Cleanup::Jobs),
+            Self::ExpiredCompleted => MaintenancePopulation::Cleanup(Cleanup::Jobs),
             Self::Failed => MaintenancePopulation::FailedJobs,
         }
     }
@@ -195,7 +195,7 @@ async fn read_population(
                 .fetch_one(&mut *tx),
             )
             .await?,
-            Population::Completed => observed(
+            Population::ExpiredCompleted => observed(
                 "observe completed jobs population",
                 sqlx::query_as!(
                     PopulationSample,

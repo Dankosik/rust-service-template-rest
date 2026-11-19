@@ -81,7 +81,6 @@ impl Write<'_> {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WritePlan<'a> {
-    AlreadyCommitted,
     CompleteBatched,
     Single(Write<'a>),
 }
@@ -89,7 +88,7 @@ pub(super) enum WritePlan<'a> {
 impl WritePlan<'_> {
     pub(super) const fn operation(self) -> Operation {
         match self {
-            Self::AlreadyCommitted | Self::CompleteBatched => Operation::Record,
+            Self::CompleteBatched => Operation::Record,
             Self::Single(write) => write.operation(),
         }
     }
@@ -114,10 +113,10 @@ impl Written {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Unacknowledged;
 
-pub(super) fn write_of(transition: &Transition) -> WritePlan<'_> {
+pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
     match transition {
-        Transition::Complete(Completion::Committed) => WritePlan::AlreadyCommitted,
-        Transition::Complete(Completion::Pending) => WritePlan::CompleteBatched,
+        Transition::Complete(Completion::Committed) => None,
+        Transition::Complete(Completion::Pending) => Some(WritePlan::CompleteBatched),
         Transition::Retry {
             summary,
             base_micros,
@@ -128,20 +127,20 @@ pub(super) fn write_of(transition: &Transition) -> WritePlan<'_> {
             let jitter_micros = (base_micros / 5)
                 .max(floor / 10)
                 .min(saturating_micros(MAX_DELAY) - minimum_micros);
-            WritePlan::Single(Write::Retry {
+            Some(WritePlan::Single(Write::Retry {
                 summary,
                 minimum_micros,
                 jitter_micros,
-            })
+            }))
         }
-        Transition::Snooze { delay_micros, .. } => WritePlan::Single(Write::Snooze {
+        Transition::Snooze { delay_micros, .. } => Some(WritePlan::Single(Write::Snooze {
             delay_micros: *delay_micros,
-        }),
-        Transition::Fail { reason, summary } => WritePlan::Single(Write::Fail {
+        })),
+        Transition::Fail { reason, summary } => Some(WritePlan::Single(Write::Fail {
             reason: *reason,
             summary,
-        }),
-        Transition::Release => WritePlan::Single(Write::Release),
+        })),
+        Transition::Release => Some(WritePlan::Single(Write::Release)),
     }
 }
 
@@ -252,11 +251,11 @@ async fn execute(
 }
 
 #[derive(Debug)]
-pub(super) enum Ended {
+pub(super) enum HandlerOutcome {
     Success(Completion),
     Error(JobError),
     Panic,
-    Payload(serde_json::Error),
+    PayloadDecode(serde_json::Error),
     Timeout,
     Cancelled,
 }
@@ -265,7 +264,7 @@ pub(super) fn map_outcome(
     attempt: &AttemptId,
     policy: Policy,
     is_outbox: bool,
-    ended: Ended,
+    outcome: HandlerOutcome,
 ) -> Transition {
     let number = attempt.number;
     let exhausted = number >= policy.max_attempts;
@@ -285,10 +284,10 @@ pub(super) fn map_outcome(
             cause,
         }
     };
-    match ended {
-        Ended::Success(completion) => Transition::Complete(completion),
-        Ended::Cancelled => Transition::Release,
-        Ended::Error(error) => match error.disposition {
+    match outcome {
+        HandlerOutcome::Success(completion) => Transition::Complete(completion),
+        HandlerOutcome::Cancelled => Transition::Release,
+        HandlerOutcome::Error(error) => match error.disposition {
             Disposition::Snooze { delay_micros } => Transition::Snooze {
                 delay_micros,
                 summary: sanitize_summary(&error.summary),
@@ -307,14 +306,16 @@ pub(super) fn map_outcome(
                 retry_or_exhaust(retry_budget_spent, &error.summary, RetryCause::Failure, 0)
             }
         },
-        Ended::Panic => retry_or_exhaust(exhausted, "handler panicked", RetryCause::Failure, 0),
-        Ended::Payload(error) => retry_or_exhaust(
+        HandlerOutcome::Panic => {
+            retry_or_exhaust(exhausted, "handler panicked", RetryCause::Failure, 0)
+        }
+        HandlerOutcome::PayloadDecode(error) => retry_or_exhaust(
             exhausted,
             &payload_summary(attempt.kind, &error),
             RetryCause::Failure,
             0,
         ),
-        Ended::Timeout => retry_or_exhaust(
+        HandlerOutcome::Timeout => retry_or_exhaust(
             retry_budget_spent,
             &format!(
                 "attempt timed out after {}",
@@ -378,20 +379,20 @@ mod tests {
 
     const ID: JobId = JobId(uuid::Uuid::nil());
 
-    fn outcome(ended: Ended, number: u16) -> Transition {
+    fn outcome(handler_outcome: HandlerOutcome, number: u16) -> Transition {
         let attempt = AttemptId {
             job_id: ID,
             kind: "sample",
             number,
         };
-        map_outcome(&attempt, Policy::default(), false, ended)
+        map_outcome(&attempt, Policy::default(), false, handler_outcome)
     }
 
     #[test]
     fn unhandled_driver_error_retries_with_only_its_category() {
         let error = sqlx::Error::Protocol("private driver detail".to_owned());
         std::assert_matches!(
-            outcome(Ended::Error(error.into()), 1),
+            outcome(HandlerOutcome::Error(error.into()), 1),
             Transition::Retry { ref summary, .. } if summary == "postgres protocol"
         );
     }
@@ -399,11 +400,11 @@ mod tests {
     #[test]
     fn dispositions_preserve_cap_and_snooze() {
         std::assert_matches!(
-            outcome(Ended::Success(Completion::Pending), 25),
+            outcome(HandlerOutcome::Success(Completion::Pending), 25),
             Transition::Complete(Completion::Pending)
         );
         std::assert_matches!(
-            outcome(Ended::Error(JobError::retryable("fail")), 25),
+            outcome(HandlerOutcome::Error(JobError::retryable("fail")), 25),
             Transition::Fail {
                 reason: FailureReason::Exhausted,
                 ..
@@ -411,7 +412,7 @@ mod tests {
         );
         std::assert_matches!(
             outcome(
-                Ended::Error(
+                HandlerOutcome::Error(
                     JobError::retry_after_at_least("at least", Duration::new(2, 500)).unwrap()
                 ),
                 1,
@@ -425,7 +426,7 @@ mod tests {
         );
         std::assert_matches!(
             outcome(
-                Ended::Error(
+                HandlerOutcome::Error(
                     JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
                 ),
                 3,
@@ -439,7 +440,7 @@ mod tests {
         );
         std::assert_matches!(
             outcome(
-                Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
+                HandlerOutcome::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
                 25,
             ),
             Transition::Snooze {
@@ -448,11 +449,14 @@ mod tests {
             }
         );
         std::assert_matches!(
-            outcome(Ended::Error(JobError::unavailable("pool timed out")), 25),
+            outcome(
+                HandlerOutcome::Error(JobError::unavailable("pool timed out")),
+                25,
+            ),
             Transition::Snooze { delay_micros: 10_000_000, ref summary } if summary == "pool timed out"
         );
         std::assert_matches!(
-            outcome(Ended::Panic, 1),
+            outcome(HandlerOutcome::Panic, 1),
             Transition::Retry {
                 ref summary,
                 cause: RetryCause::Failure,
@@ -460,14 +464,14 @@ mod tests {
             } if summary == "handler panicked"
         );
         std::assert_matches!(
-            outcome(Ended::Timeout, 1),
+            outcome(HandlerOutcome::Timeout, 1),
             Transition::Retry {
                 cause: RetryCause::Timeout,
                 ..
             }
         );
         std::assert_matches!(
-            outcome(Ended::Error(JobError::permanent("stop")), 1),
+            outcome(HandlerOutcome::Error(JobError::permanent("stop")), 1),
             Transition::Fail {
                 reason: FailureReason::Permanent,
                 ..
@@ -482,9 +486,10 @@ mod tests {
             kind: "sample",
             number: 25,
         };
-        let outcome = |ended| map_outcome(&attempt, Policy::default(), true, ended);
+        let outcome =
+            |handler_outcome| map_outcome(&attempt, Policy::default(), true, handler_outcome);
         std::assert_matches!(
-            outcome(Ended::Timeout),
+            outcome(HandlerOutcome::Timeout),
             Transition::Retry {
                 floor_micros: 0,
                 cause: RetryCause::Timeout,
@@ -492,9 +497,12 @@ mod tests {
             }
         );
         let decode_error = serde_json::from_str::<u64>("null").unwrap_err();
-        for ended in [Ended::Panic, Ended::Payload(decode_error)] {
+        for handler_outcome in [
+            HandlerOutcome::Panic,
+            HandlerOutcome::PayloadDecode(decode_error),
+        ] {
             std::assert_matches!(
-                outcome(ended),
+                outcome(handler_outcome),
                 Transition::Fail {
                     reason: FailureReason::Exhausted,
                     ..
@@ -507,15 +515,12 @@ mod tests {
     fn a_completed_attempt_selects_the_completion_write_plan() {
         std::assert_matches!(
             write_of(&Transition::Complete(Completion::Pending)),
-            WritePlan::CompleteBatched
+            Some(WritePlan::CompleteBatched)
         );
-        std::assert_matches!(
-            write_of(&Transition::Complete(Completion::Committed)),
-            WritePlan::AlreadyCommitted
-        );
+        std::assert_matches!(write_of(&Transition::Complete(Completion::Committed)), None);
         std::assert_matches!(
             write_of(&Transition::Release),
-            WritePlan::Single(Write::Release)
+            Some(WritePlan::Single(Write::Release))
         );
     }
 
@@ -529,11 +534,11 @@ mod tests {
         };
         std::assert_matches!(
             write_of(&retry),
-            WritePlan::Single(Write::Retry {
+            Some(WritePlan::Single(Write::Retry {
                 summary,
                 minimum_micros: 72_900_000,
                 jitter_micros: 16_200_000,
-            }) if summary == "retry me"
+            })) if summary == "retry me"
         );
         let snooze = Transition::Snooze {
             delay_micros: 7,
@@ -541,7 +546,7 @@ mod tests {
         };
         std::assert_matches!(
             write_of(&snooze),
-            WritePlan::Single(Write::Snooze { delay_micros: 7 })
+            Some(WritePlan::Single(Write::Snooze { delay_micros: 7 }))
         );
         let fail = Transition::Fail {
             reason: FailureReason::Exhausted,
@@ -549,10 +554,10 @@ mod tests {
         };
         std::assert_matches!(
             write_of(&fail),
-            WritePlan::Single(Write::Fail {
+            Some(WritePlan::Single(Write::Fail {
                 reason: FailureReason::Exhausted,
                 summary,
-            }) if summary == "done"
+            })) if summary == "done"
         );
     }
 
@@ -563,10 +568,10 @@ mod tests {
             let error =
                 JobError::retry_after_at_least("busy", Duration::from_micros(floor.unsigned_abs()))
                     .unwrap();
-            let transition = outcome(Ended::Error(error), 1);
+            let transition = outcome(HandlerOutcome::Error(error), 1);
             std::assert_matches!(
                 write_of(&transition),
-                WritePlan::Single(Write::Retry { minimum_micros, jitter_micros, .. })
+                Some(WritePlan::Single(Write::Retry { minimum_micros, jitter_micros, .. }))
                     if minimum_micros == floor && jitter_micros == width
             );
         }

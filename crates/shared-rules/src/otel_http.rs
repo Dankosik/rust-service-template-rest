@@ -17,12 +17,15 @@ pub fn request_method(method: &str) -> &'static str {
     }
 }
 
-static STATUS_CODE_DIGITS: [[u8; 3]; 900] = {
-    let mut digits = [[0; 3]; 900];
+const MIN_STATUS_CODE: usize = 100;
+const STATUS_CODE_COUNT: usize = 900;
+
+static STATUS_CODE_DIGITS: [[u8; 3]; STATUS_CODE_COUNT] = {
+    let mut digits = [[0; 3]; STATUS_CODE_COUNT];
     let mut index = 0;
     let decimal = b"0123456789";
     while index < digits.len() {
-        let code = 100 + index;
+        let code = MIN_STATUS_CODE + index;
         digits[index] = [
             decimal[code / 100],
             decimal[code / 10 % 10],
@@ -33,8 +36,8 @@ static STATUS_CODE_DIGITS: [[u8; 3]; 900] = {
     digits
 };
 
-static STATUS_CODES: [&str; 900] = {
-    let mut codes = [""; 900];
+static STATUS_CODES: [&str; STATUS_CODE_COUNT] = {
+    let mut codes = [""; STATUS_CODE_COUNT];
     let mut index = 0;
     while index < codes.len() {
         codes[index] = match str::from_utf8(&STATUS_CODE_DIGITS[index]) {
@@ -49,7 +52,7 @@ static STATUS_CODES: [&str; 900] = {
 #[must_use]
 pub fn response_status_code(code: u16) -> Option<&'static str> {
     STATUS_CODES
-        .get(usize::from(code.checked_sub(100)?))
+        .get(usize::from(code).checked_sub(MIN_STATUS_CODE)?)
         .copied()
 }
 

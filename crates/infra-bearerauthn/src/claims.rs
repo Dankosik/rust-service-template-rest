@@ -93,17 +93,16 @@ struct RawAct<'a> {
     client_id: Option<Cow<'a, str>>,
 }
 
-fn optional_actor(raw: Option<JsonObject<RawAct<'_>>>) -> Result<Option<Actor>, ()> {
-    let Some(JsonObject(raw)) = raw else {
-        return Ok(None);
-    };
+struct EmptyActorSubject;
+
+fn parse_actor(JsonObject(raw): JsonObject<RawAct<'_>>) -> Result<Actor, EmptyActorSubject> {
     if raw.sub.is_empty() {
-        return Err(());
+        return Err(EmptyActorSubject);
     }
-    Ok(Some(Actor::new(
+    Ok(Actor::new(
         raw.sub.into_owned(),
         raw.client_id.map(Cow::into_owned),
-    )))
+    ))
 }
 
 impl StringOrStrings<'_> {
@@ -254,26 +253,35 @@ pub(crate) fn validate_jwt_claims(
     let not_before = claims.nbf.map(|NumericDate(date)| date);
     check_lifetime(expiry, not_before, now)?;
     policy.check_issuer_and_audience(&issuer, &audience)?;
-    let subject = non_empty(claims.sub);
-    // RFC 9068 §2.2
-    let standard_client_id = non_empty(claims.client_id);
-    if token_profile == TokenProfile::Rfc9068
-        && (subject.is_none()
-            || standard_client_id.is_none()
-            || claims.iat.is_none()
-            || claims.jti.as_deref().is_none_or(str::is_empty))
-    {
-        return Err(invalid(VerificationReason::MissingClaim));
-    }
-    let client_id = standard_client_id.or_else(|| {
-        [claims.azp, claims.appid, claims.cid]
-            .into_iter()
-            .find_map(non_empty)
-    });
-    let identifiers = Identifiers::from_claims(subject, client_id)?;
-    let scopes = Scopes::from_claim(scope).map_err(|()| invalid(VerificationReason::Scope))?;
-    let actor =
-        optional_actor(claims.act).map_err(|()| invalid(VerificationReason::MalformedClaims))?;
+    let identifiers = match token_profile {
+        // RFC 9068 §2.2
+        TokenProfile::Rfc9068 => {
+            let (Some(subject), Some(client_id), Some(_), Some(_)) = (
+                non_empty(claims.sub),
+                non_empty(claims.client_id),
+                claims.iat,
+                claims.jti.as_deref().filter(|jti| !jti.is_empty()),
+            ) else {
+                return Err(invalid(VerificationReason::MissingClaim));
+            };
+            Identifiers::Subject {
+                subject,
+                client_id: Some(client_id),
+            }
+        }
+        TokenProfile::ResourceServer => {
+            let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
+                .into_iter()
+                .find_map(non_empty);
+            Identifiers::from_claims(non_empty(claims.sub), client_id)?
+        }
+    };
+    let scopes = Scopes::from_claim(scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
+    let actor = claims
+        .act
+        .map(parse_actor)
+        .transpose()
+        .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
@@ -357,8 +365,8 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
 impl VerifiedClaims {
-    pub(crate) fn is_reusable_at(&self, now: u64) -> bool {
-        now < self.principal.expires_at() && is_active_at(self.not_before, Duration::from_secs(now))
+    pub(crate) fn is_reusable_at(&self, now: Duration) -> bool {
+        now < self.principal.expiry_from_epoch() && satisfies_not_before(self.not_before, now)
     }
 }
 
@@ -366,7 +374,7 @@ impl VerifiedClaims {
 pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
-    now: u64,
+    now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
     let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
@@ -385,13 +393,17 @@ pub(crate) fn validate_introspection_claims(
     policy.check_issuer_and_audience(&issuer, &audience)?;
     let expiry = Duration::from_secs(expiry);
     let not_before = claims.nbf.map(Duration::from_secs);
-    check_lifetime(expiry, not_before, Duration::from_secs(now))?;
+    check_lifetime(expiry, not_before, now)?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
     let identifiers = Identifiers::from_claims(subject, client_id)?;
     let scopes = Scopes::from_claim(claims.scope.map(StringOrStrings::One).or(claims.scp))
-        .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
-    let actor = optional_actor(claims.act).map_err(|()| malformed())?;
+        .ok_or_else(|| VerificationError::unavailable(VerificationReason::Scope))?;
+    let actor = claims
+        .act
+        .map(parse_actor)
+        .transpose()
+        .map_err(|EmptyActorSubject| malformed())?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
@@ -419,13 +431,13 @@ fn check_lifetime(
     {
         return Err(VerificationError::invalid(VerificationReason::Expired));
     }
-    if !is_active_at(not_before, now) {
+    if !satisfies_not_before(not_before, now) {
         return Err(VerificationError::invalid(VerificationReason::NotYetValid));
     }
     Ok(())
 }
 
-fn is_active_at(not_before: Option<Duration>, now: Duration) -> bool {
+fn satisfies_not_before(not_before: Option<Duration>, now: Duration) -> bool {
     not_before.is_none_or(|not_before| not_before <= now.saturating_add(LEEWAY))
 }
 
@@ -449,7 +461,7 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
 pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
-    fn from_claim(scope: Option<StringOrStrings<'_>>) -> Result<Self, ()> {
+    fn from_claim(scope: Option<StringOrStrings<'_>>) -> Option<Self> {
         let mut values: Vec<String> = match scope {
             None => Vec::new(),
             Some(StringOrStrings::One(value)) if value.is_empty() => Vec::new(),
@@ -462,11 +474,11 @@ impl Scopes {
             .iter()
             .all(|value| shared_rules::rfc6749::is_scope_token(value))
         {
-            return Err(());
+            return None;
         }
         values.sort_unstable();
         values.dedup();
-        Ok(Self(values))
+        Some(Self(values))
     }
 
     pub(crate) fn as_slice(&self) -> &[String] {
@@ -847,7 +859,8 @@ mod tests {
             br#"{"active":false,"sub":"one","sub":"two"}"#,
         ] {
             assert_eq!(
-                validate_introspection_claims(response, &policy(), 100).unwrap_err(),
+                validate_introspection_claims(response, &policy(), Duration::from_secs(100))
+                    .unwrap_err(),
                 crate::VerificationError::invalid(VerificationReason::Inactive)
             );
         }
@@ -868,7 +881,7 @@ mod tests {
             br#"{"active":true,"iss":"https://issuer.example","aud":false,"exp":130,"sub":"subject"}"#,
         ] {
             let error =
-                validate_introspection_claims(response, &policy(), 100)
+                validate_introspection_claims(response, &policy(), Duration::from_secs(100))
                     .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable, "{response:?}");
         }
@@ -900,8 +913,11 @@ mod tests {
         }
         let principal = validate_introspection_claims(
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"write read read","tenant":"private-value","region":"first","region":"second","accounts":[{"id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
-            &policy(), 100,
-        ).unwrap().principal;
+            &policy(),
+            Duration::from_secs(100),
+        )
+        .unwrap()
+        .principal;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, "write read read");
@@ -926,8 +942,12 @@ mod tests {
                 serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),
                 &extra,
             );
-            validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
-                .map(|verified| verified.principal)
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy(),
+                Duration::from_secs(100),
+            )
+            .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Unavailable);
     }
@@ -938,9 +958,13 @@ mod tests {
     fn active_claims_are_required_and_null_means_absent() {
         let complete = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
         let reason = |response: &serde_json::Value| {
-            validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
-                .map(|_| ())
-                .map_err(|error| (error.failure, error.reason))
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy(),
+                Duration::from_secs(100),
+            )
+            .map(|_| ())
+            .map_err(|error| (error.failure, error.reason))
         };
         for claim in ["iss", "aud", "exp", "sub"] {
             for absent in [None, Some(serde_json::Value::Null)] {
@@ -1029,7 +1053,7 @@ mod tests {
                 let result = validate_introspection_claims(
                     &serde_json::to_vec(&response).unwrap(),
                     &policy(),
-                    100,
+                    Duration::from_secs(100),
                 );
                 if let Some(expected) = expected.as_ref().filter(|_| standard_shape) {
                     assert_eq!(

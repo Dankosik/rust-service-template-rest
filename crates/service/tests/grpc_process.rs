@@ -1043,7 +1043,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let (http, diagnostics, grpc) = listener_addresses(&mut example);
     let ready = format!("http://{http}/health/ready");
     assert!(
-        poll_until(&ready, 200, Duration::from_secs(5)),
+        poll_until(&ready, 200, Duration::from_secs(5)).is_some(),
         "HTTP readiness never became ready"
     );
     assert_eq!(

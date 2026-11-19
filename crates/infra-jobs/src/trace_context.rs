@@ -19,7 +19,7 @@ pub(crate) fn capture() -> Carrier {
     global::get_text_map_propagator(|propagator| {
         propagator.inject_context(&context, &mut carrier);
     });
-    carrier.validated()
+    carrier.sanitized()
 }
 
 pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
@@ -66,7 +66,7 @@ impl Carrier {
         self.trace_state.as_deref()
     }
 
-    fn validated(self) -> Self {
+    fn sanitized(self) -> Self {
         Self::from_stored(self.trace_parent, self.trace_state.map(truncated_state))
     }
 }
@@ -188,7 +188,7 @@ mod tests {
             trace_parent: Some(PARENT.to_owned()),
             trace_state: Some(format!("first=1,{long},{}", short.join(","))),
         }
-        .validated();
+        .sanitized();
 
         let state = captured.get(TRACESTATE).expect("state kept");
         assert!(state.len() <= TRACESTATE_MAX_BYTES, "{}", state.len());

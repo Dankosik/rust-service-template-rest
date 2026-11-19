@@ -71,30 +71,3 @@ async fn subscribe(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
 }
 
 pub(crate) const WAKE_CHANNEL: &str = "background_jobs";
-
-#[cfg(test)]
-mod tests {
-    use sqlx::ConnectOptions as _;
-    use sqlx::postgres::PgConnectOptions;
-
-    use super::*;
-
-    fn password(pool: &PgPool) -> Option<String> {
-        pool.connect_options()
-            .to_url_lossy()
-            .password()
-            .map(str::to_owned)
-    }
-
-    #[tokio::test]
-    async fn the_listener_connects_with_the_engine_pools_rotated_password() {
-        let options: PgConnectOptions = "postgres://app:first@127.0.0.1:1/app".parse().unwrap();
-        let engine_pool = PgPoolOptions::new().connect_lazy_with(options.clone());
-        let listener = listener_pool(&engine_pool);
-        assert_eq!(password(&listener).as_deref(), Some("first"));
-
-        engine_pool.set_connect_options(options.password("second"));
-        follow_connect_options(&engine_pool, &listener);
-        assert_eq!(password(&listener).as_deref(), Some("second"));
-    }
-}

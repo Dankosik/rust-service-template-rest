@@ -119,9 +119,9 @@ impl TokenEndpoint {
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
         let request = self.token_request(grant)?;
-        let exchange = self.http.execute_buffered(request, context.clone()).await;
-        let response = classify_token_response(exchange)?;
-        token_from_response(&response, started, grant.expected_issued_type())
+        let http_response = self.http.execute_buffered(request, context.clone()).await;
+        let token_response = classify_token_response(http_response)?;
+        token_from_response(&token_response, started, grant.expected_issued_type())
     }
 
     fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
@@ -230,13 +230,12 @@ fn provider_failure(status: StatusCode, body: Option<&[u8]>) -> AcquisitionError
 }
 
 fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, AcquisitionError> {
-    if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
-        let value = content_type
+    if let Some(content_type) = response.headers().get(CONTENT_TYPE)
+        && !content_type
             .to_str()
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if !shared_rules::rfc9110::is_json_content_type(value) {
-            return Err(AcquisitionError::InvalidResponse);
-        }
+            .is_ok_and(shared_rules::rfc9110::is_json_content_type)
+    {
+        return Err(AcquisitionError::InvalidResponse);
     }
     serde_json::from_slice(response.body().as_ref()).map_err(|_| AcquisitionError::InvalidResponse)
 }

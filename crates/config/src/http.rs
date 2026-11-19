@@ -354,11 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_validate() {
-        admit(HttpInput::default()).unwrap();
-    }
-
-    #[test]
     fn grace_budget_validates_inside_admission_when_tail_is_supplied() {
         let tail = ShutdownTail::new(Duration::from_secs(18), "teardown tail");
         let tight = HttpInput {

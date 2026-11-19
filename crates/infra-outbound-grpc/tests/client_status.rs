@@ -26,29 +26,6 @@ type NativePath = axum::extract::Path<String>;
 
 #[tokio::test]
 async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
-    const OWN_PROCESS: &str = "INFRA_GRPC_CLIENT_OBSERVATION_OWN_PROCESS";
-    if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() != Ok("process-per-test")
-        && std::env::var_os(OWN_PROCESS).is_none()
-    {
-        let name = "client_observation_is_global_bounded_and_terminal_exactly_once";
-        #[expect(
-            clippy::disallowed_methods,
-            clippy::disallowed_types,
-            reason = "cargo test fallback isolates the global metric registry in a fresh child process"
-        )]
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--test-threads=1"])
-            .env(OWN_PROCESS, "1")
-            .output()
-            .unwrap();
-        assert!(
-            child.status.success(),
-            "{}",
-            String::from_utf8_lossy(&child.stdout)
-        );
-        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
-        return;
-    }
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);

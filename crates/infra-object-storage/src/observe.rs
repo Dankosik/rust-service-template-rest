@@ -38,7 +38,7 @@ impl Operation {
         }
     }
 
-    fn span_names(self) -> (&'static str, Option<&'static str>) {
+    fn span_and_rpc_method(self) -> (&'static str, Option<&'static str>) {
         match self {
             Self::Put => ("S3.PutObject", Some("PutObject")),
             Self::Get => ("S3.GetObject", Some("GetObject")),
@@ -121,14 +121,18 @@ impl OperationGuard {
         operation: Operation,
         cloud_region: Option<&str>,
     ) -> Self {
-        let (span_name, method) = operation.span_names();
+        let (span_name, rpc_method) = operation.span_and_rpc_method();
         let span = tracing::info_span!(
             "object_storage",
             otel.name = span_name,
-            otel.kind = if method.is_some() { "client" } else { "internal" },
-            rpc.system = method.map(|_| "aws-api"),
-            rpc.service = method.map(|_| "S3"),
-            rpc.method = method,
+            otel.kind = if rpc_method.is_some() {
+                "client"
+            } else {
+                "internal"
+            },
+            rpc.system = rpc_method.map(|_| "aws-api"),
+            rpc.service = rpc_method.map(|_| "S3"),
+            rpc.method = rpc_method,
             cloud.region = cloud_region,
             object_storage.outcome = tracing::field::Empty,
             object_storage.timeout_source = tracing::field::Empty,
@@ -148,9 +152,9 @@ impl OperationGuard {
         }
     }
 
-    pub(crate) fn answered_by(&mut self, answer: &(impl RequestId + RequestIdExt)) {
-        self.request_id = answer.request_id().and_then(bounded_request_id);
-        self.extended_request_id = answer.extended_request_id().and_then(bounded_request_id);
+    pub(crate) fn record_request_ids(&mut self, response: &(impl RequestId + RequestIdExt)) {
+        self.request_id = response.request_id().and_then(bounded_request_id);
+        self.extended_request_id = response.extended_request_id().and_then(bounded_request_id);
         if let Some(request_id) = self.request_id.as_deref() {
             self.span.record("aws.request_id", request_id);
         }

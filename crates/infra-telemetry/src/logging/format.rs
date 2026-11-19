@@ -154,7 +154,7 @@ impl<const INLINE: usize> Bytes<INLINE> {
         self.buf.extend_from_slice(bytes);
     }
 
-    fn json(&mut self, value: &(impl serde::Serialize + ?Sized)) {
+    fn append_json(&mut self, value: &(impl serde::Serialize + ?Sized)) {
         if !self.failed && serde_json::to_writer(&mut *self, value).is_err() {
             self.failed = true;
         }
@@ -231,7 +231,7 @@ impl Scratch {
             return;
         }
         let start = self.values.len();
-        self.values.json(value);
+        self.values.append_json(value);
         if self.values.failed {
             self.values.buf.truncate(start);
             self.truncated = true;
@@ -283,20 +283,22 @@ impl Scratch {
         self.add_field(field.key, start);
     }
 
-    fn write_body(&mut self, line: &mut Bytes, event_fields: usize, format: LoggingFormat) {
+    fn write_body(&mut self, line: &mut Bytes, event_field_count: usize, format: LoggingFormat) {
         let values = self.values.as_slice();
-        let (event, spans) = self.fields.split_at_mut(event_fields);
+        let (event, spans) = self.fields.split_at_mut(event_field_count);
         event.sort_unstable_by_key(|field| (field.key, field.start));
         spans.sort_unstable_by_key(|field| (field.key, field.start));
         let header = line.len();
-        let mut truncated = self.truncated;
-        if !write_all_fields(line, values, event, spans, truncated, format) && !truncated {
-            truncated = true;
+        let mut tail = record_tail(format, self.truncated);
+        line.limit = MAX_RECORD_BYTES - tail.len();
+        if !write_all_fields(line, values, event, spans, format) && !self.truncated {
+            tail = record_tail(format, true);
+            line.limit = MAX_RECORD_BYTES - tail.len();
             line.rewind(header);
-            write_all_fields(line, values, event, spans, truncated, format);
+            write_all_fields(line, values, event, spans, format);
         }
         line.limit = MAX_RECORD_BYTES;
-        line.append(record_tail(format, truncated));
+        line.append(tail);
     }
 
     fn compact_into(&self, cache: &mut SpanFields) -> bool {
@@ -501,7 +503,7 @@ impl FormatLayer {
             scratch: &mut scratch,
             source,
         });
-        let event_fields = scratch.fields.len();
+        let event_field_count = scratch.fields.len();
         let span = ctx.event_span(event);
         if let Some(span) = &span {
             for span in span.scope() {
@@ -525,7 +527,7 @@ impl FormatLayer {
         if line.failed {
             return Err(DropReason::Oversize);
         }
-        scratch.write_body(&mut line, event_fields, self.format);
+        scratch.write_body(&mut line, event_field_count, self.format);
         if line.failed {
             Err(DropReason::Oversize)
         } else {
@@ -614,10 +616,10 @@ where
         let Some(cached) = extensions.get_mut::<SpanFields>() else {
             return;
         };
-        let delta_fields = scratch.fields.len();
+        let delta_field_count = scratch.fields.len();
         scratch.values.limit = MAX_RECORD_BYTES;
         for field in &cached.fields {
-            if !scratch.fields[..delta_fields]
+            if !scratch.fields[..delta_field_count]
                 .iter()
                 .any(|delta| delta.key == field.key)
             {
@@ -647,9 +649,9 @@ fn write_record_header(line: &mut Bytes, metadata: &tracing::Metadata<'_>, forma
     match format {
         LoggingFormat::Json => {
             line.append(b"{\"level\":");
-            line.json(metadata.level().as_str());
+            line.append_json(metadata.level().as_str());
             line.append(b",\"target\":");
-            line.json(metadata.target());
+            line.append_json(metadata.target());
             line.append(b",\"timestamp\":\"");
             write_timestamp(line);
             line.append(b"\"");
@@ -659,7 +661,7 @@ fn write_record_header(line: &mut Bytes, metadata: &tracing::Metadata<'_>, forma
             line.append(b" ");
             line.append(metadata.level().as_str().as_bytes());
             line.append(b" ");
-            line.json(metadata.target());
+            line.append_json(metadata.target());
         }
     }
 }
@@ -678,10 +680,8 @@ fn write_all_fields(
     values: &[u8],
     event: &[Entry],
     spans: &[Entry],
-    truncated: bool,
     format: LoggingFormat,
 ) -> bool {
-    line.limit = MAX_RECORD_BYTES - record_tail(format, truncated).len();
     let same_key = |a: &Entry, b: &Entry| a.key == b.key;
     let event_fields = event.chunk_by(same_key).filter_map(<[_]>::last);
     let span_fields = spans
@@ -743,7 +743,7 @@ fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
         LoggingFormat::Text => (b" ", b"="),
     };
     line.append(separator);
-    line.json(key);
+    line.append_json(key);
     line.append(assign);
 }
 

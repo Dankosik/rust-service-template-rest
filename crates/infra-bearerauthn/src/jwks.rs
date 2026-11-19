@@ -11,7 +11,10 @@ use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyCom
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{
     Algorithm,
-    jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse, RSAKeyParameters},
+    jwk::{
+        AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
+        RSAKeyParameters,
+    },
 };
 use serde::Deserialize;
 use tokio::time::Instant;
@@ -165,7 +168,7 @@ struct ParsedKeySet {
 }
 
 impl ParsedKeySet {
-    fn has_no_usable_keys(&self) -> bool {
+    fn has_non_encryption_rejections_without_keys(&self) -> bool {
         self.keys.is_empty()
             && self
                 .rejected
@@ -207,7 +210,7 @@ fn parse_jwks_entries(
 }
 
 fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
-    let no_usable_keys = parsed.has_no_usable_keys();
+    let rejected_without_usable_keys = parsed.has_non_encryption_rejections_without_keys();
     for (reason, count) in parsed.rejected {
         tracing::debug!(
             reason = reason.label(),
@@ -216,7 +219,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
-    if no_usable_keys {
+    if rejected_without_usable_keys {
         return Err(KeySetFailure::NoUsableKeys);
     }
     Ok(KeySet {
@@ -271,23 +274,8 @@ fn admit_key(
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithm = if let Some(explicit) = jwk.common.key_algorithm {
-        Algorithm::try_from(explicit)
-            .ok()
-            .and_then(JwtAlgorithm::from_jsonwebtoken)
-            .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
-            .ok_or(KeyRejection::AlgorithmBinding)?
-    } else {
-        let mut matching = configured
-            .iter()
-            .copied()
-            .filter(|algorithm| algorithm.family() == family);
-        let algorithm = matching.next().ok_or(KeyRejection::AlgorithmBinding)?;
-        if matching.any(|other| other != algorithm) {
-            return Err(KeyRejection::AlgorithmBinding);
-        }
-        algorithm
-    };
+    let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)
+        .ok_or(KeyRejection::AlgorithmBinding)?;
     let public_key = algorithm
         .parse_public_key(&jwk.algorithm)
         .ok_or(KeyRejection::InvalidMaterial)?;
@@ -296,6 +284,28 @@ fn admit_key(
         algorithm,
         public_key,
     })
+}
+
+fn bind_algorithm(
+    explicit: Option<KeyAlgorithm>,
+    family: KeyFamily,
+    configured: &[JwtAlgorithm],
+) -> Option<JwtAlgorithm> {
+    if let Some(explicit) = explicit {
+        Algorithm::try_from(explicit)
+            .ok()
+            .and_then(JwtAlgorithm::from_jsonwebtoken)
+            .filter(|algorithm| configured.contains(algorithm) && algorithm.family() == family)
+    } else {
+        let mut matching = configured
+            .iter()
+            .copied()
+            .filter(|algorithm| algorithm.family() == family);
+        let algorithm = matching.next()?;
+        matching
+            .all(|other| other == algorithm)
+            .then_some(algorithm)
+    }
 }
 
 fn is_encryption_only(jwk: &Jwk, raw_alg: Option<&str>) -> bool {

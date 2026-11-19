@@ -1,15 +1,48 @@
 # OpenCode Harness Adapter
 
-Use installed OpenCode 1 agent, Task, skill, and command controls as native
-authority; callable Task fields and frontmatter outrank prose. Never mix with
-`opencode2`.
+Use the native tool schema for the installed OpenCode generation. Check
+`opencode --version` when both executables are installed.
 
-## Native Map
+## Preparation and handoff
 
-- Default `build` stays Direct Work until the user asks to orchestrate a ready
-  Implementation ledger, which launches routing from `build` or `orchestrator`
-  (never ask the user to Tab, `/agent`, `/orchestrator`, or start a second
-  process). `build` may load the `orchestrator` skill via `skill`.
+Start an ordinary request in `build` under [Work Selection](../../AGENTS.md#work-selection-and-loading).
+The preparation coordinator writes the intent. For each applicable macro phase,
+dispatch `general` with its phase brief and accepted artifact paths. Each
+phase may call `reviewer-agent` for its independent review. When nesting is
+unavailable, the coordinator brokers that review and returns its verdict to
+the same phase owner under [Transition](../spec-first-workflow/shared/transition.md#cross-phase-continuation).
+Broker with the same read-only `reviewer-agent`. If its model is unavailable,
+preserve the candidate and report the pending review. A writable `general`
+session cannot supply that verdict.
+After ready Planning, return the [user's launch message](../spec-first-workflow/shared/transition.md#implementation-handoff).
+A new `build` or `orchestrator` session executes the named ledger.
+
+| Installed generation | New phase, reviewer, or implementation Lead | Same assignment follow-up |
+| --- | --- | --- |
+| 1.x | `Task` with `subagent_type`, `description`, and `prompt`. Omit `task_id`. | Set `task_id` to the returned child ID. |
+| 2.x | `subagent` with `agent`, `description`, and `prompt`. Omit `sessionID`. | Pass the returned `sessionID` to `subagent`. |
+
+## OpenCode 2
+
+Use the result of a foreground call when the next phase depends on it.
+In [2.2.7](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/subagent.ts)
+foreground is the default. If a call returns `running`, retain its ID and
+consume the completion notification before moving the phase. A new ID is
+required for each new macro phase. A follow-up keeps that child's history.
+
+Dispatch each ready implementation unit to `acceptance-unit-lead` and
+independent reviews to `reviewer-agent`. A configured role model takes
+precedence over the parent's model. Use the native model override when the
+user explicitly selects a different child model.
+OpenCode 2 translates their shared agent files and permission rules. It reads
+the nesting limit from `experimental.subagent_depth`; OpenCode 1 reads the
+top-level `subagent_depth`. Use the native subagent catalog in 2.x. Project
+instructions and role dispatch are independent of the 1.x Task plugin.
+Apply the [Planning Ledger Contract](../spec-first-workflow/phases/planning/ledger-contract.md)
+for implementation scheduling and final acceptance.
+
+## OpenCode 1
+
 - Dispatch ready units via Task (`subagent_type: "acceptance-unit-lead"`), even
   if `.opencode/plugins/task-subagents.js` blurbs are stale; never substitute
   `general`, `explore`, `scout`, or generic workers. Integrate candidates via
@@ -29,7 +62,7 @@ authority; callable Task fields and frontmatter outrank prose. Never mix with
   `user/workflow` skills in `opencode.json` while keeping `orchestrator` loadable
   on `build`. Never commit `.opencode/` runtime files excluded by `.opencode/.gitignore`.
 
-## Models And Dispatch
+### Models And Dispatch
 
 Connect xAI via `/connect`. Use `xai/grok-4.6` variant `high` on Orchestrator
 and `xhigh` on Leads; OpenCode applies `variant` only when an agent pins a

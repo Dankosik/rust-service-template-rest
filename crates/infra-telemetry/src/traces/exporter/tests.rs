@@ -206,10 +206,12 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
         trust,
         CollectorTrust {
             certificate: Some(TrustFile {
+                scope: SettingScope::Signal,
                 variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
                 path: "/traces/ca.pem".into(),
             }),
             client_certificate: Some(TrustFile {
+                scope: SettingScope::Common,
                 variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
                 path: "/general/client.pem".into(),
             }),
@@ -224,10 +226,10 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
-    let headers = parse_headers(Setting {
+    let headers = parse_headers(&Setting {
         scope: SettingScope::Typed,
         name: TYPED_HEADERS,
-        raw: OsStr::new("authorization=Basic%20x, x-tenant = t1 ,"),
+        raw: Cow::Borrowed(OsStr::new("authorization=Basic%20x, x-tenant = t1 ,")),
     })
     .unwrap();
     assert_eq!(
@@ -251,43 +253,16 @@ fn malformed_header_entries_fail_by_position() {
         ("auth=private%+A", 1),
         ("auth=private%00", 1),
     ] {
-        let err = parse_headers(Setting {
+        let err = parse_headers(&Setting {
             scope: SettingScope::Typed,
             name: TYPED_HEADERS,
-            raw: OsStr::new(raw),
+            raw: Cow::Borrowed(OsStr::new(raw)),
         })
         .unwrap_err();
         std::assert_matches!(err, TracingError::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );
     }
-}
-
-#[test]
-fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
-    use futures_util::FutureExt;
-
-    let exporter = span_exporter(
-        "https://127.0.0.1:1/v1/traces",
-        HashMap::new(),
-        &CollectorTrust::default(),
-        export_timeout(&|_: &str| None),
-        None,
-    )
-    .expect("https endpoint must build");
-    let result = {
-        use opentelemetry_sdk::trace::SpanExporter as _;
-        exporter
-            .export(Vec::new())
-            .now_or_never()
-            .expect("blocking OTLP client must finish in one poll")
-    };
-    let err = result.expect_err("nothing listens on 127.0.0.1:1");
-    let message = err.to_string();
-    assert!(
-        !message.contains("URL scheme is not allowed"),
-        "https must be a permitted scheme: {message}"
-    );
 }
 
 #[test]

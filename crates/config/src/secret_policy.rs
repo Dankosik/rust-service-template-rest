@@ -11,6 +11,7 @@ const SECRET_KEY_PATTERNS: &[&str] = &[
     // template:end service-auth:secret-policy-service-auth
     // template:begin postgres:secret-policy-postgres
     "postgres.dsn",
+    "postgres.migration_dsn",
     // template:end postgres:secret-policy-postgres
     // template:begin cache:secret-policy-cache
     "cache.dsn",
@@ -104,6 +105,7 @@ mod tests {
             // template:end service-auth:secret-key-service-auth-vector
             // template:begin postgres:secret-key-vector
             "postgres.dsn",
+            "postgres.migration_dsn",
             // template:end postgres:secret-key-vector
             // template:begin cache:secret-key-cache-vector
             "cache.dsn",

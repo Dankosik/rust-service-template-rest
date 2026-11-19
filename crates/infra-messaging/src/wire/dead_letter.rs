@@ -122,8 +122,8 @@ pub struct DeadLetterRecord {
 }
 
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
-    let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT).to_owned();
-    if !valid_subject(&subject) {
+    let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
+    if !valid_subject(subject) {
         return Err(EnvelopeError::DeadLetterSubject);
     }
     let message_id = required_header(&record.headers, MESSAGE_ID)?;
@@ -147,7 +147,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
         stored_publication_id,
     )?;
     PreparedEvent::from_parts(PreparedEventParts {
-        subject,
+        subject: subject.to_owned(),
         message_id: message_id.to_owned(),
         publication_id,
         event_type: event_type.to_owned(),

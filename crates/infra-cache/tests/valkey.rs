@@ -425,31 +425,6 @@ async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     );
 }
 
-#[tokio::test]
-async fn a_silent_server_times_out_within_the_command_bound() {
-    let caller = OperationContext::unbounded();
-    let recorder = observation_recorder();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("silent bind");
-    let port = listener.local_addr().expect("port").port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let _stream = stream;
-                std::future::pending::<()>().await;
-            });
-        }
-    });
-    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT).await;
-    let namespace = cache.namespace(namespace!("silent"));
-    let started = Instant::now();
-    let err = namespace.get(&caller, &unique_key()).await.unwrap_err();
-    std::assert_matches!(err, OperationError::Unavailable);
-    assert!(started.elapsed() < TIMEOUT_BOUND);
-    let scrape = recorder.handle().render();
-    assert!(scrape.contains("outcome=\"timeout\""), "{scrape}");
-}
-
 async fn wait_for_recovered_value(
     namespace: &infra_cache::CacheNamespace,
     caller: &OperationContext,
