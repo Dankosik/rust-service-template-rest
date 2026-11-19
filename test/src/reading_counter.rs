@@ -244,7 +244,7 @@ async fn enqueue_intents(
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
     let local_job_id = infra_jobs::enqueue(tx, operation).await?.to_string();
-    prepared.event.enqueue(tx).await?;
+    let _ = prepared.event.enqueue(tx).await?;
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND COALESCE(payload_text::jsonb, payload)->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
     let webhook_job_id = outbound
