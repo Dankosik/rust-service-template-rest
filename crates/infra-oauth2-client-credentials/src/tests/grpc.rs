@@ -634,10 +634,9 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
         .http(tokens.resource_client())
         .unwrap();
     let gate = tokens.block_tokens();
-    let mut exchange = Box::pin(http.execute(
-        tokens.on_behalf_of_request("active"),
-        Instant::now() + Duration::from_secs(10),
-    ));
+    let wait_context = OperationContext::with_timeout(Duration::from_secs(10));
+    let subject = super::subject_token("active");
+    let mut exchange = Box::pin(http.execute(tokens.request(), &subject, &wait_context));
     tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     let error = resource
         .client(&credentials)
@@ -1079,7 +1078,7 @@ async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
     );
     request
         .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+        .insert(OnBehalfOf::try_new(SecretString::from("subject-token")).unwrap());
     let error = resource
         .client(&credentials)
         .unary(request)
@@ -1114,17 +1113,14 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
         .exchange_tokens(ExchangeTokenTarget::default(), resource.origin(), 1)
         .unwrap();
     let mut client = EchoServiceClient::new(exchange.grpc(channel).unwrap());
-    for subject in [None, Some("")] {
-        let mut request = rpc(message(), Duration::from_secs(10));
-        if let Some(subject) = subject {
-            request
-                .extensions_mut()
-                .insert(OnBehalfOf::new(SecretString::from(subject)));
-        }
-        let error = client.unary(request).await.unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "on-behalf-of subject is required");
-    }
+    assert_eq!(
+        OnBehalfOf::try_new(SecretString::from("")).unwrap_err(),
+        crate::EmptySubject
+    );
+    let request = rpc(message(), Duration::from_secs(10));
+    let error = client.unary(request).await.unwrap_err();
+    assert_eq!(error.code(), Code::Internal);
+    assert_eq!(error.message(), "on-behalf-of subject is required");
     assert_eq!(tokens.token_request_count(), 1);
     assert_eq!(resource.calls(), 1);
 
@@ -1132,7 +1128,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let mut request = rpc(message(), Duration::from_secs(10));
     request
         .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+        .insert(OnBehalfOf::try_new(SecretString::from("subject-token")).unwrap());
     client.unary(request).await.unwrap();
     assert_eq!(
         resource.authorizations(),
@@ -1142,7 +1138,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let mut request = rpc(message(), Duration::from_secs(10));
     request
         .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
+        .insert(OnBehalfOf::try_new(SecretString::from("subject-token")).unwrap());
     assert_eq!(
         client.unary(request).await.unwrap_err().code(),
         Code::Unavailable

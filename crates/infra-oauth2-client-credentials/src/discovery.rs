@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
-use infra_outbound_http::{BuildError, Client, ExchangeError, prepare_tls};
+use infra_outbound_http::{BuildError, Client, ExchangeError, Origin, prepare_tls};
 use operation_context::OperationContext;
 use serde::Deserialize;
 use url::Url;
@@ -54,10 +54,11 @@ pub async fn verify_keycloak_metadata(issuer: &str, token_url: &str) -> Result<(
 }
 
 fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
+    let origin = url.origin().ascii_serialization();
     match scheme {
-        Scheme::Https => Client::try_new(url, TOKEN_LIMITS),
+        Scheme::Https => Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS),
         #[cfg(any(test, feature = "test-support"))]
-        Scheme::Http => Client::try_new_for_test_http(url, TOKEN_LIMITS),
+        Scheme::Http => Client::try_new_for_test_http(&origin, TOKEN_LIMITS),
     }
 }
 
@@ -97,7 +98,7 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Keycl
         .body(Bytes::new())
         .map_err(|_| KeycloakError::Discovery("issuer discovery URL is invalid"))?;
     let context = OperationContext::with_timeout(FETCH_TIMEOUT);
-    let response = match client.execute_buffered(request, &context).await {
+    let response = match client.execute(request, &context).await {
         Ok(response) if response.status() != StatusCode::OK => {
             return Err(KeycloakError::DiscoveryStatus(response.status()));
         }

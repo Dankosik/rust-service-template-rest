@@ -30,8 +30,9 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokenTarget, ExchangeTokens,
-    OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceTokenTarget, ServiceTokens,
+    AcquisitionError, Algorithm, EmptySubject, Error, ExchangeHttpClient, ExchangeTokenTarget,
+    ExchangeTokens, OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceHttpClient,
+    ServiceTokenTarget, ServiceTokens,
     credentials::acquisition_deadline,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
@@ -212,32 +213,56 @@ impl Fixture {
     }
 
     fn resource_client(&self) -> Client {
-        Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
+        Client::try_new_for_test_http(self.origin.as_str(), TOKEN_LIMITS).unwrap()
     }
 
-    fn service_client(&self) -> AuthenticatedClient {
+    fn service_client(&self) -> ServiceHttpClient {
         self.service_tokens(&[])
             .http(self.resource_client())
             .unwrap()
     }
 
-    fn exchange_client(&self) -> AuthenticatedClient {
+    fn exchange_client(&self) -> ExchangeHttpClient {
         self.exchange_tokens(&[], None, EXCHANGE_CAPACITY)
             .http(self.resource_client())
             .unwrap()
     }
 
-    async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
+    async fn send(&self, client: &ServiceHttpClient) -> Result<Response<Bytes>, Error> {
         self.send_request(client, self.request()).await
     }
 
     async fn send_request(
         &self,
-        client: &AuthenticatedClient,
+        client: &ServiceHttpClient,
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
-            .execute(request, deadline(Duration::from_secs(10)))
+            .execute(request, &context(Duration::from_secs(10)))
+            .await
+    }
+
+    async fn send_exchange(
+        &self,
+        client: &ExchangeHttpClient,
+        subject: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        self.send_exchange_request(client, self.request(), subject)
+            .await
+    }
+
+    async fn send_exchange_request(
+        &self,
+        client: &ExchangeHttpClient,
+        request: Request<Bytes>,
+        subject: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        client
+            .execute(
+                request,
+                &subject_token(subject),
+                &context(Duration::from_secs(10)),
+            )
             .await
     }
 
@@ -245,14 +270,6 @@ impl Fixture {
         Request::get(self.origin.join(RESOURCE_PATH).unwrap().as_str())
             .body(Bytes::new())
             .unwrap()
-    }
-
-    fn on_behalf_of_request(&self, subject: &str) -> Request<Bytes> {
-        let mut request = self.request();
-        request
-            .extensions_mut()
-            .insert(OnBehalfOf::new(SecretString::from(subject)));
-        request
     }
 
     fn token_json(&self, status: StatusCode, body: &serde_json::Value) {
@@ -352,6 +369,10 @@ fn exchange_target(scopes: &[&str], audience: Option<&str>) -> ExchangeTokenTarg
         .map(|&scope| scope.to_owned())
         .collect::<Vec<_>>();
     ExchangeTokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
+}
+
+fn subject_token(subject: &str) -> OnBehalfOf {
+    OnBehalfOf::try_new(SecretString::from(subject)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {
@@ -485,12 +506,12 @@ fn prepare_registration(options: Options) -> Registration {
     Registration::prepare_for_test_http(options).unwrap()
 }
 
-fn deadline(after: Duration) -> Instant {
-    Instant::now() + after
+fn context(after: Duration) -> OperationContext {
+    OperationContext::with_timeout(after)
 }
 
-fn token_context() -> infra_outbound_http::RequestContext {
-    OperationContext::with_timeout(Duration::from_secs(10)).into()
+fn token_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(10))
 }
 
 async fn advance(duration: Duration) {

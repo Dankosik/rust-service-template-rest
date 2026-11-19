@@ -4,7 +4,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{Client, RequestContext};
+use infra_outbound_http::{Client, Origin};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -14,11 +14,10 @@ use tokio::{
 };
 
 use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
-    ServiceTokenTarget, TransportBuildFailure,
+    AcquisitionError, ConfigurationError, EmptySubject, ExchangeTokenTarget, Options,
+    PreparationError, ServiceTokenTarget, TransportBuildFailure,
     assertion::Signer,
     options::{Scheme, ValidatedOptions, validate_options},
-    request_admission::{AdmissionRefusal, RequestAuth},
     token::Token,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
 };
@@ -36,13 +35,15 @@ const REFRESH_RETRY: Duration = Duration::from_secs(30);
 pub struct OnBehalfOf(SecretString);
 
 impl OnBehalfOf {
-    #[must_use]
-    pub fn new(subject_token: SecretString) -> Self {
-        Self(subject_token)
+    pub fn try_new(subject_token: SecretString) -> Result<Self, EmptySubject> {
+        if subject_token.expose_secret().is_empty() {
+            return Err(EmptySubject);
+        }
+        Ok(Self(subject_token))
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.expose_secret().is_empty()
+    pub(crate) const fn secret(&self) -> &SecretString {
+        &self.0
     }
 }
 
@@ -171,21 +172,24 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options, Scheme::Https, Scheme::Https)?;
-        let token_http = Client::try_new(&validated.endpoint, TOKEN_LIMITS)
-            .map_err(TransportBuildFailure::token_url)?;
+        let origin = Origin::parse_https(&validated.endpoint.origin().ascii_serialization())
+            .map_err(|error| TransportBuildFailure::token_url(error.into()))?;
+        let token_http =
+            Client::try_new(origin, TOKEN_LIMITS).map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
         let validated = validate_options(options, Scheme::Http, Scheme::Https)?;
-        let token_http =
-            Client::try_new_for_test_http(&validated.endpoint, TOKEN_LIMITS).map_err(|_| {
-                ConfigurationError {
-                    key: "token_url",
-                    reason: "requires an HTTP loopback IP address",
-                }
-            })?;
+        let token_http = Client::try_new_for_test_http(
+            &validated.endpoint.origin().ascii_serialization(),
+            TOKEN_LIMITS,
+        )
+        .map_err(|_| ConfigurationError {
+            key: "token_url",
+            reason: "requires an HTTP loopback IP address",
+        })?;
         Self::build(validated, token_http)
     }
 
@@ -242,118 +246,44 @@ impl Registration {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum TokenSource<Subject = ()> {
-    Service(ServiceTokens),
-    Exchange(ExchangeTokens, Subject),
-}
-
-impl From<&ServiceTokens> for TokenSource {
-    fn from(tokens: &ServiceTokens) -> Self {
-        Self::Service(tokens.clone())
-    }
-}
-
-impl From<&ExchangeTokens> for TokenSource {
-    fn from(tokens: &ExchangeTokens) -> Self {
-        Self::Exchange(tokens.clone(), ())
-    }
-}
-
-impl<Subject> TokenSource<Subject> {
+impl ServiceTokens {
     pub(crate) fn resource_origin(&self) -> &http::Uri {
-        match self {
-            Self::Service(service) => &service.0.inner.resource_origin,
-            Self::Exchange(exchange, _) => exchange.resource_origin(),
-        }
+        &self.0.inner.resource_origin
     }
 
-    fn registration(&self) -> &RegistrationState {
-        match self {
-            Self::Service(service) => &service.0.inner.registration,
-            Self::Exchange(exchange, _) => exchange.registration(),
-        }
-    }
-
-    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        match self {
-            Self::Service(service) => service.check_active(deadline),
-            Self::Exchange(exchange, _) => exchange.registration().check_active(deadline),
-        }
-    }
-}
-
-impl TokenSource {
-    pub(crate) fn admit(
+    pub(crate) fn check_active(
         &self,
-        auth: RequestAuth,
         deadline: AcquisitionDeadline<'_>,
-    ) -> Result<TokenSource<OnBehalfOf>, AdmissionRefusal> {
-        self.check_active(deadline)
-            .map_err(AdmissionRefusal::Acquisition)?;
-        match (self, auth) {
-            (_, RequestAuth::AuthorizationConflict) => Err(AdmissionRefusal::AuthorizationConflict),
-            (Self::Service(service), RequestAuth::None) => {
-                Ok(TokenSource::Service(service.clone()))
-            }
-            (Self::Service(_), RequestAuth::OnBehalfOf(_)) => {
-                Err(AdmissionRefusal::UnexpectedSubject)
-            }
-            (Self::Exchange(exchange, ()), RequestAuth::OnBehalfOf(subject))
-                if !subject.is_empty() =>
-            {
-                Ok(TokenSource::Exchange(exchange.clone(), subject))
-            }
-            (Self::Exchange(_, ()), RequestAuth::None | RequestAuth::OnBehalfOf(_)) => {
-                Err(AdmissionRefusal::SubjectRequired)
-            }
+    ) -> Result<(), AcquisitionError> {
+        self.0.inner.registration.check_active(deadline)?;
+        if self.0.refresh_requests.is_closed() {
+            return Err(AcquisitionError::Unavailable);
         }
+        Ok(())
     }
-}
 
-impl TokenSource<OnBehalfOf> {
     pub(crate) async fn acquire_for_request(
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_active(deadline)?;
-        let acquired = if let Self::Service(service) = self
-            && tokio::task::coop::has_budget_remaining()
-            && service.check_active(deadline).is_ok()
-            && let Some(token) = service.reuse_service_token_and_schedule_refresh(Instant::now())
+        let acquired = if tokio::task::coop::has_budget_remaining()
+            && let Some(token) = self.reuse_service_token_and_schedule_refresh(Instant::now())
         {
             Ok(token)
         } else {
-            let mut registration_closed = self.registration().closed.clone();
-            let acquisition = async {
-                match self {
-                    Self::Service(service) => service.service_token(deadline).await,
-                    Self::Exchange(exchange, OnBehalfOf(subject)) => {
-                        exchange.exchange(subject, deadline).await
-                    }
-                }
-            };
+            let mut registration_closed = self.0.inner.registration.closed.clone();
             tokio::select! {
                 biased;
                 stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
                 _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
-                result = acquisition => result,
+                result = self.service_token(deadline) => result,
             }
         };
         self.check_active(deadline)?;
         let acquired = acquired?;
         acquired.check_expiry(Instant::now())?;
         Ok(acquired)
-    }
-}
-
-impl ServiceTokens {
-    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
-        self.0.inner.registration.check_active(deadline)?;
-        if self.0.refresh_requests.is_closed() {
-            return Err(AcquisitionError::Unavailable);
-        }
-        Ok(())
     }
 
     pub(crate) async fn service_token(
@@ -526,7 +456,7 @@ impl ServiceState {
             return;
         }
         let endpoint = &self.registration.endpoint;
-        let context = OperationContext::from_deadline(Deadline::at(request.deadline)).into();
+        let context = OperationContext::from_deadline(Deadline::at(request.deadline));
         match endpoint.fetch_service_token(&self.target, &context).await {
             Ok(token) => {
                 let now = Instant::now();
@@ -565,7 +495,7 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     source: CutoffSource,
-    context: &'a RequestContext,
+    context: &'a OperationContext,
 }
 
 #[derive(Clone, Copy)]
@@ -575,7 +505,7 @@ enum CutoffSource {
 }
 
 impl AcquisitionDeadline<'_> {
-    fn fetch_context(self, now: Instant) -> RequestContext {
+    fn fetch_context(self, now: Instant) -> OperationContext {
         let ceiling = Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT));
         self.context.child_until(ceiling)
     }
@@ -595,7 +525,7 @@ impl AcquisitionDeadline<'_> {
     }
 }
 
-pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadline<'_> {
+pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDeadline<'_> {
     let (cutoff, source) = match context.deadline().and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, CutoffSource::Request),
         None => (Instant::now() + FETCH_TIMEOUT, CutoffSource::Synthetic),

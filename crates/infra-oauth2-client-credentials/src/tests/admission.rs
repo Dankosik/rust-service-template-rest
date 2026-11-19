@@ -268,3 +268,13 @@ fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
         })
     );
 }
+
+#[test]
+fn an_empty_on_behalf_of_subject_is_refused_at_construction() {
+    assert_eq!(
+        OnBehalfOf::try_new(SecretString::from("")).unwrap_err(),
+        EmptySubject
+    );
+    let subject = OnBehalfOf::try_new(SecretString::from("secret-subject-token")).unwrap();
+    assert!(!format!("{subject:?}").contains("secret-subject-token"));
+}

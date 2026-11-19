@@ -6,7 +6,8 @@ use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use infra_outbound_http::{Client, ExchangeError, Limits, RequestContext};
+use infra_outbound_http::{Client, ExchangeError, Limits};
+use operation_context::OperationContext;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
 use tokio::{sync::Semaphore, time::Instant};
@@ -67,7 +68,7 @@ impl TokenEndpoint {
     pub(crate) async fn fetch_service_token(
         &self,
         target: &ServiceTokenTarget,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::ClientCredentials(target), context)
             .await
@@ -77,7 +78,7 @@ impl TokenEndpoint {
         &self,
         subject: &SecretString,
         target: &ExchangeTokenTarget,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::TokenExchange { subject, target }, context)
             .await
@@ -86,7 +87,7 @@ impl TokenEndpoint {
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
         let check = || context.check().map_err(AcquisitionError::from);
@@ -125,14 +126,14 @@ impl TokenEndpoint {
         &self,
         grant: Grant<'_>,
         started: Instant,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         let _permit = self
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
         let request = self.token_request(grant)?;
-        let http_response = self.http.execute_buffered(request, context.clone()).await;
+        let http_response = self.http.execute(request, context).await;
         let token_response = classify_token_response(http_response)?;
         token_from_response(&token_response, started, grant.expected_issued_type())
     }

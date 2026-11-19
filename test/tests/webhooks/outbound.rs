@@ -60,9 +60,11 @@ fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Disp
             .map(|(id, path)| {
                 let destination = url::Url::parse(&format!("http://{address}{path}"))
                     .expect("fixture destination");
-                let client =
-                    infra_outbound_http::Client::try_new_for_test_http(&destination, limits)
-                        .expect("fixture client");
+                let client = infra_outbound_http::Client::try_new_for_test_http(
+                    &destination.origin().ascii_serialization(),
+                    limits,
+                )
+                .expect("fixture client");
                 let keys =
                     KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys");
                 (

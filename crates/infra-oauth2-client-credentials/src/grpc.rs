@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_util::future::Either;
-use http::{Request, Response};
+use http::{Request, Response, header::AUTHORIZATION};
 use infra_outbound_grpc::{Client, PreparedCall};
 use operation_context::OperationContext;
 use tokio::time::Instant;
@@ -14,35 +14,117 @@ use tower::Service;
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokens, OnBehalfOf, ServiceTokens,
-    credentials::{TokenSource, acquisition_deadline},
-    request_admission::{AdmissionRefusal, take_request_auth},
+    credentials::{AcquisitionDeadline, acquisition_deadline},
+    token::Token,
 };
 
 type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
 type CallFuture = Either<std::future::Ready<Result<Response<Body>, Status>>, RpcFuture>;
 
+#[derive(Clone)]
+enum GrpcTokens {
+    Service(ServiceTokens),
+    Exchange(ExchangeTokens),
+}
+
+enum AdmittedTokens {
+    Service(ServiceTokens),
+    Exchange(ExchangeTokens, OnBehalfOf),
+}
+
+enum RequestAuth {
+    None,
+    OnBehalfOf(OnBehalfOf),
+    AuthorizationConflict,
+}
+
+enum AdmissionRefusal {
+    AuthorizationConflict,
+    SubjectRequired,
+    UnexpectedSubject,
+    Acquisition(AcquisitionError),
+}
+
+impl GrpcTokens {
+    fn resource_origin(&self) -> &http::Uri {
+        match self {
+            Self::Service(service) => service.resource_origin(),
+            Self::Exchange(exchange) => exchange.resource_origin(),
+        }
+    }
+
+    fn admit(
+        &self,
+        auth: RequestAuth,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<AdmittedTokens, AdmissionRefusal> {
+        match self {
+            Self::Service(service) => service.check_active(deadline),
+            Self::Exchange(exchange) => exchange.check_active(deadline),
+        }
+        .map_err(AdmissionRefusal::Acquisition)?;
+        match (self, auth) {
+            (_, RequestAuth::AuthorizationConflict) => Err(AdmissionRefusal::AuthorizationConflict),
+            (Self::Service(service), RequestAuth::None) => {
+                Ok(AdmittedTokens::Service(service.clone()))
+            }
+            (Self::Service(_), RequestAuth::OnBehalfOf(_)) => {
+                Err(AdmissionRefusal::UnexpectedSubject)
+            }
+            (Self::Exchange(exchange), RequestAuth::OnBehalfOf(subject)) => {
+                Ok(AdmittedTokens::Exchange(exchange.clone(), subject))
+            }
+            (Self::Exchange(_), RequestAuth::None) => Err(AdmissionRefusal::SubjectRequired),
+        }
+    }
+}
+
+impl AdmittedTokens {
+    async fn acquire_for_request(
+        &self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        match self {
+            Self::Service(service) => service.acquire_for_request(deadline).await,
+            Self::Exchange(exchange, subject) => {
+                exchange.acquire_for_request(subject, deadline).await
+            }
+        }
+    }
+}
+
+fn take_request_auth<B>(request: &mut Request<B>) -> RequestAuth {
+    if request.headers().contains_key(AUTHORIZATION) {
+        return RequestAuth::AuthorizationConflict;
+    }
+    request
+        .extensions_mut()
+        .remove::<OnBehalfOf>()
+        .map_or(RequestAuth::None, RequestAuth::OnBehalfOf)
+}
+
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
-    tokens: TokenSource,
+    tokens: GrpcTokens,
     resource: Client,
     context: Option<OperationContext>,
 }
 
 impl ServiceTokens {
     pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(self.into(), resource)
+        AuthenticatedClient::new(GrpcTokens::Service(self.clone()), resource)
     }
 }
 
 impl ExchangeTokens {
     pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(self.into(), resource)
+        AuthenticatedClient::new(GrpcTokens::Exchange(self.clone()), resource)
     }
 }
 
 impl AuthenticatedClient {
-    fn new(tokens: TokenSource, resource: Client) -> Result<Self, ConfigurationError> {
+    fn new(tokens: GrpcTokens, resource: Client) -> Result<Self, ConfigurationError> {
         if !resource.uses_tls() {
             return Err(ConfigurationError {
                 key: "grpc_resource",
@@ -87,7 +169,7 @@ impl AuthenticatedClient {
                     Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
                     _ => status,
                 })?;
-        let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
+        let context = prepared.opening_context().clone();
         let admitted_tokens = match self.tokens.admit(auth, acquisition_deadline(&context)) {
             Ok(admitted_tokens) => admitted_tokens,
             Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
@@ -98,8 +180,8 @@ impl AuthenticatedClient {
 
 async fn send_admitted(
     mut prepared: PreparedCall,
-    admitted_tokens: TokenSource<OnBehalfOf>,
-    context: infra_outbound_http::RequestContext,
+    admitted_tokens: AdmittedTokens,
+    context: OperationContext,
 ) -> Result<Response<Body>, Status> {
     let token = match admitted_tokens
         .acquire_for_request(acquisition_deadline(&context))
@@ -110,7 +192,7 @@ async fn send_admitted(
     };
     prepared
         .headers_mut()
-        .insert(http::header::AUTHORIZATION, token.header.clone());
+        .insert(AUTHORIZATION, token.header.clone());
     let used = Arc::downgrade(&token);
     prepared
         .send_with_dispatch_check(

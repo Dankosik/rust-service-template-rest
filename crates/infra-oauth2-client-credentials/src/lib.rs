@@ -4,7 +4,6 @@ mod discovery;
 mod error;
 mod http_client;
 mod options;
-mod request_admission;
 mod token;
 mod token_endpoint;
 
@@ -19,8 +18,10 @@ pub mod grpc;
 pub use credentials::{ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens};
 pub use discovery::verify_keycloak_metadata;
 pub use error::{
-    AcquisitionError, ConfigurationError, DiscoveryTransportError, Error, KeycloakError,
-    PreparationError, Rejection, TransportBuildFailure, TransportFailure,
+    AcquisitionError, ConfigurationError, DiscoveryTransportError, EmptySubject, Error,
+    KeycloakError, PreparationError, Rejection, TransportBuildFailure, TransportFailure,
 };
-pub use http_client::{AuthenticatedClient, RequestClient};
+pub use http_client::{
+    ExchangeHttpClient, ExchangeRequestClient, ServiceHttpClient, ServiceRequestClient,
+};
 pub use options::{Algorithm, ExchangeTokenTarget, Options, ServiceTokenTarget};

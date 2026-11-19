@@ -5,10 +5,13 @@ use std::{
 
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
+use operation_context::OperationContext;
 
 use tls_test_support::TlsMaterial;
 
-use crate::{Error, Limits, UrlTemplate, test_support::*};
+use crate::{
+    DispatchError, Error, ExchangeError, Limits, TransportErrorKind, UrlTemplate, test_support::*,
+};
 
 const REQUEST_SENTINELS: [&str; 6] = [
     "sentinel-path",
@@ -29,7 +32,8 @@ async fn exercise_completed_attempts() {
             ..limits()
         },
     );
-    let unpolled = client.execute(request(), deadline());
+    let ctx = context();
+    let unpolled = client.execute(request(), &ctx);
     drop(unpolled);
 
     let (address, server) = tls_server(
@@ -38,7 +42,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let success = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(request(), &context())
         .await;
     assert!(success.is_ok());
     server.await.expect("success fixture joins");
@@ -49,7 +53,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let not_found = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(request(), &context())
         .await
         .expect("HTTP error statuses remain responses");
     assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
@@ -61,7 +65,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let custom_error = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(request(), &context())
         .await
         .expect("600 status remains a response");
     assert_eq!(custom_error.status().as_u16(), 600);
@@ -73,7 +77,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let custom_error = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(request(), &context())
         .await
         .expect("999 status remains a response");
     assert_eq!(custom_error.status().as_u16(), 999);
@@ -81,9 +85,9 @@ async fn exercise_completed_attempts() {
 
     std::assert_matches!(
         client
-            .execute(request_to("https://other.fixture.test/items"), deadline())
+            .execute(request_to("https://other.fixture.test/items"), &context())
             .await,
-        Err(Error::InvalidTarget)
+        Err(ExchangeError::BeforeResponse(Error::InvalidTarget))
     );
 
     let (address, server) = tls_server(
@@ -109,9 +113,12 @@ async fn exercise_completed_attempts() {
                 ..limits()
             },
         )
-        .execute(request, deadline())
+        .execute(request, &context())
         .await,
-        Err(Error::ResponseBodyTooLarge)
+        Err(ExchangeError::AfterResponse {
+            status: StatusCode::BAD_GATEWAY,
+            source: Error::ResponseBodyTooLarge,
+        })
     );
     server.await.expect("body-limit fixture joins");
 }
@@ -236,7 +243,7 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
     let mut request = request_to("https://provider.fixture.test/items/sentinel-path");
     request.extensions_mut().insert(UrlTemplate("/items/{id}"));
     fixture_client(address, &material)
-        .execute(request, deadline())
+        .execute(request, &context())
         .await
         .expect("HTTP error statuses remain responses");
     let wire = captured.await.expect("captured request");
@@ -285,9 +292,15 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) = tls_server_stall_after_headers(&material).await;
     let timed = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(request(), &context())
         .await;
-    std::assert_matches!(timed, Err(Error::Timeout));
+    std::assert_matches!(
+        timed,
+        Err(ExchangeError::AfterResponse {
+            status: StatusCode::OK,
+            source: Error::Timeout,
+        })
+    );
     server.abort();
     assert!(
         server
@@ -299,14 +312,15 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     for cancel in [false, true] {
         let (address, server) = tls_server_stall_after_headers(&material).await;
         let client = fixture_client(address, &material);
-        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+        let context = OperationContext::with_timeout(Duration::from_secs(1));
         let (seen, status) = tokio::sync::oneshot::channel();
-        let mut exchange =
-            Box::pin(
-                client.execute_with_response_status(request(), &context, |code| {
-                    seen.send(code).unwrap();
-                }),
-            );
+        let prepared = client.prepare(request(), &context).expect("prepared");
+        let mut exchange = Box::pin(prepared.send_checked(
+            || Ok::<(), std::convert::Infallible>(()),
+            |code| {
+                seen.send(code).unwrap();
+            },
+        ));
         tokio::select! {
             biased;
             result = &mut exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
@@ -316,7 +330,13 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
         }
         if cancel {
             context.cancel();
-            std::assert_matches!(exchange.await, Err(Error::Cancelled));
+            std::assert_matches!(
+                exchange.await,
+                Err(DispatchError::Exchange(ExchangeError::AfterResponse {
+                    status: StatusCode::OK,
+                    source: Error::Cancelled,
+                }))
+            );
         } else {
             drop(exchange);
         }
@@ -403,15 +423,27 @@ async fn exercise_transport_failures() -> Vec<String> {
             .body(Bytes::from_static(b"sentinel-body"))
             .expect("sensitive fixture request")
     };
-    let root_cause = |result: Result<http::Response<Bytes>, Error>, reason: &str| {
-        let error = result.expect_err("transport failure");
+    let root_cause = |result: Result<http::Response<Bytes>, ExchangeError>,
+                      kind: TransportErrorKind,
+                      reason: &str| {
+        let error = result.expect_err("transport failure").into_error();
         std::assert_matches!(error, Error::Transport { .. }, "{error:?}");
+        assert_eq!(error.transport_kind(), Some(kind));
         assert_eq!(error.diagnostic_reason(), reason);
         shared_rules::error_chain::sources(&error)
             .last()
             .expect("transport source")
             .to_string()
     };
+    for non_transport in [
+        Error::InvalidTarget,
+        Error::Timeout,
+        Error::Cancelled,
+        Error::ResponseBodyTooLarge,
+    ] {
+        assert_eq!(non_transport.transport_kind(), None);
+    }
+
     let mut roots = Vec::new();
     let material = TlsMaterial::new(FIXTURE_HOST);
 
@@ -419,19 +451,21 @@ async fn exercise_transport_failures() -> Vec<String> {
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
     let untrusted = fixture_client(address, &untrusted)
-        .execute(sensitive_request(), deadline())
+        .execute(sensitive_request(), &context())
         .await;
     roots.push(root_cause(
         untrusted,
+        TransportErrorKind::Tls,
         "HTTP transport failed during the TLS exchange",
     ));
     server.await.expect("untrusted fixture joins");
 
     let unresolved = fixture_client_resolving(FIXTURE_HOST, vec![], &material, limits())
-        .execute(sensitive_request(), deadline())
+        .execute(sensitive_request(), &context())
         .await;
     roots.push(root_cause(
         unresolved,
+        TransportErrorKind::Connect,
         "HTTP transport failed during connection setup",
     ));
 
@@ -448,10 +482,11 @@ async fn exercise_transport_failures() -> Vec<String> {
             ..limits()
         },
     )
-    .execute(sensitive_request(), deadline())
+    .execute(sensitive_request(), &context())
     .await;
     roots.push(root_cause(
         overflow,
+        TransportErrorKind::Protocol,
         "HTTP transport failed while parsing the response",
     ));
     server.await.expect("parser fixture joins");
@@ -459,9 +494,13 @@ async fn exercise_transport_failures() -> Vec<String> {
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no").await;
     let truncated = fixture_client(address, &material)
-        .execute(sensitive_request(), deadline())
+        .execute(sensitive_request(), &context())
         .await;
-    roots.push(root_cause(truncated, "HTTP transport failed"));
+    roots.push(root_cause(
+        truncated,
+        TransportErrorKind::Other,
+        "HTTP transport failed",
+    ));
     server.await.expect("truncated fixture joins");
     roots
 }

@@ -6,32 +6,25 @@ async fn each_grant_enforces_its_subject_policy_before_any_io() {
     let fixture = Fixture::new().await;
     let service = fixture.service_client();
     let delegated = fixture.exchange_client();
-    for subject in ["alice", ""] {
-        assert_matches!(
-            fixture
-                .send_request(&service, fixture.on_behalf_of_request(subject))
-                .await,
-            Err(Error::UnexpectedSubject)
-        );
-    }
-    for request in [fixture.request(), fixture.on_behalf_of_request("")] {
-        assert_matches!(
-            fixture.send_request(&delegated, request).await,
-            Err(Error::SubjectRequired)
-        );
-    }
+    assert_eq!(
+        OnBehalfOf::try_new(SecretString::from("")).unwrap_err(),
+        EmptySubject
+    );
+    assert_eq!(service.origin(), fixture.resource_client().origin());
+    assert_eq!(delegated.origin(), service.origin());
     assert_eq!(fixture.token_request_count(), 0);
     assert_eq!(fixture.resource_request_count(), 0);
 
-    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let ctx = context(Duration::from_secs(10));
     service
-        .with_context(&context)
+        .with_context(&ctx)
         .execute(fixture.request())
         .await
         .unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    fixture
-        .send_request(&delegated, fixture.on_behalf_of_request("alice"))
+    delegated
+        .with_context(&ctx)
+        .execute(fixture.request(), &subject_token("alice"))
         .await
         .unwrap();
     assert_eq!(
@@ -57,14 +50,22 @@ async fn each_grant_enforces_its_subject_policy_before_any_io() {
 async fn invalid_resource_target_refuses_before_acquiring_credentials() {
     let fixture = Fixture::new().await;
     let other = Fixture::new().await;
-    for binding in [
-        fixture.service_tokens(&[]).http(other.resource_client()),
+    assert_eq!(
+        fixture
+            .service_tokens(&[])
+            .http(other.resource_client())
+            .unwrap_err()
+            .key,
+        "resource_origin"
+    );
+    assert_eq!(
         fixture
             .exchange_tokens(&[], None, EXCHANGE_CAPACITY)
-            .http(other.resource_client()),
-    ] {
-        assert_eq!(binding.unwrap_err().key, "resource_origin");
-    }
+            .http(other.resource_client())
+            .unwrap_err()
+            .key,
+        "resource_origin"
+    );
     assert_eq!(other.resource_request_count(), 0);
     other.finish().await;
     let client = fixture.service_client();
@@ -100,14 +101,14 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let client = fixture.service_client();
         let budget = Duration::from_secs(2);
-        let context = OperationContext::with_timeout(budget);
-        let client = client.with_context(&context);
+        let ctx = OperationContext::with_timeout(budget);
+        let client = client.with_context(&ctx);
         let mut exchange = Box::pin(client.execute(fixture.request()));
         fixture.drive_until_token_received(exchange.as_mut()).await;
         if deadline_expires {
             advance(budget).await;
         } else {
-            context.cancel();
+            ctx.cancel();
         }
         let result = tokio::time::timeout(Duration::from_secs(1), exchange)
             .await
@@ -154,15 +155,13 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() 
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture.service_client();
-    let operation = OperationContext::with_timeout(Duration::from_secs(1));
-    let request_context = OperationContext::unbounded();
-    let mut request = fixture.request();
-    request.extensions_mut().insert(request_context.clone());
-    let mut exchange = Box::pin(client.execute_with_context(request, &operation));
+    let parent = OperationContext::with_timeout(Duration::from_secs(1));
+    let child = parent.child_context();
+    let mut exchange = Box::pin(client.execute(fixture.request(), &child));
     fixture.drive_until_token_received(exchange.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    request_context.cancel();
+    child.cancel();
     assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
@@ -178,13 +177,10 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() 
     let fixture = Fixture::new().await;
     let client = fixture.service_client();
     let operation = OperationContext::with_timeout(Duration::ZERO);
-    let request_context = OperationContext::unbounded();
-    request_context.cancel();
-    let mut request = fixture.request();
-    request.extensions_mut().insert(request_context);
+    operation.cancel();
 
     assert_matches!(
-        client.execute_with_context(request, &operation).await,
+        client.execute(fixture.request(), &operation).await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
     assert_eq!(fixture.token_request_count(), 0);
@@ -201,7 +197,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
         .service_tokens(&[])
         .http(
             Client::try_new_for_test_http(
-                &fixture.origin,
+                fixture.origin.as_str(),
                 infra_outbound_http::Limits {
                     operation_timeout: Duration::from_secs(3),
                     ..TOKEN_LIMITS
@@ -210,8 +206,8 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
             .unwrap(),
         )
         .unwrap();
-    let context = OperationContext::with_timeout(Duration::from_secs(30));
-    let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
+    let ctx = OperationContext::with_timeout(Duration::from_secs(30));
+    let mut call = Box::pin(client.execute(fixture.request(), &ctx));
     tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
     advance(Duration::from_secs(2)).await;
     token_gate.add_permits(1);
@@ -320,8 +316,9 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         ),
     ] {
         fixture.token_raw(response);
-        let error = fixture.service_client()
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        let error = fixture
+            .service_client()
+            .execute(fixture.request(), &context(Duration::from_secs(10)))
             .await
             .unwrap_err();
         assert_matches!(&error, Error::Acquisition(actual) if *actual == expected);
@@ -398,26 +395,35 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
     let fixture = Fixture::new().await;
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
-    for (client, mut conflicting) in [
-        (fixture.service_client(), fixture.request()),
-        (
-            fixture.exchange_client(),
-            fixture.on_behalf_of_request("subject"),
-        ),
-    ] {
-        conflicting.headers_mut().insert(
-            header::AUTHORIZATION,
-            "Bearer caller-token".parse().unwrap(),
-        );
-        assert_matches!(
-            fixture.send_request(&client, conflicting.clone()).await,
-            Err(Error::AuthorizationConflict)
-        );
-        assert_matches!(
-            client.execute_with_context(conflicting, &cancelled).await,
-            Err(Error::Acquisition(AcquisitionError::Cancelled))
-        );
-    }
+    let mut conflicting = fixture.request();
+    conflicting.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Bearer caller-token".parse().unwrap(),
+    );
+
+    let service = fixture.service_client();
+    assert_matches!(
+        fixture.send_request(&service, conflicting.clone()).await,
+        Err(Error::AuthorizationConflict)
+    );
+    assert_matches!(
+        service.execute(conflicting.clone(), &cancelled).await,
+        Err(Error::Acquisition(AcquisitionError::Cancelled))
+    );
+
+    let exchange = fixture.exchange_client();
+    let subject = subject_token("subject");
+    assert_matches!(
+        fixture
+            .send_exchange_request(&exchange, conflicting.clone(), "subject")
+            .await,
+        Err(Error::AuthorizationConflict)
+    );
+    assert_matches!(
+        exchange.execute(conflicting, &subject, &cancelled).await,
+        Err(Error::Acquisition(AcquisitionError::Cancelled))
+    );
+
     assert_eq!(fixture.token_request_count(), 0);
     assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;
@@ -457,7 +463,7 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
         .service_tokens(&[])
         .http(
             Client::try_new_for_test_http(
-                &fixture.origin,
+                fixture.origin.as_str(),
                 infra_outbound_http::Limits {
                     response_body_bytes: 8,
                     ..TOKEN_LIMITS

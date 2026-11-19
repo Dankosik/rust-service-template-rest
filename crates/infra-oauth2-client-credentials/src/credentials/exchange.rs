@@ -7,7 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, RegistrationState, timeout_as_unavailable};
-use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token};
+use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, OnBehalfOf, token::Token};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
@@ -190,12 +190,39 @@ impl ExchangeTokens {
         })))
     }
 
-    pub(super) fn registration(&self) -> &RegistrationState {
+    fn registration(&self) -> &RegistrationState {
         &self.0.registration
     }
 
-    pub(super) fn resource_origin(&self) -> &http::Uri {
+    pub(crate) fn resource_origin(&self) -> &http::Uri {
         &self.0.resource_origin
+    }
+
+    pub(crate) fn check_active(
+        &self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<(), AcquisitionError> {
+        self.registration().check_active(deadline)
+    }
+
+    pub(crate) async fn acquire_for_request(
+        &self,
+        subject: &OnBehalfOf,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        let registration = self.registration();
+        registration.check_active(deadline)?;
+        let mut registration_closed = registration.closed.clone();
+        let acquired = tokio::select! {
+            biased;
+            stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
+            _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
+            result = self.exchange(subject.secret(), deadline) => result,
+        };
+        registration.check_active(deadline)?;
+        let acquired = acquired?;
+        acquired.check_expiry(Instant::now())?;
+        Ok(acquired)
     }
 
     #[cfg(test)]

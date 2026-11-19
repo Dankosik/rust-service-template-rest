@@ -3006,9 +3006,7 @@ name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "delegate",
  "derive_more",
- "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -3023,7 +3021,6 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
- "smallvec",
  "thiserror",
  "tls-test-support",
  "tokio",
@@ -3033,7 +3030,6 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]

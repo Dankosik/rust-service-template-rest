@@ -4,7 +4,9 @@ use http::StatusCode;
 use operation_context::Stopped;
 use serde::Deserialize;
 
-use crate::request_admission::AdmissionRefusal;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("on-behalf-of subject token must be nonempty")]
+pub struct EmptySubject;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
@@ -140,7 +142,6 @@ impl From<&infra_outbound_http::Error> for TransportFailure {
             infra_outbound_http::Error::Cancelled => Self::Cancelled,
             infra_outbound_http::Error::ResponseBodyTooLarge => Self::ResponseLimit,
             infra_outbound_http::Error::InvalidTarget
-            | infra_outbound_http::Error::DispatchRefused
             | infra_outbound_http::Error::Transport { .. } => Self::Transport,
         }
     }
@@ -256,23 +257,8 @@ impl fmt::Display for Rejection {
 pub enum Error {
     #[error("caller Authorization header conflicts with OAuth2 authentication")]
     AuthorizationConflict,
-    #[error("request carries no subject to act on behalf of")]
-    SubjectRequired,
-    #[error("service identity does not accept an on-behalf-of subject")]
-    UnexpectedSubject,
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]
     Resource(#[from] infra_outbound_http::Error),
-}
-
-impl From<AdmissionRefusal> for Error {
-    fn from(refusal: AdmissionRefusal) -> Self {
-        match refusal {
-            AdmissionRefusal::AuthorizationConflict => Self::AuthorizationConflict,
-            AdmissionRefusal::SubjectRequired => Self::SubjectRequired,
-            AdmissionRefusal::UnexpectedSubject => Self::UnexpectedSubject,
-            AdmissionRefusal::Acquisition(error) => Self::Acquisition(error),
-        }
-    }
 }
