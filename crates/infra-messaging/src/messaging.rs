@@ -15,7 +15,7 @@ use crate::probe::{MessagingProbe, PublishWorkMetrics};
 use crate::producer::{Producer, PublishMetrics};
 use crate::registry::Registry;
 // template:begin outbox:messaging-outbox-refusal-import
-use crate::topology::refusal_failure;
+use crate::topology::report_refusal_failure;
 // template:end outbox:messaging-outbox-refusal-import
 use crate::topology::{TopologyAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
@@ -181,7 +181,7 @@ impl Messaging {
     // template:begin outbox:messaging-outbox-producer-access
     pub fn outbox_producer(&self) -> Result<OutboxProducer, MessagingError> {
         self.topology.outbox_source.map_err(|refusal| {
-            refusal_failure(
+            report_refusal_failure(
                 "source_stream",
                 refusal,
                 self.shared.envelope_limit_bytes,

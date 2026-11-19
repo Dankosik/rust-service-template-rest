@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
 
-const CREDENTIALS_FILE_BYTES: usize = 1024 * 1024;
+const CREDENTIALS_FILE_MAX_BYTES: usize = 1024 * 1024;
 const CHALLENGES_METRIC: &str = "messaging_credentials_file_challenges_total";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -145,9 +145,9 @@ fn read_file(path: &Path) -> io::Result<SecretString> {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let content = SecretString::from(io::read_to_string(
-        file.take(CREDENTIALS_FILE_BYTES as u64 + 1),
+        file.take(CREDENTIALS_FILE_MAX_BYTES as u64 + 1),
     )?);
-    if content.expose_secret().len() > CREDENTIALS_FILE_BYTES {
+    if content.expose_secret().len() > CREDENTIALS_FILE_MAX_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
     Ok(content)

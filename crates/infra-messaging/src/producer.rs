@@ -122,7 +122,7 @@ impl Producer {
         if self.shared.refuses_work() {
             return Err(PublishRejection::Unavailable.into());
         }
-        let message = source_message(
+        let message = publish_message(
             event,
             span,
             &self.shared.source_stream,
@@ -139,7 +139,7 @@ impl Producer {
     }
 }
 
-fn source_message(
+fn publish_message(
     event: &PreparedEvent,
     span: &tracing::Span,
     expected_stream: &str,
@@ -326,9 +326,9 @@ mod tests {
             "\r\n",
         );
         let stream = "s".repeat(8192 - fixed.len());
-        assert!(source_message(&prepared, &tracing::Span::none(), &stream, 4).is_ok());
+        assert!(publish_message(&prepared, &tracing::Span::none(), &stream, 4).is_ok());
         std::assert_matches!(
-            source_message(&prepared, &tracing::Span::none(), &(stream + "s"), 4),
+            publish_message(&prepared, &tracing::Span::none(), &(stream + "s"), 4),
             Err(PublishRejection::InvalidEnvelope(
                 EnvelopeError::HeadersTooLarge
             ))

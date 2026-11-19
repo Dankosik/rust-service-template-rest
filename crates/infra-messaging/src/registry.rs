@@ -207,13 +207,13 @@ pub struct Registry {
 pub(crate) struct RegisteredRoute {
     pub(crate) subject: async_nats::Subject,
     pub(crate) schema: Option<PayloadSchema>,
-    payload: TypeId,
+    payload_type: TypeId,
     handler: Option<ErasedHandler>,
 }
 
 impl RegisteredRoute {
     fn matches<T: 'static>(&self, route: &Route<T>) -> bool {
-        self.payload == TypeId::of::<T>()
+        self.payload_type == TypeId::of::<T>()
             && self.subject == route.subject
             && self.schema.is_some() == route.schema.is_some()
     }
@@ -280,7 +280,7 @@ impl Registry {
         entry.insert(RegisteredRoute {
             subject: route.subject.clone(),
             schema: route.schema,
-            payload: TypeId::of::<T>(),
+            payload_type: TypeId::of::<T>(),
             handler: None,
         });
         Ok(())
