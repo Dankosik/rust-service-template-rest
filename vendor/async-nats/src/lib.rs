@@ -2619,20 +2619,6 @@ mod tests {
     }
 
     #[test]
-    fn multiplexer_prunes_abandoned_requests_after_burst() {
-        let mut multiplexer = multiplexer();
-        answer_burst(&mut multiplexer, 10_000);
-
-        for i in 0..10_000 {
-            let (sender, receiver) = oneshot::channel();
-            drop(receiver);
-            multiplexer.insert(format!("abandoned{i}"), sender);
-        }
-
-        assert!(multiplexer.senders.len() <= MULTIPLEXER_PRUNE_MIN);
-    }
-
-    #[test]
     fn multiplexer_releases_capacity_after_burst() {
         let mut multiplexer = multiplexer();
         answer_burst(&mut multiplexer, 100_000);
@@ -2643,6 +2629,7 @@ mod tests {
             multiplexer.insert(format!("abandoned{i}"), sender);
         }
 
+        assert!(multiplexer.senders.len() <= MULTIPLEXER_PRUNE_MIN);
         assert!(multiplexer.senders.capacity() <= 4 * MULTIPLEXER_PRUNE_MIN);
     }
 }
