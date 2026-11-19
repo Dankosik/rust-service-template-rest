@@ -18,7 +18,7 @@ use tracing::Instrument as _;
 pub use bytes::Bytes;
 pub use context::RequestContext;
 pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
-pub use observe::{HISTOGRAMS, REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC, UrlTemplate};
+pub use observe::{HISTOGRAMS, REQUEST_DURATION_METRIC, UrlTemplate};
 pub use transport::prepare_tls;
 pub use url::Url;
 
@@ -345,8 +345,7 @@ impl PreparedRequest<'_> {
             context.check()?;
             Ok(response)
         });
-        let status = attempt.status();
-        std::mem::DropGuard::dismiss(attempt).finish(result.as_ref().err());
+        let status = attempt.finish(result.as_ref().err());
         result.map_err(|source| match status {
             Some(status) => ExchangeError::AfterResponse { status, source },
             None => ExchangeError::BeforeResponse(source),

@@ -2830,7 +2830,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "async-nats",
- "async-trait",
  "base64 0.23.1",
  "bstr",
  "bytes",
@@ -3041,7 +3040,6 @@ name = "infra-postgres"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "enum-map",
  "foldhash",
  "futures-util",
@@ -3102,7 +3100,6 @@ dependencies = [
  "bitflags 2.13.2",
  "const-hex",
  "crossbeam-channel",
- "delegate",
  "derive_more",
  "enum-map",
  "futures-util",

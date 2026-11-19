@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use secrecy::SecretString;
 use uuid::Uuid;
 
-use crate::metrics::static_counter_key;
+use crate::metrics::static_counter;
 
 const TRACE_EXPORT_SDK_RESULT_SPANS_METRIC: &str =
     "telemetry_trace_exporter_sdk_result_spans_total";
@@ -171,9 +171,10 @@ pub enum TracingError {
 }
 
 #[derive(Debug)]
+#[must_use = "retain the tracer provider handle and shut it down before process exit"]
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
-    pub exporter_state: ExporterState,
+    exporter_state: ExporterState,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
@@ -290,6 +291,11 @@ fn batch_config(
 }
 
 impl TracerProviderHandle {
+    #[must_use]
+    pub const fn exporter_state(&self) -> &ExporterState {
+        &self.exporter_state
+    }
+
     #[must_use]
     pub(crate) fn tracer(&self) -> SdkTracer {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
@@ -413,19 +419,19 @@ impl SdkFailure {
         }
     }
 
-    fn metric_key(self) -> &'static metrics::Key {
+    fn counter(self) -> metrics::Counter {
         match self {
-            Self::Timeout => static_counter_key!(
+            Self::Timeout => static_counter!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
                 "outcome" => "error",
                 "error_type" => "timeout",
             ),
-            Self::AlreadyShutdown => static_counter_key!(
+            Self::AlreadyShutdown => static_counter!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
                 "outcome" => "error",
                 "error_type" => "already_shutdown",
             ),
-            Self::Internal => static_counter_key!(
+            Self::Internal => static_counter!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
                 "outcome" => "error",
                 "error_type" => "internal_failure",
@@ -454,22 +460,18 @@ struct ObservedExporter<E> {
 
 impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
-        static METADATA: metrics::Metadata<'static> =
-            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
         let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
-        let key = match &result {
-            Ok(()) => static_counter_key!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
+        let counter = match &result {
+            Ok(()) => static_counter!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
             Err(error) => {
                 let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
-                failure.metric_key()
+                failure.counter()
             }
         };
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA))
-            .increment(spans);
+        counter.increment(spans);
         result
     }
 

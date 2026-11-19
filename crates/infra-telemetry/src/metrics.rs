@@ -13,17 +13,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
-macro_rules! static_counter_key {
+macro_rules! static_counter {
     ($name:expr, $($label:literal => $value:literal),+ $(,)?) => {{
         static LABELS: &[::metrics::Label] = &[
             $(::metrics::Label::from_static_parts($label, $value)),+
         ];
         static KEY: ::metrics::Key = ::metrics::Key::from_static_parts($name, LABELS);
-        &KEY
+        static METADATA: ::metrics::Metadata<'static> = ::metrics::Metadata::new(
+            module_path!(),
+            ::metrics::Level::INFO,
+            Some(module_path!()),
+        );
+        ::metrics::with_recorder(|recorder| recorder.register_counter(&KEY, &METADATA))
     }};
 }
 
-pub(crate) use static_counter_key;
+pub(crate) use static_counter;
 
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -180,8 +185,8 @@ impl Metrics {
         })
     }
 
-    pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
-        let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
+    pub fn record_trace_exporter(&self, state: &ExporterState) {
+        let initialized = matches!(state, ExporterState::Initialized { .. });
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(f64::from(initialized));
     }
 

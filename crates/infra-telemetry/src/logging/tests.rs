@@ -81,9 +81,9 @@ pub(crate) fn capture(
 }
 
 fn drain(guard: LoggerGuard) {
-    std::assert_matches!(
+    assert_eq!(
         guard.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(2)),
-        LoggerShutdown::Completed(_)
+        LoggerShutdown::Completed
     );
 }
 

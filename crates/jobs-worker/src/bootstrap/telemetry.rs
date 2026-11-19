@@ -24,7 +24,7 @@ pub(super) async fn install_observability(
         },
         tracer_provider: Some(tracer_provider),
     })?);
-    let exporter_state = tracer_provider.exporter_state.clone();
+    let exporter_state = tracer_provider.exporter_state().clone();
     let metrics = Metrics::install(
         &[
             infra_http::HISTOGRAMS,
@@ -38,7 +38,7 @@ pub(super) async fn install_observability(
         ]
         .concat(),
     )?;
-    metrics.record_trace_exporter(Some(&exporter_state));
+    metrics.record_trace_exporter(&exporter_state);
     Ok((metrics, exporter_state))
 }
 

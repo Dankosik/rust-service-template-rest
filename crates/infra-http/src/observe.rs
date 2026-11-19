@@ -15,7 +15,7 @@ use http_body::Body as _;
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
-use shared_rules::otel_http::{OTHER_METHOD, request_method, response_status_code};
+use shared_rules::otel_http::{HttpMethod, response_status_code};
 use tokio::time::Instant;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
@@ -108,7 +108,7 @@ pub(crate) async fn observe(
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
-    let method = MethodSlot::from_label(request_method(request.method().as_str()));
+    let method = HttpMethod::parse(request.method().as_str());
     let version = request.version();
     let scheme = url_scheme(request.uri(), connection.as_ref());
     let route = matched.as_ref().map(MatchedPath::as_str);
@@ -215,9 +215,9 @@ impl TraceContext {
     }
 }
 
-fn ends_at_headers(method: MethodSlot, status: StatusCode) -> bool {
-    matches!(method, MethodSlot::Head)
-        || (matches!(method, MethodSlot::Connect) && status.is_success())
+fn ends_at_headers(method: HttpMethod, status: StatusCode) -> bool {
+    matches!(method, HttpMethod::Head)
+        || (matches!(method, HttpMethod::Connect) && status.is_success())
         || status.is_informational()
         || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED)
 }
@@ -253,7 +253,7 @@ enum RequestEnd {
 struct RequestObservation {
     log_access: bool,
     observer: Arc<Observer>,
-    method: MethodSlot,
+    method: HttpMethod,
     scheme: Scheme,
     matched: Option<MatchedPath>,
     request_id: Option<RequestId>,
@@ -374,7 +374,7 @@ impl RequestObservation {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     version: Version,
-    method: MethodSlot,
+    method: HttpMethod,
     route: Option<&str>,
     cached_route: Option<Arc<str>>,
     request_id: Option<&str>,
@@ -429,65 +429,9 @@ fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> Scheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, Enum, Eq, Hash, PartialEq)]
-enum MethodSlot {
-    Connect,
-    Delete,
-    Get,
-    Head,
-    Options,
-    Patch,
-    Post,
-    Put,
-    Query,
-    Trace,
-    Other,
-}
-
-impl MethodSlot {
-    fn from_label(method: &'static str) -> Self {
-        match method {
-            "CONNECT" => Self::Connect,
-            "DELETE" => Self::Delete,
-            "GET" => Self::Get,
-            "HEAD" => Self::Head,
-            "OPTIONS" => Self::Options,
-            "PATCH" => Self::Patch,
-            "POST" => Self::Post,
-            "PUT" => Self::Put,
-            "QUERY" => Self::Query,
-            "TRACE" => Self::Trace,
-            _ => Self::Other,
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Connect => "CONNECT",
-            Self::Delete => "DELETE",
-            Self::Get => "GET",
-            Self::Head => "HEAD",
-            Self::Options => "OPTIONS",
-            Self::Patch => "PATCH",
-            Self::Post => "POST",
-            Self::Put => "PUT",
-            Self::Query => "QUERY",
-            Self::Trace => "TRACE",
-            Self::Other => OTHER_METHOD,
-        }
-    }
-
-    const fn span_name_prefix(self) -> &'static str {
-        match self {
-            Self::Other => "HTTP",
-            _ => self.as_str(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DurationLabels {
-    method: MethodSlot,
+    method: HttpMethod,
     scheme: Scheme,
     status: Option<StatusCode>,
     error_type: Option<&'static str>,
@@ -521,7 +465,7 @@ impl DurationSeries {
 
 #[derive(Debug, Default)]
 struct Series {
-    active: EnumMap<MethodSlot, EnumMap<Scheme, OnceLock<Gauge>>>,
+    active: [EnumMap<Scheme, OnceLock<Gauge>>; HttpMethod::COUNT],
     durations: ArcSwap<DurationSeries>,
     durations_write: Mutex<()>,
 }
@@ -535,8 +479,8 @@ impl Series {
             .map(|(cached, _)| Arc::clone(cached))
     }
 
-    fn active_gauge(&self, method: MethodSlot, scheme: Scheme) -> &Gauge {
-        self.active[method][scheme].get_or_init(|| {
+    fn active_gauge(&self, method: HttpMethod, scheme: Scheme) -> &Gauge {
+        self.active[method.index()][scheme].get_or_init(|| {
             metrics::gauge!(
                 ACTIVE_REQUESTS_METRIC,
                 "http_request_method" => method.as_str(),
@@ -633,7 +577,7 @@ mod tests {
                 series.record_duration(
                     None,
                     DurationLabels {
-                        method: MethodSlot::Other,
+                        method: HttpMethod::Other,
                         scheme: Scheme::Https,
                         status: Some(StatusCode::from_u16(code).unwrap()),
                         error_type: None,
@@ -665,7 +609,7 @@ mod tests {
                 series.record_duration(
                     Some("/items/{id}"),
                     DurationLabels {
-                        method: MethodSlot::Get,
+                        method: HttpMethod::Get,
                         scheme: Scheme::Http,
                         status: Some(status),
                         error_type: None,

@@ -16,7 +16,6 @@ hotpath = []
 
 [dependencies]
 arc-swap = { workspace = true }
-async-trait = { workspace = true }
 enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true }

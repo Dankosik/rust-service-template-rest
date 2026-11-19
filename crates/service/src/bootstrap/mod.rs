@@ -355,8 +355,8 @@ async fn install_telemetry(
     *logger_installed = true;
     install_panic_hook();
     let metrics = telemetry::install_metrics()?;
-    metrics.record_trace_exporter(Some(&provider.exporter_state));
-    telemetry::log_startup_summary(config, &provider.exporter_state);
+    metrics.record_trace_exporter(provider.exporter_state());
+    telemetry::log_startup_summary(config, provider.exporter_state());
     spawn_metrics_tasks(&metrics, background);
     Ok(metrics)
 }

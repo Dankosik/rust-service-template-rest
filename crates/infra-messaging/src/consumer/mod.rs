@@ -79,7 +79,7 @@ pub struct Consumer {
 
 struct ConsumerProbe(Weak<AtomicBool>);
 
-#[async_trait::async_trait]
+#[health::async_trait]
 impl health::Probe for ConsumerProbe {
     fn name(&self) -> &'static str {
         "messaging_consumer"

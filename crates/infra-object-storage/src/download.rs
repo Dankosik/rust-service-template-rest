@@ -55,17 +55,29 @@ struct Completion {
 }
 
 impl Completion {
-    fn finish(mut self) {
-        match self.outcome {
-            Outcome::Success => self.resources.guard.succeed(),
+    fn finish(self) {
+        let Self {
+            resources:
+                Resources {
+                    waker,
+                    context,
+                    body,
+                    progress,
+                    guard,
+                    _permit,
+                },
+            outcome,
+            discarded,
+        } = self;
+        match outcome {
+            Outcome::Success => guard.succeed(),
             Outcome::Failure(failure) => {
-                self.resources.guard.fail(failure);
+                guard.fail(&failure);
             }
-            Outcome::Cancelled => self.resources.guard.cancel(),
+            Outcome::Cancelled => drop(guard),
         }
-        let waker = self.resources.waker.take();
-        drop(self.discarded);
-        drop(self.resources);
+        drop(discarded);
+        drop((context, body, progress, _permit));
         if let Some(waker) = waker {
             waker.wake();
         }
