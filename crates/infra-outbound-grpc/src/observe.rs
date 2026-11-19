@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use foldhash::HashMap;
 use metrics::SharedString;
+use opentelemetry::Value;
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
 use parking_lot::Mutex;
 use shared_rules::grpc::{
@@ -22,6 +23,7 @@ pub(crate) const CLIENT_HANDLING_METRIC: &str = "grpc_client_handling_seconds";
 
 const MAX_ADMITTED_METHODS: usize = 256;
 const MAX_RPC_NAME_PART_BYTES: usize = 256;
+const MAX_RPC_PATH_BYTES: usize = 2 * MAX_RPC_NAME_PART_BYTES + 2;
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SECONDS_BUCKETS)];
 
@@ -121,7 +123,7 @@ fn make_client_span<B>(
     } else {
         span.set_attribute(RPC_METHOD_ATTR, RPC_METHOD_OTHER);
         if let Some(original) = diagnostic_rpc_method_original(request.uri().path()) {
-            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, original.to_owned());
+            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, DiagnosticAttribute(original));
         }
     }
     if let Some(destination) = destination {
@@ -132,9 +134,17 @@ fn make_client_span<B>(
     }
     let user_agent = otel_http::user_agent(request);
     if !user_agent.is_empty() && user_agent.len() <= DIAGNOSTIC_BYTES {
-        span.set_attribute("user_agent.original", user_agent.to_owned());
+        span.set_attribute("user_agent.original", DiagnosticAttribute(user_agent));
     }
     span
+}
+
+struct DiagnosticAttribute<'a>(&'a str);
+
+impl From<DiagnosticAttribute<'_>> for Value {
+    fn from(attribute: DiagnosticAttribute<'_>) -> Self {
+        attribute.0.to_owned().into()
+    }
 }
 
 #[derive(derive_more::Debug)]
@@ -169,8 +179,8 @@ impl Series {
     }
 
     fn resolve<B>(&self, request: &http::Request<B>) -> Arc<MethodMetrics> {
-        if let Some((path, rpc)) = verified_client_path(request)
-            && let Some(admitted) = self.admit_path(path, rpc)
+        if let Some(declared) = declared_method(request)
+            && let Some(admitted) = self.admit_path(request.uri().path(), declared)
         {
             return admitted;
         }
@@ -180,12 +190,21 @@ impl Series {
         )
     }
 
-    fn admit_path(&self, path: &str, rpc: RpcName<'_>) -> Option<Arc<MethodMetrics>> {
+    fn admit_path(&self, path: &str, declared: RpcName<'_>) -> Option<Arc<MethodMetrics>> {
+        if path.len() > MAX_RPC_PATH_BYTES {
+            return None;
+        }
         let snapshot = self.admitted.load();
         if let Some(existing) = snapshot.get(path) {
-            return Some(Arc::clone(existing));
+            return (existing.service.as_ref() == declared.service
+                && existing.method.as_ref() == declared.method)
+                .then(|| Arc::clone(existing));
+        }
+        if snapshot.len() >= MAX_ADMITTED_METHODS {
+            return None;
         }
         drop(snapshot);
+        let rpc = split_method_path(path).filter(|rpc| *rpc == declared)?;
         let _guard = self.admit_lock.lock();
         let current = self.admitted.load();
         if let Some(existing) = current.get(path) {
@@ -260,16 +279,12 @@ impl MethodMetrics {
     }
 }
 
-fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, RpcName<'_>)> {
+fn declared_method<B>(request: &http::Request<B>) -> Option<RpcName<'_>> {
     let declared = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
-    if declared.service().len() > MAX_RPC_NAME_PART_BYTES
-        || declared.method().len() > MAX_RPC_NAME_PART_BYTES
-    {
-        return None;
-    }
-    let path = request.uri().path();
-    let rpc = split_method_path(path)?;
-    (rpc.service == declared.service() && rpc.method == declared.method()).then_some((path, rpc))
+    let service = declared.service();
+    let method = declared.method();
+    (service.len() <= MAX_RPC_NAME_PART_BYTES && method.len() <= MAX_RPC_NAME_PART_BYTES)
+        .then_some(RpcName { service, method })
 }
 
 fn describe_client_metrics() {
@@ -333,32 +348,81 @@ mod tests {
         );
         let destination = Destination::from_uri(&"http://[::1]:50051".parse().unwrap());
         Call::start(&series, &known, destination.as_ref()).finish(tonic::Code::Unauthenticated);
+        let mut raw = test_request("/example.v1.Raw/Unary", None);
+        raw.headers_mut().insert(
+            http::header::USER_AGENT,
+            "grpc-client-test".parse().unwrap(),
+        );
+        Call::start(&series, &raw, None).finish(tonic::Code::Ok);
+        let overlong = "a".repeat(DIAGNOSTIC_BYTES + 1);
+        let mut raw = test_request(&format!("/{overlong}"), None);
+        raw.headers_mut()
+            .insert(http::header::USER_AGENT, overlong.parse().unwrap());
+        Call::start(&series, &raw, None).finish(tonic::Code::Ok);
         drop(guard);
 
         let spans = exporter.get_finished_spans().unwrap();
-        let [span] = spans.as_slice() else {
-            panic!("one span: {spans:?}");
+        let [known, raw, overlong] = spans.as_slice() else {
+            panic!("three spans: {spans:?}");
         };
-        let text = |key: &str| {
+        let text = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
             span.attributes
                 .iter()
                 .find(|attribute| attribute.key.as_str() == key)
                 .map(|attribute| attribute.value.as_str().into_owned())
         };
-        assert_eq!(span.name, "example.v1.EchoService/Unary");
-        assert_eq!(text("rpc.system.name").as_deref(), Some("grpc"));
+        assert_eq!(known.name, "example.v1.EchoService/Unary");
+        assert_eq!(text(known, "rpc.system.name").as_deref(), Some("grpc"));
         for deprecated in ["rpc.system", "rpc.service", "rpc.grpc.status_code"] {
-            assert_eq!(text(deprecated), None, "{deprecated}");
+            assert_eq!(text(known, deprecated), None, "{deprecated}");
         }
         assert_eq!(
-            text("rpc.method").as_deref(),
+            text(known, "rpc.method").as_deref(),
             Some("example.v1.EchoService/Unary")
         );
-        assert_eq!(text("rpc.method_original"), None);
-        assert_eq!(text("rpc.status_code").as_deref(), Some("UNAUTHENTICATED"));
-        assert_eq!(text("error.type").as_deref(), Some("UNAUTHENTICATED"));
-        assert_eq!(text("server.address").as_deref(), Some("::1"));
-        assert_eq!(text("server.port").as_deref(), Some("50051"));
+        assert_eq!(text(known, "rpc.method_original"), None);
+        assert_eq!(
+            text(known, "rpc.status_code").as_deref(),
+            Some("UNAUTHENTICATED")
+        );
+        assert_eq!(
+            text(known, "error.type").as_deref(),
+            Some("UNAUTHENTICATED")
+        );
+        assert_eq!(text(known, "server.address").as_deref(), Some("::1"));
+        assert_eq!(text(known, "server.port").as_deref(), Some("50051"));
+        assert_eq!(
+            text(raw, "rpc.method_original").as_deref(),
+            Some("example.v1.Raw/Unary")
+        );
+        assert_eq!(
+            text(raw, "user_agent.original").as_deref(),
+            Some("grpc-client-test")
+        );
+        assert_eq!(text(overlong, "rpc.method_original"), None);
+        assert_eq!(text(overlong, "user_agent.original"), None);
+    }
+
+    #[test]
+    fn an_admitted_path_still_requires_both_declared_labels() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let series = Series::new();
+        for declared in [
+            Some(("example.v1.EchoService", "Unary")),
+            None,
+            Some(("example.v1.OtherService", "Unary")),
+            Some(("example.v1.EchoService", "Other")),
+            Some(("example.v1.EchoService", "Unary")),
+        ] {
+            let request = test_request("/example.v1.EchoService/Unary", declared);
+            Call::start(&series, &request, None).finish(tonic::Code::Ok);
+        }
+        let rendered = recorder.handle().render();
+        assert!(rendered.lines().any(|line| line
+            == r#"grpc_client_started_total{grpc_service="example.v1.EchoService",grpc_method="Unary"} 2"#));
+        assert!(rendered.lines().any(|line| line
+            == r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 3"#));
     }
 
     #[test]
