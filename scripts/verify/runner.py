@@ -773,6 +773,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "scripts/tests/test_image_inventory.py",
                 "scripts/tests/test_profile_runners.py",
                 "scripts/tests/test_verify.py",
+                "scripts/verify/test_ledger.py",
             )
         )
         if (repo / "make/source.mk").is_file():

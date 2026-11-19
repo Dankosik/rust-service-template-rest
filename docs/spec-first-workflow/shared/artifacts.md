@@ -62,5 +62,6 @@ Use one status when durable state changes an action:
 
 A material invalidation moves `ready` back to `draft` or `blocked`. Only the
 artifact owner changes status. Required or conditionally triggered independent
-review follows the shared [Review](review.md) lifecycle. Task receipts and
-executable-ledger transitions use [Task Ledger V1](../interfaces/task-ledger-v1.md).
+review follows the shared [Review](review.md) lifecycle. Task receipts and executable-ledger state use [Task Ledger
+V1](../interfaces/task-ledger-v1.md) and [Ledger Runtime
+State](../interfaces/acceptance-result-v1.md#ledger-runtime-state).

@@ -72,7 +72,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 
 - **Verified anchors:** <source-verified `path::Symbol`, `crate@version::item`, schema/config anchors, and uncached crates in `Reopen if`>
 - **Pinned shared identifiers:** <exact new/changed config keys, error codes, metric/span names, wire/event/job/table/column names, or cross-unit symbols left open by `spec.md`, preserving any external contract already pinned by `spec.md`; omit when none>
-- **Shared mutated surfaces:** <narrowest canonical repo-relative shared files or ordered directories actually mutated matching [Task Packet V1](task-packet-v1.md)—e.g. `Cargo.toml`, `migrations/`, shared `docs/decisions/*.md`, `crates/config/src/app.rs`, `crates/service/src/api.rs`, `crates/service/src/bootstrap/mod.rs`, or a crate `lib.rs`—or `none`>
+- **Shared mutated surfaces:** <narrowest canonical repo-relative shared files or ordered directories actually mutated matching [Task Packet V1](task-packet-v1.md) — manifests/policy, ordered/generated surfaces, shared wiring including parent `lib.rs`/`mod.rs`, or concrete shared docs such as `docs/decisions/<topic>.md` — or `none`>
 - **Superseded paths and generated contracts:** <code, config, contracts, or tests to delete; generated artifacts to regenerate (`api/`, `.sqlx/`, etc.); omit when none>
 - **Durable doc updates:** <`docs/decisions/...`, `docs/backend-library-selection.md`, `docs/repo-architecture.md` (incl. `Domain Vocabulary`), or `docs/production-contract.md` updates for Implementation, citing `D<n>` or `spec.md`; omit when none>
 - **Planning hooks:** <`prefactor`, `shared-contract` (≥2 lock-disjoint parallel consumers only), `integration-first`, or `expand -> migrate -> contract`; omit when none>
