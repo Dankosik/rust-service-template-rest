@@ -28,7 +28,13 @@ pub enum PostgresSessionBudgets {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub(crate) struct PostgresFields<Session, Capacity, Deadline, Notifications> {
+pub(crate) struct PostgresFields<
+    Session,
+    Capacity,
+    Deadline,
+    Notifications,
+    MigrationDsn = IgnoredAny,
+> {
     #[serde(deserialize_with = "crate::de::boolean")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
@@ -36,6 +42,8 @@ pub(crate) struct PostgresFields<Session, Capacity, Deadline, Notifications> {
     /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     dsn: Option<SecretString>,
+    /// Optional direct connection URL, including credentials, for the migrator.
+    migration_dsn: MigrationDsn,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
     /// password. The DSN then carries no password, and the running service
@@ -95,7 +103,8 @@ impl Default for Notifications {
 
 pub(crate) type PostgresInput =
     PostgresFields<SessionBudgetsInput, PoolCapacity, IgnoredAny, Notifications>;
-type MigrationPostgresInput = PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny>;
+type MigrationPostgresInput =
+    PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny, Option<SecretString>>;
 // template:begin jobs:postgres-operator-input
 pub(crate) type OperatorPostgresInput =
     PostgresFields<SessionBudgetsInput, IgnoredAny, IgnoredAny, IgnoredAny>;
@@ -189,10 +198,14 @@ impl MigrationPostgresInput {
             self.migration_deadline.0,
             Duration::from_secs(1)..=Duration::from_hours(24),
         ));
+        let (dsn, password_file) = match self.migration_dsn {
+            Some(dsn) => (Some(dsn), None),
+            None => (self.dsn, self.password_file),
+        };
         Ok(
-            admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| MigrationPostgresConfig {
+            admit_dsn(self.enabled, dsn, violations)?.map(|dsn| MigrationPostgresConfig {
                 dsn,
-                password_file: self.password_file,
+                password_file,
                 migration_deadline: self.migration_deadline.0,
             }),
         )

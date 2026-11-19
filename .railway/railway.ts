@@ -59,7 +59,11 @@ export default defineRailway((ctx) => {
       // The migrator refuses a disabled profile, and the DSN is set out of band.
       APP__POSTGRES__ENABLED: "true",
       APP__POSTGRES__DSN: preserve(),
+      APP__POSTGRES__MIGRATION_DSN: preserve(),
       // template:end postgres:railway-postgres-env
+      // template:begin jobs:railway-postgres-notifications
+      APP__POSTGRES__NOTIFICATIONS: preserve(),
+      // template:end jobs:railway-postgres-notifications
       // template:begin service-auth:railway-service-auth-env
       // The token type and the trust registry are one value for every service
       // of the environment, kept as shared variables.
