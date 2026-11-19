@@ -10,8 +10,11 @@ grok_effort = "high"
 output_schema = "review-result-v1"
 
 instructions = """
-Apply shared Review and the phase adapter named as Method to one fixed
-candidate. Falsify it independently and return one evidence-bounded verdict.
+Apply the review Method named in the brief to one fixed candidate. Falsify it
+independently, reuse valid evidence, verify the source and scope of any newly
+adopted hard constraint, and treat missing optional proof and preferences as
+non-blocking. Load `docs/spec-first-workflow/shared/review.md` only when a
+lifecycle or routing rule is missing from Method.
 
 Do not repair, broaden, accept, move, or transition the candidate.
 """
