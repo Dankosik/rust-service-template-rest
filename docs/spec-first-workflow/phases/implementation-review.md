@@ -7,22 +7,19 @@ accepting.
 
 Pin the brief's diff command (`git diff <Base>..HEAD` or supplied command) and
 confirm the ref resolves and the diff is non-empty (`REVIEW_HANDOFF_INVALID`
-otherwise). Read touched production files, surrounding modules, and direct
-callers before reading tests — judge live code in context, not diff hunks
-alone. Reuse valid check receipts; run a bounded existing diagnostic only for a
+otherwise). Inspect live source and direct callers within the assigned read scope before judging reachability. Reuse valid check receipts; run a bounded existing diagnostic only for a
 concrete falsification question under [Evidence
 Contract](../shared/evidence-contract.md#required-and-optional-proof).
 
 ## Read Scope And Standards
 
-Load only the sources and `.agents/skills/rust-*` standards assigned to your
-review mode so parallel lenses stay disjoint and lean. Skip anything
+Use the assigned axes and the available accepted inputs. Apply Rust-specific standards only to Rust surfaces; for documentation or other changes use the owning policy and matching checks. Skip anything
 deterministic tooling (`rustc`, `clippy`, `rustfmt`,
 `quality/architecture.json`) already enforces.
 
 | Mode | Read inputs | Standards to load |
 | --- | --- | --- |
-| Single reviewer (Axes 1–4) | Diff, accepted bundle, check receipts, production files + callers, tests | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md), [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), plus 1–2 matching domain `rust-*` skills below |
+| Single reviewer (Axes 1–4) | Diff, accepted bundle, check receipts, production files + callers, tests | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md), [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), and any domain skills matching a touched risk |
 | Lens A — Spec, Scope & Proof (Axes 1 + 4) | Diff, `spec.md`, `tasks.md`, packets, check receipts, tests, and touched production code strictly for reachability and Mutation Mental Test | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md); add `rust-api-contract` if HTTP/OpenAPI changed |
 | Lens B — Runtime, Seams & Structure (Axes 2 + 3) | Diff, touched production files + surrounding modules + callers, `design/`, `rollout.md`, task `decisions` (skip `intent.md` and full test suites unless verifying a seam caller) | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), plus 1–2 matching domain skills for touched risk surfaces (`rust-sqlx`, `rust-tokio`, `rust-security`, `rust-axum`, `rust-reliability`, `rust-errors`, `rust-config`) |
 | [Structure-Only](#structure-only-review) (Axis 3) | Diff hunks and callers for each structural addition named in the brief | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md) |
@@ -54,17 +51,7 @@ axis never masks another's defect.
      defaults, and `decisions` across `Provides -> Depends on` seams
      (`INTEGRATION_DEFECT`); flag duplicated private helpers or divergent
      vocabulary, error shapes, or telemetry fields across parallel tasks.
-3. **Structure & Single Ownership.** Apply `rust-structural-quality`'s
-   **deletion test**, [Engineering](../../../AGENTS.md#engineering), and [Rust
-   Change Surface](../../../AGENTS.md#rust-change-surface). Flag reimplementing
-   `std`, a locked `Cargo.lock` crate, or an authoritative tool; splitting one
-   fact across hand-synced carriers; adding an unjustified crate,
-   dependency/feature, layer, trait, config key, or fallback/shim; or violating
-   non-clippy repo rules (explanatory comments, `#[non_exhaustive]` on public
-   workspace types, debug probes/logging, unjustified policy waivers). **Repo
-   standards override generic taste:** suppress objections endorsed by
-   `AGENTS.md` or `docs/decisions/`. Name the violated constraint and exact
-   action (`delete | collapse | bind | delegate <item>`).
+3. **Structure & Single Ownership.** Apply the deletion test and the changed surface's authoritative standards, including recorded decisions. Name the violated constraint and the action (`delete | collapse | bind | delegate <item>`).
 4. **Test & Proof Falsifiability.** Apply the **Mutation Mental Test** to every
    added or edited test: mentally invert or delete the single production branch
    it claims to guard — would it go **red**? Flag **tautological** assertions
@@ -88,9 +75,7 @@ Record compact `evidence_boundary` reconstructions for assigned axes:
 - **Axes 2 / 3:** production files, callers, and cross-unit seams inspected,
   plus `.agents/skills/rust-*` skills loaded.
 
-Return [Review Result V1](../interfaces/review-result-v1.md) (`PASS | FAIL |
-NEEDS_PARENT`, or `REVIEW_HANDOFF_INVALID`), keeping `findings` compact
-(target **≤400 words per lens**, structured bullets only, no prose essays):
+Return [Review Result V1](../interfaces/review-result-v1.md). An invalid handoff has no verdict. Keep findings compact (target ≤400 words per lens), grouped by assigned axis:
 
 ```text
 ## Axis <N> — <Axis Name>
@@ -99,11 +84,7 @@ NEEDS_PARENT`, or `REVIEW_HANDOFF_INVALID`), keeping `findings` compact
 - [<TASK_DEFECT | INTEGRATION_DEFECT | UPSTREAM_GAP | FOLLOW_UP>] <path::Symbol> — violated: <exact anchor/rule>; trace: <reachable counterexample, surviving mutant, or structural action>; owner: <smallest owner>
 ```
 
-Blocking findings (`TASK_DEFECT`, `INTEGRATION_DEFECT`, `UPSTREAM_GAP`, and
-real in-scope defects from optional checks) require all four fields. Style
-preferences, equivalent single-owner structure, naming polish, speculative
-risks, untouched historical debt, and missing optional infrastructure stay
-`FOLLOW_UP` and never block `PASS`.
+Apply the classifications and routing in Review Result V1. Record missing optional observations in `evidence_boundary`.
 
 ## Complementary Panel
 
@@ -113,15 +94,11 @@ Standards](#read-scope-and-standards)) in parallel on the frozen candidate.
 
 **Synthesis (Delivery Owner):** `PASS` requires both lenses `PASS`; hold any
 `FAIL` or `NEEDS_PARENT` verbatim per axis without reranking. Resolve an
-evidence-backed lens conflict via `adjudicator-agent`. Post-repair recheck uses
-one fresh [Delta Recheck](#delta-recheck) reviewer.
+evidence-backed lens conflict via `adjudicator-agent`.
 
 ## Delta Recheck
 
-Run **one fresh `reviewer-agent`** scoped to the brief's pinned repair diff,
-repaired/open anchored findings, Delivery-Owner-verified partial-refutation
-anchors, repair `decisions`, and invalidated proof (all four axes on the repair
-delta, including after a 2-lens Panel):
+Inspect the pinned repair delta, repaired and open findings, verified partial refutations, repair decisions and invalidated proof. Cover all four axes on that delta:
 
 - Falsify root-cause closure of each repaired finding.
 - Falsify preserved spec parity and clean repair structure (`Engineering` and
@@ -132,9 +109,4 @@ Keep unaffected closed reasoning and verified refutations intact.
 
 ## Structure-Only Review
 
-Run **Falsifier 3** exclusively on each structural addition named in the brief,
-keeping behavior and proof outside scope. Classify
-[Engineering](../../../AGENTS.md#engineering) and [Rust Change
-Surface](../../../AGENTS.md#rust-change-surface) violations as `TASK_DEFECT`
-naming the exact action (`delete | collapse | bind | delegate <item>`);
-classify other observations as `FOLLOW_UP`.
+Apply Axis 3 only to the structural additions named in the brief.

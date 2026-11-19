@@ -1,62 +1,46 @@
 # Execution Modes
 
-Load only when executing in **`no-commit` mode** (the user explicitly forbade
-local commits) or **inline unit mode** (a fixed unit with no `tasks.md` ledger).
-Standard ledger runs commit each unit on the integration branch and skip this
-file.
-
 ## No-Commit Mode
 
-When the user forbade local commits, the Orchestrator applies these overrides
-and passes the relevant active lines into each brief so downstream actors do
-not re-derive them:
+When the user forbids local commits, record `Commit mode: no-commit` and
+serialize all writers in the integration worktree. Use `git diff <Base>` for
+the assembled change. Mark newly created, verified candidate files with
+`git add -N -- <paths>` so this diff includes them. Exclude the task bundle.
 
-- **Pinning and serialization:** record `Commit mode: no-commit` in `tasks.md`,
-  serialize every unit and repair in the shared checkout, and track
-  `landed paths` across completed tasks and repairs.
-- **Unit and repair landing:** verify changed paths stay inside granted scope
-  (excluding `specs/<task>/` and prior `landed paths`), run
-  `git add -N -- <newly-created-untracked-paths>` strictly on newly created
-  paths (never deleted paths or `specs/<task>/`) so `git diff <Base>` sees new
-  files without committing, and append all verified changed paths from the unit
-  or repair to `landed paths`.
-- **Delivery Owner read-only snapshot:** before dispatching **or resuming**
-  Delivery Owner (refreshing immediately after every landed repair), capture a
-  snapshot outside the repo (`git diff <Base>` saved to a temp patch plus the
-  untracked path list outside `specs/<task>/`). On return, confirm zero delta
-  against that snapshot; if Delivery Owner mutated candidate files, revert
-  newly dirtied untouched paths and remove stray untracked paths then
-  reject/re-run validation, or fail closed (`Blocked`, preserving the tree and
-  naming the unauthorized delta) if any already-landed uncommitted file was
-  modified — never blindly discard landed edits. Remove the temp snapshot at
-  closeout.
-- **Diff commands and repair resume:** substitute `git diff <Base>` everywhere
-  `<Base>..HEAD` appears, and `git diff <Base> -- <repaired paths>` everywhere
-  `<old-HEAD>..<new-HEAD>` appears. After a Repair Lead returns `Implemented`,
-  land via `git add -N` above, refresh the pre-dispatch snapshot, and resume
-  Delivery Owner with `git diff <Base> -- <repaired paths>`, whether scope
-  expanded, and repair `decisions` (no `new HEAD`).
-- **Brief fields:**
-  - *Unit Lead and Repair Lead briefs:* include `Commit mode: no-commit` and
-    prior `landed paths` (excluded from Step 3 scope checks).
-  - *Delivery Owner brief:* include `Commit mode: no-commit`, pinned diff
-    command `git diff <Base>`, and on Round 2 author `Repair Request`
-    `prior_attempt` with Round 1's repaired paths and summary instead of a
-    commit SHA.
-- **Closeout:** if [Cleanup](../../shared/cleanup.md) updates tracked `docs/`,
-  run `make docs-check` and `make typos` and leave the edits uncommitted.
+Before each unit, repair, validation or validation resume, pin the current
+candidate. Retain HEAD, index state and a recoverable snapshot of the content,
+paths and file modes of the scoped worktree changes, including new files and
+deletions. Keep temporary snapshots private and outside the candidate; exclude
+credentials, ignored fixtures and the task bundle. Track newly appearing
+untracked paths before including their contents. Preserve snapshots through
+their last consumer.
+
+On every return verify HEAD and index against their pinned state. Only the
+Orchestrator marks verified new files intent-to-add, after checking the
+writer's delta. Preserve and reconcile unexpected commits or staging before
+consuming a result. Compare working-tree content before and after each writer,
+including paths changed by earlier units. Verify the actual delta against this writer's grant. Record that delta
+in place of a landing commit. Give downstream Leads the relevant bounded diffs.
+Pass the before/after repair delta to the Delivery Owner and reviewer.
+Identify a prior attempt by snapshot and repair summary. For a read-only
+assignment, any candidate or index change invalidates its return. Preserve
+unexpected edits and recover the pinned candidate before continuing. Apply
+[Cleanup](../../shared/cleanup.md) to snapshots and leave tracked closeout
+edits uncommitted.
 
 ## Inline Unit Mode
 
-When executing a fixed inline unit with no `tasks.md` ledger, this session acts
-as the root-local Lead (`ACCEPTANCE_UNIT_LEAD`): pin `Base` before the first
-edit, run [Unit Implementation](unit.md), then proceed directly to [Final
-Validation](final-validation.md) without an Orchestrator or `Implementation
-Result` handoff.
+For a fixed unit without a ledger, the root-local Lead pins Base before editing
+and uses the accepted inline scope and obligations wherever the ledger method
+would read a packet, ledger or Completion criteria. Apply [Unit
+Implementation](unit.md), then [Final Validation](final-validation.md) on the
+fixed change. The same Lead owns both steps without dispatch or result handoff.
+For uncommitted changes the root-local Lead performs the snapshot, scope
+check and intent-to-add steps above.
 
-| Boundary | Root-local inline delta |
-| --- | --- |
-| Candidate diff when uncommitted | Run `git add -N` on newly created paths and pass `git diff <Base>` (and `git diff <Base> -- <repaired paths>` after repair) to Final Validation and review instead of `<Base>..HEAD`. |
-| Scope expansion or Cargo crate/feature | Decide directly within session authority (applying `rust-dependencies` and `AGENTS.md#authority` for dependencies). |
-| Invalid behavior, architecture, or zero delta | Reopen directly under [Transition](../../shared/transition.md). |
-| Final Validation `NeedsRepair` or refuted findings | Edit directly under [Repair Assignment](repair.md) (or record the refuting anchor) and return directly to [Final Validation Step 4](final-validation.md#4-verify-findings-classify-and-route-repairs). |
+Decide disjoint scope and dependency changes directly within existing authority.
+Reopen invalid behavior, architecture or a zero-delta assignment under
+[Transition](../../shared/transition.md). On a confirmed defect, perform
+[Repair Assignment](repair.md) directly. Resume validation with the repair
+delta or refuting evidence. Keep the selected independent review and recheck
+boundaries.

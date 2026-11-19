@@ -1,154 +1,81 @@
 # Final Validation
 
-Use as Delivery Owner (`ACCEPTANCE_UNIT_LEAD`) once every planned unit is
-`Implemented` and assembled. Prove the fixed candidate against the accepted
-outcome and return one [Completion
-Result](../../interfaces/acceptance-result-v1.md#completion-result) — or one
-batched [Repair Request](../../interfaces/acceptance-result-v1.md#repair-request)
-for in-scope defects.
-
-**Read-only in a ledger:** leave candidate files untouched; inspect diffs, run
-checks, and dispatch review, routing every code, test, or generated-file edit
-through `NeedsRepair`. For `no-commit` or inline-unit overrides, follow
-[Execution Modes](modes.md).
-
-## Steps
+As Delivery Owner prove the fixed assembled candidate. In a ledger this
+assignment is read-only. Route candidate edits through a Repair Lead.
+[Execution Modes](modes.md) supplies the inputs for inline and no-commit runs.
 
 ### 1. Pin Candidate, Select Review Mode, And Run Mechanical Baseline
 
-- Pin `<Base>..HEAD` (or brief's diff command) and `git status`, confirming
-  zero active writers and no stray untracked files (`specs/<task>/` stays
-  untracked until [Close](../implementation.md#5-close)).
-- Read `tasks.md` (`Completion`, `Global constraints`, task `decisions`, and
-  `unverified`), each packet's `Final validation`, and `git diff --stat`.
-- **Select review mode early** under [Review
-  Trigger](../../shared/review.md#trigger) so Step 2 stays inside your smart
-  zone without duplicating Full Review's diff audit.
-- Pick one non-overlapping plan from [Validation
-  budget](../../../../AGENTS.md#validation-budget); on mixed surfaces, load
-  [Validation Routing](../../../validation-routing.md) to pick the matching leaf
-  checks (ignoring `docs-check` failures caused solely by untracked
-  `specs/<task>/`). Load
-  [Evidence Contract](../../shared/evidence-contract.md) only for reuse,
-  additional required proof, or unavailable infrastructure.
-- Run mechanical checks (`fmt-check`, `lint`, `build`, relevant tests,
-  generated-contract and surface checks). Run assembled checks across every
-  seam touched by multiple units, count only executed checks with **non-zero**
-  test counts observing the claimed boundary, and record unavailable *optional*
-  infrastructure as a limitation without provisioning ad-hoc stacks.
+Pin the brief's diff and candidate identity. Confirm writers have joined and
+identify any unexpected working-tree changes before using receipts. Read
+Completion, global constraints, packet final-validation claims, decisions,
+unverified entries and the diff stat. Select the disposition under [Review
+Trigger](../../shared/review.md#trigger).
 
-If build or lint blocks tests, go straight to Step 4; otherwise finish tests
-and continue to Step 2 so check failures and proof gaps batch into one `Repair
-Request`.
+Select the matching [Validation budget](../../../../AGENTS.md#validation-budget)
+checks plus source-mandated additional proof. Apply [Execution
+Evidence](../../shared/evidence-contract.md#execution-evidence) for receipt
+reuse and invalidation, and [Validation Routing](../../../validation-routing.md)
+for generated contracts or mixed surfaces. Attribute any docs-check failure to
+its actual path before excluding an execution-only untracked bundle issue.
+If a failed prerequisite prevents further checks, route it through Step 4 and
+retain the unfinished checks.
 
 ### 2. Verify Proof Completeness (And Diff Trace When Unreviewed)
 
-- **Always (specific proof mapping):** map every active `Observable claim`
-  (`superseded at assembly by T<contract>` closes via `T<contract>` and
-  `Completion`), `Completion` criterion, preserved `G<n>`, and `unverified`
-  entry to the **specific executed test name(s) or command output** observing
-  its claimed seam (a blanket suite total like `make test: N passed` without
-  naming covering tests is not proof). Run locally runnable `unverified` tests
-  now, verify removals make old behavior unreachable, and compare task
-  `decisions` for contradictions across shared seams or locks.
-- **When Full Review will run:** stop Step 2 here — leave hunk-by-hunk semantic
-  diff auditing to fresh `reviewer-agent`(s) in Step 3 so you keep your smart
-  zone lean and stay neutral when verifying citations in Step 4.
-- **When Direct Completion or Structure-Only Review applies:** also read
-  accepted sources (`intent.md`, `spec.md`, `design/`, `rollout.md`) and the
-  candidate diff to trace every material hunk back to an accepted obligation,
-  verify cross-unit seams, and spot-check added tests against tautologies.
+Map each active observable claim, preserved guarantee and local Completion
+criterion to the specific executed test or command output observing its seam.
+Resolve superseded claims through the named contract task and Completion.
+Check cross-unit decisions and shared seams, verify withdrawn paths, and
+reconcile every unverified entry. Run outstanding required local checks and
+locally runnable deferred tests. Record unavailable optional proof at its
+actual scope.
 
-Done when every obligation, `unverified` entry, and (when unreviewed) material
-hunk maps to a named passing check, an unavailable *optional* gap, or a
-concrete defect. Fix check failures and missing required proof first; dispatch
-review only on a green, proof-complete candidate.
+For direct completion or structure-only review, trace each material diff hunk
+to the accepted inputs and spot-check changed tests for tautologies. In full
+review the independent reviewers own this diff audit. Batch mechanical defects
+and proof gaps in Step 4. Begin initial review only after required local proof
+is complete.
 
 ### 3. Freeze Candidate And Run Selected Review
 
-- Re-evaluate [Review Trigger](../../shared/review.md#trigger) if a repair
-  landed before initial review. If **Direct completion** applies, record
-  `review: not_required (<checked trigger signals: none matched>)` and go to
-  Step 5.
-- Otherwise freeze the candidate and dispatch `reviewer-agent` (tier per
-  harness adapter) under [Implementation Review](../implementation-review.md)
-  with mode, pinned diff command and commit list, accepted bundle paths
-  (`specs/<task>/`), and current check receipts — omitting builder or Delivery
-  Owner narrative justifications or self-review claims.
-
-| Review Return | Action |
-| --- | --- |
-| `PASS` (both lenses `PASS` in a 2-lens panel) | Go to Step 5. |
-| `FAIL` or `NEEDS_PARENT` | Hold 2-lens reports verbatim by axis without reranking (dispatch `adjudicator-agent` only for an evidence-backed conflict between lenses). Go to Step 4. |
-| `REVIEW_HANDOFF_INVALID` | Repair brief or diff boundary and re-dispatch without consuming a repair round (or return `Blocked` if candidate diff is genuinely empty). |
+Re-evaluate the trigger on the fixed candidate after pre-review repair.
+Record direct completion with the checked trigger signals. Otherwise apply
+[Review Lifecycle](../../shared/review.md#lifecycle) and dispatch the selected
+[Implementation Review](../implementation-review.md) with its mode, pinned
+diff, accepted sources and check receipts. Apply the adapter's panel threshold.
+Route findings through Step 4. For an invalid handoff correct the boundary
+and redispatch without consuming a repair round. If a required diff is
+genuinely empty, return the missing decision to its owner.
 
 ### 4. Verify Findings, Classify, And Route Repairs
 
-**Verify before routing:** read the cited code anchor and surrounding callers
-for every review finding before acting; dismiss unanchored or factually refuted
-claims with their refuting anchor (or escalate contested claims via
-`adjudicator-agent`). If zero blocking findings survive, record those anchors
-in `review` and go directly to Step 5 without editing code.
+Verify each cited finding against the primary anchor and surrounding callers.
+Record the exact refutation for a dismissed claim. Preserve panel findings by
+axis and use [Review Route](../../shared/review.md#route) for a surviving
+material conflict. Classify findings under [Review Result V1](../../interfaces/review-result-v1.md).
 
-Batch surviving failures and verified findings under [Review Result
-V1](../../interfaces/review-result-v1.md):
-
-| Classification | Action |
-| --- | --- |
-| `TASK_DEFECT` or `INTEGRATION_DEFECT` | Stop active readers, release validation locks, and return **one batched** [Repair Request](../../interfaces/acceptance-result-v1.md#repair-request) (`verdict: NeedsRepair`) naming all surviving findings, owning tasks (both seam tasks for `INTEGRATION_DEFECT`), `retained_evidence`, and `prior_attempt` on Round 2. |
-| `environment` (optional) | Record the material gap in `evidence` without holding acceptance. |
-| `environment` (required), `UPSTREAM_GAP`, or `NEEDS_PARENT` | Run a missing local check directly if inside authority (read-only); otherwise apply [Evidence Contract](../../shared/evidence-contract.md#required-and-optional-proof) and return `Blocked` naming claim and owner. |
-
-Follow the **2-repair-round cap** and escalation rules in [Review
-Lifecycle](../../shared/review.md#lifecycle); escalate via [Parent-Owned
-Recovery](../../shared/transition.md#parent-owned-recovery) if unresolved.
-
-**On resume after repair:**
-
-- **All findings refuted (`Blocked: refuted findings`):** inspect the refuting
-  anchor directly; if verified with zero surviving blockers, record the anchor
-  in `review` and continue (Step 5, or Step 2/3 if initial validation or review
-  has not run); otherwise escalate via `adjudicator-agent` or Parent-Owned
-  Recovery.
-- **Repair landed (`Implemented`):** re-pin candidate, inspect the repair diff
-  (`<old-HEAD>..<new-HEAD>`) and repair `decisions`, and follow in order:
-  1. **Resolve any partial refutations in repair `decisions`:** inspect each
-     refuting anchor directly — dismiss verified refutations (removing them
-     from open findings passed to `Delta Recheck`), stay in Step 4 and batch
-     for Round 2 (within the 2-round cap) if a refutation fails and the defect
-     still holds, or escalate genuinely contested claims via `adjudicator-agent`.
-  2. **Rerun checks:** rerun failed, invalidated, and not-yet-run required
-     checks; if any fail, stay in Step 4 and batch within the 2-round cap.
-  3. **Refresh proof mapping:** if Step 2 has not completed or the repair
-     invalidated proof or seams, complete Step 2's proof check first (staying
-     in Step 4 if any gap survives).
-  4. **Route review:** if initial review has not run, go to Step 3; otherwise
-     dispatch one fresh `reviewer-agent` in [Delta
-     Recheck](../implementation-review.md#delta-recheck) mode (passing repair
-     diff, repaired/open findings, verified partial-refutation anchors, and
-     repair `decisions`) — or a fresh **full** review via Step 3 if the repair
-     expanded scope, interfaces, or risk surface under [Review
-     Lifecycle](../../shared/review.md#lifecycle) — routing per Step 3's table.
+- Batch confirmed task and integration defects into one [Repair
+  Request](../../interfaces/acceptance-result-v1.md#repair-request) per pass.
+  Stop readers and release validation locks before handing off. Include both
+  owning units for a broken seam.
+- For unavailable proof, apply [Required and Optional Proof](../../shared/evidence-contract.md#required-and-optional-proof).
+  Return a required missing input, upstream gap or unresolved parent decision
+  as `Blocked` with its owner and narrower evidence.
+- On repair or refutation, verify the repair delta and each refuting anchor.
+  Keep surviving defects open. Re-pin any changed candidate, reconcile
+  failed, invalidated and unfinished checks in Step 1, and refresh affected
+  proof mappings in Step 2. Complete any pending initial review in Step 3.
+  After previously completed review apply Review Lifecycle for the bounded
+  delta recheck, expanded full review and repair limit. Apply that limit to
+  unresolved defects even across candidate revisions in the same repair cycle.
 
 ### 5. Emit Completion Result
 
-Return [Completion
-Result](../../interfaces/acceptance-result-v1.md#completion-result) (`Accepted`)
-only when every gate holds:
-
-- [ ] Every active `Observable claim` (`superseded at assembly by T<contract>`
-  closed via `T<contract>`), `Completion` criterion, and locally runnable
-  `unverified` entry maps to a named passing executed check at its required
-  boundary (only unavailable *optional* proof remains a named gap).
-- [ ] Every material behavior change in the candidate diff serves an accepted
-  obligation.
-- [ ] All blocking check and verified review findings are closed and any
-  selected review returned `PASS` (or all blocking findings were dismissed with
-  primary-source refutation/adjudication, or `not_required` with checked
-  signals).
-- [ ] Every external outcome explicitly requested in `Completion` (CI,
-  deployment, runtime observation) is directly observed. Unrequested CI/`main`
-  checks remain pending notes under `Accepted`; if a requested external outcome
-  is unreachable or awaits authorization, return `Blocked` with passing local
-  results in `evidence` and the exact external gate and owner in `next_owner`
-  (never invent a third verdict).
+Return [Completion Result](../../interfaces/acceptance-result-v1.md#completion-result)
+as `Accepted` once Steps 1–4 close on the current candidate, including the
+required review disposition and any verified refutations or adjudication.
+Every explicitly requested external outcome also needs direct evidence and
+the action's existing authority. While it is pending, return `Blocked` with
+verified local scope and the exact external gate and owner. Unrequested CI or
+runtime checks and material optional gaps stay scoped notes.

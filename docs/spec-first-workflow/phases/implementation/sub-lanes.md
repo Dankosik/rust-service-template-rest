@@ -6,19 +6,12 @@ inside one unit, or when a mutable `worker-agent` returns a lane result.
 ## Delegation Rules
 
 - Implement directly whenever handoff costs more than it saves.
-- Run parallel lanes only when accepted interfaces are stable, writable owners
-  and exclusive locks are disjoint (and never edited concurrently by the Lead),
-  and capacity permits. Apply [Agent Harness](../../../agent-harness.md) when
-  dispatching, steering, or replacing a lane.
+- Once interfaces are stable, apply [Nested Execution](../../../agent-harness.md#nested-execution) for scope, capacity, integration and lifetime.
 - **Shared Rust seams:** land boundary types, traits, signatures, and generated
   sources first and verify with `cargo check` before dependent lanes consume
   them. A consumer of a checked contract may start immediately; a consumer of
   implemented code starts once that code is integrated into the unit candidate.
-- **Serial integration & escalation:** integrate lane mutations serially. A
-  lane raises scope expansion or invalid accepted behavior/architecture with
-  its Lead through `gap`.
-- Join or stop every lane before returning `Implementation Result`, freezing
-  the candidate, or releasing writable scope.
+- Report an out-of-scope change or invalidated contract to the Lead in `gap`.
 
 ## Delegated Result V1
 
