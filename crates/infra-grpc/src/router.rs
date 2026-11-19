@@ -300,7 +300,7 @@ async fn native_grpc(
         infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
         return next.run(request).await;
     };
-    drain_rejected(request, REJECT_DRAIN).await;
+    drain_rejected(request, REJECT_DRAIN_TIMEOUT).await;
     response
 }
 
@@ -545,7 +545,7 @@ fn admission_wait(max_wait: Duration, opening_context: &OperationContext) -> Dur
     opening_context
         .remaining()
         .unwrap_or_default()
-        .saturating_sub(REJECT_DRAIN)
+        .saturating_sub(REJECT_DRAIN_TIMEOUT)
         .min(max_wait)
 }
 
@@ -661,7 +661,7 @@ fn finish_call(
     }
 }
 
-const REJECT_DRAIN: Duration = Duration::from_millis(100);
+const REJECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
 pub(crate) async fn reject_with_budget(
@@ -669,17 +669,19 @@ pub(crate) async fn reject_with_budget(
     request: Request,
     status: tonic::Status,
 ) -> Response {
-    let drain = opening_context
+    let timeout = opening_context
         .remaining()
-        .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));
-    drain_rejected(request, drain).await;
+        .map_or(REJECT_DRAIN_TIMEOUT, |remaining| {
+            REJECT_DRAIN_TIMEOUT.min(remaining / 2)
+        });
+    drain_rejected(request, timeout).await;
     status.into_http()
 }
 
 #[warn(clippy::arithmetic_side_effects)]
-async fn drain_rejected(request: Request, drain: Duration) {
+async fn drain_rejected(request: Request, timeout: Duration) {
     let mut body = request.into_body();
-    let _ = tokio::time::timeout(drain, async {
+    let _ = tokio::time::timeout(timeout, async {
         let mut remaining = REJECT_DRAIN_BYTES;
         while let Some(Ok(frame)) = body.frame().await {
             tokio::task::consume_budget().await;
