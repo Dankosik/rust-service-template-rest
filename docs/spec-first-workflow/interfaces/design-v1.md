@@ -4,7 +4,7 @@
 structured task—closing every **two-engineer divergence** and **one-way door**
 while leaving internals behind a single module's seam to Implementation.
 
-```markdown
+````markdown
 # Technical Design: <short technical outcome>
 
 status: draft | ready | blocked
@@ -88,7 +88,7 @@ Carried concerns: <risk, downstream owner, closing action; omit when none>
 <Include only while `status: blocked`; remove once resolved.>
 
 - **B1 — <upstream question or falsified rule; for `Intake`, phrase in requester language so `"yes"` accepts recommendation when supported>:** <primary evidence> | **Options & consequences:** <A vs B> | **Recommendation:** <choice and reason, or `none` when balanced>
-```
+````
 
 ## Field Rules
 
