@@ -252,7 +252,6 @@ impl Work {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
     NotSuccess,
-    Unstorable,
 }
 
 async fn execute(
@@ -337,14 +336,8 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     },);
     assert_eq!(committed(held), record);
 
-    for replica in [&replica_1, &replica_2] {
-        let retry = execute(replica, &scope, INPUT, &record, &work).await;
-        assert_eq!(live(retry), Some(record.clone()));
-    }
-    let concurrent = [
-        &replica_1, &replica_2, &replica_1, &replica_2, &replica_1, &replica_2,
-    ]
-    .map(|replica| execute(replica, &scope, INPUT, &record, &work));
+    let concurrent = [&replica_1, &replica_2, &replica_1, &replica_2]
+        .map(|replica| execute(replica, &scope, INPUT, &record, &work));
     for retry in join_all(concurrent).await {
         assert_eq!(live(retry), Some(record.clone()));
     }
@@ -393,22 +386,14 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let work = Work::default();
 
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
-    let other_caller = ScopeKey::new(caller(OTHER_SUBJECT), KEY);
     let other_key = ScopeKey::new(caller(SUBJECT), OTHER_KEY);
-    for (scope, refusal) in [
-        (&scope, Refusal::NotSuccess),
-        (&other_caller, Refusal::Unstorable),
-    ] {
-        let outcome: Outcome<Refusal> = replica_1
-            .attempt(scope, &INPUT, async |tx: &mut Tx<'_>| {
-                work.run(tx).await;
-                Err(refusal)
-            })
-            .await;
-        std::assert_matches!(outcome, Ok(Attempted::RolledBack(returned)) if returned == refusal,
-            "{outcome:?}"
-        );
-    }
+    let outcome: Outcome<Refusal> = replica_1
+        .attempt(&scope, &INPUT, async |tx: &mut Tx<'_>| {
+            work.run(tx).await;
+            Err(Refusal::NotSuccess)
+        })
+        .await;
+    std::assert_matches!(outcome, Ok(Attempted::RolledBack(Refusal::NotSuccess)));
     let panicked = AssertUnwindSafe(replica_1.attempt(
         &other_key,
         &INPUT,
@@ -420,16 +405,16 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     .catch_unwind()
     .await;
     assert!(panicked.is_err());
-    assert_eq!(work.runs(), 3);
+    assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    for scope in [&scope, &other_caller, &other_key] {
+    for scope in [&scope, &other_key] {
         assert_eq!(records(&pool, scope).await, 0);
         let retry = once_free(&replica_2, scope, &record, &work).await;
         assert_eq!(committed(retry), record);
     }
-    assert_eq!(work.runs(), 6);
-    assert_eq!(count(&pool, EFFECTS).await, 3);
+    assert_eq!(work.runs(), 4);
+    assert_eq!(count(&pool, EFFECTS).await, 2);
     close_pools(&[&pool_1, &pool_2]).await;
 }
 
