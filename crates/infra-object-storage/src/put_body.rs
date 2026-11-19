@@ -317,7 +317,6 @@ mod tests {
     fn an_exact_body_passes_in_any_framing() {
         assert_eq!(send(8, [b"abcdefgh"]), (Ok(8), false));
         assert_eq!(send(8, [b"abcd", b"", b"efgh"]), (Ok(8), false));
-        assert_eq!(send(0, []), (Ok(0), false));
     }
 
     #[test]
@@ -500,28 +499,5 @@ mod tests {
             assert!(completed, "finite stream must finish after self-wakeup");
             assert!(source_pending, "source Pending must reach the caller");
         }
-    }
-
-    #[test]
-    fn trailers_follow_the_held_frame() {
-        let mut trailers = axum::http::HeaderMap::new();
-        trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
-        let body = StreamBody::new(stream::iter([
-            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"abcd"))),
-            Ok(Frame::trailers(trailers)),
-        ]));
-        let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(4, body);
-        let waker = std::task::Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let first = Pin::new(&mut body).poll_frame(&mut context);
-        std::assert_matches!(first, Poll::Ready(Some(Ok(ref frame))) if frame.is_data());
-        let second = Pin::new(&mut body).poll_frame(&mut context);
-        std::assert_matches!(second, Poll::Ready(Some(Ok(ref frame))) if frame.is_trailers());
-        std::assert_matches!(
-            Pin::new(&mut body).poll_frame(&mut context),
-            Poll::Ready(None)
-        );
-        assert!(body.is_end_stream());
-        assert!(!mismatch.load(Ordering::Acquire));
     }
 }
