@@ -36,27 +36,14 @@ serde = { workspace = true, features = ["std", "derive"] }
 [dependencies.clap]
 workspace = true
 features = ["derive", "std"]
-[dependencies.async-nats]
-workspace = true
-features = ["jetstream"]
 [dependencies.derive_more]
 workspace = true
 features = ["from"]
 [dependencies.domain-events]
 workspace = true
-[dependencies.secrecy]
-workspace = true
-[dependencies.service-config]
-workspace = true
 [dependencies.infra-messaging]
 workspace = true
 [dependencies.infra-webhooks]
-workspace = true
-features = ["test-support"]
-[dependencies.infra-outbound-http]
-workspace = true
-features = ["test-support"]
-[dependencies.migrate]
 workspace = true
 [dependencies.serde_json]
 workspace = true
@@ -67,12 +54,6 @@ features = ["std", "serde", "serde-well-known", "formatting", "parsing"]
 [dependencies.uuid]
 workspace = true
 features = ["std"]
-[dependencies.futures-util]
-workspace = true
-features = ["std", "async-await"]
-[dependencies.tokio-util]
-workspace = true
-features = ["rt"]
 # template:end jobs-reference:test-reading-counter-dependencies
 
 # template:begin webhooks-common:test-webhooks-dependencies
