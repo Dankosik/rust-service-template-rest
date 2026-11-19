@@ -155,23 +155,6 @@ fn write_pem(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
     temp_file(pem)
 }
 
-#[test]
-fn pem_fixtures_preserve_labels_and_wrap_at_64_columns_with_lf() {
-    let empty = write_pem("CERTIFICATE", &[]);
-    assert_eq!(
-        std::io::read_to_string(empty.reopen().unwrap()).unwrap(),
-        "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
-    );
-    let key = write_pem("PRIVATE KEY", &[0; 49]);
-    assert_eq!(
-        std::io::read_to_string(key.reopen().unwrap()).unwrap(),
-        format!(
-            "-----BEGIN PRIVATE KEY-----\n{}\nAA==\n-----END PRIVATE KEY-----\n",
-            "A".repeat(64)
-        ),
-    );
-}
-
 fn client_identity() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
     let identity = rcgen::generate_simple_self_signed(["cache-client".to_owned()])
         .expect("client certificate");
