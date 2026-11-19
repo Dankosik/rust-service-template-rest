@@ -155,21 +155,23 @@ async fn drain_work(
         DrainOutcome::NeedsForcedCleanup,
     )
     .await;
-    let outcome = if matches!(drain_outcome, DrainOutcome::NeedsForcedCleanup) {
+    let forced = matches!(drain_outcome, DrainOutcome::NeedsForcedCleanup);
+    if forced {
         isolate_stage_or(
             "attempt_cleanup",
             clean_up_after_forced_drain(resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
             (),
         )
         .await;
-        Outcome::Degraded
-    } else {
-        Outcome::Graceful
-    };
+    }
     // template:begin messaging:worker-shutdown-drop-consumer
     drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-drop-consumer
-    outcome
+    if forced {
+        Outcome::Degraded
+    } else {
+        Outcome::Graceful
+    }
 }
 
 async fn finish_background(
