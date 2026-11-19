@@ -55,9 +55,8 @@ resumption.
 
 Outcome and Provides describe code to implement; Final validation defines
 the behavior to establish after the whole ledger is assembled.
-Record a missing required criterion as Blocked, not as an alternative success.
-Missing optional proof does not block local completion. Keep explicitly requested
-CI, release, or external-effect requirements distinct and outstanding.
+The [Completion Result](acceptance-result-v1.md#completion-result) governs
+pending external outcomes, unavailable required proof, and optional gaps.
 
 Mutable owners are semantic (package, contract, bootstrap), not a guessed file
 list. Exclusive locks cannot be mutated concurrently even when files differ.

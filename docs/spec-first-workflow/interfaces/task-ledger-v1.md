@@ -31,8 +31,9 @@ from that native owner. Keep Resume only across an interruption when native
 state cannot recover the next action; refresh or remove it when work resumes.
 These fields are routing context, not acceptance evidence.
 
-Tasks retain their outcome boundaries; checkboxes record implementation, while
-Completion records final validation. Return one replaceable
+Tasks retain their outcome boundaries. Checkboxes record integrated
+implementation. Completion covers final validation and any requested external
+outcomes. Return one replaceable
 [Acceptance Result V1](acceptance-result-v1.md) per task, and a final result for
 Completion after assembly:
 
