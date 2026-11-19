@@ -15,8 +15,11 @@ next_owner: <next implementation owner, or exact missing input and its owner>
 
 Return Implemented when in-scope code, tests, and cleanup are written and writers
 have joined. [Implementation](../phases/implementation.md#feedback-during-coding)
-owns permitted coding feedback. The result unlocks local dependent coding;
-it makes no behavior, acceptance, or release claim. Blocked retains partial
+owns permitted coding feedback. For a ledger, the Orchestrator follows the
+[Acceptance Transition](../phases/planning/ledger-contract.md#acceptance-transition)
+before unlocking tasks that require the integrated code. After reassignment or
+a change to consumed inputs, identify the dispatch or steering update the
+result answers, including when returning `Blocked`. Blocked retains partial
 work and names the missing implementation input. Neither verdict starts final
 validation while another code task remains unfinished.
 
@@ -30,27 +33,24 @@ a ledger cannot use this branch.
 unit: Completion
 verdict: Accepted | Blocked
 candidate: <fixed assembled candidate>
-evidence: <local completion scope, required results, and material optional gaps; keep requested external outcomes distinct>
+evidence: <local validation results, observed requested external outcomes, and material gaps>
 review: <final review result or not_required under shared Review>
 invalidated_receipts: <evidence invalidated by repair; omit when none>
 next_owner: <exact remaining action and owner, or none>
 ```
 
-Accepted requires the ordinary local criterion in
-[AGENTS.md](../../../AGENTS.md#validation-budget), explicit task additions,
-resolved blocking findings, and any final review selected by
-[Review](../shared/review.md). Load the
-[Evidence Contract](../shared/evidence-contract.md) for explicit additions,
-reuse, claim scope, or unavailable infrastructure. Missing optional
-integration or runtime observations do not block local Accepted. Use existing
-evidence and next_owner fields to state scope and material gaps; no new status
-or proof artifact is needed.
+Return `Accepted` once [Final Validation](../phases/implementation.md#final-validation)
+passes for the changed surface and explicit additions, blocking findings are
+resolved, and any selected review passes. If the request also includes an
+external outcome, such as green CI or a deployment, its stated success
+condition must be directly observed before returning `Accepted`. Report
+material optional gaps in `evidence` without holding the verdict.
 
-Blocked means a required criterion or an explicitly requested CI, runtime,
-release, or external action remains incomplete. Report a completed local portion
-separately without relabeling the whole larger request as Accepted. Preserve
-genuine external-effect gates. Do not convert an unfinished code subset into
-Completion to run checks early.
+Retain passing local results for `evidence` while a requested external outcome
+is pending. Continue its authorized execution, observation, or in-scope repair
+and keep Completion open. Return `Blocked` only when no authorized progress
+can obtain the required outcome or proof. Record the completed scope in
+`evidence` and the missing input, capability, or authority in `next_owner`.
 
 During orchestrated execution these results are input to the Orchestrator,
 which records canonical state without repeating implementation or validation.

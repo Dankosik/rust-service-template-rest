@@ -41,10 +41,10 @@ and useful subtask lanes in parallel when accepted interfaces are stable, writab
 locks are disjoint, and capacity permits. Integrate mutations serially. Apply
 [Agent Harness](../../agent-harness.md) when delegating or replacing a lane.
 
-A finished implementation immediately unlocks downstream implementation that
-consumes its available code or agreed contract; writing tests, generating
-required sources, and reading callers stay inside implementation work, while
-validation and review wait for the final assembled boundary.
+Consumers may start from an agreed contract as soon as it is available. A
+consumer that needs implemented code starts once that code is integrated into
+the shared candidate. Writing tests, generating required sources, and reading
+callers stay inside implementation.
 
 ### Feedback During Coding
 
@@ -69,29 +69,35 @@ locks and continuing the lane when disjoint without reopening Planning.
 
 Join or stop child lanes, return [Delegated Result V1](#delegated-result-v1) to
 the Acceptance-Unit Lead (or `Implemented` via [Acceptance Result
-V1](../interfaces/acceptance-result-v1.md)) immediately, and release the
-writable scope so downstream units can proceed while keeping the Lead available
-for final-validation repairs.
+V1](../interfaces/acceptance-result-v1.md)) immediately, and keep the Lead
+available for final-validation repairs. The scheduling owner integrates the
+result before reassigning its writable scope.
 
 ## Final Validation
 
-Start final validation once every planned code task in the unit or ledger is
-`Implemented` and assembled with all writers joined.
+Once every planned implementation task is `Implemented`, the changes are
+assembled, and all writers have joined, the delivery owner checks each material
+behavior change against its accepted source. Trace the change through the
+affected entry paths on the assembled candidate. For an
+addition or modification, check the target behavior. For a removal, check that
+the old behavior is unreachable on the paths from which it was withdrawn. For
+a requirement rename alone, check that its promised behavior still holds.
 
-Select one non-overlapping validation plan covering the ordinary local criterion
-in [AGENTS.md](../../../AGENTS.md#validation-budget) (matching build and
-relevant tests) plus any explicit task additions, consulting [Validation
+Select the checks for the changed surface from the [Validation
+budget](../../../AGENTS.md#validation-budget) and reconcile any task additions
+with their authoritative source. Match each claim to current evidence at the
+required boundary. One result can cover several claims. Consult [Validation
 Routing](../../validation-routing.md) for mixed or specialized surfaces and the
-[Evidence Contract](../shared/evidence-contract.md) for explicit additions,
-reuse, claim scope, or unavailable infrastructure. Reconcile packet annotations
-with their authoritative source and combine claims satisfied by one command.
-Run [Review](../shared/review.md) once at this assembled boundary while keeping
-the candidate frozen; join or stop readers before repairing, then rerun only
-invalidated checks.
+[Evidence Contract](../shared/evidence-contract.md) for reuse, claim scope, or
+unavailable infrastructure. Run fast checks first. Include variants, generated
+clients, or intermediate versions when the selected checks or accepted scope
+require them.
 
-Run fast mechanical checks ahead of expensive suites, covering affected
-production and test targets, required build variants, generated clients, and
-intermediate versions so independent diagnostics surface together:
+Apply the [review triggers](../shared/review.md#trigger) to the assembled
+candidate to select full review, structure-only review, or direct completion.
+The delivery owner validates behavior on every route. Keep the candidate fixed
+during validation and any selected review. Join or stop readers before repair,
+then run the failed, invalidated, and outstanding required checks.
 
 - **Runtime or fixture scenarios**: When explicitly required, run the smallest
   end-to-end scenario covering setup, behavior, observation, and bounded cleanup
@@ -111,11 +117,8 @@ intermediate versions so independent diagnostics surface together:
   Recovery](../shared/transition.md#parent-owned-recovery) when repeated
   attempts add no discriminating evidence.
 
-Accept locally once the AGENTS.md criterion, explicit additions, blocking
-findings, and any selected final review pass: report optional runtime gaps as
-limitations, mark missing mandatory proof `implementation complete; verification
-incomplete`, and keep requested CI, release, deployment, or runtime outcomes
-open until directly observed.
+Report the [Completion Result](../interfaces/acceptance-result-v1.md#completion-result)
+for the requested scope, carrying forward the local validation evidence.
 
 ## Delegated Result V1
 

@@ -12,8 +12,8 @@ the final assembled delivery boundary (or an explicit standalone review
 request).
 
 At the final assembled delivery boundary (in both structured workflows and
-standalone Direct Work), select one fresh reviewer according to the changed
-surface:
+standalone Direct Work), select the disposition for the changed surface. Assign
+one fresh reviewer when full or structure-only review applies.
 
 - **Full final review**: Required when requested by the user, when changed
   behavior affects authorization, money, data integrity, concurrency safety, or

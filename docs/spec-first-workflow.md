@@ -13,7 +13,7 @@ Select the smallest non-direct execution path and current decision owner. If
 | `Ledger Orchestrator` | Single routing owner (`LEDGER_ORCHESTRATOR`) that schedules `Unit`s and writes canonical `tasks.md` state. |
 | `Lane` | Bounded delegated worker (`worker-agent`, `specialist-agent`, `evidence-agent`) executing a strict subset for its parent. |
 | `Ready Frontier` | Set of tasks in `tasks.md` whose consumed contracts, writable scopes, and authority are ready to start immediately. |
-| `Implemented` vs `Accepted` | `Implemented` means code and tests landed with writers joined (unlocking downstream coding); `Accepted` means final assembled validation and required review passed. |
+| `Implemented` vs `Accepted` | A Lead reports `Implemented` when its work is ready to integrate. Landing it unlocks consumers of that code. `Accepted` closes the requested scope, including final validation, any required review, and any requested external outcomes. |
 
 ## Path
 
