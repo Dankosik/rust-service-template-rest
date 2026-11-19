@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt;
 use std::io::{self, Write};
 
 use async_nats::Subject;
@@ -12,15 +13,43 @@ use crate::registry::route_key;
 
 const MAX_PAYLOAD_JSON_DEPTH: usize = 127;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum EventIdentity {
     Direct {
         message_id: String,
     },
     Bound {
         message_id: String,
-        publication_id: String,
+        distinct_publication_id: Option<String>,
     },
+}
+
+impl EventIdentity {
+    fn publication_id(&self) -> &str {
+        match self {
+            Self::Direct { message_id } => message_id,
+            Self::Bound {
+                message_id,
+                distinct_publication_id,
+            } => distinct_publication_id.as_deref().unwrap_or(message_id),
+        }
+    }
+}
+
+impl fmt::Debug for EventIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct { message_id } => formatter
+                .debug_struct("Direct")
+                .field("message_id", message_id)
+                .finish(),
+            Self::Bound { message_id, .. } => formatter
+                .debug_struct("Bound")
+                .field("message_id", message_id)
+                .field("publication_id", &self.publication_id())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,11 +73,56 @@ pub(crate) struct PreparedEventParts {
     pub(crate) payload: Bytes,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "distinguish the broker publication ID from the logical message ID"
+)]
+pub(crate) struct Publication<'a> {
+    pub(crate) subject: &'a Subject,
+    pub(crate) message_id: &'a str,
+    pub(crate) publication_id: &'a str,
+    pub(crate) event_type: &'a str,
+    pub(crate) schema_version: u16,
+    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) payload: &'a Bytes,
+}
+
 impl PreparedEvent {
     pub(crate) fn prepare_with_valid_subject<T: EventPayload + Serialize>(
         subject: Subject,
         event: &Event<T>,
         max_payload_bytes: usize,
+    ) -> Result<Self, EnvelopeError> {
+        Self::prepare(subject, event, max_payload_bytes, || {
+            EventIdentity::Direct {
+                message_id: event.id.clone(),
+            }
+        })
+    }
+
+    // template:begin outbox:messaging-outbox-preparation
+    pub(crate) fn prepare_outbox_with_valid_subject<T: EventPayload + Serialize>(
+        subject: Subject,
+        event: &Event<T>,
+        max_payload_bytes: usize,
+        make_bound_id: impl FnOnce() -> String,
+    ) -> Result<Self, EnvelopeError> {
+        Self::prepare(subject, event, max_payload_bytes, || EventIdentity::Bound {
+            message_id: make_bound_id(),
+            distinct_publication_id: None,
+        })
+    }
+
+    pub(crate) const fn has_bound_publication(&self) -> bool {
+        matches!(self.identity, EventIdentity::Bound { .. })
+    }
+    // template:end outbox:messaging-outbox-preparation
+
+    fn prepare<T: EventPayload + Serialize>(
+        subject: Subject,
+        event: &Event<T>,
+        max_payload_bytes: usize,
+        make_identity: impl FnOnce() -> EventIdentity,
     ) -> Result<Self, EnvelopeError> {
         let mut payload = PayloadWriter::new(max_payload_bytes);
         json_payload::to_writer(&mut payload, &event.payload)
@@ -65,9 +139,7 @@ impl PreparedEvent {
         crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
-            identity: EventIdentity::Direct {
-                message_id: event.id.clone(),
-            },
+            identity: make_identity(),
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
             occurred_at,
@@ -85,22 +157,19 @@ impl PreparedEvent {
             occurred_at,
             payload,
         } = parts;
-        if !crate::wire::valid_subject(&subject) {
-            return Err(EnvelopeError::Subject);
-        }
-        let subject = Subject::from(subject);
-        for value in [&message_id, &publication_id, &event_type] {
-            crate::wire::validate_outbound_identity(value)?;
-        }
-        if schema_version == 0 {
-            return Err(EnvelopeError::Schema);
-        }
-        crate::wire::validate_outbound_created_at(occurred_at)?;
+        validate_reconstructed_envelope(
+            &subject,
+            &message_id,
+            &publication_id,
+            &event_type,
+            schema_version,
+            occurred_at,
+        )?;
         Ok(Self {
-            subject,
+            subject: Subject::from(subject),
             identity: EventIdentity::Bound {
+                distinct_publication_id: (message_id != publication_id).then_some(publication_id),
                 message_id,
-                publication_id,
             },
             event_type: event_type.into(),
             schema_version,
@@ -109,22 +178,20 @@ impl PreparedEvent {
         })
     }
 
-    pub(crate) fn bind_outbox_id(&mut self, id: String) {
-        self.identity = EventIdentity::Bound {
-            message_id: id.clone(),
-            publication_id: id,
-        };
-    }
-
-    pub(crate) const fn has_bound_publication(&self) -> bool {
-        matches!(self.identity, EventIdentity::Bound { .. })
+    pub(crate) fn publication(&self) -> Publication<'_> {
+        Publication {
+            subject: &self.subject,
+            message_id: self.message_id(),
+            publication_id: self.publication_id(),
+            event_type: self.event_type(),
+            schema_version: self.schema_version,
+            occurred_at: self.occurred_at,
+            payload: &self.payload,
+        }
     }
 
     #[must_use]
     pub fn subject(&self) -> &str {
-        &self.subject
-    }
-    pub(crate) fn subject_handle(&self) -> &Subject {
         &self.subject
     }
     #[must_use]
@@ -137,10 +204,7 @@ impl PreparedEvent {
     }
     #[must_use]
     pub fn publication_id(&self) -> &str {
-        match &self.identity {
-            EventIdentity::Direct { message_id } => message_id,
-            EventIdentity::Bound { publication_id, .. } => publication_id,
-        }
+        self.identity.publication_id()
     }
     #[must_use]
     pub fn event_type(&self) -> &str {
@@ -162,6 +226,26 @@ impl PreparedEvent {
     pub fn payload(&self) -> &Bytes {
         &self.payload
     }
+}
+
+pub(crate) fn validate_reconstructed_envelope(
+    subject: &str,
+    message_id: &str,
+    publication_id: &str,
+    event_type: &str,
+    schema_version: u16,
+    occurred_at: OffsetDateTime,
+) -> Result<(), EnvelopeError> {
+    if !crate::wire::valid_subject(subject) {
+        return Err(EnvelopeError::Subject);
+    }
+    for value in [message_id, publication_id, event_type] {
+        crate::wire::validate_outbound_identity(value)?;
+    }
+    if schema_version == 0 {
+        return Err(EnvelopeError::Schema);
+    }
+    crate::wire::validate_outbound_created_at(occurred_at)
 }
 
 pub(crate) fn payload_depth_allowed(bytes: &[u8]) -> bool {
@@ -609,6 +693,66 @@ mod tests {
         assert_eq!(writer.bytes.len(), 1_024);
         assert!(writer.bytes.capacity() <= 1_024);
     }
+
+    // template:begin outbox:messaging-outbox-preparation-tests
+    #[test]
+    fn bound_preparation_defers_identity_and_shares_equal_ids_with_restoration() {
+        let subject = async_nats::Subject::from_static("events.created");
+        let mut event = event(Counted {
+            value: true,
+            calls: Cell::new(0),
+        });
+        let direct = PreparedEvent::prepare_with_valid_subject(subject.clone(), &event, 4).unwrap();
+        let bound =
+            PreparedEvent::prepare_outbox_with_valid_subject(subject.clone(), &event, 4, || {
+                event.id.clone()
+            })
+            .unwrap();
+        assert_ne!(direct, bound);
+        assert!(bound.has_bound_publication());
+        assert!(std::ptr::eq(bound.message_id(), bound.publication_id()));
+
+        let restore = |publication_id: &str| {
+            PreparedEvent::from_parts(super::PreparedEventParts {
+                subject: subject.to_string(),
+                message_id: bound.message_id().to_owned(),
+                publication_id: publication_id.to_owned(),
+                event_type: bound.event_type().to_owned(),
+                schema_version: bound.schema_version(),
+                occurred_at: bound.occurred_at(),
+                payload: bound.payload().clone(),
+            })
+            .unwrap()
+        };
+        let restored = restore("event-id");
+        assert_eq!(bound, restored);
+        assert!(std::ptr::eq(
+            restored.message_id(),
+            restored.publication_id()
+        ));
+        assert!(
+            format!("{bound:?}").contains(
+                r#"identity: Bound { message_id: "event-id", publication_id: "event-id" }"#
+            )
+        );
+        let redrive = restore("redrive-id");
+        assert_ne!(bound, redrive);
+        assert!(format!("{redrive:#?}").contains(concat!(
+            "identity: Bound {\n",
+            "        message_id: \"event-id\",\n",
+            "        publication_id: \"redrive-id\",\n",
+            "    }"
+        )));
+
+        event.id.clear();
+        std::assert_matches!(
+            PreparedEvent::prepare_outbox_with_valid_subject(subject, &event, 4, || {
+                panic!("invalid identity must be rejected before building the bound ID")
+            }),
+            Err(EnvelopeError::Identity)
+        );
+    }
+    // template:end outbox:messaging-outbox-preparation-tests
 
     #[test]
     fn preparation_accepts_only_creation_times_rfc3339_can_carry() {

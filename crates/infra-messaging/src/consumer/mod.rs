@@ -267,13 +267,12 @@ impl Consumer {
     #[must_use]
     pub fn start(self, cancel: &CancellationToken) -> ConsumerHandle {
         let drain = cancel.child_token();
-        let abort = CancellationToken::new();
+        let abort = self.handler.abort.clone();
         let task_drain = drain.clone();
-        let task_abort = abort.clone();
         let (failure_tx, failure) = watch::channel(None);
         let task = tokio::spawn(async move {
             let shared = Arc::clone(&self.shared);
-            let result = self.run(task_drain, task_abort).await;
+            let result = self.run(task_drain).await;
             if let Err(error) = &result {
                 if !matches!(error, ConsumerError::DrainTimedOut) {
                     shared.mark_failed();
@@ -291,17 +290,13 @@ impl Consumer {
         }
     }
 
-    async fn run(
-        self,
-        drain: CancellationToken,
-        abort: CancellationToken,
-    ) -> Result<(), ConsumerError> {
+    async fn run(self, drain: CancellationToken) -> Result<(), ConsumerError> {
         let mut deliveries = JoinSet::new();
         tokio::select! {
             biased;
-            () = abort.cancelled() => Err(ConsumerError::DrainTimedOut),
+            () = self.handler.abort.cancelled() => Err(ConsumerError::DrainTimedOut),
             result = async {
-                let result = self.consume(&mut deliveries, &drain, &abort).await;
+                let result = self.consume(&mut deliveries, &drain).await;
                 if result.as_ref().is_err_and(ConsumerError::requires_delivery_drain) {
                     while deliveries.join_next().await.is_some() {}
                 }
@@ -314,7 +309,6 @@ impl Consumer {
         &self,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
-        abort: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let concurrency = self.concurrency.get();
         let mut mode = PullMode::Normal;
@@ -350,12 +344,12 @@ impl Consumer {
             let budget = self.pull_budget(mode, deliveries.len(), limits);
             let opened = self.open_batch(&budget, deliveries, drain).await?;
             let messages = match opened {
-                BatchOpen::Ready(messages) => *messages,
+                BatchOpen::Ready(messages) => messages,
                 BatchOpen::Retry => continue 'pulls,
                 BatchOpen::Stop => break 'pulls,
             };
             match self
-                .dispatch_batch(messages, deliveries, drain, abort, &budget)
+                .dispatch_batch(messages, deliveries, drain, &budget)
                 .await?
             {
                 BatchEnd::Filled => {
@@ -437,7 +431,7 @@ impl Consumer {
             }
         };
         let error_kind = match result {
-            Ok(Ok(messages)) => return Ok(BatchOpen::Ready(Box::new(messages))),
+            Ok(Ok(messages)) => return Ok(BatchOpen::Ready(messages)),
             Ok(Err(error)) => batch_create_error_kind(error.kind()),
             Err(_) => "local_timeout",
         };
@@ -534,11 +528,10 @@ impl Consumer {
         mut messages: pull::Batch,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
-        abort: &CancellationToken,
         budget: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
         let result = self
-            .dispatch_batch_messages(&mut messages, deliveries, drain, abort, budget)
+            .dispatch_batch_messages(&mut messages, deliveries, drain, budget)
             .await;
         match &result {
             Ok(BatchEnd::Stopped | BatchEnd::Incomplete(_)) => {
@@ -572,20 +565,21 @@ impl Consumer {
         messages: &mut pull::Batch,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
-        abort: &CancellationToken,
         budget: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
         let expires = Instant::now() + budget.expires + PULL_EXPIRY_GRACE;
         let mut remaining = budget.messages;
+        let drained = drain.cancelled();
+        tokio::pin!(drained);
         while remaining > 0 {
             let message = tokio::select! {
                 biased;
-                () = drain.cancelled() => return Ok(BatchEnd::Stopped),
+                () = &mut drained => return Ok(BatchEnd::Stopped),
                 Some(joined) = deliveries.join_next(), if !deliveries.is_empty() => {
                     check_delivery_task_result(joined)?;
                     continue;
                 },
-                next = tokio::time::timeout_at(expires, messages.next()) => match next {
+                next = async { tokio::time::timeout_at(expires, messages.next()).await } => match next {
                     Ok(Some(Ok(message))) => message,
                     Ok(None) => return Ok(BatchEnd::Incomplete(BatchIncomplete::Closed)),
                     Ok(Some(Err(error))) => {
@@ -611,7 +605,7 @@ impl Consumer {
             if remaining == budget.messages {
                 let status = tokio::select! {
                     biased;
-                    () = drain.cancelled() => {
+                    () = &mut drained => {
                         release_message(&message, drain, &self.handler.filter_subject).await;
                         return Ok(BatchEnd::Stopped);
                     }
@@ -635,8 +629,7 @@ impl Consumer {
             }
             remaining -= 1;
             let handler = Arc::clone(&self.handler);
-            let cancel = abort.clone();
-            deliveries.spawn(async move { handler.handle(message, cancel).await });
+            deliveries.spawn(async move { handler.handle(message).await });
         }
         Ok(BatchEnd::Filled)
     }
@@ -654,8 +647,12 @@ enum PullMode {
     SingleRetainedMessage,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "inline batch handoff avoids a heap allocation per pull"
+)]
 enum BatchOpen {
-    Ready(Box<pull::Batch>),
+    Ready(pull::Batch),
     Retry,
     Stop,
 }

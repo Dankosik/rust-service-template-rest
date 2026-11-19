@@ -4,7 +4,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::EnvelopeError;
-use crate::prepared::PreparedEvent;
+use crate::prepared::{PreparedEvent, Publication};
 
 mod dead_letter;
 
@@ -48,16 +48,31 @@ pub struct InboundEnvelope {
     pub(crate) payload: Bytes,
 }
 
+pub(crate) struct InboundEnvelopeRef<'a> {
+    pub(crate) message_id: &'a str,
+    pub(crate) event_type: &'a str,
+    pub(crate) schema_version: u16,
+    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) payload: &'a [u8],
+}
+
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
+    encode_publication(&event.publication())
+}
+
+pub(crate) fn encode_publication(event: &Publication<'_>) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
-    headers.insert(header_name::MESSAGE_ID, event.message_id());
-    headers.insert(header_name::EVENT_TYPE, event.event_type());
-    headers.insert(header_name::EVENT_SCHEMA, event.schema_label());
+    headers.insert(header_name::MESSAGE_ID, event.message_id);
+    headers.insert(header_name::EVENT_TYPE, event.event_type);
+    headers.insert(
+        header_name::EVENT_SCHEMA,
+        schema_label(event.schema_version),
+    );
     headers.insert(
         header_name::CREATED_AT,
-        format_timestamp(event.occurred_at())?,
+        format_timestamp(event.occurred_at)?,
     );
-    headers.insert(header_name::NATS_MSG_ID, event.publication_id());
+    headers.insert(header_name::NATS_MSG_ID, event.publication_id);
     Ok(headers)
 }
 
@@ -66,6 +81,21 @@ pub fn decode_envelope(
     headers: &HeaderMap,
     payload: Bytes,
 ) -> Result<InboundEnvelope, EnvelopeError> {
+    let envelope = decode_envelope_ref(subject, headers, &payload)?;
+    Ok(InboundEnvelope {
+        message_id: envelope.message_id.to_owned(),
+        event_type: envelope.event_type.to_owned(),
+        schema_version: envelope.schema_version,
+        occurred_at: envelope.occurred_at,
+        payload,
+    })
+}
+
+pub(crate) fn decode_envelope_ref<'a>(
+    subject: &str,
+    headers: &'a HeaderMap,
+    payload: &'a [u8],
+) -> Result<InboundEnvelopeRef<'a>, EnvelopeError> {
     if !valid_subject(subject) {
         return Err(EnvelopeError::Subject);
     }
@@ -102,9 +132,9 @@ pub fn decode_envelope(
         return Err(EnvelopeError::CreatedAtRequired);
     }
 
-    Ok(InboundEnvelope {
-        message_id: message_id.to_owned(),
-        event_type: event_type.to_owned(),
+    Ok(InboundEnvelopeRef {
+        message_id,
+        event_type,
         schema_version,
         occurred_at,
         payload,
@@ -199,7 +229,7 @@ pub(crate) fn schema_label(version: u16) -> String {
 fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
     value
         .strip_prefix('v')
-        .filter(|raw| !raw.starts_with('0') && raw.bytes().all(|byte| byte.is_ascii_digit()))
+        .filter(|raw| matches!(raw.as_bytes().first(), Some(b'1'..=b'9')))
         .and_then(|raw| raw.parse().ok())
         .ok_or(EnvelopeError::Schema)
 }
@@ -270,11 +300,28 @@ pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeE
     (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES).ok_or(EnvelopeError::HeadersTooLarge)
 }
 
+const RFC3339_UTC_MAX_BYTES: usize = 30;
+
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {
-    value
+    let mut buffer = [0; RFC3339_UTC_MAX_BYTES];
+    let bytes = format_timestamp_bytes(value, &mut buffer)?;
+    str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)
+}
+
+fn format_timestamp_bytes(
+    value: OffsetDateTime,
+    buffer: &mut [u8; RFC3339_UTC_MAX_BYTES],
+) -> Result<&[u8], EnvelopeError> {
+    let utc = value
         .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format(&Rfc3339).ok())
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)
+        .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
+    let mut remaining = buffer.as_mut_slice();
+    utc.format_into(&mut remaining, &Rfc3339)
+        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)?;
+    let written = RFC3339_UTC_MAX_BYTES - remaining.len();
+    Ok(&buffer[..written])
 }
 
 pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), EnvelopeError> {
@@ -283,13 +330,21 @@ pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), 
     }
     value
         .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())
+        .filter(|utc| (0..10_000).contains(&utc.year()))
         .map(drop)
         .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
 
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
-    valid_identity(value).ok_or(EnvelopeError::CreatedAtInvalid)?;
+    const SEPARATOR_INDEX: usize = "YYYY-MM-DD".len();
+    if value.len() > IDENTITY_MAX_BYTES
+        || value
+            .as_bytes()
+            .get(SEPARATOR_INDEX)
+            .is_none_or(u8::is_ascii_control)
+    {
+        return Err(EnvelopeError::CreatedAtInvalid);
+    }
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
@@ -442,5 +497,56 @@ mod tests {
             let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
             assert_eq!(error, expected);
         }
+    }
+
+    #[test]
+    fn decode_preserves_timestamp_separators_and_the_byte_limit() {
+        let mut headers = envelope_headers();
+        let expected = time::macros::utc_datetime!(2026-09-29 10:00);
+        for separator in ['t', ' ', '@'] {
+            headers.insert(
+                header_name::CREATED_AT,
+                format!("2026-09-29{separator}10:00:00z"),
+            );
+            let envelope = decode_envelope("orders.created", &headers, Bytes::new()).unwrap();
+            assert_eq!(envelope.occurred_at(), expected);
+        }
+        for separator in ['\0', '\x1f', '\x7f', '\u{85}', 'é'] {
+            headers.insert(
+                header_name::CREATED_AT,
+                format!("2026-09-29{separator}10:00:00Z"),
+            );
+            let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
+            assert_eq!(error, EnvelopeError::CreatedAtInvalid, "{separator:?}");
+        }
+        headers.insert(
+            header_name::CREATED_AT,
+            format!("2026-09-29T10:00:00.{}Z", "0".repeat(235)),
+        );
+        let envelope = decode_envelope("orders.created", &headers, Bytes::new()).unwrap();
+        assert_eq!(envelope.occurred_at(), expected);
+        headers.insert(
+            header_name::CREATED_AT,
+            format!("2026-09-29T10:00:00.{}Z", "0".repeat(236)),
+        );
+        let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
+        assert_eq!(error, EnvelopeError::CreatedAtInvalid);
+    }
+
+    #[test]
+    fn outbound_timestamp_year_bound_uses_the_utc_year() {
+        use time::macros::datetime;
+
+        let crosses_into_range = datetime!(-0001-12-31 23:30 -01:00);
+        assert_eq!(validate_outbound_created_at(crosses_into_range), Ok(()));
+        assert_eq!(
+            format_timestamp(crosses_into_range).as_deref(),
+            Ok("0000-01-01T00:30:00Z")
+        );
+        let crosses_out_of_range = datetime!(0000-01-01 00:30 +01:00);
+        assert_eq!(
+            validate_outbound_created_at(crosses_out_of_range),
+            Err(EnvelopeError::CreatedAtOutOfRange)
+        );
     }
 }

@@ -2,9 +2,9 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_nats::HeaderMap;
 use async_nats::jetstream::message::Info;
 use async_nats::jetstream::{AckKind, Message};
+use async_nats::{HeaderMap, Request, Subject};
 use futures_util::FutureExt as _;
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::time::Instant;
@@ -41,9 +41,10 @@ pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
     registry: Registry,
     metrics: HandlerMetrics,
+    pub(super) abort: CancellationToken,
     pub(super) filter_subject: String,
     span_name: String,
-    dead_letter_subject: String,
+    dead_letter_subject: Subject,
     dead_letter_stream: String,
 }
 
@@ -162,18 +163,15 @@ impl DeliveryHandler {
             shared,
             metrics: HandlerMetrics::register(&registry),
             registry,
+            abort: CancellationToken::new(),
             span_name: format!("process {filter_subject}"),
             filter_subject,
-            dead_letter_subject: admission.options.dlq_subject,
+            dead_letter_subject: admission.options.dlq_subject.into(),
             dead_letter_stream: admission.dead_letter.stream,
         }
     }
 
-    pub(super) async fn handle(
-        &self,
-        message: Message,
-        cancel: CancellationToken,
-    ) -> Result<(), ConsumerError> {
+    pub(super) async fn handle(&self, message: Message) -> Result<(), ConsumerError> {
         let Some((info, delivery_attempt)) = message.info().ok().and_then(|info| {
             let attempt = usize::try_from(info.delivered).ok()?;
             Some((info, attempt))
@@ -189,7 +187,7 @@ impl DeliveryHandler {
         let envelope = if message.payload.len() > self.shared.max_payload_bytes {
             None
         } else {
-            wire::decode_envelope(message.subject.as_ref(), headers, message.payload.clone()).ok()
+            wire::decode_envelope_ref(message.subject.as_ref(), headers, &message.payload).ok()
         };
         let Some(envelope) = envelope else {
             return self
@@ -198,11 +196,10 @@ impl DeliveryHandler {
                     &info,
                     wire::DeadLetterReason::Malformed,
                     UNREGISTERED,
-                    &cancel,
                 )
                 .await;
         };
-        let metrics = self.metrics.get(envelope.event_type());
+        let metrics = self.metrics.get(envelope.event_type);
         if delivery_attempt > MAX_DELIVERIES {
             return self
                 .dead_letter(
@@ -210,7 +207,6 @@ impl DeliveryHandler {
                     &info,
                     wire::DeadLetterReason::Exhausted,
                     metrics.event_type,
-                    &cancel,
                 )
                 .await;
         }
@@ -228,29 +224,27 @@ impl DeliveryHandler {
             otel.status_code = tracing::field::Empty,
         );
         crate::trace::set_remote_parent(&span, headers);
-        self.process(
-            &message,
-            &info,
-            envelope,
-            metrics,
-            delivery_attempt,
-            &cancel,
-        )
-        .instrument(span)
-        .await
+        self.process(&message, &info, envelope, metrics, delivery_attempt)
+            .instrument(span)
+            .await
     }
 
     async fn process(
         &self,
         message: &Message,
         info: &Info<'_>,
-        envelope: wire::InboundEnvelope,
+        envelope: wire::InboundEnvelopeRef<'_>,
         metrics: &EventMetrics,
         delivery_attempt: usize,
-        cancel: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let started = Instant::now();
-        let outcome = run_handler(&self.registry, message.subject.as_ref(), envelope, cancel).await;
+        let outcome = run_handler(
+            &self.registry,
+            message.subject.as_ref(),
+            envelope,
+            &self.abort,
+        )
+        .await;
         metrics.outcomes.record(outcome, started.elapsed());
         let event_type = metrics.event_type;
         let label = outcome.label();
@@ -287,9 +281,7 @@ impl DeliveryHandler {
                 .await;
             }
             Settlement::DeadLetter(reason) => {
-                return self
-                    .dead_letter(message, info, reason, event_type, cancel)
-                    .await;
+                return self.dead_letter(message, info, reason, event_type).await;
             }
             Settlement::Redeliver(delay) => {
                 redeliver_after(message, delay, &self.filter_subject).await;
@@ -304,7 +296,6 @@ impl DeliveryHandler {
         info: &Info<'_>,
         reason: wire::DeadLetterReason,
         event_type: &'static str,
-        cancel: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let Some(message) =
             build_dead_letter_message(source, info, &self.dead_letter_stream, reason)
@@ -319,15 +310,13 @@ impl DeliveryHandler {
         };
         let reason = reason.label();
 
-        let context = OperationContext::new(
-            Some(Deadline::after(BROKER_OPERATION_BUDGET)),
-            cancel.clone(),
-        );
+        let deadline = Deadline::after(BROKER_OPERATION_BUDGET);
         let result = send_publication(
             &self.shared,
             self.dead_letter_subject.clone(),
             message,
-            &context,
+            Some(deadline),
+            &self.abort,
         )
         .await;
         let outcome = match &result {
@@ -391,13 +380,12 @@ impl DeliveryHandler {
 async fn run_handler(
     registry: &Registry,
     subject: &str,
-    envelope: wire::InboundEnvelope,
+    envelope: wire::InboundEnvelopeRef<'_>,
     cancel: &CancellationToken,
 ) -> Outcome {
     let deadline = Deadline::after(HANDLER_TIMEOUT);
-    let handler_cancel = cancel.child_token();
-    let _ended = handler_cancel.clone().drop_guard();
-    let context = OperationContext::new(Some(deadline), handler_cancel);
+    let context = OperationContext::new(Some(deadline), cancel.child_token());
+    let _ended = context.cancellation().drop_guard_ref();
     let dispatch = registry.dispatch(subject, envelope, context.clone());
     let stopped = |reason| match reason {
         Stopped::Deadline => Outcome::TimedOut,
@@ -424,18 +412,15 @@ async fn run_handler(
 async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
     let span = settlement_span(filter_subject, "ack");
     let error_type = if let Some(reply) = source.reply.clone() {
-        match tokio::time::timeout(
-            BROKER_OPERATION_BUDGET,
-            client.request(reply, AckKind::Ack.into()),
-        )
-        .instrument(span.clone())
-        .await
+        let request = Request::new().timeout(None).payload(AckKind::Ack.into());
+        match tokio::time::timeout(BROKER_OPERATION_BUDGET, client.send_request(reply, request))
+            .instrument(span.clone())
+            .await
         {
             Ok(Ok(_)) => {
                 record_span_outcome(&span, "confirmed", None);
                 return;
             }
-            Ok(Err(error)) if error.kind() == async_nats::RequestErrorKind::TimedOut => "timeout",
             Ok(Err(_)) => "client_error",
             Err(_) => "timeout",
         }
@@ -583,13 +568,13 @@ mod tests {
         assert!(!scrape.contains("order.shipped") && !scrape.contains("sentinel"));
     }
 
-    fn created_envelope() -> wire::InboundEnvelope {
-        wire::InboundEnvelope {
-            message_id: "event-1".to_owned(),
-            event_type: Created::EVENT_TYPE.to_owned(),
+    fn created_envelope() -> wire::InboundEnvelopeRef<'static> {
+        wire::InboundEnvelopeRef {
+            message_id: "event-1",
+            event_type: Created::EVENT_TYPE,
             schema_version: Created::SCHEMA_VERSION,
             occurred_at: time::OffsetDateTime::UNIX_EPOCH,
-            payload: bytes::Bytes::from_static(b"null"),
+            payload: b"null",
         }
     }
 
