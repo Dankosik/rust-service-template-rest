@@ -139,15 +139,25 @@ impl RefreshPolicy {
 }
 
 #[derive(Clone, Debug)]
-struct State {
-    draining: bool,
-    last_check: Option<Check>,
+enum State {
+    NotEvaluated,
+    Evaluated(Check),
+    Draining,
+}
+
+enum RefreshEvent {
+    Unchanged,
+    Recovered,
+    Lost(ProbeFailure),
+    AbsorbedFailure {
+        reason: ProbeFailure,
+        consecutive_failures: u32,
+    },
 }
 
 struct RefreshLog {
     stale_age: Option<Duration>,
-    absorbed_failure: Option<(ProbeFailure, u32)>,
-    transition: Option<Result<(), ProbeFailure>>,
+    event: RefreshEvent,
 }
 
 impl State {
@@ -157,38 +167,41 @@ impl State {
         failure_threshold: NonZeroU32,
         stale_after: Duration,
     ) -> Option<RefreshLog> {
-        if self.draining {
-            return None;
-        }
+        let previous = match self {
+            Self::Draining => return None,
+            Self::NotEvaluated => None,
+            Self::Evaluated(check) => Some(&*check),
+        };
         let at = Instant::now();
-        let previous = self.last_check.as_ref();
         let was_ready = previous.is_some_and(|check| check.is_ready_at(at, stale_after));
         let (next, absorbed) =
             apply_failure_threshold(previous, observed, failure_threshold, at, was_ready);
-        let changed = if next.verdict.is_ok() {
-            !was_ready
-        } else {
-            previous.is_some_and(|check| check.verdict.is_ok())
+        let event = match (absorbed, &next.verdict) {
+            (Some(reason), _) => RefreshEvent::AbsorbedFailure {
+                reason,
+                consecutive_failures: next.consecutive_failures,
+            },
+            (None, Ok(())) if !was_ready => RefreshEvent::Recovered,
+            (None, Err(reason)) if previous.is_some_and(|check| check.verdict.is_ok()) => {
+                RefreshEvent::Lost(reason.clone())
+            }
+            (None, _) => RefreshEvent::Unchanged,
         };
         let log = RefreshLog {
-            transition: changed.then(|| next.verdict.clone()),
-            absorbed_failure: absorbed.map(|reason| (reason, next.consecutive_failures)),
-            stale_age: previous
-                .map(|check| at.duration_since(check.at))
-                .filter(|age| *age > stale_after),
+            stale_age: previous.and_then(|check| stale_age(check.at, at, stale_after)),
+            event,
         };
-        self.last_check = Some(next);
+        *self = Self::Evaluated(next);
         Some(log)
     }
 
     fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
-        if self.draining {
-            return Err(NotReady::Draining);
-        }
-        let Some(check) = &self.last_check else {
-            return Err(NotReady::NotEvaluated);
+        let check = match self {
+            Self::Draining => return Err(NotReady::Draining),
+            Self::NotEvaluated => return Err(NotReady::NotEvaluated),
+            Self::Evaluated(check) => check,
         };
-        freshness(check.at, now, stale_after)?;
+        check_freshness(check.at, now, stale_after)?;
         Ok(check)
     }
 
@@ -215,16 +228,20 @@ struct Check {
 
 impl Check {
     fn is_ready_at(&self, now: Instant, stale_after: Duration) -> bool {
-        self.verdict.is_ok() && freshness(self.at, now, stale_after).is_ok()
+        self.verdict.is_ok() && check_freshness(self.at, now, stale_after).is_ok()
     }
 }
 
-fn freshness(at: Instant, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+fn stale_age(at: Instant, now: Instant, stale_after: Duration) -> Option<Duration> {
     let age = now.duration_since(at);
-    if age > stale_after {
-        return Err(NotReady::Stale { age, stale_after });
+    (age > stale_after).then_some(age)
+}
+
+fn check_freshness(at: Instant, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+    match stale_age(at, now, stale_after) {
+        Some(age) => Err(NotReady::Stale { age, stale_after }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub struct Readiness {
@@ -253,10 +270,14 @@ pub struct ReadinessRefresher {
 
 impl fmt::Debug for Readiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names: Vec<&str> = self.probes.iter().map(|probe| probe.name()).collect();
+        let probes = fmt::from_fn(|f| {
+            f.debug_list()
+                .entries(self.probes.iter().map(|probe| probe.name()))
+                .finish()
+        });
         f.debug_struct("Readiness")
             .field("draining", &self.control.draining.load(Ordering::Acquire))
-            .field("probes", &names)
+            .field("probes", &probes)
             .field("policy", &self.control.policy)
             .finish_non_exhaustive()
     }
@@ -284,10 +305,7 @@ impl Readiness {
         );
         Self {
             control: ReadinessControl {
-                tx: watch::Sender::new(State {
-                    draining: false,
-                    last_check: None,
-                }),
+                tx: watch::Sender::new(State::NotEvaluated),
                 draining: Arc::new(AtomicBool::new(false)),
                 policy,
             },
@@ -329,10 +347,10 @@ impl ReadinessControl {
 
     pub fn start_drain(&self) {
         self.tx.send_if_modified(|state| {
-            if state.draining {
+            if matches!(state, State::Draining) {
                 return false;
             }
-            state.draining = true;
+            *state = State::Draining;
             self.draining.store(true, Ordering::Release);
             true
         });
@@ -350,7 +368,7 @@ impl PreparedReadiness {
     pub async fn ensure_fresh(&mut self) -> Result<(), NotReady> {
         self.readiness.control.ensure_running()?;
         let stale_after = self.readiness.control.policy.stale_after();
-        if freshness(self.checked_at, Instant::now(), stale_after).is_err() {
+        if check_freshness(self.checked_at, Instant::now(), stale_after).is_err() {
             self.checked_at = self.readiness.check_startup().await?;
         }
         Ok(())
@@ -360,10 +378,10 @@ impl PreparedReadiness {
         let control = &self.readiness.control;
         let mut admission = Ok(());
         control.tx.send_if_modified(|state| {
-            admission = if state.draining {
+            admission = if matches!(state, State::Draining) {
                 Err(NotReady::Draining)
             } else {
-                freshness(
+                check_freshness(
                     self.checked_at,
                     Instant::now(),
                     control.policy.stale_after(),
@@ -372,7 +390,7 @@ impl PreparedReadiness {
             if admission.is_err() {
                 return false;
             }
-            state.last_check = Some(Check {
+            *state = State::Evaluated(Check {
                 at: self.checked_at,
                 verdict: Ok(()),
                 consecutive_failures: 0,
@@ -405,22 +423,25 @@ impl ReadinessRefresher {
         if let Some(age) = log.stale_age {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
-        if let Some((reason, consecutive_failures)) = log.absorbed_failure {
-            let reason = NotReady::from(reason);
-            tracing::warn!(
-                %reason,
-                consecutive_failures,
-                failure_threshold,
-                "readiness_check_failed"
-            );
-        }
-        match log.transition {
-            Some(Ok(())) => tracing::info!("readiness_recovered"),
-            Some(Err(reason)) => {
+        match log.event {
+            RefreshEvent::Unchanged => {}
+            RefreshEvent::Recovered => tracing::info!("readiness_recovered"),
+            RefreshEvent::Lost(reason) => {
                 let reason = NotReady::from(reason);
                 tracing::warn!(%reason, "readiness_lost");
             }
-            None => {}
+            RefreshEvent::AbsorbedFailure {
+                reason,
+                consecutive_failures,
+            } => {
+                let reason = NotReady::from(reason);
+                tracing::warn!(
+                    %reason,
+                    consecutive_failures,
+                    failure_threshold,
+                    "readiness_check_failed"
+                );
+            }
         }
     }
 
@@ -542,7 +563,10 @@ impl ReadinessReader {
 
     // template:begin grpc:health-changed-verdict
     pub async fn wait_for_drain_or_owner_drop(&mut self) {
-        let _ = self.rx.wait_for(|state| state.draining).await;
+        let _ = self
+            .rx
+            .wait_for(|state| matches!(state, State::Draining))
+            .await;
     }
 
     pub async fn wait_until_ready_is_not(&mut self, seen: bool) -> Option<bool> {
@@ -554,7 +578,7 @@ impl ReadinessReader {
                 if ready != seen {
                     return Some(ready);
                 }
-                if state.draining {
+                if matches!(*state, State::Draining) {
                     return None;
                 }
                 ready_check.map(|check| check.at + self.stale_after + Duration::from_nanos(1))

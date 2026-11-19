@@ -108,19 +108,16 @@ fn add(counter: &AtomicU64, amount: u64) {
     });
 }
 
-#[derive(Default)]
-struct ReportedCounts {
-    dropped: Option<u64>,
-    rejected: Option<u64>,
+struct NumericField {
+    name: &'static str,
+    value: Option<u64>,
 }
 
-impl Visit for ReportedCounts {
+impl Visit for NumericField {
     fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
     fn record_u64(&mut self, field: &Field, value: u64) {
-        match field.name() {
-            "dropped_span_count" => self.dropped = Some(value),
-            "rejected_spans" => self.rejected = Some(value),
-            _ => {}
+        if field.name() == self.name {
+            self.value = Some(value);
         }
     }
     fn record_i64(&mut self, field: &Field, value: i64) {
@@ -130,21 +127,25 @@ impl Visit for ReportedCounts {
     }
 }
 
+fn numeric_field(event: &Event<'_>, name: &'static str) -> Option<u64> {
+    let mut visitor = NumericField { name, value: None };
+    event.record(&mut visitor);
+    visitor.value
+}
+
 pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
     let Some(sdk_event) = SdkEvent::from_name(metadata.name()) else {
         return;
     };
     add(&COUNTS[sdk_event], 1);
-    let mut counts = ReportedCounts::default();
-    event.record(&mut counts);
     match sdk_event {
         SdkEvent::SpansDropped => {
-            if let Some(count) = counts.dropped {
+            if let Some(count) = numeric_field(event, "dropped_span_count") {
                 DROPPED.set(count);
             }
         }
         SdkEvent::PartialSuccess => {
-            if let Some(count) = counts.rejected {
+            if let Some(count) = numeric_field(event, "rejected_spans") {
                 REJECTED.add(count);
             }
         }
