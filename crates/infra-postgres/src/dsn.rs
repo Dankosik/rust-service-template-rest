@@ -272,7 +272,7 @@ mod tests {
         ] {
             for mode in ["disable", "require", "verify-ca", "verify-full"] {
                 let dsn = parse(&format!(
-                    "postgresql://a%40pp:p%40ss@{authority}:6543/app?sslmode={mode}"
+                    "postgresql://a%40pp:p%40ss%2Fword@{authority}:6543/app?sslmode={mode}"
                 ))
                 .unwrap();
                 let options = dsn.connect_options();
@@ -315,12 +315,6 @@ mod tests {
         .await
         .expect("IPv6 TCP and TLS opening are bounded");
         assert!(connected.is_err());
-    }
-
-    #[test]
-    fn percent_encoded_username_is_decoded_by_the_driver() {
-        let dsn = parse("postgres://a%40pp:p%40ss%2Fword@h:5432/app?sslmode=disable").unwrap();
-        assert_eq!(dsn.connect_options().get_username(), "a@pp");
     }
 
     #[test]
