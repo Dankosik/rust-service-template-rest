@@ -1,156 +1,111 @@
 # Implementation
 
-Use when accepted implementation work is ready and authorized. Fresh Leads
-implement planned units and their tests in parallel; one fresh Delivery Owner
-validates the assembled candidate at the end.
-
-| Role | Carrier | Follow |
-| --- | --- | --- |
-| Ledger Orchestrator (`LEDGER_ORCHESTRATOR`) | Root session | [Carrier](#carrier), then [Orchestrator Loop](#orchestrator-loop) |
-| Unit Lead (one planned unit) | Adapter's Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) | [Unit Implementation](implementation/unit.md) |
-| Repair Lead (Final Validation repair) | Adapter's Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) | [Repair Assignment](implementation/repair.md) |
-| Delivery Owner (assembled candidate) | Adapter's Acceptance-Unit Lead (`ACCEPTANCE_UNIT_LEAD`) | [Final Validation](implementation/final-validation.md) |
-
 ## Carrier
 
-Open the named `tasks.md` and use [Ledger Runtime
-State](../interfaces/acceptance-result-v1.md#ledger-runtime-state) for ledger
-fields. Load [Resume](../shared/resume.md) only when `tasks.md` already has
-runtime state (`Base:`, `[x]`, `Execution:`, `Resume:`) or after interruption
-or compaction. Report a completed ledger as done and route an unready plan to
-its recorded owner. For a ready ledger, bind this session as Ledger
-Orchestrator (`LEDGER_ORCHESTRATOR`), including for a one-task ledger.
-
-For a fixed inline unit with no ledger, load [Inline Unit
-Mode](implementation/modes.md#inline-unit-mode).
+For a fixed unit without a ledger, use [Inline Unit Mode](implementation/modes.md#inline-unit-mode).
+For a named ledger, inspect its status. Apply [Resume](../shared/resume.md)
+when runtime state exists or execution was interrupted. Report a completed
+ledger, route an unready plan to its recorded owner, or execute a ready ledger
+as root Ledger Orchestrator (`LEDGER_ORCHESTRATOR`), including a one-task ledger.
 
 ## Orchestrator Loop
 
-Route, integrate, and write canonical `tasks.md` state; never edit production
-or test code or run test suites as Orchestrator.
+The Orchestrator schedules, integrates, and alone writes [Ledger Runtime
+State](../interfaces/acceptance-result-v1.md#ledger-runtime-state). Delegate
+candidate edits and test execution. Use the adapter's Acceptance-Unit Lead
+(`ACCEPTANCE_UNIT_LEAD`) for Unit, Repair and Delivery assignments.
 
 ### 1. Verify Controls And Pin Baseline
 
-- Confirm the [Agent Harness](../../agent-harness.md) adapter's full-ledger
-  controls and run `make ledger-check TASK=<task>` to verify `status: ready`,
-  upstream readiness, packet existence, and lock-aware Ready Frontier; report
-  any blocking capability gap.
-- Pin `Base: <HEAD sha>` in `tasks.md` (keeping recorded `Base` on resume).
-- **Branch and artifact hygiene:** if `HEAD` sits on `main` or detached `HEAD`
-  without authority to land there, create a local integration branch from
-  `Base` (e.g., `impl/<task>`). Confirm no unrelated dirty edits block
-  integration, keep `specs/<task>/` untracked and out of every commit until
-  Step 5 Cleanup, and note the main checkout path when `specs/<task>/` is
-  uncommitted so worktrees can read it.
-- **Commit mode and session constraints:** land every unit as one clean local
-  commit (`<Base>..HEAD` advances monotonically). If the user forbade local
-  commits, load [No-Commit Mode](implementation/modes.md#no-commit-mode).
-  Carry any session-level user execution constraints into Lead and Delivery
-  Owner briefs.
+Confirm full-ledger controls under [Agent Harness](../../agent-harness.md).
+Select the integration worktree under [Branches and Worktrees](../../../AGENTS.md#branches-and-worktrees)
+before writing ledger state. Keep the recorded Base on resume. Otherwise pin
+the starting integration HEAD as Base. Keep the writable ledger in the integration worktree. If the accepted bundle
+is untracked in the source checkout, bring its current contents into this
+worktree before updating it. Keep it out of candidate commits and provide
+its actual location to isolated Leads. Verify
+the plan, packets, upstream readiness and frontier with `make ledger-check TASK=<task>`.
+Resolve a missing control or invalid input under [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery).
 
-Done when `ledger-check` passes on `ready`, controls are confirmed, and `Base`,
-integration branch, and commit mode are pinned.
+Use local commits unless the user forbids them. In that case apply
+[No-Commit Mode](implementation/modes.md#no-commit-mode) throughout.
+Include active mode and user constraints in every affected brief.
 
 ### 2. Ready Frontier Dispatch
 
-Read **only** `Mutable owners` and `Exclusive locks` from each ready packet
-(leave `Sources`, `Outcome`, and `Provides` to the Lead so Orchestrator stays
-in its smart zone). Start every task whose coding `Depends on`, disjoint locks,
-and authority are met (tie-break by `tasks.md` priority; leave `[acceptance]`
-and `[effect:<action>]` gates for Final Validation or release).
+Dispatch a fresh Unit Lead for each eligible task in ledger priority order,
+up to capacity. Use the [Ready Frontier](../../spec-first-workflow.md#terms)
+and read only the ready packets' mutable owners and exclusive locks to assign
+disjoint writes. Bound concurrent compiling Rust worktrees (typically 2–3)
+and reserve capacity for integration, review and recovery.
 
-- **Fresh Unit Lead per task:** dispatch one fresh Acceptance-Unit Lead
-  (`ACCEPTANCE_UNIT_LEAD`, per adapter) per ready task up to capacity (keep
-  concurrent compiling Rust worktrees bounded—typically 2–3—and reserve slots
-  for integration, review, and recovery); record its locator in `Execution`.
-- **Checkout isolation and branch ownership:** share the checkout for one
-  active writer or any task needing untracked/gitignored local fixtures
-  (serialized against concurrent writers); use isolated worktrees anchored to
-  the integration tip for two or more concurrent writers under [Agent
-  Harness](../../agent-harness.md#delegation-interface). Orchestrator owns the
-  integration branch ref (worktree Leads commit on their worktree branch;
-  shared-checkout Leads leave scoped uncommitted edits).
-- **Unit Lead brief** (sparse pointers):
-  - `Method: Unit Implementation` (`docs/spec-first-workflow/phases/implementation/unit.md`)
-  - `tasks.md` and packet paths (+ main checkout path if `specs/<task>/` is uncommitted)
-  - integration branch, current tip SHA (`HEAD`), checkout mode, and any active user constraints or `modes.md` rules
-  - landed `Depends on`, prior shared-lock, and same-crate commit SHAs (decisions in `tasks.md`)
-  - stop boundary: return [Implementation Result](../interfaces/acceptance-result-v1.md#implementation-result)
+Choose the checkout and account for descendants under [Delegation
+Interface](../../agent-harness.md#delegation-interface). Serialize tasks that
+need fixtures unavailable in isolation. Only the Orchestrator advances the
+integration branch. Record each Lead's locator in `Execution`.
 
-Done when no ready task with disjoint scope waits while capacity is free.
+Send [Unit Implementation](implementation/unit.md), ledger and packet locations,
+integration branch and tip, checkout mode, and relevant landed prerequisite,
+shared-lock and same-crate commits or bounded diffs. The Lead returns an
+[Implementation Result](../interfaces/acceptance-result-v1.md#implementation-result).
 
 ### 3. Acceptance Transition
 
-Integrate each Lead return as it arrives and refill Step 2 immediately for
-newly unblocked tasks while unrelated Leads remain in flight.
+Integrate current returns serially. For an interrupted landing, stale or
+duplicate return, or changed assignment, apply [Orchestrator Recovery](implementation/orchestrator-recovery.md).
 
-| Return or Event | Orchestrator Action |
-| --- | --- |
-| `Implemented` (clean) | 1. Confirm changed paths stay inside granted `Mutable owners`/`Exclusive locks` with zero `specs/<task>/` paths.<br>2. Worktree: verify `git merge-base --is-ancestor HEAD <candidate>` and run `git merge --ff-only <candidate>` (route below if `HEAD` advanced). Shared checkout: stage verified paths and commit cleanly.<br>3. Mark `[x]`, record replaceable `Implemented` receipt (`decisions`/`unverified` verbatim), release locks, clear `Execution`, retire Lead/worktree, and refill Step 2. |
-| `Implemented` (stale base or merge conflict) | Keep Lead alive in its worktree; send current integration tip (and conflict details) so it merges `<integration-branch>` (loading [Merge Conflict Resolution](../../../.agents/skills/merge-conflict-resolution/SKILL.md) on conflicted hunks), re-runs crate lint/tests, commits cleanly, and returns a fast-forwardable `Implemented` result. |
-| Scope expansion (`next_owner: Ledger Orchestrator — scope expansion: <paths>`) | Grant and resume one-to-one if disjoint from active writers (Planning stays closed). If held by an active writer, pause requester until that writer lands, then grant locks and send the updated tip so Lead merges `<integration-branch>` before editing. Break mutual contention via [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery). |
-| `Blocked` (missing input or upstream gap) | Keep `[ ]`, preserve partial work (WIP commit/branch ref or worktree before stopping Lead), release unused locks, clear `Execution`, and route [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery) while unaffected tasks continue. |
-| Late/duplicate return, interrupted integration, or mid-task steering/invalidation | Load [Orchestrator Recovery](implementation/orchestrator-recovery.md). |
+1. Check the assignment's delta against granted owners and locks. Reject any Lead
+   change to the task bundle, including a committed change in an isolated
+   candidate. Distinguish the Orchestrator's own ledger updates. In a shared checkout commit only verified paths. For an
+   isolated candidate fast-forward the integration branch. If it cannot
+   fast-forward, send the new tip to the same Lead for the [pre-return
+   audit](implementation/unit.md#3-pre-return-self-audit-and-return).
+2. Mark the task integrated and record its receipt under Ledger Runtime State.
+3. Release locks, clear `Execution`, and retire the Lead and its worktree
+   subject to [Cleanup](../shared/cleanup.md).
+4. Refill the frontier immediately while unrelated Leads continue.
 
-Never push, deploy, or touch auto-deploy branches without explicit authority.
+For scope expansion, grant disjoint paths before editing. If another writer
+holds them, wait for landing and refresh the requester's tip before granting
+the locks. For mutual contention, missing inputs or upstream gaps, preserve
+partial work, release unused locks and apply Parent-Owned Recovery. Clear
+`Execution` once the writer stops. Keep unintegrated tasks unchecked.
 
-Exit Steps 2–3 to Step 4 once every planned code task is `[x]` with zero active
-writers (or go to Step 5 if no ready or active tasks remain and a required task
-stays `Blocked`).
+Proceed to Step 4 when all code tasks are integrated and writers have joined,
+including when an external effect is pending. Apply [Authority](../../../AGENTS.md#authority)
+before any external write or landing on an auto-deploy branch. Close as blocked only when
+required work remains and recovery cannot advance it.
 
 ### 4. Final Validation And Repair Routing
 
-- **Entry gate:** every planned code task is `[x]` with zero active writers
-  (run local Final Validation even when `[effect:<action>]` is pending).
-- **Fresh Delivery Owner:** dispatch one fresh Acceptance-Unit Lead
-  (`ACCEPTANCE_UNIT_LEAD`, per adapter) that implemented none of the ledger's
-  units (including 1-task ledgers) with `Method: Final Validation`
-  (`docs/spec-first-workflow/phases/implementation/final-validation.md`),
-  `tasks.md`, integration branch, pinned `Base` and `HEAD` (`<Base>..HEAD`),
-  present accepted bundle (`specs/<task>/`), and any active user constraints or
-  `modes.md` rules.
-- **Read-only enforcement:** on return, verify `git status` shows zero
-  candidate edits outside `specs/<task>/` — discard any unauthorized Delivery
-  Owner mutation and reject/re-run validation (in [No-Commit
-  Mode](implementation/modes.md#no-commit-mode), enforce read-only via its
-  pre-dispatch snapshot rule instead).
-- **Repair routing (`NeedsRepair`):** dispatch one fresh Acceptance-Unit Lead
-  (`ACCEPTANCE_UNIT_LEAD`, per adapter) in the shared checkout (sole writer;
-  isolate only if an adapter requires it) with `Method: Repair Assignment`
-  (`docs/spec-first-workflow/phases/implementation/repair.md`), verbatim [Repair
-  Request](../interfaces/acceptance-result-v1.md#repair-request) (including
-  `prior_attempt` on Round 2), integration branch, `Base`, `HEAD`, affected
-  packets, prior `decisions`, combined writable scope across named owning tasks
-  (raising capability tier per adapter on a missed invariant), and active user
-  constraints or `modes.md` rules.
+Assign [Final Validation](implementation/final-validation.md) to one fresh
+Delivery Owner who implemented none of the units. Send the ledger, accepted
+bundle, integration branch, Base and fixed candidate identity/diff. At dispatch
+and return verify HEAD, index, working tree and consumed bundle inputs still
+match the fixed validation boundary. Preserve unexpected edits, establish their ownership and
+restore the agreed boundary before re-running invalidated validation.
 
-| Repair Lead Return | Orchestrator Action |
-| --- | --- |
-| `Implemented` | Confirm changed paths stay inside granted scope (zero `specs/<task>/`); land onto integration branch (`git merge --ff-only <candidate>` if isolated, one clean local commit in shared checkout); retire Repair Lead/worktree; resume Delivery Owner with new `HEAD`, `<old-HEAD>..<new-HEAD>`, whether scope expanded, and repair `decisions`. |
-| `Blocked` (`Delivery Owner — refuted findings`) | Commit nothing, retire Repair Lead, and resume Delivery Owner with the refuting proof. |
-| `Blocked` (scope expansion) | Grant and resume one-to-one. |
-| `Blocked` (`UPSTREAM_GAP` or missing input) | Preserve partial work, retire Repair Lead, and route [Parent-Owned Recovery](../shared/transition.md#parent-owned-recovery) (or Step 5 if unresolvable). |
+On `NeedsRepair` dispatch a fresh [Repair Lead](implementation/repair.md) as
+sole writer in the shared checkout (isolated if required by the adapter).
+Send the verbatim [Repair Request](../interfaces/acceptance-result-v1.md#repair-request),
+branch, Base, current tip, affected packets, prior decisions and combined
+writable scope. Apply the adapter's capability escalation for a missed invariant.
 
-- **Delivery Owner `Blocked`:** close `next_owner` under [Parent-Owned
-  Recovery](../shared/transition.md#parent-owned-recovery) if within authority
-  and resume Delivery Owner; otherwise go to Step 5.
-
-Done when Delivery Owner returns terminal [Completion
-Result](../interfaces/acceptance-result-v1.md#completion-result) (`Accepted` or
-unresolvable `Blocked`).
+- On `Implemented`, use Step 3's scope check, landing and retirement procedure
+  without changing task checkboxes. Resume the same Delivery Owner with the
+  new candidate, repair-only diff, scope delta and repair decisions.
+- On complete refutation, resume the Delivery Owner with the proof and close
+  the Repair Lead without a landing.
+- Route scope, input and upstream blockers as in Step 3. For a Delivery Owner
+  blocker, resolve its named action under Parent-Owned Recovery and resume
+  validation when possible.
 
 ### 5. Close
 
-- **On `Accepted`:** set `status: done` in `tasks.md`, apply
-  [Cleanup](../shared/cleanup.md) (delete untracked `specs/<task>/`, confirm
-  zero leftover worktrees; if Cleanup updates tracked `docs/`, run `make
-  docs-check` and `make typos` and commit cleanly), and report impact first
-  alongside verified scope, any unrequested pending CI/`main` checks, material
-  optional gaps, and `FOLLOW_UP` items.
-- **On `Blocked`** (Step 3, Step 4, or any explicitly requested external
-  outcome in `Completion` not yet observed or authorized): set `status:
-  blocked` with `Blocked stop:` naming exact missing input/authority and owner
-  while preserving useful work.
-
-Done when `tasks.md` records terminal state, temporary artifacts/worktrees are
-retired on `Accepted`, and the report leads with impact plus open action items.
+Record the terminal receipt. On `Accepted`, mark the ledger done and apply
+[Cleanup](../shared/cleanup.md). If cleanup changes tracked documentation,
+run `make docs-check` and `make typos` and commit the scoped change in commit
+mode. Report impact, material limitations, pending external checks and
+follow-ups. On terminal `Blocked`, preserve useful work and record
+`status: blocked` and `Blocked stop:` with the exact missing input or
+authority and its owner.
