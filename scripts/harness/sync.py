@@ -438,8 +438,9 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     implementation = "../../docs/spec-first-workflow/phases/implementation.md"
     lead_phase = implementation.removesuffix(".md")
     lead_method = (
-        f"Apply [Unit Implementation]({lead_phase}/unit.md) for an assigned unit, or\n"
-        f"[Final Validation]({lead_phase}/final-validation.md) as Delivery Owner,\n"
+        f"Apply [Unit Implementation]({lead_phase}/unit.md) for an assigned unit,\n"
+        f"[Repair Assignment]({lead_phase}/repair.md) for a Final Validation repair, or\n"
+        f"[Final Validation]({lead_phase}/final-validation.md) as Delivery Owner.\n"
     )
     orchestrator_method = f"Apply [Implementation as Ledger Orchestrator]({implementation}#carrier)\n"
     lead_tail = (
@@ -450,25 +451,29 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"tools: {CLAUDE_MUTABLE_TOOLS}\nmodel: inherit\neffort: high\n---\n\n"
         f"{lead_method}"
-        f"and [Claude Code adapter](../../docs/agent-harness/claude-code.md).\n{lead_tail}"
+        "Load [Claude Code adapter](../../docs/agent-harness/claude-code.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".qwen/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"model: inherit\ntools:\n{QWEN_MUTABLE_TOOLS}\n---\n\n"
         f"{lead_method}"
-        f"and [Qwen Code adapter](../../docs/agent-harness/qwen-code.md).\n{lead_tail}"
+        "Load [Qwen Code adapter](../../docs/agent-harness/qwen-code.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".cursor/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         "model: grok-4.6[effort=xhigh]\nreadonly: false\n---\n\n"
         f"{lead_method}"
-        f"and [Cursor adapter](../../docs/agent-harness/cursor.md).\n{lead_tail}"
+        "Load [Cursor adapter](../../docs/agent-harness/cursor.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".grok/agents"]["acceptance-unit-lead.md"] = (
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         "agents_md: true\npermission_mode: bypassPermissions\nprompt_mode: full\n---\n\n"
         f"{lead_method}"
-        f"and [Grok Build adapter](../../docs/agent-harness/grok-build.md).\n{lead_tail}"
+        "Load [Grok Build adapter](../../docs/agent-harness/grok-build.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".grok/agents"]["orchestrator.md"] = (
         f'---\nname: orchestrator\ndescription: "{ORCH_DESC}"\n'
@@ -482,7 +487,8 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         "    evidence-agent: allow\n    reviewer-agent: allow\n    adjudicator-agent: allow\n"
         "  question: deny\n---\n\n"
         f"{lead_method}"
-        f"and [OpenCode adapter](../../docs/agent-harness/opencode.md).\n{lead_tail}"
+        "Load [OpenCode adapter](../../docs/agent-harness/opencode.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".opencode/agents"]["orchestrator.md"] = (
         f'---\ndescription: "{ORCH_DESC}"\nmode: primary\nmodel: xai/grok-4.6\nvariant: high\n'
@@ -496,7 +502,8 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
         f"tools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: false\nsubagent: true\n---\n\n"
         f"{lead_method}"
-        f"and [Antigravity adapter](../../docs/agent-harness/antigravity.md).\n{lead_tail}"
+        "Load [Antigravity adapter](../../docs/agent-harness/antigravity.md) only when spawning "
+        f"sub-lanes or independent review.\n{lead_tail}"
     ).encode("utf-8")
     rendered[".agents/agents"]["orchestrator.md"] = (
         f'---\nname: orchestrator\ndescription: "{ORCH_DESC}"\n'

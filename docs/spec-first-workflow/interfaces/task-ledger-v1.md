@@ -41,7 +41,8 @@ Managed under [Implementation](../phases/implementation.md#orchestrator-loop);
 Planning omits these fields.
 
 - `Base: <commit SHA>` (header, pinned before the first dispatch so worktrees,
-  Final Validation, and Review share one exact diff baseline).
+  Final Validation, and Review share one exact diff baseline; add `Commit mode:
+  no-commit` only when the user explicitly forbade local commits).
 - `Blocked stop: <unavailable required input and owner>` (header, only when
   blocked).
 - Routing fields per task (not acceptance evidence): `Execution: <native task or
@@ -52,10 +53,14 @@ Planning omits these fields.
   unchecked, and a checked task makes no acceptance claim while final validation
   or later gates remain open.
 - Replace one [Acceptance Result V1](acceptance-result-v1.md) in place per task
-  and one for `Completion` (Git keeps history):
+  and one for `Completion` (Git keeps history; write non-empty `decisions` or
+  `unverified` as indented sub-bullets under the task so primary details stay
+  untruncated):
 
 ```text
-Implemented: <unit>; verification: pending final validation; candidate: <bounded diff, tree, or commit>; decisions: <carried from the Lead's result; omit when none>; unverified: <carried from the Lead's result; omit when none>
+Implemented: <unit>; verification: pending final validation; candidate: <commit or bounded diff>
+  - decisions: <carried verbatim from Lead's result; omit when none>
+  - unverified: <carried verbatim from Lead's result; omit when none>
 Accepted: Completion; evidence: <claim-matched result>; candidate: <identity>
 Blocked: <unit>; unverified: <claim>; evidence: <narrower result>; next owner: <owner and condition>; candidate: <identity or none>
 ```
