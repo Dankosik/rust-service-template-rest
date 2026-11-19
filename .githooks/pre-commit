@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${ALLOW_MAIN_COMMIT:-0}" = "1" ]; then
+    exit 0
+fi
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ "${branch}" = "main" ]; then
+    cat >&2 <<'EOF'
+error: direct commits to 'main' are blocked by .githooks/pre-commit.
+Create an isolated sibling task worktree anchored to origin/main instead
+(see docs/worktrees.md#2-create-anchored-to-an-explicit-base), or set
+ALLOW_MAIN_COMMIT=1 when committing to main is explicitly authorized.
+EOF
+    exit 1
+fi
