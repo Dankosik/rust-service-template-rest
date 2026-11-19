@@ -93,9 +93,7 @@ Mark `done` once final `Accepted` closes Completion, then apply
 
 ## Stop Rule
 
-Planning is ready when each outcome has its scope, consumed inputs, writable
-owners, final observable outcomes, and dependency timing. Concrete tests are
-executor-owned implementation choices, not readiness inputs. Name a future live
-prerequisite as a final gate only when the accepted task explicitly requires
-that execution or external effect. Empty additional-proof lists need no
-expansion. Preserve actual user-owned acceptance and external-effect requirements.
+Apply the [Readiness Dry Run](../planning.md#readiness-dry-run) and the
+[Planning review verdict](../task-review-readiness.md#verdict) to the fixed
+ledger. Name a future live prerequisite as a final gate only when the accepted
+task explicitly requires that execution or external effect.
