@@ -184,7 +184,7 @@ impl Handler<Delivery> for Dispatcher {
         };
         let response = endpoint
             .client
-            .execute_for_headers(request, &job.context())
+            .execute_for_headers(&job.context(), request)
             .await;
         outcomes.finish_attempt(response)
     }

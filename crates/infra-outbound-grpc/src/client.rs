@@ -334,24 +334,25 @@ impl PreparedCall {
         let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
         let (body, upload_guard) = guard_upload(body);
         let mut request = Request::from_parts(parts, body);
-        let result = async {
-            let outcome = tokio::select! {
-                biased;
-                reason = opening.wait_stopped() => Err(client_stopped_status(reason)),
-                dispatched = async {
-                    let ready = channel.ready().await.map_err(|err| transport_status(&err))?;
-                    opening.check().map_err(client_stopped_status)?;
-                    prepare_dispatch(request.headers_mut())?;
-                    opening.check().map_err(client_stopped_status)?;
-                    apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
-                    ready.call(request).await.map_err(|err| transport_status(&err))
-                } => dispatched,
-            };
-            opening.check().map_err(client_stopped_status)?;
-            outcome
-        }
-        .instrument(call.span().clone())
-        .await;
+        let result = opening
+            .run(async {
+                let ready = channel
+                    .ready()
+                    .await
+                    .map_err(|err| transport_status(&err))?;
+                opening.check().map_err(client_stopped_status)?;
+                prepare_dispatch(request.headers_mut())?;
+                opening.check().map_err(client_stopped_status)?;
+                apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
+                ready
+                    .call(request)
+                    .await
+                    .map_err(|err| transport_status(&err))
+            })
+            .instrument(call.span().clone())
+            .await
+            .map_err(client_stopped_status)
+            .and_then(std::convert::identity);
         drop(permit);
         let mut response = match result {
             Ok(response) => response,

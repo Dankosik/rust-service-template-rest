@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::ServiceExt as _;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, FromRef, State};
@@ -149,18 +148,12 @@ impl From<CreateError> for Rollback<TerminalProblem> {
     }
 }
 
-#[async_trait]
-trait CreateWidgets: Send + Sync {
-    async fn create(&self, tx: &mut Tx<'_>, input: &NewWidget) -> Result<Widget, CreateError>;
-}
-
 #[derive(Debug)]
 struct SqlWidgets {
     hold: Arc<Hold>,
 }
 
-#[async_trait]
-impl CreateWidgets for SqlWidgets {
+impl SqlWidgets {
     async fn create(&self, tx: &mut Tx<'_>, input: &NewWidget) -> Result<Widget, CreateError> {
         let id =
             sqlx::query_scalar("INSERT INTO widgets (name, color) VALUES ($1, $2) RETURNING id")
@@ -256,7 +249,7 @@ async fn replace_widget(
 }
 
 struct CreateWidget {
-    widgets: Arc<dyn CreateWidgets>,
+    widgets: Arc<SqlWidgets>,
     input: NewWidget,
     handler_timeout: bool,
 }
@@ -523,7 +516,7 @@ struct Mounted {
 #[derive(Clone)]
 struct WidgetState {
     readiness: health::ReadinessReader,
-    widgets: Arc<dyn CreateWidgets>,
+    widgets: Arc<SqlWidgets>,
 }
 
 impl FromRef<WidgetState> for health::ReadinessReader {
@@ -609,7 +602,7 @@ impl Mounted {
     async fn new(store_pool: PgPool, budget: Duration) -> Self {
         let provider = Provider::start().await;
         let hold = Arc::new(Hold::default());
-        let widgets: Arc<dyn CreateWidgets> = Arc::new(SqlWidgets {
+        let widgets = Arc::new(SqlWidgets {
             hold: Arc::clone(&hold),
         });
         let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");

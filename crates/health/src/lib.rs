@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -10,12 +11,49 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-pub use async_trait::async_trait;
-
-#[async_trait]
 pub trait Probe: Send + Sync + 'static {
     fn name(&self) -> &'static str;
-    async fn check(&self) -> Result<(), ProbeError>;
+    fn check(&self) -> impl Future<Output = Result<(), ProbeError>> + Send;
+}
+
+type ProbeFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + 'a>>;
+
+trait ErasedProbe: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn check(&self) -> ProbeFuture<'_>;
+}
+
+impl<P: Probe> ErasedProbe for P {
+    fn name(&self) -> &'static str {
+        Probe::name(self)
+    }
+
+    fn check(&self) -> ProbeFuture<'_> {
+        Box::pin(Probe::check(self))
+    }
+}
+
+pub struct BoxedProbe(Box<dyn ErasedProbe>);
+
+impl BoxedProbe {
+    #[must_use]
+    pub fn new(probe: impl Probe) -> Self {
+        Self(Box::new(probe))
+    }
+
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn check(&self) -> ProbeFuture<'_> {
+        self.0.check()
+    }
+}
+
+impl fmt::Debug for BoxedProbe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BoxedProbe").field(&self.name()).finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -305,7 +343,7 @@ fn check_freshness(
 
 pub struct Readiness {
     control: ReadinessControl,
-    probes: Vec<Box<dyn Probe>>,
+    probes: Vec<BoxedProbe>,
 }
 
 #[derive(Clone, Debug)]
@@ -331,7 +369,7 @@ impl fmt::Debug for Readiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let probes = fmt::from_fn(|f| {
             f.debug_list()
-                .entries(self.probes.iter().map(|probe| probe.name()))
+                .entries(self.probes.iter().map(BoxedProbe::name))
                 .finish()
         });
         f.debug_struct("Readiness")
@@ -351,7 +389,7 @@ pub struct ReadinessReader {
 
 impl Readiness {
     #[must_use]
-    pub fn new(probes: Vec<Box<dyn Probe>>, policy: RefreshPolicy) -> Self {
+    pub fn new(probes: Vec<BoxedProbe>, policy: RefreshPolicy) -> Self {
         metrics::describe_counter!(
             CHECKS_METRIC,
             metrics::Unit::Count,
@@ -527,11 +565,11 @@ impl Readiness {
         let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
         let observed = match self.probes.as_slice() {
-            [probe] => check_probe(probe.as_ref(), deadline, budget).await,
+            [probe] => check_probe(probe, deadline, budget).await,
             probes => {
                 let checks = probes
                     .iter()
-                    .map(|probe| check_probe(probe.as_ref(), deadline, budget));
+                    .map(|probe| check_probe(probe, deadline, budget));
                 join_all(checks)
                     .await
                     .into_iter()
@@ -544,7 +582,7 @@ impl Readiness {
 }
 
 async fn check_probe(
-    probe: &dyn Probe,
+    probe: &BoxedProbe,
     deadline: Instant,
     budget: Duration,
 ) -> Result<(), ProbeFailure> {

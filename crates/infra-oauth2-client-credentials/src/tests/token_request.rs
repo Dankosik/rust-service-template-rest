@@ -62,7 +62,7 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
     let response = service_tokens
         .http(fixture.resource_client())
         .unwrap()
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -89,9 +89,9 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
         .http(fixture.resource_client())
         .unwrap()
         .execute(
+            &timeout_context(Duration::from_secs(10)),
             fixture.request(),
             &subject("subject+/="),
-            deadline(Duration::from_secs(10)),
         )
         .await
         .unwrap();
@@ -183,7 +183,7 @@ async fn absent_scope_is_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
         .service_client()
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
         .await
         .unwrap();
     assert_token_form(
@@ -201,7 +201,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         let before = jsonwebtoken::get_current_timestamp();
         fixture
             .service_client()
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
             .await
             .unwrap();
         signing_windows.push(before..=jsonwebtoken::get_current_timestamp());
@@ -244,9 +244,9 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
         let result = fixture
             .exchange_client()
             .execute(
+                &timeout_context(Duration::from_secs(10)),
                 fixture.request(),
                 &subject("subject"),
-                deadline(Duration::from_secs(10)),
             )
             .await;
         assert_matches!(
@@ -268,7 +268,7 @@ async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
         );
         let result = fixture
             .service_client()
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+            .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
             .await;
         assert_matches!(
             result,
@@ -322,16 +322,16 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
             fixture
                 .exchange_client()
                 .execute(
+                    &timeout_context(Duration::from_secs(10)),
                     fixture.request(),
                     &subject("subject"),
-                    deadline(Duration::from_secs(10)),
                 )
                 .await
                 .unwrap_err()
         } else {
             fixture
                 .service_client()
-                .execute(fixture.request(), deadline(Duration::from_secs(10)))
+                .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
                 .await
                 .unwrap_err()
         };
@@ -373,9 +373,9 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     let observation = metrics::set_default_local_recorder(&recorder);
     let result = client
         .execute(
+            &timeout_context(Duration::from_secs(20)),
             fixture.request(),
             &subject("subject"),
-            deadline(Duration::from_secs(20)),
         )
         .await;
     drop(observation);
@@ -500,12 +500,10 @@ async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_s
             let result = if delegated {
                 fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
                 let client = fixture.exchange_client();
-                client
-                    .execute_with_context(request, &subject("subject"), context)
-                    .await
+                client.execute(context, request, &subject("subject")).await
             } else {
                 let client = fixture.service_client();
-                client.execute_with_context(request, context).await
+                client.execute(context, request).await
             };
             assert_matches!(result, Err(Error::Acquisition(AcquisitionError::Cancelled)));
             assert_eq!(*outcomes.lock().unwrap(), ["cancelled"]);
@@ -574,7 +572,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                 drive_cancelled_provider_completion(
                     &fixture,
                     &gate,
-                    Box::pin(client.execute_with_context(first, &subject_token, context)),
+                    Box::pin(client.execute(context, first, &subject_token)),
                     Box::pin(fixture.send_exchange_request(&client, request, "subject")),
                 )
                 .await;
@@ -583,7 +581,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                 drive_cancelled_provider_completion(
                     &fixture,
                     &gate,
-                    Box::pin(client.execute_with_context(first, context)),
+                    Box::pin(client.execute(context, first)),
                     Box::pin(fixture.send_request(&client, request)),
                 )
                 .await;
@@ -641,10 +639,10 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let mut captured = RecordedMetrics::default();
     let fixture = Fixture::new().await;
-    let far = || deadline(Duration::from_secs(10));
+    let far = || timeout_context(Duration::from_secs(10));
     let reused = fixture.service_client();
     for _ in 0..2 {
-        reused.execute(fixture.request(), far()).await.unwrap();
+        reused.execute(&far(), fixture.request()).await.unwrap();
     }
     fixture.token_raw(response(
         StatusCode::BAD_REQUEST,
@@ -652,7 +650,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     ));
     fixture
         .service_client()
-        .execute(fixture.request(), far())
+        .execute(&far(), fixture.request())
         .await
         .unwrap_err();
     fixture.token_raw(response(
@@ -661,7 +659,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     ));
     fixture
         .exchange_client()
-        .execute(fixture.request(), &subject("subject"), far())
+        .execute(&far(), fixture.request(), &subject("subject"))
         .await
         .unwrap_err();
     let gate = fixture.block_tokens();
@@ -670,7 +668,8 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     request
         .extensions_mut()
         .insert(OperationContext::with_timeout(Duration::from_secs(1)));
-    let mut timed = Box::pin(timed.execute(request, far()));
+    let timed_context = far();
+    let mut timed = Box::pin(timed.execute(&timed_context, request));
     fixture.drive_until_token_received(timed.as_mut()).await;
     advance(Duration::from_secs(1)).await;
     assert_matches!(
@@ -694,20 +693,22 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         .unwrap()
         .http(fixture.resource_client())
         .unwrap();
-    let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
+    let dropped_context = far();
+    let mut dropped = Box::pin(dropped_client.execute(&dropped_context, fixture.request()));
     fixture.drive_until_token_received(dropped.as_mut()).await;
     captured.drain(&snapshotter);
     let before_capacity = captured.outbound_samples;
     assert!(before_capacity > 0);
     assert_matches!(
         exchange_client
-            .execute(fixture.request(), &subject("at-capacity"), far())
+            .execute(&far(), fixture.request(), &subject("at-capacity"))
             .await,
         Err(Error::Acquisition(AcquisitionError::AtCapacity))
     );
     captured.drain(&snapshotter);
     assert_eq!(captured.outbound_samples, before_capacity);
-    let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
+    let waiter_context = far();
+    let mut waiter = Box::pin(dropped_client.execute(&waiter_context, fixture.request()));
     poll_pending(waiter.as_mut()).await;
     drop(waiter);
     drop(dropped);

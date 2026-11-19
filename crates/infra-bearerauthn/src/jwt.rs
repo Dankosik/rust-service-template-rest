@@ -1499,16 +1499,19 @@ mod tests {
             let verifier = crate::Verifier::jwt(engine);
             assert_eager_success_registrations(&diagnostics.registered_counters());
             runtime.block_on(async {
+                let live = operation_context::OperationContext::with_timeout(
+                    crate::provider::PROVIDER_TIMEOUT,
+                );
                 for transport in [Transport::Http, Transport::Grpc] {
                     verifier
-                        .authenticate([header.as_bytes()], transport)
+                        .authenticate(&live, [header.as_bytes()], transport)
                         .await
                         .unwrap();
                 }
                 for _ in 0..2 {
                     assert_eq!(
                         verifier
-                            .authenticate(std::iter::empty(), Transport::Http)
+                            .authenticate(&live, std::iter::empty(), Transport::Http)
                             .await
                             .err(),
                         Some(Failure::Missing)
@@ -1516,7 +1519,7 @@ mod tests {
                 }
                 assert_eq!(
                     verifier
-                        .authenticate([b"Bearer =".as_slice()], Transport::Grpc)
+                        .authenticate(&live, [b"Bearer =".as_slice()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Malformed)
@@ -1524,7 +1527,7 @@ mod tests {
                 let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
                 assert_eq!(
                     verifier
-                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &expired)
+                        .authenticate(&expired, [header.as_bytes()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Unavailable)
@@ -1533,13 +1536,16 @@ mod tests {
                 cancelled.cancel();
                 assert_eq!(
                     verifier
-                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &cancelled)
+                        .authenticate(&cancelled, [header.as_bytes()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Unavailable)
                 );
-                let mut pending =
-                    Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
+                let mut pending = Box::pin(verifier.authenticate(
+                    &live,
+                    [unknown_header.as_bytes()],
+                    Transport::Http,
+                ));
                 assert!(futures_util::poll!(pending.as_mut()).is_pending());
                 drop(pending);
             });

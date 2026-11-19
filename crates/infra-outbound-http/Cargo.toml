@@ -31,7 +31,7 @@ parking_lot = { workspace = true }
 rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
 shared-rules = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

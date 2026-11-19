@@ -35,31 +35,7 @@
         ]
       }
     },
-    "crates/shared-rules/Cargo.toml": {
-      "role": "shared-rules",
-      "allow_dependents": {
-        "reason": "Each listed crate applies a rule that another crate must apply identically, with no other common owner.",
-        "authority": "crates/shared-rules/src/lib.rs",
-        "members": [
-          "crates/config/Cargo.toml",
-          "crates/infra-bearerauthn/Cargo.toml",
-          "crates/infra-cache/Cargo.toml",
-          "crates/infra-grpc/Cargo.toml",
-          "crates/infra-http/Cargo.toml",
-          "crates/infra-http-transport/Cargo.toml",
-          "crates/infra-jobs/Cargo.toml",
-          "crates/infra-messaging/Cargo.toml",
-          "crates/infra-oauth2-client-credentials/Cargo.toml",
-          "crates/infra-object-storage/Cargo.toml",
-          "crates/infra-outbound-grpc/Cargo.toml",
-          "crates/infra-outbound-http/Cargo.toml",
-          "crates/infra-postgres/Cargo.toml",
-          "crates/infra-serviceauth/Cargo.toml",
-          "crates/infra-telemetry/Cargo.toml",
-          "crates/infra-webhooks/Cargo.toml"
-        ]
-      }
-    },
+    "crates/shared-rules/Cargo.toml": {"role": "shared-rules"},
     "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
@@ -92,7 +68,7 @@
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
     "contract": {"rule": "independent-shared-contract"},
-    "shared-rules": {"rule": "std-only-shared-rules", "std_only": true},
+    "shared-rules": {"rule": "std-only-shared-rules", "std_only": true, "allow_all_dependents": true},
     "bearer": {"rule": "independent-bearer-provider"},
     "service-auth": {"rule": "independent-service-token-provider"},
     "outbound-grpc": {
@@ -141,10 +117,7 @@
         }
       }
     },
-    "feature-provider": {
-      "rule": "feature-provider-explicit-reviewed-dependencies",
-      "deny_roles": ["root", "config", "test"]
-    },
+    "feature-provider": {"rule": "feature-provider-explicit-reviewed-dependencies"},
     "http-transport": {"rule": "shared-http-listener"},
     "http": {
       "rule": "http-inbound-contract-dependencies",

@@ -65,7 +65,7 @@ pub(crate) async fn authenticate(
             .iter()
             .map(http::HeaderValue::as_bytes);
         verifier
-            .authenticate_presented_with_context(authorization, Transport::Grpc, context)
+            .authenticate_presented(context, authorization, Transport::Grpc)
             .await
     };
     check_open(context)?;

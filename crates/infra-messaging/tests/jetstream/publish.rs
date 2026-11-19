@@ -23,16 +23,16 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     stopped.cancel();
     assert_eq!(
         producer
-            .publish(&prepared, &context(deadline(), &stopped))
+            .publish(&context(deadline(), &stopped), &prepared)
             .await,
         Err(PublishRejection::ContextStopped.into())
     );
     let first = producer
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("first publication receives a JetStream acknowledgment");
     let duplicate = producer
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("retrying the same immutable publication identity is acknowledged");
 
@@ -47,14 +47,14 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
         .prepare(&event("event-refused"))
         .expect("second registered event is prepared");
     let result = producer
-        .publish(&rejected, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &rejected)
         .await;
     assert_eq!(result, Err(PublishRejection::BrokerRefused.into()));
 
     close(messaging).await;
     assert_eq!(
         producer
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await,
         Err(PublishRejection::Unavailable.into())
     );
@@ -81,7 +81,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     std::assert_matches!(
         messaging
             .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await,
         Err(PublishError::Rejected(PublishRejection::InvalidEnvelope(
             EnvelopeError::PayloadTooLarge
@@ -107,7 +107,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     .unwrap();
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("the exact payload boundary is admitted");
     close(messaging).await;
@@ -152,7 +152,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         let (producer, prepared, cancel) = (messaging.producer(), prepared.clone(), cancel.clone());
         publications.spawn(async move {
             producer
-                .publish(&prepared, &context(deadline(), &cancel))
+                .publish(&context(deadline(), &cancel), &prepared)
                 .await
         });
     }
@@ -167,7 +167,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     let healthy = CancellationToken::new();
     let refused = timeout(
         Duration::from_millis(250),
-        producer.publish(&prepared, &context(deadline(), &healthy)),
+        producer.publish(&context(deadline(), &healthy), &prepared),
     )
     .await
     .expect("a full shared window refuses without waiting");
@@ -178,7 +178,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         Duration::from_secs(7),
         "native cleanup restores publication without replacing the resource",
         async || match producer
-            .publish(&prepared, &context(deadline(), &healthy))
+            .publish(&context(deadline(), &healthy), &prepared)
             .await
         {
             Ok(ack) => Some(ack),
@@ -213,8 +213,8 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let result = messaging
         .producer()
         .publish(
-            &prepared,
             &context(Instant::now() + Duration::from_millis(250), &cancel),
+            &prepared,
         )
         .await;
     std::assert_matches!(result, Err(PublishError::Ambiguous));
@@ -251,7 +251,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("retrying the same prepared identity receives a broker acknowledgment");
     assert!(acknowledgment.duplicate);

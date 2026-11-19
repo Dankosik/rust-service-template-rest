@@ -44,7 +44,6 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 arc-swap = { workspace = true }
-async-trait = { workspace = true }
 axum = { workspace = true }
 http-body-util = { workspace = true }
 infra-http = { workspace = true }

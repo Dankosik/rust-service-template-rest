@@ -47,7 +47,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -113,7 +113,7 @@ async fn handler_runs_in_the_trace_of_the_publication() {
     let request = tracing::info_span!("request");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .instrument(request.clone())
         .await
         .expect("fixture event publication is acknowledged");
@@ -202,7 +202,7 @@ async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -290,7 +290,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -404,7 +404,7 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -453,7 +453,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
     timeout(Duration::from_secs(3), started.notified())
@@ -503,7 +503,7 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("publication continues after the owner aborted one consumer");
     startup_cancel.cancel();
@@ -585,7 +585,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
             .expect("fixture event is prepared");
         messaging
             .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await
             .expect("fixture event publication is acknowledged");
     }
