@@ -27,8 +27,9 @@ anchor).
 1. **Coverage, scope creep & deletion.** Independently check accepted inputs
    (`intent.md`, `spec.md`, `design/`, `rollout.md`). Construct a scenario
    where every task meets its `Outcome` and `Observable claim` yet an accepted
-   `R<n>`, `G<n>`, rollout gate, `Carried concerns`, or required durable doc
-   update still fails. Trace every task's `Outcome` and `Boundary -> In scope`
+   `R<n>`, `G<n>`, `Downstream handoff`, rollout gate, `Carried concerns`, or
+   required durable contract or decision-doc update still fails. Trace every
+   task's `Outcome` and `Boundary -> In scope`
    back to an accepted obligation (`FAIL` on scope creep or invented behavior
    or architecture). Test whether deleting or merging any task preserves all
    obligations and prerequisites.
