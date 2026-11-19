@@ -1,0 +1,142 @@
+{
+  "compressed_archive_bytes": 15780427,
+  "compute_upper_estimate_usd": 0.1989,
+  "id": 621123323,
+  "invoice": "Provider invoice pending",
+  "manifest": [
+    {
+      "archive": "builds-prewarm.tar.gz",
+      "bytes": 6269,
+      "sha256": "68d56fd116a3404cf4df6681b77659c88eecda2eb07f664bf06ede2bfbd16a78"
+    },
+    {
+      "archive": "builds.tar.gz",
+      "bytes": 7634,
+      "sha256": "a0e452da0cd781810c803c9fef8c1dc1f0d23a1bc419f4f6663c4650d45d9b11"
+    },
+    {
+      "archive": "core-http-provisional.tar.gz",
+      "bytes": 1339330,
+      "sha256": "a0af059c87a92459c8f98b5d77490e62ddcf23a862a88ad9dd6513f148e33a18"
+    },
+    {
+      "archive": "exact-authority-timing.tar.gz",
+      "bytes": 1125366,
+      "sha256": "5cf56e4472bd3944025b3267fba94766e5264246f0dd9a15b55925851a9bcab4"
+    },
+    {
+      "archive": "final-credentials.tar.gz",
+      "bytes": 808772,
+      "sha256": "f1e077c060dcbef27a5b5ed80c4f752cc2f2493f78e44881a5af503086162900"
+    },
+    {
+      "archive": "final-grpc-decoded.tar.gz",
+      "bytes": 2722651,
+      "sha256": "604c6028af87c12ab290b52978286c12938d1bfb5c3b9d586dfa71ad6d6f321d"
+    },
+    {
+      "archive": "final-grpc-transport.tar.gz",
+      "bytes": 2729034,
+      "sha256": "f3c9979ac7e22dbb999bef9c4b062887894d2e2ff93cfff664de02d406059346"
+    },
+    {
+      "archive": "final-http-buffered-late.tar.gz",
+      "bytes": 37055,
+      "sha256": "7400b0faed73ac3cf644924f36c8b511dc0d4ab2305609e20252edc3210f800b"
+    },
+    {
+      "archive": "final-http-headers-late.tar.gz",
+      "bytes": 158850,
+      "sha256": "48e6e81c09b1559f3e10a74582eb20de97c6e3234537b519ca87e24f361b30eb"
+    },
+    {
+      "archive": "final-http-multi.tar.gz",
+      "bytes": 148834,
+      "sha256": "8153bf91e9b4f762def35d0c873355b248979231783acfb1276ea50f5e5512d4"
+    },
+    {
+      "archive": "final-http-standard.tar.gz",
+      "bytes": 1028720,
+      "sha256": "cbc9f0223a492d44cd624c5cfe26742755520702d0aa88abbd8901cdd59157dc"
+    },
+    {
+      "archive": "first-frame-heap-short.tar.gz",
+      "bytes": 5060,
+      "sha256": "99c220069b3e7517a2eb4346ae13ba2ffe8b73dcab47819514833d11a4551706"
+    },
+    {
+      "archive": "first-frame-heap.tar.gz",
+      "bytes": 5103,
+      "sha256": "9fac40de9d863e2d2aca9256851672ecf1659913a794119ba8253f7a08f55869"
+    },
+    {
+      "archive": "first-frame-multi.tar.gz",
+      "bytes": 149799,
+      "sha256": "0fac4c686607f84a75ae79798c7c9943c07c00ab1ead50bf765a41b71ed89b4a"
+    },
+    {
+      "archive": "first-frame-timing.tar.gz",
+      "bytes": 592451,
+      "sha256": "f9a38bdf859708a57d2d66580a77ac229fc44fbf9d31703cd6fdbfe30e18f7e2"
+    },
+    {
+      "archive": "host-timing.tar.gz",
+      "bytes": 698296,
+      "sha256": "a2c26cf315a10e14e747e0ad36db56afd4987ed6dc1844d4113eb724e18ffd9b"
+    },
+    {
+      "archive": "host-unstarted-retry.tar.gz",
+      "bytes": 19952,
+      "sha256": "11123cead72d3c9b1bbb657ed7a031df2a19fd408f747ab2ead137804e19a16b"
+    },
+    {
+      "archive": "pilot-primed.tar.gz",
+      "bytes": 105292,
+      "sha256": "90c4b228d4a965bc5ea099b3292c9b8efb8b8b4a9613d60e034adf7bb36f8ba5"
+    },
+    {
+      "archive": "pilot-warm-1024.tar.gz",
+      "bytes": 52666,
+      "sha256": "9f193c7640de39a626f8b03105507296e63abd5aed5bdc313ccf69fd2555d39a"
+    },
+    {
+      "archive": "pilot-warm.tar.gz",
+      "bytes": 5017,
+      "sha256": "b1f7c8606b65f81ab2bf92fa8d2763e362db39fe098ac97b47c85709d35b7cde"
+    },
+    {
+      "archive": "pilot.tar.gz",
+      "bytes": 303539,
+      "sha256": "8630e6d652f402cc9c4f59ce10db617567683223c45c49303cc010e43bcd5547"
+    },
+    {
+      "archive": "retention-profile-tuned.tar.gz",
+      "bytes": 1310786,
+      "sha256": "d2f587fe288b351e982d3f5e070fdc0cfe9ab97e3728f3d7fde30c5af5bd524e"
+    },
+    {
+      "archive": "retention-profile.tar.gz",
+      "bytes": 1332711,
+      "sha256": "3adb4cc416d9c569cd391339a89f4ec4048f2e8e5d07d9793c1c49235e328266"
+    },
+    {
+      "archive": "retention-short.tar.gz",
+      "bytes": 423462,
+      "sha256": "3d60c6a07ebafc947532c0a9c4b4e1e8ba46a615e80c565d0abbe65799a4ac6d"
+    },
+    {
+      "archive": "shared-cache-timing.tar.gz",
+      "bytes": 663778,
+      "sha256": "aef5d32807117a35cebbbc8e3f5a71453d9d9f2e899a18b1601567dcd61deb66"
+    }
+  ],
+  "observed_before_delete_at": "2026-11-19T17:36:37.234186+00:00",
+  "outbound_after_observation_margin_bytes": 1048576,
+  "outbound_upper_estimate_usd": 0.00021,
+  "pre_tax_usage_upper_estimate_usd": 0.1991,
+  "public_interface": "eth0",
+  "rx_bytes_observed": 251300794,
+  "tx_bytes_observed": 21460117,
+  "verified_absent_at": "2026-11-19T17:38:19.111248+00:00",
+  "verified_archives": 25
+}

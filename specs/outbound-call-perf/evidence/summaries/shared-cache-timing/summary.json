@@ -1,0 +1,1470 @@
+{
+  "observed_paired_deltas": {
+    "service-before-1": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 36605.56201171875,
+          "median": -6269.063232421875,
+          "min": -13783.95556640625,
+          "paired_deltas": [
+            -12757.95947265625,
+            -13783.95556640625,
+            36605.56201171875,
+            219.8330078125
+          ]
+        },
+        "p99_ns": {
+          "max": 136624,
+          "median": -13772.0,
+          "min": -177564,
+          "paired_deltas": [
+            -177564,
+            -492,
+            136624,
+            -27052
+          ]
+        }
+      }
+    },
+    "service-before-64": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": -416.03271484375,
+          "median": -4175.494140625,
+          "min": -25698.00830078125,
+          "paired_deltas": [
+            -25698.00830078125,
+            -416.03271484375,
+            -1383.95751953125,
+            -6967.03076171875
+          ]
+        },
+        "p99_ns": {
+          "max": 3518733,
+          "median": 959187.0,
+          "min": -1786349,
+          "paired_deltas": [
+            1667365,
+            251009,
+            -1786349,
+            3518733
+          ]
+        }
+      }
+    },
+    "service-refresh-1": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 301.2880859375,
+          "median": -305.603271484375,
+          "min": -6703.29052734375,
+          "paired_deltas": [
+            -503.8720703125,
+            -107.33447265625,
+            -6703.29052734375,
+            301.2880859375
+          ]
+        },
+        "p99_ns": {
+          "max": 5950,
+          "median": -1687.0,
+          "min": -95373,
+          "paired_deltas": [
+            -2540,
+            -834,
+            -95373,
+            5950
+          ]
+        }
+      }
+    },
+    "service-refresh-64": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 13386.3837890625,
+          "median": -1352.90283203125,
+          "min": -5022.724609375,
+          "paired_deltas": [
+            13386.3837890625,
+            -834.98974609375,
+            -1870.81591796875,
+            -5022.724609375
+          ]
+        },
+        "p99_ns": {
+          "max": 3135820,
+          "median": -805118.5,
+          "min": -1590941,
+          "paired_deltas": [
+            -1590941,
+            -535116,
+            -1075121,
+            3135820
+          ]
+        }
+      }
+    }
+  },
+  "pairs": [
+    {
+      "cells": {
+        "candidate": "001-service-before-1-candidate/cell.json",
+        "shared-cache": "001-service-before-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -12757.95947265625,
+            "p99_ns": -177564
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 1,
+      "scenario": "service-before-1"
+    },
+    {
+      "cells": {
+        "candidate": "001-service-before-64-candidate/cell.json",
+        "shared-cache": "001-service-before-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -25698.00830078125,
+            "p99_ns": 1667365
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "service-before-64"
+    },
+    {
+      "cells": {
+        "candidate": "001-service-refresh-1-candidate/cell.json",
+        "shared-cache": "001-service-refresh-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -503.8720703125,
+            "p99_ns": -2540
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 1,
+      "scenario": "service-refresh-1"
+    },
+    {
+      "cells": {
+        "candidate": "001-service-refresh-64-candidate/cell.json",
+        "shared-cache": "001-service-refresh-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 13386.3837890625,
+            "p99_ns": -1590941
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "service-refresh-64"
+    },
+    {
+      "cells": {
+        "candidate": "001-service-demand-candidate/cell.json",
+        "shared-cache": "001-service-demand-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": null,
+        "peer_work_matches": null,
+        "reference_peer_deltas": null,
+        "window_count_matches": true,
+        "windows": []
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 1,
+      "scenario": "service-demand"
+    },
+    {
+      "cells": {
+        "candidate": "002-service-before-1-candidate/cell.json",
+        "shared-cache": "002-service-before-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -13783.95556640625,
+            "p99_ns": -492
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "service-before-1"
+    },
+    {
+      "cells": {
+        "candidate": "002-service-before-64-candidate/cell.json",
+        "shared-cache": "002-service-before-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -416.03271484375,
+            "p99_ns": 251009
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 2,
+      "scenario": "service-before-64"
+    },
+    {
+      "cells": {
+        "candidate": "002-service-refresh-1-candidate/cell.json",
+        "shared-cache": "002-service-refresh-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -107.33447265625,
+            "p99_ns": -834
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "service-refresh-1"
+    },
+    {
+      "cells": {
+        "candidate": "002-service-refresh-64-candidate/cell.json",
+        "shared-cache": "002-service-refresh-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -834.98974609375,
+            "p99_ns": -535116
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 2,
+      "scenario": "service-refresh-64"
+    },
+    {
+      "cells": {
+        "candidate": "002-service-demand-candidate/cell.json",
+        "shared-cache": "002-service-demand-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": null,
+        "peer_work_matches": null,
+        "reference_peer_deltas": null,
+        "window_count_matches": true,
+        "windows": []
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "service-demand"
+    },
+    {
+      "cells": {
+        "candidate": "003-service-before-1-candidate/cell.json",
+        "shared-cache": "003-service-before-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 36605.56201171875,
+            "p99_ns": 136624
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 3,
+      "scenario": "service-before-1"
+    },
+    {
+      "cells": {
+        "candidate": "003-service-before-64-candidate/cell.json",
+        "shared-cache": "003-service-before-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -1383.95751953125,
+            "p99_ns": -1786349
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "service-before-64"
+    },
+    {
+      "cells": {
+        "candidate": "003-service-refresh-1-candidate/cell.json",
+        "shared-cache": "003-service-refresh-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -6703.29052734375,
+            "p99_ns": -95373
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 3,
+      "scenario": "service-refresh-1"
+    },
+    {
+      "cells": {
+        "candidate": "003-service-refresh-64-candidate/cell.json",
+        "shared-cache": "003-service-refresh-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -1870.81591796875,
+            "p99_ns": -1075121
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "service-refresh-64"
+    },
+    {
+      "cells": {
+        "candidate": "003-service-demand-candidate/cell.json",
+        "shared-cache": "003-service-demand-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": null,
+        "peer_work_matches": null,
+        "reference_peer_deltas": null,
+        "window_count_matches": true,
+        "windows": []
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 3,
+      "scenario": "service-demand"
+    },
+    {
+      "cells": {
+        "candidate": "004-service-before-1-candidate/cell.json",
+        "shared-cache": "004-service-before-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 219.8330078125,
+            "p99_ns": -27052
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "service-before-1"
+    },
+    {
+      "cells": {
+        "candidate": "004-service-before-64-candidate/cell.json",
+        "shared-cache": "004-service-before-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -6967.03076171875,
+            "p99_ns": 3518733
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 4,
+      "scenario": "service-before-64"
+    },
+    {
+      "cells": {
+        "candidate": "004-service-refresh-1-candidate/cell.json",
+        "shared-cache": "004-service-refresh-1-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 301.2880859375,
+            "p99_ns": 5950
+          }
+        ]
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "service-refresh-1"
+    },
+    {
+      "cells": {
+        "candidate": "004-service-refresh-64-candidate/cell.json",
+        "shared-cache": "004-service-refresh-64-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 0,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 2048,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -5022.724609375,
+            "p99_ns": 3135820
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "shared-cache"
+      ],
+      "repetition": 4,
+      "scenario": "service-refresh-64"
+    },
+    {
+      "cells": {
+        "candidate": "004-service-demand-candidate/cell.json",
+        "shared-cache": "004-service-demand-shared-cache/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": null,
+        "peer_work_matches": null,
+        "reference_peer_deltas": null,
+        "window_count_matches": true,
+        "windows": []
+      },
+      "order": [
+        "shared-cache",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "service-demand"
+    }
+  ]
+}

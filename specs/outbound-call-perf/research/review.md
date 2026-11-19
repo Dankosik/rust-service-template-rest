@@ -1,0 +1,21 @@
+# Outbound call review evidence
+
+The six-lens review traced the full production sources at 5f7b83c87b14e007fc89e294ff45b66a90cbb8cd. The scoped crates, Cargo.lock, operation-context, shared-rules, vendored tonic and hyper-util are identical at the preparation baseline d101ce385552e29267d6e8ed42f50163582a30ad. These are source predictions for a single call, not benchmark results.
+
+| Call shape | Predicted change or reason for comparison |
+| --- | --- |
+| Reusable service token, one bounded context, first poll with available cooperative budget | One temporary deadline timer, one cancellation waiter, one registration-close waiter and a registration receiver clone/drop can be avoided. A bounded HTTP extension context adds another timer and cancellation waiter. Preserve the cooperative yield and precedence on registration closure, deadline and cancellation. Moka exchange lookup can suspend during maintenance. |
+| Representable primary deadline | The four service-hit activity checks read the clock eight times. Exchange hits read it ten times in five checks. Using the primary deadline once per check halves those counts. Other checks still read time. Synthetic cutoff has distinct Unavailable precedence. |
+| HTTP attempt observation | Borrowing the client-owned Server avoids two Arc increments and two drops per logical send. Labels still acquire ownership for the active recorder. |
+| HTTP origin check | Share the result of authority.host() between host and port checks. An additional exact configured-authority comparison benefits canonical input and adds work to fallback. Preserve empty-port, explicit default-port, case, IPv6 and userinfo behavior. |
+| gRPC verified warm method | Compare the declaration with the admitted path's stored labels. Saves two delimiter searches. Keep a bounded speculative lookup and full validation before inserting. |
+| Empty HTTP POST/PUT/PATCH | Static zero Content-Length saves formatting and two allocations in http 1.5.0 and bytes 1.12.1. Other framing rules stay intact. |
+| gRPC terminal-at-headers response | Finish once, then return the empty tonic body for Done. Saves one Arc allocation and two uncontended mutex acquisitions. Staged trailers and live custody still need polling. |
+| gRPC verified method outside saturated registry | A miss in a full append-only snapshot saves one exclusive acquisition, snapshot reload and map lookup. Keep the under-lock recheck for an initial snapshot below capacity. |
+| gRPC attributes with no OpenTelemetry context | Defer the two bounded owned strings until attribute conversion. Savings range from zero to two copies for unknown paths and caller-supplied user agents. Tonic adds its transport user agent later. |
+| HTTP/1 checkout and pre-dispatch retry | Explicit Host already exists. hyper-util 0.1.21 set_host(false) skips a URI clone and occupied header lookup per eligible checkout. HeaderMap::entry can reserve before detecting occupancy, including an incidental panic on maximal full maps. Preserve canonical wire Host and unstarted-retry rules. |
+| Single nonempty HTTP response frame | Retaining the first frame until EOF can save one allocation and B copied bytes but a tiny body may pin a larger Hyper receive buffer. Preserve byte limits, errors, trailers and cancellation through EOF. Compare retained backing/lifetime before selecting. |
+| Concurrent service hits with refresh | Healthy callers already avoid the network fetch lock. Shared read locking can improve same-source concurrency but adds a read/write transition on refresh-due paths. Retain refresh single-flight, jitter, retry schedule and revalidation. Historical 64-way cutoff-only results do not measure the current cache mutex. |
+| URI pool alias | Implicit and explicit default ports occupy distinct hyper-util buckets. Existing fixed-URL callers do not establish recurrent churn. Normalization can change CONNECT reuse and fixture resolver destination behavior. Reopen only with supporting workload and compatible semantics. |
+
+Review evidence owners are the outbound crates, the locked dependency sources, docs/decisions/outbound-http-decisions.md, docs/decisions/outbound-machine-authentication-decisions.md and docs/backend-library-selection.md. Do not infer end-to-end latency from these counts or add overlapping counts together after restructuring.

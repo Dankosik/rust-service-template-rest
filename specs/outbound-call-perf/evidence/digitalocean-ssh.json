@@ -1,0 +1,7 @@
+{
+  "fingerprint": "256 SHA256:BVOFRYupjJNyaEL7iMXp06P6mUn5AkYcqvfq7roKh2U 143.110.164.174 (ED25519)",
+  "first_use_at": "2026-11-19T16:04:26.362981+00:00",
+  "id": 621123323,
+  "ipv4": "143.110.164.174",
+  "trust": "TOFU from provider-reconciled IP, followed by strict pinning"
+}

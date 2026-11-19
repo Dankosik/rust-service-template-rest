@@ -1,0 +1,3100 @@
+{
+  "observed_paired_deltas": {
+    "http-buffered-empty": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": -53.95166015625,
+          "median": -15704.00830078125,
+          "min": -34265.1796875,
+          "paired_deltas": [
+            -16009.67529296875,
+            -34265.1796875,
+            -53.95166015625,
+            -15398.34130859375
+          ]
+        },
+        "p99_ns": {
+          "max": -521,
+          "median": -92945.0,
+          "min": -108299,
+          "paired_deltas": [
+            -102524,
+            -108299,
+            -521,
+            -83366
+          ]
+        }
+      }
+    },
+    "http-buffered-empty-patch": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 18845.31640625,
+          "median": 6515.332275390625,
+          "min": -21632.56982421875,
+          "paired_deltas": [
+            7097.7275390625,
+            5932.93701171875,
+            -21632.56982421875,
+            18845.31640625
+          ]
+        },
+        "p99_ns": {
+          "max": 93062,
+          "median": 3136.0,
+          "min": -108933,
+          "paired_deltas": [
+            93062,
+            2011,
+            -108933,
+            4261
+          ]
+        }
+      }
+    },
+    "http-buffered-empty-post": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 32341.97900390625,
+          "median": 59.087646484375,
+          "min": -24957.5400390625,
+          "paired_deltas": [
+            488.0439453125,
+            32341.97900390625,
+            -369.86865234375,
+            -24957.5400390625
+          ]
+        },
+        "p99_ns": {
+          "max": 96439,
+          "median": -1900.5,
+          "min": -104103,
+          "paired_deltas": [
+            -5761,
+            96439,
+            1960,
+            -104103
+          ]
+        }
+      }
+    },
+    "http-buffered-empty-put": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 8545.181640625,
+          "median": -944.723388671875,
+          "min": -4022.87158203125,
+          "paired_deltas": [
+            -987.1611328125,
+            8545.181640625,
+            -902.28564453125,
+            -4022.87158203125
+          ]
+        },
+        "p99_ns": {
+          "max": 83080,
+          "median": -2797.5,
+          "min": -8320,
+          "paired_deltas": [
+            -8042,
+            83080,
+            -8320,
+            2447
+          ]
+        }
+      }
+    },
+    "http-buffered-multi": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": -2107.86572265625,
+          "median": -2107.86572265625,
+          "min": -2107.86572265625,
+          "paired_deltas": [
+            -2107.86572265625
+          ]
+        },
+        "p99_ns": {
+          "max": -2594,
+          "median": -2594,
+          "min": -2594,
+          "paired_deltas": [
+            -2594
+          ]
+        }
+      }
+    },
+    "http-buffered-one": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 540.84619140625,
+          "median": -1828.83837890625,
+          "min": -7986.6640625,
+          "paired_deltas": [
+            540.84619140625,
+            -7986.6640625,
+            332.9853515625,
+            -3990.662109375
+          ]
+        },
+        "p99_ns": {
+          "max": 15083,
+          "median": -8507.0,
+          "min": -38120,
+          "paired_deltas": [
+            -2363,
+            -38120,
+            15083,
+            -14651
+          ]
+        }
+      }
+    },
+    "http-headers-empty": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 18364.61181640625,
+          "median": 4202.77734375,
+          "min": -34931.4189453125,
+          "paired_deltas": [
+            -34931.4189453125,
+            10910.548828125,
+            18364.61181640625,
+            -2504.994140625
+          ]
+        },
+        "p99_ns": {
+          "max": 91566,
+          "median": 38296.0,
+          "min": -97406,
+          "paired_deltas": [
+            -97406,
+            82728,
+            91566,
+            -6136
+          ]
+        }
+      }
+    },
+    "http-headers-late-error": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 89908.86328125,
+          "median": 41789.98388671875,
+          "min": -6328.8955078125,
+          "paired_deltas": [
+            89908.86328125,
+            -6328.8955078125
+          ]
+        },
+        "p99_ns": {
+          "max": 22095,
+          "median": -2646.0,
+          "min": -27387,
+          "paired_deltas": [
+            22095,
+            -27387
+          ]
+        }
+      }
+    },
+    "http-headers-one": {
+      "0": {
+        "cpu_ns_per_completion": {
+          "max": 11508.70068359375,
+          "median": -4202.995849609375,
+          "min": -35611.43359375,
+          "paired_deltas": [
+            -35611.43359375,
+            435.01611328125,
+            11508.70068359375,
+            -8841.0078125
+          ]
+        },
+        "p99_ns": {
+          "max": 103080,
+          "median": 3321.5,
+          "min": -100899,
+          "paired_deltas": [
+            -100899,
+            3350,
+            103080,
+            3293
+          ]
+        }
+      }
+    }
+  },
+  "pairs": [
+    {
+      "cells": {
+        "base": "001-http-buffered-empty-base/cell.json",
+        "candidate": "001-http-buffered-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -16009.67529296875,
+            "p99_ns": -102524
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-empty"
+    },
+    {
+      "cells": {
+        "base": "001-http-buffered-empty-post-base/cell.json",
+        "candidate": "001-http-buffered-empty-post-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 488.0439453125,
+            "p99_ns": -5761
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-empty-post"
+    },
+    {
+      "cells": {
+        "base": "001-http-buffered-empty-put-base/cell.json",
+        "candidate": "001-http-buffered-empty-put-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -987.1611328125,
+            "p99_ns": -8042
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-empty-put"
+    },
+    {
+      "cells": {
+        "base": "001-http-buffered-empty-patch-base/cell.json",
+        "candidate": "001-http-buffered-empty-patch-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 7097.7275390625,
+            "p99_ns": 93062
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-empty-patch"
+    },
+    {
+      "cells": {
+        "base": "001-http-buffered-one-base/cell.json",
+        "candidate": "001-http-buffered-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 540.84619140625,
+            "p99_ns": -2363
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-one"
+    },
+    {
+      "cells": {
+        "base": "001-http-buffered-multi-base/cell.json",
+        "candidate": "001-http-buffered-multi-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": false,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 1,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": false,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 1,
+      "scenario": "http-buffered-multi"
+    },
+    {
+      "cells": {
+        "base": "001-http-headers-empty-base/cell.json",
+        "candidate": "001-http-headers-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -34931.4189453125,
+            "p99_ns": -97406
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "http-headers-empty"
+    },
+    {
+      "cells": {
+        "base": "001-http-headers-one-base/cell.json",
+        "candidate": "001-http-headers-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -35611.43359375,
+            "p99_ns": -100899
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 1,
+      "scenario": "http-headers-one"
+    },
+    {
+      "cells": {
+        "base": "001-http-headers-late-error-base/cell.json",
+        "candidate": "001-http-headers-late-error-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1085952,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1085952,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 89908.86328125,
+            "p99_ns": 22095
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 1,
+      "scenario": "http-headers-late-error"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-empty-base/cell.json",
+        "candidate": "002-http-buffered-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -34265.1796875,
+            "p99_ns": -108299
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-empty"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-empty-post-base/cell.json",
+        "candidate": "002-http-buffered-empty-post-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 32341.97900390625,
+            "p99_ns": 96439
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-empty-post"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-empty-put-base/cell.json",
+        "candidate": "002-http-buffered-empty-put-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 8545.181640625,
+            "p99_ns": 83080
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-empty-put"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-empty-patch-base/cell.json",
+        "candidate": "002-http-buffered-empty-patch-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 5932.93701171875,
+            "p99_ns": 2011
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-empty-patch"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-one-base/cell.json",
+        "candidate": "002-http-buffered-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -7986.6640625,
+            "p99_ns": -38120
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-one"
+    },
+    {
+      "cells": {
+        "base": "002-http-buffered-multi-base/cell.json",
+        "candidate": "002-http-buffered-multi-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": false,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 1,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": false,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "http-buffered-multi"
+    },
+    {
+      "cells": {
+        "base": "002-http-headers-empty-base/cell.json",
+        "candidate": "002-http-headers-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 10910.548828125,
+            "p99_ns": 82728
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 2,
+      "scenario": "http-headers-empty"
+    },
+    {
+      "cells": {
+        "base": "002-http-headers-one-base/cell.json",
+        "candidate": "002-http-headers-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 435.01611328125,
+            "p99_ns": 3350
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 2,
+      "scenario": "http-headers-one"
+    },
+    {
+      "cells": {
+        "base": "002-http-headers-late-error-base/cell.json",
+        "candidate": "002-http-headers-late-error-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1092096,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1092096,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -6328.8955078125,
+            "p99_ns": -27387
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 2,
+      "scenario": "http-headers-late-error"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-empty-base/cell.json",
+        "candidate": "003-http-buffered-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -53.95166015625,
+            "p99_ns": -521
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-empty"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-empty-post-base/cell.json",
+        "candidate": "003-http-buffered-empty-post-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -369.86865234375,
+            "p99_ns": 1960
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-empty-post"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-empty-put-base/cell.json",
+        "candidate": "003-http-buffered-empty-put-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -902.28564453125,
+            "p99_ns": -8320
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-empty-put"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-empty-patch-base/cell.json",
+        "candidate": "003-http-buffered-empty-patch-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -21632.56982421875,
+            "p99_ns": -108933
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-empty-patch"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-one-base/cell.json",
+        "candidate": "003-http-buffered-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 332.9853515625,
+            "p99_ns": 15083
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-one"
+    },
+    {
+      "cells": {
+        "base": "003-http-buffered-multi-base/cell.json",
+        "candidate": "003-http-buffered-multi-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -2107.86572265625,
+            "p99_ns": -2594
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 3,
+      "scenario": "http-buffered-multi"
+    },
+    {
+      "cells": {
+        "base": "003-http-headers-empty-base/cell.json",
+        "candidate": "003-http-headers-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 18364.61181640625,
+            "p99_ns": 91566
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "http-headers-empty"
+    },
+    {
+      "cells": {
+        "base": "003-http-headers-one-base/cell.json",
+        "candidate": "003-http-headers-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 11508.70068359375,
+            "p99_ns": 103080
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 3,
+      "scenario": "http-headers-one"
+    },
+    {
+      "cells": {
+        "base": "003-http-headers-late-error-base/cell.json",
+        "candidate": "003-http-headers-late-error-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1094656,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": false,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1093120,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 3,
+      "scenario": "http-headers-late-error"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-empty-base/cell.json",
+        "candidate": "004-http-buffered-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -15398.34130859375,
+            "p99_ns": -83366
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-empty"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-empty-post-base/cell.json",
+        "candidate": "004-http-buffered-empty-post-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -24957.5400390625,
+            "p99_ns": -104103
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-empty-post"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-empty-put-base/cell.json",
+        "candidate": "004-http-buffered-empty-put-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -4022.87158203125,
+            "p99_ns": 2447
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-empty-put"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-empty-patch-base/cell.json",
+        "candidate": "004-http-buffered-empty-patch-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": 18845.31640625,
+            "p99_ns": 4261
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-empty-patch"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-one-base/cell.json",
+        "candidate": "004-http-buffered-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -3990.662109375,
+            "p99_ns": -14651
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-one"
+    },
+    {
+      "cells": {
+        "base": "004-http-buffered-multi-base/cell.json",
+        "candidate": "004-http-buffered-multi-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": false,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": false,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 1,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "http-buffered-multi"
+    },
+    {
+      "cells": {
+        "base": "004-http-headers-empty-base/cell.json",
+        "candidate": "004-http-headers-empty-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 0,
+          "http_response_aborts": 0,
+          "http_response_bytes": 0,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -2504.994140625,
+            "p99_ns": -6136
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 4,
+      "scenario": "http-headers-empty"
+    },
+    {
+      "cells": {
+        "base": "004-http-headers-one-base/cell.json",
+        "candidate": "004-http-headers-one-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": true,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 0,
+          "http_late_errors": 0,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 2097152,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true,
+            "cpu_ns_per_completion": -8841.0078125,
+            "p99_ns": 3293
+          }
+        ]
+      },
+      "order": [
+        "base",
+        "candidate"
+      ],
+      "repetition": 4,
+      "scenario": "http-headers-one"
+    },
+    {
+      "cells": {
+        "base": "004-http-headers-late-error-base/cell.json",
+        "candidate": "004-http-headers-late-error-candidate/cell.json"
+      },
+      "comparison": {
+        "both_cells_valid": true,
+        "candidate_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1094656,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "peer_work_matches": false,
+        "reference_peer_deltas": {
+          "anonymous_requests": 2048,
+          "exchange_grants": 0,
+          "exchange_responses": 0,
+          "exchange_token_requests": 0,
+          "grpc_anonymous_requests": 0,
+          "grpc_connections": 0,
+          "grpc_exchange_token_requests": 0,
+          "grpc_messages": 0,
+          "grpc_old_token_requests": 0,
+          "grpc_replacement_token_requests": 0,
+          "grpc_request_bytes": 0,
+          "grpc_requests": 0,
+          "grpc_traceparent": 0,
+          "grpc_unauthorized": 0,
+          "http_connections": 2048,
+          "http_late_errors": 2048,
+          "http_request_bytes": 38912,
+          "http_response_aborts": 0,
+          "http_response_bytes": 1093632,
+          "invalid_grants": 0,
+          "old_token_requests": 0,
+          "replacement_token_requests": 0,
+          "resources": 2048,
+          "service_grants": 0,
+          "service_responses": 0,
+          "unauthorized": 0
+        },
+        "window_count_matches": true,
+        "windows": [
+          {
+            "caller_work_matches": true
+          }
+        ]
+      },
+      "order": [
+        "candidate",
+        "base"
+      ],
+      "repetition": 4,
+      "scenario": "http-headers-late-error"
+    }
+  ]
+}

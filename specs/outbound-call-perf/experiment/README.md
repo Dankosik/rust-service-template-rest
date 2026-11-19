@@ -17,6 +17,8 @@ The cleanup process first reconciles the original create within the recorded nam
 
 Transfer a Git bundle or other authorized local checkout containing the frozen baseline, D1–D6, and final-selection commits, together with the frozen overlay. Record the overlay commit and archive checksum in an off-host receipt. On the host, install the pinned Rust toolchain from `rust-toolchain.toml`, a native Rust build environment, Python 3.11 or later, `curl`, `taskset`, and OpenSSL. Install Heaptrack and its analysis tools for the retention comparison.
 
+Ubuntu Heaptrack 1.5.0 requires the [compatibility launcher used for the retained-memory measurements](../evidence/heaptrack-compat.json). It omits the unsupported quiet flag and keeps profiler output separate from the caller's JSON.
+
 From the overlay directory, set `source_repo` to the transferred Git checkout, `experiment_root` to an empty directory outside the overlay, and `base_revision`, `candidate_revision`, and `final_revision` to the full commit IDs. Use the same clean build environment each time. To amortize build inputs, set `CARGO_TARGET_DIR` to one experiment-only absolute scratch directory and invoke builds serially. The script copies each final binary into its artifact directory before any subsequent build can overwrite the Cargo example.
 
 ```sh

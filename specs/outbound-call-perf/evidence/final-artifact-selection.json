@@ -1,0 +1,13 @@
+{
+  "baseline_release_sha256": "1fcb69389fc4716db2a69b38c4b8bb0cda41c79d56f74519daa233c6da102f71",
+  "baseline_source": "d101ce385552e29267d6e8ed42f50163582a30ad",
+  "candidate_archive_has_only_experiment_overlay_changes_from_product": true,
+  "candidate_release_sha256": "092f5454c28932a835523b70722404f1986516244461334592faf7d30a88142c",
+  "candidate_source_archive": "8e2317e82bde1f967539070f75f4efe90fda2dc6",
+  "frozen_at": "2026-11-19T16:50:48.691981+00:00",
+  "overlay": "f6c99a10faf0134c18b642e5c9be2c6d8cde12a6",
+  "overlay_archive_sha256": "4014b4897e1a91c9ee555a336727d909deec3dd287206358598ca05c03d18cbf",
+  "product_candidate": "b06f10f79257135a94c00ce0a3762fb5c54100da",
+  "provider_id": 621123323,
+  "variant_patches_selected": []
+}

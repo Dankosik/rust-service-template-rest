@@ -1,0 +1,54 @@
+{
+  "absent_before_create_at": "2026-11-19T16:03:49.010115+00:00",
+  "account_uuid": "6beb11d4-4bf7-4e69-831a-99493575991b",
+  "addons": [],
+  "armed_at": "2026-11-19T16:03:27.945718+00:00",
+  "authorized_total_ceiling_usd": 5,
+  "billing_end": "deletion",
+  "billing_start": "creation",
+  "compute_upper_estimate_usd": 0.1989,
+  "context": "benchmarks",
+  "create_requested_at": "2026-11-19T16:03:49.010125+00:00",
+  "create_window_ends_at": "2026-11-19T16:13:27.945718+00:00",
+  "delete_attempts": [
+    {
+      "returncode": 0,
+      "returned_at": "2026-11-19T17:37:00.674725+00:00",
+      "started_at": "2026-11-19T17:36:58.065496+00:00"
+    }
+  ],
+  "id": 621123323,
+  "image_id": 255376831,
+  "image_slug": "ubuntu-24-04-x64",
+  "last_export": {
+    "returncode": 0,
+    "returned_at": "2026-11-19T16:50:17.828657+00:00",
+    "started_at": "2026-11-19T16:50:12.690842+00:00"
+  },
+  "name": "codex-outbound-perf-9ab0c43a17a2",
+  "off_host_cleanup": "macOS per-user launchd RunAtLoad/StartInterval 60",
+  "off_host_cleanup_label": "org.codex.outbound-perf-cleanup-kDdsefUS",
+  "off_host_cleanup_retired_at": "2026-11-19T17:39:31.271118+00:00",
+  "off_host_controller": "/Users/daniil/Library/Application Support/codex-outbound-control.kDdsefUS/control.py",
+  "planned_compute_through_retry_cutoff_usd_with_rounding_reserve": 1.7521,
+  "price_usd_per_hour": 0.125,
+  "pricing_reference": "https://docs.digitalocean.com/products/droplets/details/pricing/",
+  "provider_absence": "GET https://api.digitalocean.com/v2/droplets/621123323: 404 (request \"42f7e5ea-067d-4c2a-87b8-8f933d6174cf\") The resource you were accessing could not be found.",
+  "provider_access_locator": "/Users/daniil/Library/Application Support/doctl/config.yaml",
+  "provider_created_at": "2026-11-19T16:03:51Z",
+  "region": "lon1",
+  "retry_cutoff": "2026-11-20T06:03:27.945718+00:00",
+  "size_resources": {
+    "disk": 50,
+    "memory": 8192,
+    "transfer": 5,
+    "vcpus": 4
+  },
+  "size_slug": "c-4",
+  "ssh_host_trust": "First ED25519 host key from exact provider-reconciled public IPv4 (TOFU), then strict per-task pin",
+  "transfer_reference": "https://docs.digitalocean.com/platform/billing/bandwidth/",
+  "transfer_reserve_gib": 10,
+  "unallocated_reserve_below_ceiling_usd_before_tax": 3.1479,
+  "verified_absent_at": "2026-11-19T17:38:19.111248+00:00",
+  "workload_cutoff": "2026-11-20T04:03:27.945718+00:00"
+}
