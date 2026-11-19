@@ -186,21 +186,19 @@ impl CleanupPass {
     where
         F: Copy + AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
-        let mut removed_rows = 0;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Ok(CleanupPassResult {
-                    removed_rows,
+                    removed_rows: self.removed_rows,
                     end: PassEnd::Cancelled,
                 });
             }
             let rows = self.run_batch(pool, options, delete).await?;
             metrics::counter!(options.removed_metric).increment(rows);
-            removed_rows += rows;
             if rows < u64::from(options.limit) {
                 self.completed();
                 return Ok(CleanupPassResult {
-                    removed_rows,
+                    removed_rows: self.removed_rows,
                     end: PassEnd::Completed,
                 });
             }

@@ -141,7 +141,7 @@ pub async fn record_metrics_periodically(
         .await;
 }
 
-pub(crate) async fn acquisition<T>(
+pub(crate) async fn observe_acquisition<T>(
     operation: &'static str,
     budget: Duration,
     future: impl Future<Output = Result<T, sqlx::Error>>,
@@ -313,7 +313,7 @@ impl TransactionObservation {
         }
     }
 
-    pub(crate) fn waited(&self) {
+    pub(crate) fn record_connection_wait(&self) {
         metrics::histogram!(
             CONNECTION_WAIT_METRIC,
             "db.client.connection.pool.name" => "postgres"

@@ -66,7 +66,7 @@ impl ScopeKey {
 
     fn validate_caller(&self) -> Result<(), AttemptError> {
         if self.caller.issuer.contains('\0') || self.caller.value.contains('\0') {
-            return Err(refused(
+            return Err(store_failed(
                 "caller_identity",
                 AttemptError::Internal,
                 "unstorable_caller",
@@ -210,7 +210,7 @@ impl Store {
         let record = work(tx).await.map_err(Stop::RolledBack)?;
         if record.is_terminal_refusal() {
             if !self.terminal_refusals {
-                return Err(Stop::Failed(refused(
+                return Err(Stop::Failed(store_failed(
                     "command",
                     AttemptError::Internal,
                     "undeclared_terminal_refusal",
@@ -249,7 +249,7 @@ async fn arbitrate(
     scope: &ScopeKey,
     fingerprint: &RequestFingerprint,
 ) -> Result<Option<Decision>, AttemptError> {
-    let row = observed(
+    let probe = observed(
         "lock and read idempotency record",
         sqlx::query!(
             "SELECT \
@@ -270,22 +270,22 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
-    if !row.writable {
-        return Err(refused(
+    if !probe.writable {
+        return Err(store_failed(
             "writer_check",
             AttemptError::Unavailable,
             "not_writable",
         ));
     }
     if let (Some(stored_fingerprint), Some(status), Some(headers)) =
-        (row.fingerprint, row.status, row.headers)
+        (probe.fingerprint, probe.status, probe.headers)
     {
-        return decide_live(stored_fingerprint, status, headers, row.body, fingerprint).map(Some);
+        return decide_live(stored_fingerprint, status, headers, probe.body, fingerprint).map(Some);
     }
-    if !row.acquired {
+    if !probe.acquired {
         return Ok(Some(Decision::InProgress));
     }
-    let row = observed(
+    observed(
         "read idempotency record",
         sqlx::query!(
             "SELECT fingerprint AS \"fingerprint: Digest\", status, \
@@ -299,13 +299,13 @@ async fn arbitrate(
         .fetch_optional(tx),
     )
     .await
-    .map_err(|err| read_failed(&err, "read_record"))?;
-    row.map(|row| {
+    .map_err(|err| read_failed(&err, "read_record"))?
+    .map(|record| {
         decide_live(
-            row.fingerprint,
-            row.status,
-            row.headers,
-            row.body,
+            record.fingerprint,
+            record.status,
+            record.headers,
+            record.body,
             fingerprint,
         )
     })
@@ -322,10 +322,11 @@ fn decide_live(
     if &stored_fingerprint != fingerprint.as_bytes() {
         return Ok(Decision::Mismatch);
     }
-    let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
+    let body =
+        body.ok_or_else(|| store_failed("decode_record", AttemptError::Integrity, "decode"))?;
     Record::decode(status, headers, Bytes::from(body))
         .map(|record| Decision::Replay(Box::new(record)))
-        .map_err(|err| refused("decode_record", AttemptError::Integrity, err.class()))
+        .map_err(|err| store_failed("decode_record", AttemptError::Integrity, err.cause()))
 }
 
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
@@ -363,7 +364,7 @@ async fn write(
              WHERE r.expires_at <= statement_timestamp()",
             scope.digest.as_slice(),
             fingerprint.as_bytes().as_slice(),
-            record.status(),
+            record.encode_status(),
             &headers as _,
             record.body(),
             scope.caller.issuer,
@@ -378,7 +379,7 @@ async fn write(
     if written.rows_affected() == 1 {
         Ok(())
     } else {
-        Err(refused(
+        Err(store_failed(
             "write_record",
             AttemptError::Internal,
             "record_not_written",
@@ -400,7 +401,7 @@ impl<R> From<AttemptError> for Stop<R> {
 
 impl<R> From<TxError> for Stop<R> {
     fn from(err: TxError) -> Self {
-        Self::Failed(classify_tx(&err))
+        Self::Failed(tx_failed(&err))
     }
 }
 
@@ -410,7 +411,7 @@ impl<R> From<infra_postgres::OperationDeadlineElapsed> for Stop<R> {
     }
 }
 
-fn classify_tx(err: &TxError) -> AttemptError {
+fn tx_failed(err: &TxError) -> AttemptError {
     let (phase, class, commit_outcome) = match err {
         TxError::Acquire(err) => ("acquire", AttemptError::classify_sql(err), None),
         TxError::Begin(err) => ("begin", AttemptError::classify_sql(err), None),
@@ -445,7 +446,7 @@ fn failed(
     class
 }
 
-fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
+fn store_failed(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,
@@ -481,18 +482,18 @@ mod tests {
             sqlx::Error::Decode("invalid COMMIT response".into()),
         ] {
             assert_eq!(
-                classify_tx(&TxError::CommitUnknown(err)),
+                tx_failed(&TxError::CommitUnknown(err)),
                 AttemptError::Unavailable
             );
         }
         assert_eq!(
-            classify_tx(&TxError::CommitFailed(sqlx::Error::Protocol(
+            tx_failed(&TxError::CommitFailed(sqlx::Error::Protocol(
                 "failure before COMMIT".to_owned()
             ))),
             AttemptError::Internal
         );
         assert_eq!(
-            classify_tx(&TxError::Begin(sqlx::Error::WorkerCrashed)),
+            tx_failed(&TxError::Begin(sqlx::Error::WorkerCrashed)),
             AttemptError::Internal
         );
     }

@@ -89,18 +89,18 @@ impl Dsn {
     }
 
     #[cfg(test)]
-    pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
+    pub(crate) fn admit_with_environment<F>(raw: &str, is_env_set: F) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
     {
-        Self::admit_from(raw, None, true, occupied)
+        Self::admit_from(raw, None, true, is_env_set)
     }
 
     fn admit_from<F>(
         raw: &str,
         password_file: Option<&Path>,
         local_development: bool,
-        occupied: F,
+        is_env_set: F,
     ) -> Result<Self, DsnError>
     where
         F: Fn(&str) -> bool,
@@ -109,7 +109,10 @@ impl Dsn {
         if raw.is_empty() {
             return Err(DsnError::Empty);
         }
-        if let Some(name) = AMBIENT_ENVIRONMENT.into_iter().find(|name| occupied(name)) {
+        if let Some(name) = AMBIENT_ENVIRONMENT
+            .into_iter()
+            .find(|name| is_env_set(name))
+        {
             return Err(DsnError::Ambient(name));
         }
         if !raw.starts_with("postgres://") && !raw.starts_with("postgresql://") {

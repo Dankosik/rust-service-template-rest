@@ -48,7 +48,7 @@ pub struct Tx<'c, Mode = ()> {
     proven_alive: bool,
     mode: Mode,
     notifications: Vec<Notification>,
-    command_savepoint_notifications: Option<usize>,
+    command_savepoint_notification_count: Option<usize>,
 }
 
 pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
@@ -56,7 +56,7 @@ pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
 #[derive(Debug)]
 pub struct OperationDeadline {
     at: Instant,
-    caller_limit: Option<i32>,
+    armed_timeout_ms: Option<i32>,
     expired: bool,
 }
 
@@ -80,21 +80,33 @@ impl TxMode for OperationDeadline {
     }
 }
 
-trait TransactionMode<E: From<TxError>>: TxMode {
+trait TxModeExt<E: From<TxError>>: TxMode {
     fn acquisition_failure(&self, error: TxError) -> E {
         error.into()
     }
 
     fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E>;
+
+    fn check_before_commit(
+        &mut self,
+        observation: &mut TransactionObservation,
+    ) -> impl Future<Output = Result<(), E>> + Send;
 }
 
-impl<E: From<TxError>> TransactionMode<E> for () {
+impl<E: From<TxError>> TxModeExt<E> for () {
     fn check_expiry(&self, _: &mut TransactionObservation) -> Result<(), E> {
         Ok(())
     }
+
+    fn check_before_commit(
+        &mut self,
+        _: &mut TransactionObservation,
+    ) -> impl Future<Output = Result<(), E>> + Send {
+        std::future::poll_fn(|_| Poll::Ready(Ok(())))
+    }
 }
 
-impl<E: From<TxError> + From<OperationDeadlineElapsed>> TransactionMode<E> for OperationDeadline {
+impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for OperationDeadline {
     fn acquisition_failure(&self, error: TxError) -> E {
         if matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at
         {
@@ -110,9 +122,20 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TransactionMode<E> for O
         }
         Ok(())
     }
+
+    async fn check_before_commit(
+        &mut self,
+        observation: &mut TransactionObservation,
+    ) -> Result<(), E> {
+        if self.remaining_ms().await.is_none() {
+            observation.end(TransactionOutcome::RolledBack);
+            return Err(OperationDeadlineElapsed.into());
+        }
+        Ok(())
+    }
 }
 
-fn elapsed() -> sqlx::Error {
+fn deadline_elapsed_error() -> sqlx::Error {
     sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
 }
 
@@ -133,7 +156,10 @@ impl OperationDeadline {
     }
 
     async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
-        let remaining_ms = self.remaining_ms().await.ok_or_else(elapsed)?;
+        let remaining_ms = self
+            .remaining_ms()
+            .await
+            .ok_or_else(deadline_elapsed_error)?;
         let result = sqlx::query_as::<_, (String, bool)>(
             "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
              WHERE name = 'statement_timeout') \
@@ -141,19 +167,22 @@ impl OperationDeadline {
              ms = 0 OR $1 < ms OR (ms = $1 AND ms IS NOT DISTINCT FROM $2) FROM prior",
         )
         .bind(remaining_ms)
-        .bind(self.caller_limit)
+        .bind(self.armed_timeout_ms)
         .fetch_one(conn)
         .await;
-        let (_, deadline_controls_statement_timeout) = self.finish(result).await?;
-        self.caller_limit = deadline_controls_statement_timeout.then_some(remaining_ms);
-        self.remaining_ms().await.map(|_| ()).ok_or_else(elapsed)
+        let (_, deadline_controls_statement_timeout) = self.check_result(result).await?;
+        self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
+        self.remaining_ms()
+            .await
+            .map(|_| ())
+            .ok_or_else(deadline_elapsed_error)
     }
 
-    fn finish<T>(
+    fn check_result<T>(
         &mut self,
         result: Result<T, sqlx::Error>,
     ) -> impl Future<Output = Result<T, sqlx::Error>> + use<T> {
-        let rounded_expiry = self.caller_limit.is_some()
+        let rounded_expiry = self.armed_timeout_ms.is_some()
             && result
                 .as_ref()
                 .is_err_and(|e| sqlstate(e).as_deref() == Some("57014"))
@@ -196,10 +225,13 @@ impl<M> Tx<'_, M> {
         payload: &'static str,
         min_interval: Duration,
     ) {
-        const MAX_HINTS: usize = 32;
-        let key = (channel, payload);
-        if self.notifications.len() < MAX_HINTS
-            && !self.notifications.iter().any(|hint| hint.key == key)
+        const MAX_NOTIFICATIONS: usize = 32;
+        let key = NotificationKey { channel, payload };
+        if self.notifications.len() < MAX_NOTIFICATIONS
+            && !self
+                .notifications
+                .iter()
+                .any(|notification| notification.key == key)
         {
             self.notifications.push(Notification { key, min_interval });
         }
@@ -214,7 +246,7 @@ impl Tx<'_> {
 }
 
 impl<M: TxMode> Tx<'_, M> {
-    fn query_metadata<'a, T: Send + 'a>(
+    fn run_unproven<'a, T: Send + 'a>(
         &'a mut self,
         call: impl FnOnce(&'a mut PgConnection) -> DriverFuture<'a, T> + Send + 'a,
     ) -> DriverFuture<'a, T> {
@@ -226,36 +258,39 @@ impl<M: TxMode> Tx<'_, M> {
         Box::pin(async move {
             budget.arm(conn).await?;
             let result = call(conn).await;
-            budget.finish(result).await
+            budget.check_result(result).await
         })
     }
 
     pub async fn begin_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
-        if self.command_savepoint_notifications.is_some() {
+        if self.command_savepoint_notification_count.is_some() {
             return Err(sqlx::Error::InvalidArgument(
                 "the transaction already owns a command savepoint".into(),
             ));
         }
-        self.command_savepoint_notifications = Some(self.notifications.len());
+        self.command_savepoint_notification_count = Some(self.notifications.len());
         self.execute("SAVEPOINT command_work").await?;
         Ok(())
     }
 
     pub async fn rollback_command_savepoint(&mut self) -> Result<(), sqlx::Error> {
-        let notification_count = self.command_savepoint_notifications.ok_or_else(|| {
+        let notification_count = self.command_savepoint_notification_count.ok_or_else(|| {
             sqlx::Error::InvalidArgument("the transaction has no command savepoint".into())
         })?;
         self.proven_alive = false;
         let rollback = self.conn.execute("ROLLBACK TO SAVEPOINT command_work");
         if let Some(budget) = self.mode.operation_deadline() {
-            budget.remaining_ms().await.ok_or_else(elapsed)?;
+            budget
+                .remaining_ms()
+                .await
+                .ok_or_else(deadline_elapsed_error)?;
             let response = tokio::time::timeout_at(budget.at, rollback)
                 .await
                 .map_err(|_| {
                     budget.expired = true;
-                    elapsed()
+                    deadline_elapsed_error()
                 })?;
-            budget.finish(response).await?;
+            budget.check_result(response).await?;
         } else {
             rollback.await?;
         }
@@ -265,7 +300,11 @@ impl<M: TxMode> Tx<'_, M> {
     }
 }
 
-type NotificationKey = (&'static str, &'static str);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NotificationKey {
+    channel: &'static str,
+    payload: &'static str,
+}
 
 #[derive(Debug)]
 struct Notification {
@@ -303,7 +342,7 @@ fn dispatch_notifications(
     }
     let now = Instant::now();
     let mut last_sent = LAST_SENT.lock();
-    notifications.retain(|hint| hint.take_slot(&mut last_sent, now));
+    notifications.retain(|notification| notification.take_slot(&mut last_sent, now));
     drop(last_sent);
     if notifications.is_empty() {
         return;
@@ -312,8 +351,8 @@ fn dispatch_notifications(
     tokio::spawn(async move {
         guard.discard = true;
         let send = async {
-            for hint in notifications {
-                let (channel, payload) = hint.key;
+            for notification in notifications {
+                let NotificationKey { channel, payload } = notification.key;
                 observed(
                     "post-commit notification",
                     sqlx::query!("SELECT pg_notify($1, $2)", channel, payload)
@@ -371,7 +410,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
                     budget.arm(conn).await?;
                     Ok(conn
                         .fetch_many(SingleStatement(query))
-                        .then(move |item| budget.finish(item)))
+                        .then(move |item| budget.check_result(item)))
                 }
                 .try_flatten_stream(),
             ) as DriverStream<'_, _>
@@ -394,7 +433,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
             let row = if let Some(budget) = self.mode.operation_deadline() {
                 budget.arm(self.conn).await?;
                 budget
-                    .finish(self.conn.fetch_optional(SingleStatement(query)).await)
+                    .check_result(self.conn.fetch_optional(SingleStatement(query)).await)
                     .await?
             } else {
                 self.conn.fetch_optional(query).await?
@@ -412,14 +451,14 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     where
         'c: 'e,
     {
-        self.query_metadata(move |conn| conn.prepare_with(sql, parameters))
+        self.run_unproven(move |conn| conn.prepare_with(sql, parameters))
     }
 
     fn describe<'e>(self, sql: SqlStr) -> DriverFuture<'e, sqlx::Describe<Postgres>>
     where
         'c: 'e,
     {
-        self.query_metadata(move |conn| conn.describe(sql))
+        self.run_unproven(move |conn| conn.describe(sql))
     }
 }
 
@@ -547,13 +586,13 @@ where
 {
     let mode = OperationDeadline {
         at: deadline,
-        caller_limit: None,
+        armed_timeout_ms: None,
         expired: false,
     };
     transaction(pool, options, Some(deadline), mode, f).await
 }
 
-async fn transaction<M: TransactionMode<E>, T, E, F>(
+async fn transaction<M: TxModeExt<E>, T, E, F>(
     pool: &PgPool,
     options: TxOptions,
     deadline: Option<tokio::time::Instant>,
@@ -565,7 +604,7 @@ where
     E: From<TxError>,
 {
     let span = observe::transaction_span(pool);
-    let mut observed = TransactionObservation::start(span.clone());
+    let mut observation = TransactionObservation::start(span.clone());
     async {
         let acquired = Box::pin(async {
             match deadline {
@@ -574,10 +613,10 @@ where
             }
         })
         .await;
-        observed.waited();
+        observation.record_connection_wait();
         let connection = acquired
             .map_err(TxError::Acquire)
-            .inspect_err(|error| observed.record_failure(error))
+            .inspect_err(|error| observation.record_failure(error))
             .map_err(|error| mode.acquisition_failure(error))?;
         let mut guard = DiscardOnDrop {
             connection,
@@ -588,7 +627,7 @@ where
             Some(statement) => guard.connection.begin_with(statement).await,
         }
         .map_err(TxError::Begin)
-        .inspect_err(|error| observed.record_failure(error))?;
+        .inspect_err(|error| observation.record_failure(error))?;
         guard.discard = false;
 
         let mut handle = Tx {
@@ -596,36 +635,26 @@ where
             proven_alive: true,
             mode,
             notifications: Vec::new(),
-            command_savepoint_notifications: None,
+            command_savepoint_notification_count: None,
         };
         let result = f(&mut handle).await;
-        handle.mode.check_expiry(&mut observed)?;
-        let value = match result {
-            Ok(value) => value,
-            Err(err) => {
-                observed.end(TransactionOutcome::RolledBack);
-                return Err(err);
-            }
-        };
+        handle.mode.check_expiry(&mut observation)?;
+        let value = result.inspect_err(|_| observation.end(TransactionOutcome::RolledBack))?;
         if !(options.read_only || handle.proven_alive) {
             let proof = (&mut handle).execute("SELECT 1").await;
-            handle.mode.check_expiry(&mut observed)?;
+            handle.mode.check_expiry(&mut observation)?;
             proof
                 .map_err(TxError::CommitFailed)
-                .inspect_err(|error| observed.record_failure(error))?;
+                .inspect_err(|error| observation.record_failure(error))?;
         }
-        if let Some(budget) = handle.mode.operation_deadline()
-            && budget.remaining_ms().await.is_none()
-        {
-            handle.mode.check_expiry(&mut observed)?;
-        }
+        handle.mode.check_before_commit(&mut observation).await?;
         let notifications = handle.notifications;
-        observed.begin_commit();
+        observation.begin_commit();
         tx.commit()
             .await
             .map_err(classify_commit)
-            .inspect_err(|error| observed.record_failure(error))?;
-        observed.end(TransactionOutcome::Committed);
+            .inspect_err(|error| observation.record_failure(error))?;
+        observation.end(TransactionOutcome::Committed);
         dispatch_notifications(pool, guard, notifications);
         Ok(value)
     }
@@ -655,12 +684,24 @@ mod tests {
         let interval = Duration::from_millis(25);
         let mut last_sent = BTreeMap::new();
         let first = Notification {
-            key: ("jobs", "first"),
+            key: NotificationKey {
+                channel: "jobs",
+                payload: "first",
+            },
             min_interval: interval,
         };
         assert!(first.take_slot(&mut last_sent, now));
         assert!(!first.take_slot(&mut last_sent, now + interval / 2));
-        for key in [("jobs", "second"), ("another", "first")] {
+        for key in [
+            NotificationKey {
+                channel: "jobs",
+                payload: "second",
+            },
+            NotificationKey {
+                channel: "another",
+                payload: "first",
+            },
+        ] {
             let other = Notification {
                 key,
                 min_interval: interval,
@@ -719,7 +760,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn only_caller_limited_cancellation_in_the_rounding_window_reaches_the_cutoff() {
-        for (caller_limit, remaining_us, sqlstate, expires) in [
+        for (armed_timeout_ms, remaining_us, sqlstate, expires) in [
             (Some(10), 750, "57014", true),
             (Some(10), 1_000, "57014", false),
             (None, 750, "57014", false),
@@ -728,11 +769,11 @@ mod tests {
             let start = Instant::now();
             let mut budget = OperationDeadline {
                 at: start + Duration::from_micros(remaining_us),
-                caller_limit,
+                armed_timeout_ms,
                 expired: false,
             };
             let original = crate::error::tests::database(sqlstate);
-            let result = budget.finish(Err::<(), _>(original)).await;
+            let result = budget.check_result(Err::<(), _>(original)).await;
             assert_eq!(
                 crate::sqlstate(&result.unwrap_err()).as_deref(),
                 Some(sqlstate)

@@ -233,7 +233,11 @@ fn terminal_fixture() {
     let mut go = String::new();
     std::io::stdin().read_line(&mut go).unwrap();
     if scenario == "config" {
-        let result = finish_config_failure("bad config".to_owned(), Some(7), Instant::now());
+        let result = RunContext {
+            started: Instant::now(),
+            target: Some(7),
+        }
+        .finish_config_failure("bad config".to_owned());
         std::process::exit(i32::from(result != ExitCode::SUCCESS));
     }
     let level = if scenario == "warn" {
@@ -281,6 +285,10 @@ fn terminal_fixture() {
             applied: vec![6, 7],
         }),
     };
-    let result = finish_run(Some(runtime), logging, outcome, Some(7), Instant::now());
+    let result = RunContext {
+        started: Instant::now(),
+        target: Some(7),
+    }
+    .finish_run(Some(runtime), logging, outcome);
     std::process::exit(i32::from(result != ExitCode::SUCCESS));
 }

@@ -56,11 +56,13 @@ async fn acquisition_reports_only_slow_success_and_native_timeout() {
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let budget = Duration::from_millis(2500);
     assert_eq!(
-        acquisition("fast", budget, async { Ok(7) }).await.unwrap(),
+        observe_acquisition("fast", budget, async { Ok(7) })
+            .await
+            .unwrap(),
         7
     );
     assert_eq!(
-        acquisition("slow", budget, async {
+        observe_acquisition("slow", budget, async {
             tokio::time::sleep(Duration::from_millis(1050)).await;
             Ok(9)
         })
@@ -74,7 +76,7 @@ async fn acquisition_reports_only_slow_success_and_native_timeout() {
         sqlx::Error::Protocol("private server detail".to_owned()),
     ] {
         let expected = format!("{error:?}");
-        let returned = acquisition("failed", budget, async { Err::<(), _>(error) })
+        let returned = observe_acquisition("failed", budget, async { Err::<(), _>(error) })
             .await
             .unwrap_err();
         assert_eq!(format!("{returned:?}"), expected);
@@ -82,7 +84,7 @@ async fn acquisition_reports_only_slow_success_and_native_timeout() {
     assert!(
         tokio::time::timeout(
             Duration::from_millis(1),
-            acquisition(
+            observe_acquisition(
                 "cancelled",
                 budget,
                 std::future::pending::<Result<(), sqlx::Error>>()

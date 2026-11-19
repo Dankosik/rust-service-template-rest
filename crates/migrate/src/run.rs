@@ -127,8 +127,10 @@ impl RunFailure {
     }
 }
 
+const RECORD_TARGET: &str = "migrate_record";
+
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
-    run_cutoff(options.deadline)?;
+    deadline_instant(options.deadline)?;
     let session = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
@@ -143,7 +145,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
         .await
         .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
         .map_err(RunError::Connect)?;
-    let deadline_at = run_cutoff(options.deadline)?;
+    let deadline_at = deadline_instant(options.deadline)?;
     let mut report = Report::default();
     let outcome = tokio::time::timeout_at(
         deadline_at,
@@ -157,11 +159,11 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
     Ok(report)
 }
 
-fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunError> {
+fn deadline_instant(deadline: Duration) -> Result<tokio::time::Instant, RunError> {
     tokio::time::Instant::now()
-        .checked_add(budget)
-        .filter(|deadline| deadline.checked_add(Duration::from_millis(1)).is_some())
-        .ok_or(RunError::InvalidDeadline(budget))
+        .checked_add(deadline)
+        .filter(|instant| instant.checked_add(Duration::from_millis(1)).is_some())
+        .ok_or(RunError::InvalidDeadline(deadline))
 }
 
 async fn apply_pending(
@@ -177,7 +179,7 @@ async fn apply_pending(
     report.before = history.iter().map(|migration| migration.version).max();
     for migration in pending(migrator, &history)? {
         tracing::event!(
-            target: "migrate_record",
+            target: RECORD_TARGET,
             tracing::Level::INFO,
             migration.version = migration.version,
             migration.transaction = !migration.no_tx,
@@ -190,7 +192,7 @@ async fn apply_pending(
             conn.apply(&migrator.table_name, migration).await?
         };
         tracing::event!(
-            target: "migrate_record",
+            target: RECORD_TARGET,
             tracing::Level::INFO,
             migration.version = migration.version,
             migration.duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),

@@ -24,8 +24,56 @@ struct State {
     free: usize,
     next_waiter: u64,
     probes: BTreeMap<u64, oneshot::Sender<()>>,
-    regular_waiters: BTreeMap<u64, oneshot::Sender<()>>,
-    regular_waiters_since: Option<Instant>,
+    regular: RegularQueue,
+}
+
+#[derive(Debug, Default)]
+struct RegularQueue(Option<ActiveRegularQueue>);
+
+#[derive(Debug)]
+struct ActiveRegularQueue {
+    since: Instant,
+    waiters: BTreeMap<u64, oneshot::Sender<()>>,
+}
+
+impl RegularQueue {
+    fn push(&mut self, id: u64, grant: oneshot::Sender<()>) {
+        let active = self.0.get_or_insert_with(|| ActiveRegularQueue {
+            since: Instant::now(),
+            waiters: BTreeMap::new(),
+        });
+        active.waiters.insert(id, grant);
+    }
+
+    fn is_standing(&self) -> bool {
+        self.0.as_ref().is_some_and(|active| {
+            Instant::now().saturating_duration_since(active.since) > STANDING_AFTER
+        })
+    }
+
+    fn pop(&mut self, newest_first: bool) -> Option<oneshot::Sender<()>> {
+        let active = self.0.as_mut()?;
+        let (_, grant) = if newest_first {
+            active.waiters.pop_last()
+        } else {
+            active.waiters.pop_first()
+        }?;
+        if active.waiters.is_empty() {
+            self.0 = None;
+        }
+        Some(grant)
+    }
+
+    fn remove(&mut self, id: u64) -> bool {
+        let Some(active) = self.0.as_mut() else {
+            return false;
+        };
+        let removed = active.waiters.remove(&id).is_some();
+        if active.waiters.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -45,8 +93,7 @@ impl Slots {
                 free: capacity,
                 next_waiter: 0,
                 probes: BTreeMap::new(),
-                regular_waiters: BTreeMap::new(),
-                regular_waiters_since: None,
+                regular: RegularQueue::default(),
             }),
         })
     }
@@ -71,12 +118,7 @@ impl Slots {
                 Queue::Probe => {
                     state.probes.insert(id, grant);
                 }
-                Queue::Regular => {
-                    if state.regular_waiters.is_empty() {
-                        state.regular_waiters_since = Some(Instant::now());
-                    }
-                    state.regular_waiters.insert(id, grant);
-                }
+                Queue::Regular => state.regular.push(id, grant),
             }
             (id, granted)
         };
@@ -93,27 +135,13 @@ impl Slots {
                 return;
             }
         }
-        let now = Instant::now();
-        loop {
-            let newest_first = state
-                .regular_waiters_since
-                .is_some_and(|since| now.saturating_duration_since(since) > STANDING_AFTER);
-            let next = if newest_first {
-                state.regular_waiters.pop_last()
-            } else {
-                state.regular_waiters.pop_first()
-            };
-            if state.regular_waiters.is_empty() {
-                state.regular_waiters_since = None;
-            }
-            let Some((_, grant)) = next else {
-                state.free += 1;
-                return;
-            };
+        let newest_first = state.regular.is_standing();
+        while let Some(grant) = state.regular.pop(newest_first) {
             if grant.send(()).is_ok() {
                 return;
             }
         }
+        state.free += 1;
     }
 
     fn cancel_wait(&self, queue: Queue, id: u64) {
@@ -121,13 +149,7 @@ impl Slots {
             let mut state = self.state.lock();
             match queue {
                 Queue::Probe => state.probes.remove(&id).is_some(),
-                Queue::Regular => {
-                    let queued = state.regular_waiters.remove(&id).is_some();
-                    if state.regular_waiters.is_empty() {
-                        state.regular_waiters_since = None;
-                    }
-                    queued
-                }
+                Queue::Regular => state.regular.remove(id),
             }
         };
         if !queued {
