@@ -159,31 +159,31 @@ impl<T: EventPayload + Serialize> PublicationRoute<T> {
     // template:end outbox:messaging-publication-route-prepare-outbox
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
     #[error("route event type {event_type:?} v{schema_version} is invalid")]
     InvalidEventType {
-        event_type: String,
+        event_type: &'static str,
         schema_version: u16,
     },
     #[error("route subject is invalid for {event_type} v{schema_version}")]
     InvalidSubject {
-        event_type: String,
+        event_type: &'static str,
         schema_version: u16,
     },
     #[error("duplicate route for {event_type} v{schema_version}")]
     DuplicateRoute {
-        event_type: String,
+        event_type: &'static str,
         schema_version: u16,
     },
     #[error("typed route is not registered for {event_type} v{schema_version}")]
     MissingRoute {
-        event_type: String,
+        event_type: &'static str,
         schema_version: u16,
     },
     #[error("duplicate handler for {event_type} v{schema_version}")]
     DuplicateHandler {
-        event_type: String,
+        event_type: &'static str,
         schema_version: u16,
     },
     #[error(
@@ -258,19 +258,19 @@ impl Registry {
         } = route_key::<T>();
         if !valid_subject(&route.subject) {
             return Err(RegistryError::InvalidSubject {
-                event_type: event_type.to_owned(),
+                event_type,
                 schema_version,
             });
         }
         if crate::wire::validate_outbound_identity(event_type).is_err() {
             return Err(RegistryError::InvalidEventType {
-                event_type: event_type.to_owned(),
+                event_type,
                 schema_version,
             });
         }
         let std::collections::hash_map::Entry::Vacant(entry) = self.routes.entry(key) else {
             return Err(RegistryError::DuplicateRoute {
-                event_type: event_type.to_owned(),
+                event_type,
                 schema_version,
             });
         };
@@ -295,13 +295,13 @@ impl Registry {
             .filter(|entry| entry.matches(route))
         else {
             return Err(RegistryError::MissingRoute {
-                event_type: T::EVENT_TYPE.to_owned(),
+                event_type: T::EVENT_TYPE,
                 schema_version: T::SCHEMA_VERSION,
             });
         };
         if entry.handler.is_some() {
             return Err(RegistryError::DuplicateHandler {
-                event_type: T::EVENT_TYPE.to_owned(),
+                event_type: T::EVENT_TYPE,
                 schema_version: T::SCHEMA_VERSION,
             });
         }
@@ -376,7 +376,7 @@ impl Registry {
             .ok_or(DispatchError::Unhandled)?;
         let run = handler(
             envelope.message_id,
-            envelope.occurred_at.to_utc(),
+            envelope.occurred_at,
             envelope.payload,
             context,
         )

@@ -573,7 +573,7 @@ mod tests {
             message_id: "event-1",
             event_type: Created::EVENT_TYPE,
             schema_version: Created::SCHEMA_VERSION,
-            occurred_at: time::OffsetDateTime::UNIX_EPOCH,
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
             payload: b"null",
         }
     }

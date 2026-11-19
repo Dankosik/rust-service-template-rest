@@ -16,7 +16,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_messaging::wire::{DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, restore_dead_letter};
 use infra_messaging::{
     BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, EnvelopeError, Messaging, MessagingOptions,
-    MessagingStartup, PreparedEvent, PublishError,
+    MessagingStartup, PreparedEvent, PublishError, TransportSecurity,
 };
 use operation_context::{Deadline, OperationContext};
 use serde::{Deserialize, Serialize};
@@ -548,8 +548,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                 servers: config.servers,
                 credentials: config.credentials_file.map(Credentials::File),
                 root_ca_path: config.root_ca_path,
-                allow_plaintext: false,
-                tls_first: false,
+                security: TransportSecurity::Tls,
                 source_stream: config.source_stream.clone(),
                 max_payload_bytes: config.max_payload_bytes,
                 consumer: None,

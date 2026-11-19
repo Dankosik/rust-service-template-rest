@@ -26,6 +26,7 @@ pub use messaging::OutboxProducer;
 // template:end outbox:messaging-outbox-producer-export
 pub use messaging::{
     CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
+    TransportSecurity,
 };
 pub use prepared::PreparedEvent;
 pub use probe::MessagingProbe;

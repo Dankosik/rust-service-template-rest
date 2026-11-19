@@ -19,9 +19,9 @@ use infra_messaging::{Registry, Route};
 use serde::Deserialize;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::utc_datetime;
+use time::{OffsetDateTime, UtcDateTime};
 
 const FIXTURE_PATH_ENV: &str = "GO_WIRE_FIXTURES";
 const EXPORT_PATH_ENV: &str = "GO_WIRE_RUST_EXPORT";
@@ -63,8 +63,8 @@ struct EventRecord {
 }
 
 impl EventRecord {
-    fn occurred_at(&self) -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp_nanos(
+    fn occurred_at(&self) -> UtcDateTime {
+        UtcDateTime::from_unix_timestamp_nanos(
             i128::from(self.unix_seconds) * 1_000_000_000 + i128::from(self.nanosecond),
         )
         .expect("fixture instant is representable")

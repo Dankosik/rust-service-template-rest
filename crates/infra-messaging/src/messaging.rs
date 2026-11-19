@@ -22,6 +22,13 @@ use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportSecurity {
+    Tls,
+    TlsFirst,
+    AllowPlaintext,
+}
+
 #[derive(Clone, derive_more::Debug)]
 pub struct MessagingOptions {
     pub connection_name: String,
@@ -29,8 +36,7 @@ pub struct MessagingOptions {
     pub servers: Vec<String>,
     pub credentials: Option<Credentials>,
     pub root_ca_path: Option<PathBuf>,
-    pub allow_plaintext: bool,
-    pub tls_first: bool,
+    pub security: TransportSecurity,
     pub source_stream: String,
     pub max_payload_bytes: usize,
     pub consumer: Option<ConsumerOptions>,
@@ -320,8 +326,7 @@ mod tests {
                     servers: vec!["not a server URL".to_owned()],
                     credentials: None,
                     root_ca_path: None,
-                    allow_plaintext: true,
-                    tls_first: false,
+                    security: TransportSecurity::AllowPlaintext,
                     source_stream: "SOURCE".to_owned(),
                     max_payload_bytes,
                     consumer: concurrency.and_then(NonZeroUsize::new).map(|concurrency| {

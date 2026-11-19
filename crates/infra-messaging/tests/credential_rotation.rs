@@ -13,7 +13,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use domain_events::{Event, EventPayload};
 use futures_util::FutureExt as _;
 use health::Probe as _;
-use infra_messaging::{CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route};
+use infra_messaging::{
+    CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route, TransportSecurity,
+};
 use nkeys::KeyPair;
 use operation_context::{Deadline, OperationContext};
 use serde_json::json;
@@ -197,8 +199,7 @@ async fn rotation_scenario(
                 servers: vec![url.to_owned()],
                 credentials: Some(Credentials::File(path.clone())),
                 root_ca_path: None,
-                allow_plaintext: true,
-                tls_first: false,
+                security: TransportSecurity::AllowPlaintext,
                 source_stream: stream.to_owned(),
                 max_payload_bytes: 1024,
                 consumer: None,
