@@ -30,7 +30,7 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
             match files.entry(name) {
                 Entry::Occupied(entry) => {
                     let first = entry.get();
-                    if &file != first && definition(&file)? != definition(first)? {
+                    if file != first && definition(&file)? != definition(first)? {
                         return Err(Error::ConflictingFileDescription(entry.remove_entry().0));
                     }
                 }
