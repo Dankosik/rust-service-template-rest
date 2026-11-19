@@ -170,7 +170,7 @@ impl Receiver {
 
     fn fresh(&self, source: &TokenSource) -> Result<HeaderValue> {
         source
-            .receiver(RECEIVER, self.uri.clone())?
+            .receiver(ServiceName::parse(RECEIVER)?, self.uri.clone())?
             .authorization()?
             .ok_or_else(|| "signer omitted its credential".into())
     }

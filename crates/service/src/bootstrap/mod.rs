@@ -1204,7 +1204,7 @@ mod tests {
         let signed = resource
             .with_service_tokens(
                 signing
-                    .receiver("catalog", origin.parse().unwrap())
+                    .receiver("catalog".parse().unwrap(), origin.parse().unwrap())
                     .unwrap(),
             )
             .unwrap();

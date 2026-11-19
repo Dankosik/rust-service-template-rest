@@ -18,13 +18,12 @@ use super::execute::{
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::IdempotencyComponents;
 use super::{CommandInput, KEY_HEADER, KEY_HEADER_NAME, ReplaySuccess as _};
-use crate::authn::VerifiedPrincipal;
 use crate::context::{RequestContext, RequestDeadline, collect_body};
 use crate::problem::{
     Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
     sanitized_internal_error,
 };
-use crate::{DelegationCredential, HttpContract};
+use crate::{DelegationCredential, HttpContract, Principal};
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const INVALID_KEY_PARAM_NAME: &str = const_format::formatcp!("header.{KEY_HEADER}");
@@ -34,7 +33,7 @@ const INVALID_KEY_PARAM_REASON: &str = const_format::formatcp!(
 
 pub fn route<S, C, F>(
     mut document: utoipa::openapi::OpenApi,
-    prepare: impl Fn(CommandInput, VerifiedPrincipal, Option<DelegationCredential>, S) -> F
+    prepare: impl Fn(CommandInput, Principal, Option<DelegationCredential>, S) -> F
     + Clone
     + Send
     + Sync
@@ -102,7 +101,7 @@ where
 async fn capture_attempt(
     route: Arc<RouteState>,
     mut request: Request,
-) -> Result<(CommandInput, VerifiedPrincipal, Attempt), Response> {
+) -> Result<(CommandInput, Principal, Attempt), Response> {
     let store = request
         .extensions_mut()
         .remove::<Store>()
@@ -114,14 +113,12 @@ async fn capture_attempt(
         .get::<RequestDeadline>()
         .copied()
         .ok_or_else(|| wiring_failure(&route.operation_id, "deadline_missing"))?;
-    let principal = VerifiedPrincipal::from_extensions(&parts.extensions)
+    let principal = parts
+        .extensions
+        .get::<Principal>()
+        .cloned()
         .ok_or_else(|| wiring_failure(&route.operation_id, "principal_missing"))?;
-    let caller = identity::caller_identity(
-        principal.issuer(),
-        principal.subject(),
-        principal.client_id(),
-    )
-    .ok_or_else(|| wiring_failure(&route.operation_id, "caller_missing"))?;
+    let caller = identity::caller_identity(principal.issuer(), principal.identity());
     let Some(scope) = identity::decode_key(
         parts
             .headers

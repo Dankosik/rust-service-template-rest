@@ -25,20 +25,20 @@ impl Signer {
             key: "private_key",
             reason: "must be a PEM key matching its configured algorithm",
         };
-        let pem = options.private_key.expose_secret().as_bytes();
-        let key = match options.algorithm {
+        let pem = options.auth.private_key.expose_secret().as_bytes();
+        let key = match options.auth.algorithm {
             Algorithm::Rs256 | Algorithm::Ps256 => jsonwebtoken::EncodingKey::from_rsa_pem(pem),
             Algorithm::Es256 => jsonwebtoken::EncodingKey::from_ec_pem(pem),
         }
         .map_err(|_| invalid_key)?;
-        let mut header = jsonwebtoken::Header::new(options.algorithm.into());
-        header.kid = Some(options.key_id);
+        let mut header = jsonwebtoken::Header::new(options.auth.algorithm.into());
+        header.kid = Some(options.auth.key_id);
         header.typ = Some(ASSERTION_TYP.to_owned());
         let signer = Self {
             key,
             header,
             client_id: options.client_id,
-            assertion_audience: options.assertion_audience,
+            assertion_audience: options.auth.audience.as_str().to_owned(),
         };
         let since_unix_epoch = now
             .duration_since(UNIX_EPOCH)

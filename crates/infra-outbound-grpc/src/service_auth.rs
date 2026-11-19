@@ -86,7 +86,7 @@ mod tests {
     use std::assert_matches;
     use std::time::Duration;
 
-    use infra_serviceauth::{TokenSource, test_support::TestKey};
+    use infra_serviceauth::{ServiceName, TokenSource, test_support::TestKey};
     use operation_context::OperationContext;
     use tower::ServiceExt as _;
 
@@ -98,8 +98,9 @@ mod tests {
         let key = TestKey::new("orders/2026-10");
         let source =
             TokenSource::try_new(key.signing_options("orders", "example-svc+jwt")).unwrap();
+        let catalog: ServiceName = "catalog".parse().unwrap();
         let origin = http::Uri::from_static("https://peer.example:443");
-        let tokens = source.receiver("catalog", origin.clone()).unwrap();
+        let tokens = source.receiver(catalog.clone(), origin.clone()).unwrap();
         let plain = Client::try_new(
             "http://127.0.0.1:1",
             ClientSecurity::Plaintext,
@@ -110,7 +111,9 @@ mod tests {
             plain.with_service_tokens(tokens.clone()).unwrap_err(),
             ClientError::ServiceTokensRequireTls
         );
-        let disabled = TokenSource::disabled().receiver("catalog", origin).unwrap();
+        let disabled = TokenSource::disabled()
+            .receiver(catalog.clone(), origin)
+            .unwrap();
         assert!(plain.with_service_tokens(disabled).is_ok());
         let ca = rcgen::generate_simple_self_signed(["peer.example".to_owned()]).unwrap();
         let client = Client::try_new(
@@ -131,7 +134,9 @@ mod tests {
             "https://user@peer.example",
             "https://peer.example:65536",
         ] {
-            let elsewhere = source.receiver("catalog", wrong.parse().unwrap()).unwrap();
+            let elsewhere = source
+                .receiver(catalog.clone(), wrong.parse().unwrap())
+                .unwrap();
             assert_matches!(
                 client.with_service_tokens(elsewhere).unwrap_err(),
                 ClientError::ServiceTokenOriginMismatch

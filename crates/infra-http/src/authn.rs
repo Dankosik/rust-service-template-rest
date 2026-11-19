@@ -19,33 +19,7 @@ pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 #[derive(Clone, Debug)]
-pub struct VerifiedPrincipal(Principal);
-
-impl VerifiedPrincipal {
-    pub(crate) fn from_extensions(extensions: &Extensions) -> Option<Self> {
-        extensions.get::<Principal>().cloned().map(Self)
-    }
-
-    delegate::delegate! {
-        to self.0 {
-            #[must_use]
-            pub fn issuer(&self) -> &str;
-            #[must_use]
-            pub fn subject(&self) -> Option<&str>;
-            #[must_use]
-            pub fn client_id(&self) -> Option<&str>;
-            #[must_use]
-            pub fn scopes(&self) -> &[String];
-            pub fn claims<'a, T: serde::Deserialize<'a>>(
-                &'a self,
-            ) -> Result<T, infra_bearerauthn::ClaimAccessError>;
-            #[must_use]
-            pub fn expires_at(&self) -> u64;
-            #[must_use]
-            pub fn actor(&self) -> Option<&infra_bearerauthn::Actor>;
-        }
-    }
-}
+pub struct VerifiedPrincipal(pub Principal);
 
 impl<S> FromRequestParts<S> for VerifiedPrincipal
 where
@@ -58,7 +32,11 @@ where
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(
-            Self::from_extensions(&parts.extensions)
+            parts
+                .extensions
+                .get::<Principal>()
+                .cloned()
+                .map(Self)
                 .ok_or_else(crate::context::missing_extension::<Self>),
         )
     }
@@ -111,7 +89,6 @@ async fn authenticate(
 
 pub(crate) fn strip_identity(extensions: &mut Extensions) {
     extensions.remove::<Principal>();
-    extensions.remove::<VerifiedPrincipal>();
     extensions.remove::<DelegationCredential>();
 }
 
@@ -166,7 +143,7 @@ fn authorize(
     if !required
         .scope_alternatives
         .iter()
-        .any(|scopes| principal.has_scopes(scopes))
+        .any(|scopes| principal.has_scopes(scopes.iter()))
     {
         return Err(insufficient_scope_response());
     }

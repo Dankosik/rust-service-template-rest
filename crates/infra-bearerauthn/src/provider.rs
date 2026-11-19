@@ -1,4 +1,5 @@
 use std::{
+    str::FromStr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -10,7 +11,7 @@ use shared_rules::{rfc9110, uri};
 use tracing::Instrument as _;
 use url::Url;
 
-use crate::{PreparationError, PreparationPhase, PreparationReason};
+use crate::{InvalidUrl, PreparationError};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -143,10 +144,10 @@ type OperationHistograms = EnumMap<Operation, EnumMap<Outcome, OnceLock<metrics:
 pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
-    pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+    pub fn parse(raw: &str) -> Result<Self, InvalidUrl> {
         let endpoint = parse_endpoint_url(raw)?;
         if endpoint.url().query().is_some() {
-            return Err(invalid_url());
+            return Err(InvalidUrl);
         }
         Ok(Self(endpoint))
     }
@@ -163,6 +164,20 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
+impl AsRef<str> for IssuerUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for IssuerUrl {
+    type Err = InvalidUrl;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
@@ -171,7 +186,7 @@ pub struct EndpointUrl {
 }
 
 impl EndpointUrl {
-    pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+    pub fn parse(raw: &str) -> Result<Self, InvalidUrl> {
         parse_endpoint_url(raw)
     }
 
@@ -185,11 +200,25 @@ impl EndpointUrl {
     }
 }
 
-fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, PreparationError> {
-    if uri::has_whitespace_or_control(raw) {
-        return Err(invalid_url());
+impl AsRef<str> for EndpointUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
-    let url = Url::parse(raw).map_err(|_| invalid_url())?;
+}
+
+impl FromStr for EndpointUrl {
+    type Err = InvalidUrl;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, InvalidUrl> {
+    if uri::has_whitespace_or_control(raw) {
+        return Err(InvalidUrl);
+    }
+    let url = Url::parse(raw).map_err(|_| InvalidUrl)?;
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
@@ -197,16 +226,12 @@ fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, PreparationError> {
         || url.fragment().is_some()
         || uri::authority_has_userinfo(raw)
     {
-        return Err(invalid_url());
+        return Err(InvalidUrl);
     }
     Ok(EndpointUrl {
         exact: raw.to_owned(),
         url,
     })
-}
-
-const fn invalid_url() -> PreparationError {
-    PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl)
 }
 
 #[derive(Clone)]
@@ -217,9 +242,7 @@ pub(crate) struct ProviderClient {
 
 impl ProviderClient {
     pub(crate) fn try_new() -> Result<Self, PreparationError> {
-        Self::from_builder(client_builder()).map_err(|_| {
-            PreparationError::new(PreparationPhase::Client, PreparationReason::ClientBuild)
-        })
+        Self::from_builder(client_builder()).map_err(|_| PreparationError::ClientBuild)
     }
 
     fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
@@ -595,8 +618,13 @@ mod tests {
 
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
-        let url = IssuerUrl::parse("https://provider.example/path").unwrap();
+        let url: IssuerUrl = "https://provider.example/path".parse().unwrap();
         assert_eq!(url.as_str(), "https://provider.example/path");
+        assert_eq!(url.as_ref(), "https://provider.example/path");
+        assert_eq!(
+            IssuerUrl::parse("https://provider.example/path").unwrap(),
+            url
+        );
         for invalid in [
             "http://provider.example",
             "https://user@provider.example",
@@ -607,17 +635,22 @@ mod tests {
             "https://@provider.example",
             "https://provider.example/\u{a0}tenant",
         ] {
-            assert!(IssuerUrl::parse(invalid).is_err(), "{invalid:?}");
+            assert_eq!(
+                IssuerUrl::parse(invalid),
+                Err(crate::InvalidUrl),
+                "{invalid:?}"
+            );
         }
     }
 
     #[test]
     fn endpoint_spelling_is_preserved_and_provider_debug_is_redacted() {
         let raw = "https://provider.example/keys?token=private%2Fvalue&x=1&x=2";
-        let endpoint = EndpointUrl::parse(raw).unwrap();
+        let endpoint: EndpointUrl = raw.parse().unwrap();
         assert_eq!(endpoint.as_str(), raw);
+        assert_eq!(endpoint.as_ref(), raw);
         assert_eq!(endpoint.url().as_str(), raw);
-        assert!(IssuerUrl::parse(raw).is_err());
+        assert_eq!(IssuerUrl::parse(raw), Err(crate::InvalidUrl));
         assert!(!format!("{endpoint:?}").contains("private"));
         for invalid in [
             "http://provider.example?token=private",

@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_util::future::Either;
-use http::{Request, Response};
+use http::{Request, Response, header::AUTHORIZATION};
 use infra_outbound_grpc::{Client, PreparedCall};
 use operation_context::OperationContext;
 use tokio::time::Instant;
@@ -14,51 +14,101 @@ use tower::Service;
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokens, OnBehalfOf, ServiceTokens,
-    credentials::{TokenSource, acquisition_deadline},
-    request_admission::{AdmissionRefusal, take_request_auth},
+    credentials::{AcquisitionDeadline, acquisition_deadline},
+    token::Token,
 };
 
 type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
 type CallFuture = Either<std::future::Ready<Result<Response<Body>, Status>>, RpcFuture>;
 
+#[derive(Clone)]
+enum BoundTokens {
+    Service(ServiceTokens),
+    Exchange(ExchangeTokens, OnBehalfOf),
+}
+
+impl BoundTokens {
+    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+        match self {
+            Self::Service(service) => service.check_active(deadline),
+            Self::Exchange(exchange, _) => exchange.check_active(deadline),
+        }
+    }
+
+    async fn acquire_for_request(
+        &self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        match self {
+            Self::Service(service) => service.acquire_for_request(deadline).await,
+            Self::Exchange(exchange, subject) => {
+                exchange.acquire_for_request(subject, deadline).await
+            }
+        }
+    }
+}
+
+#[derive(Clone, derive_more::Debug)]
+#[debug("grpc::ExchangeClient([REDACTED])")]
+pub struct ExchangeClient {
+    tokens: ExchangeTokens,
+    resource: Client,
+}
+
+impl ExchangeClient {
+    #[must_use]
+    pub fn on_behalf_of(&self, subject: OnBehalfOf) -> AuthenticatedClient {
+        AuthenticatedClient {
+            tokens: BoundTokens::Exchange(self.tokens.clone(), subject),
+            resource: self.resource.clone(),
+            context: None,
+        }
+    }
+}
+
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
-    tokens: TokenSource,
+    tokens: BoundTokens,
     resource: Client,
     context: Option<OperationContext>,
 }
 
 impl ServiceTokens {
     pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(self.into(), resource)
-    }
-}
-
-impl ExchangeTokens {
-    pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
-        AuthenticatedClient::new(self.into(), resource)
-    }
-}
-
-impl AuthenticatedClient {
-    fn new(tokens: TokenSource, resource: Client) -> Result<Self, ConfigurationError> {
-        if !resource.uses_tls() {
-            return Err(ConfigurationError {
-                key: "grpc_resource",
-                reason: "must use TLS to carry OAuth2 bearer tokens",
-            });
-        }
-        if !resource.matches_origin(tokens.resource_origin()) {
-            return Err(ConfigurationError::resource_origin());
-        }
-        Ok(Self {
-            tokens,
+        validate_resource(&resource, self.resource_origin())?;
+        Ok(AuthenticatedClient {
+            tokens: BoundTokens::Service(self.clone()),
             resource,
             context: None,
         })
     }
+}
 
+impl ExchangeTokens {
+    pub fn grpc(&self, resource: Client) -> Result<ExchangeClient, ConfigurationError> {
+        validate_resource(&resource, self.resource_origin())?;
+        Ok(ExchangeClient {
+            tokens: self.clone(),
+            resource,
+        })
+    }
+}
+
+fn validate_resource(resource: &Client, origin: &http::Uri) -> Result<(), ConfigurationError> {
+    if !resource.uses_tls() {
+        return Err(ConfigurationError {
+            key: "grpc_resource",
+            reason: "must use TLS to carry OAuth2 bearer tokens",
+        });
+    }
+    if !resource.matches_origin(origin) {
+        return Err(ConfigurationError::resource_origin());
+    }
+    Ok(())
+}
+
+impl AuthenticatedClient {
     #[must_use]
     pub fn with_context(&self, context: &OperationContext) -> Self {
         Self {
@@ -78,7 +128,7 @@ impl AuthenticatedClient {
             }
             request.extensions_mut().insert(context.clone());
         }
-        let auth = take_request_auth(&mut request);
+        let has_authorization = request.headers().contains_key(AUTHORIZATION);
         let prepared =
             self.resource
                 .prepare_call(request)
@@ -88,20 +138,28 @@ impl AuthenticatedClient {
                     _ => status,
                 })?;
         let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
-        let admitted_tokens = match self.tokens.admit(auth, acquisition_deadline(&context)) {
-            Ok(admitted_tokens) => admitted_tokens,
-            Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
-        };
-        Ok(Box::pin(send_admitted(prepared, admitted_tokens, context)))
+        if let Err(error) = self.tokens.check_active(acquisition_deadline(&context)) {
+            return Err(prepared.refuse(acquisition_status(error)));
+        }
+        if has_authorization {
+            return Err(prepared.refuse(Status::internal(
+                "authorization conflicts with client credentials",
+            )));
+        }
+        Ok(Box::pin(send_admitted(
+            prepared,
+            self.tokens.clone(),
+            context,
+        )))
     }
 }
 
 async fn send_admitted(
     mut prepared: PreparedCall,
-    admitted_tokens: TokenSource<OnBehalfOf>,
+    tokens: BoundTokens,
     context: infra_outbound_http::RequestContext,
 ) -> Result<Response<Body>, Status> {
-    let token = match admitted_tokens
+    let token = match tokens
         .acquire_for_request(acquisition_deadline(&context))
         .await
     {
@@ -110,7 +168,7 @@ async fn send_admitted(
     };
     prepared
         .headers_mut()
-        .insert(http::header::AUTHORIZATION, token.header.clone());
+        .insert(AUTHORIZATION, token.header.clone());
     let used = Arc::downgrade(&token);
     prepared
         .send_with_dispatch_check(
@@ -148,19 +206,6 @@ impl Service<Request<Body>> for AuthenticatedClient {
 }
 
 /// gRFC A54
-fn admission_status(refusal: AdmissionRefusal) -> Status {
-    match refusal {
-        AdmissionRefusal::AuthorizationConflict => {
-            Status::internal("authorization conflicts with client credentials")
-        }
-        AdmissionRefusal::SubjectRequired => Status::internal("on-behalf-of subject is required"),
-        AdmissionRefusal::UnexpectedSubject => {
-            Status::internal("service identity does not accept an on-behalf-of subject")
-        }
-        AdmissionRefusal::Acquisition(error) => acquisition_status(error),
-    }
-}
-
 fn acquisition_status(error: AcquisitionError) -> Status {
     let mut status = match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("credential acquisition timed out"),

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
+    DiscoveryError,
     jwks::{AllowedAlgorithms, JwksSource, KeySet, KeySetFailure},
     provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
@@ -164,8 +165,18 @@ impl KeyStore {
             Err(failure) => {
                 let reason = failure.label();
                 match failure {
+                    KeySetFailure::Discovery(DiscoveryError::Fetch(cause)) => {
+                        warn!(reason, ?cause, "authn_jwks_refresh_failed");
+                    }
                     KeySetFailure::Discovery(error) => {
-                        warn!(reason, cause = ?error.reason(), "authn_jwks_refresh_failed");
+                        warn!(
+                            reason,
+                            cause = error.reason_label(),
+                            "authn_jwks_refresh_failed"
+                        );
+                    }
+                    KeySetFailure::DiscoveryTimeout => {
+                        warn!(reason, cause = "timeout", "authn_jwks_refresh_failed");
                     }
                     KeySetFailure::Fetch(cause) => {
                         warn!(reason, ?cause, "authn_jwks_refresh_failed");
@@ -207,23 +218,54 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
     }
 }
 
-pub(crate) fn run_refresh_worker(
+#[must_use = "drive and await RefreshDriver::run for the verifier lifetime"]
+#[derive(derive_more::Debug)]
+#[debug("RefreshDriver([REDACTED])")]
+pub struct RefreshDriver {
     store: Arc<KeyStore>,
     provider: ProviderClient,
     source: JwksSource,
     algorithms: AllowedAlgorithms,
-    cancel: CancellationToken,
     jwks_max_age: Duration,
-) -> impl Future<Output = ()> {
-    let worker_lost_guard = store.worker_lost.clone().drop_guard();
-    let next_period = move || refresh_period().min(jwks_max_age / 2);
-    let mut next_refresh = Instant::now() + next_period();
-    async move {
+    worker_lost_guard: tokio_util::sync::DropGuard,
+}
+
+impl RefreshDriver {
+    pub(crate) fn new(
+        store: Arc<KeyStore>,
+        provider: ProviderClient,
+        source: JwksSource,
+        algorithms: AllowedAlgorithms,
+        jwks_max_age: Duration,
+    ) -> Self {
+        let worker_lost_guard = store.worker_lost.clone().drop_guard();
+        Self {
+            store,
+            provider,
+            source,
+            algorithms,
+            jwks_max_age,
+            worker_lost_guard,
+        }
+    }
+
+    pub async fn run(self, shutdown: impl Future<Output = ()>) {
+        let Self {
+            store,
+            provider,
+            source,
+            algorithms,
+            jwks_max_age,
+            worker_lost_guard,
+        } = self;
+        let next_period = move || refresh_period().min(jwks_max_age / 2);
+        let mut next_refresh = Instant::now() + next_period();
         let mut state_changes = store.state.subscribe();
+        let mut shutdown = std::pin::pin!(shutdown);
         'worker: loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => break,
+                () = &mut shutdown => break,
                 _ = state_changes.wait_for(|state| state.pending().is_some()) => {}
                 () = tokio::time::sleep_until(next_refresh) => {
                     store.request_periodic();
@@ -233,7 +275,7 @@ pub(crate) fn run_refresh_worker(
             while let Some(ticket) = store.pending() {
                 let replacement = tokio::select! {
                     biased;
-                    () = cancel.cancelled() => break 'worker,
+                    () = &mut shutdown => break 'worker,
                     replacement = source.fetch(&provider, algorithms, Instant::now() + PROVIDER_TIMEOUT) => replacement,
                 };
                 store.finish(ticket, replacement);
@@ -357,14 +399,14 @@ mod tests {
             crate::EndpointUrl::parse(&format!("https://jwks.test:{}/keys", address.port()))
                 .unwrap();
         store.request_periodic();
-        let worker = tokio::spawn(super::run_refresh_worker(
+        let driver = super::RefreshDriver::new(
             store.clone(),
             provider,
             super::JwksSource::Configured(endpoint),
             crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
-            cancel.clone(),
             Duration::from_hours(1),
-        ));
+        );
+        let worker = tokio::spawn(driver.run(cancel.clone().cancelled_owned()));
         let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
             .unwrap()
@@ -414,9 +456,8 @@ mod tests {
 
     fn worker_with_unavailable_provider(
         store: &Arc<KeyStore>,
-        cancel: &CancellationToken,
         jwks_max_age: Duration,
-    ) -> impl Future<Output = ()> + use<> {
+    ) -> super::RefreshDriver {
         let host = "authn.fixture.test";
         let material = tls_test_support::TlsMaterial::new(host);
         let deny_dns = CancellationToken::new();
@@ -428,14 +469,13 @@ mod tests {
             deny_dns,
         )
         .unwrap();
-        super::run_refresh_worker(
+        super::RefreshDriver::new(
             store.clone(),
             provider,
             super::JwksSource::Configured(
                 crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
             ),
             crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
-            cancel.clone(),
             jwks_max_age,
         )
     }
@@ -466,11 +506,10 @@ mod tests {
     async fn unknown_key_work_does_not_postpone_initial_or_subsequent_periods() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_hours(1)
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_hours(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         for period in 0..2 {
             let started = tokio::time::Instant::now();
@@ -497,11 +536,10 @@ mod tests {
     async fn an_overdue_period_rearms_from_observed_time_without_a_backlog() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_hours(1)
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_hours(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         tokio::time::advance(Duration::from_secs(4_000)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
@@ -539,11 +577,10 @@ mod tests {
     async fn a_short_freshness_window_renews_before_the_normal_refresh_period() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_mins(1),
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_mins(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         tokio::time::advance(Duration::from_secs(30)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;

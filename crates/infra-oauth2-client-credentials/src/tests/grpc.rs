@@ -38,12 +38,8 @@ use tokio_rustls::{
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::{Service as _, service_fn};
 
-use secrecy::SecretString;
-
-use super::{Fixture, acquisition_deadline, prepare_registration, token_context};
-use crate::{
-    AcquisitionError, ExchangeTokenTarget, OnBehalfOf, Rejection, ServiceTokenTarget, ServiceTokens,
-};
+use super::{Fixture, acquisition_deadline, nonzero, prepare_registration, subject, token_context};
+use crate::{AcquisitionError, ExchangeTokenTarget, Rejection, ServiceTokenTarget, ServiceTokens};
 
 #[derive(Clone)]
 struct Peer {
@@ -369,12 +365,18 @@ async fn plaintext_cannot_be_bound_to_oauth_credentials() {
         Duration::from_secs(10),
     )
     .unwrap();
-    for binding in [
-        credentials.grpc(channel.clone()),
-        tokens.exchange_tokens(&[], None, 1).grpc(channel),
-    ] {
-        assert_eq!(binding.unwrap_err().key, "grpc_resource");
-    }
+    assert_eq!(
+        credentials.grpc(channel.clone()).unwrap_err().key,
+        "grpc_resource"
+    );
+    assert_eq!(
+        tokens
+            .exchange_tokens(&[], None, nonzero(1))
+            .grpc(channel)
+            .unwrap_err()
+            .key,
+        "grpc_resource"
+    );
     assert_eq!(tokens.token_request_count(), 0);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
@@ -622,20 +624,26 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let registration = prepare_registration(crate::Options {
-        provider_concurrency: 1,
+        provider_concurrency: nonzero(1),
         ..tokens.options()
     });
     let (credentials, driver) =
         registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     tokens.drive(driver);
     let http = registration
-        .exchange_tokens(ExchangeTokenTarget::default(), tokens.resource_origin(), 1)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            tokens.resource_origin(),
+            nonzero(1),
+        )
         .unwrap()
         .http(tokens.resource_client())
         .unwrap();
     let gate = tokens.block_tokens();
+    let active_subject = subject("active");
     let mut exchange = Box::pin(http.execute(
-        tokens.on_behalf_of_request("active"),
+        tokens.request(),
+        &active_subject,
         Instant::now() + Duration::from_secs(10),
     ));
     tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
@@ -1067,33 +1075,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 }
 
 #[tokio::test]
-async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
-    let tokens = Fixture::new().await;
-    let resource = Resource::new().await;
-    let credentials = resource.credentials(&tokens);
-    let mut request = rpc(
-        UnaryRequest {
-            message: "one".to_owned(),
-        },
-        Duration::from_secs(10),
-    );
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
-    let error = resource
-        .client(&credentials)
-        .unary(request)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Internal);
-    assert_eq!(tokens.token_request_count(), 0);
-    assert_eq!(resource.calls(), 0);
-    resource.finish().await;
-    tokens.finish().await;
-}
-
-#[tokio::test]
-async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
+async fn exchange_client_sends_exchanged_bearer_and_closes_when_registration_drops() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = resource.credentials(&tokens);
@@ -1111,40 +1093,31 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
     let registration = prepare_registration(tokens.options());
     let exchange = registration
-        .exchange_tokens(ExchangeTokenTarget::default(), resource.origin(), 1)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            resource.origin(),
+            nonzero(1),
+        )
         .unwrap();
-    let mut client = EchoServiceClient::new(exchange.grpc(channel).unwrap());
-    for subject in [None, Some("")] {
-        let mut request = rpc(message(), Duration::from_secs(10));
-        if let Some(subject) = subject {
-            request
-                .extensions_mut()
-                .insert(OnBehalfOf::new(SecretString::from(subject)));
-        }
-        let error = client.unary(request).await.unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "on-behalf-of subject is required");
-    }
-    assert_eq!(tokens.token_request_count(), 1);
-    assert_eq!(resource.calls(), 1);
+    let exchange_client = exchange.grpc(channel).unwrap();
+    let mut client = EchoServiceClient::new(exchange_client.on_behalf_of(subject("subject-token")));
 
     tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
-    let mut request = rpc(message(), Duration::from_secs(10));
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
-    client.unary(request).await.unwrap();
+    client
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
     assert_eq!(
         resource.authorizations(),
         ["Bearer fixture-token", "Bearer exchanged-token"]
     );
     drop(registration);
-    let mut request = rpc(message(), Duration::from_secs(10));
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
     assert_eq!(
-        client.unary(request).await.unwrap_err().code(),
+        client
+            .unary(rpc(message(), Duration::from_secs(10)))
+            .await
+            .unwrap_err()
+            .code(),
         Code::Unavailable
     );
     assert_eq!(tokens.token_request_count(), 2);

@@ -7,6 +7,7 @@ use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
 
 use super::CommandInput;
+use crate::PrincipalIdentity;
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
@@ -15,21 +16,16 @@ pub(super) const KEY_GRAMMAR: &str = "Send an IETF Structured Field string in do
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
 
-pub(super) fn caller_identity(
-    issuer: &str,
-    subject: Option<&str>,
-    client_id: Option<&str>,
-) -> Option<CallerIdentity> {
-    let (kind, value) = match (subject, client_id) {
-        (Some(subject), _) => (CallerKind::Subject, subject),
-        (None, Some(client_id)) => (CallerKind::Client, client_id),
-        (None, None) => return None,
+pub(super) fn caller_identity(issuer: &str, identity: PrincipalIdentity<'_>) -> CallerIdentity {
+    let (kind, value) = match identity {
+        PrincipalIdentity::Subject { subject, .. } => (CallerKind::Subject, subject),
+        PrincipalIdentity::ClientOnly(client_id) => (CallerKind::Client, client_id),
     };
-    Some(CallerIdentity {
+    CallerIdentity {
         issuer: issuer.to_owned(),
         kind,
         value: value.to_owned(),
-    })
+    }
 }
 
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
@@ -224,10 +220,11 @@ mod tests {
     fn scope_and_request_match_the_pinned_framing_vectors() {
         let caller = caller_identity(
             "https://issuer.example",
-            Some("fixture-subject"),
-            Some("client"),
-        )
-        .expect("verified caller");
+            PrincipalIdentity::Subject {
+                subject: "fixture-subject",
+                client_id: Some("client"),
+            },
+        );
         assert_eq!(
             infra_idempotency_store::ScopeKey::new(caller, b"k-123").digest(),
             &decode_digest("98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94")
