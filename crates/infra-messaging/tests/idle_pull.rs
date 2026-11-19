@@ -56,6 +56,50 @@ async fn provision(
     jetstream
 }
 
+async fn assert_idle_expiry(
+    broker: &async_nats::Client,
+    pulls: &mut async_nats::Subscriber,
+    scrape: &metrics_exporter_prometheus::PrometheusHandle,
+) {
+    let first = tokio::time::timeout_at(deadline(), pulls.next())
+        .await
+        .expect("the consumer sends the first idle pull")
+        .expect("pull subscription remains open");
+    let first_reply = first.reply.expect("idle pull has a reply subject");
+    let mut replies = broker
+        .subscribe(first_reply.clone())
+        .await
+        .expect("observe the first pull reply");
+    broker.flush().await.expect("reply subscription is active");
+    let expiry = tokio::time::timeout_at(deadline(), replies.next())
+        .await
+        .expect("the broker replies when the idle pull expires")
+        .expect("reply subscription remains open");
+    assert_eq!(expiry.status, Some(async_nats::StatusCode::TIMEOUT));
+    let renewed = tokio::time::timeout_at(deadline(), pulls.next())
+        .await
+        .expect("the consumer renews the expired idle pull")
+        .expect("pull subscription remains open");
+    assert_ne!(
+        renewed.reply.expect("renewed pull has a reply subject"),
+        first_reply
+    );
+
+    let errors = scrape
+        .render()
+        .lines()
+        .filter(|line| line.starts_with("messaging_consumer_stream_errors_total"))
+        .map(|line| {
+            line.rsplit_once(' ')
+                .expect("stream error metric has a sample value")
+                .1
+                .parse::<u64>()
+                .expect("stream error metric is a counter")
+        })
+        .sum::<u64>();
+    assert_eq!(errors, 0, "an idle pull expiry counted as a failed batch");
+}
+
 #[tokio::test]
 async fn idle_pull_expiry_is_not_a_failed_batch() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -142,43 +186,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     broker.flush().await.expect("pull subscription is active");
 
     let mut handle = consumer.start(&cancel);
-    let first = tokio::time::timeout_at(deadline(), pulls.next())
-        .await
-        .expect("the consumer sends the first idle pull")
-        .expect("pull subscription remains open");
-    let first_reply = first.reply.expect("idle pull has a reply subject");
-    let mut replies = broker
-        .subscribe(first_reply.clone())
-        .await
-        .expect("observe the first pull reply");
-    broker.flush().await.expect("reply subscription is active");
-    let expiry = tokio::time::timeout_at(deadline(), replies.next())
-        .await
-        .expect("the broker replies when the idle pull expires")
-        .expect("reply subscription remains open");
-    assert_eq!(expiry.status, Some(async_nats::StatusCode::TIMEOUT));
-    let renewed = tokio::time::timeout_at(deadline(), pulls.next())
-        .await
-        .expect("the consumer renews the expired idle pull")
-        .expect("pull subscription remains open");
-    assert_ne!(
-        renewed.reply.expect("renewed pull has a reply subject"),
-        first_reply
-    );
-
-    let errors = scrape
-        .render()
-        .lines()
-        .filter(|line| line.starts_with("messaging_consumer_stream_errors_total"))
-        .map(|line| {
-            line.rsplit_once(' ')
-                .expect("stream error metric has a sample value")
-                .1
-                .parse::<u64>()
-                .expect("stream error metric is a counter")
-        })
-        .sum::<u64>();
-    assert_eq!(errors, 0, "an idle pull expiry counted as a failed batch");
+    assert_idle_expiry(&broker, &mut pulls, &scrape).await;
 
     handle
         .finish(deadline())
