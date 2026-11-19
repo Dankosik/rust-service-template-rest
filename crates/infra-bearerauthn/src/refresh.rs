@@ -120,11 +120,11 @@ impl KeyStore {
             Admission::Answer(answer) => return answer,
             Admission::Join(ticket) | Admission::Request(ticket) => ticket,
         };
-        let mut state = self.state.subscribe();
+        let mut state_changes = self.state.subscribe();
         match self
             .worker_lost
             .run_until_cancelled(
-                state.wait_for(|state| state.stopped || state.finished_ticket >= ticket),
+                state_changes.wait_for(|state| state.stopped || state.finished_ticket >= ticket),
             )
             .await
         {
@@ -162,7 +162,9 @@ impl KeyStore {
                     KeySetFailure::Fetch(cause) => {
                         warn!(reason, ?cause, "authn_jwks_refresh_failed");
                     }
-                    _ => warn!(reason, "authn_jwks_refresh_failed"),
+                    KeySetFailure::Parse | KeySetFailure::NoUsableKeys => {
+                        warn!(reason, "authn_jwks_refresh_failed");
+                    }
                 }
                 ("failure", reason)
             }

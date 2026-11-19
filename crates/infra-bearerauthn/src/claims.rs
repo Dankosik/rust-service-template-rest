@@ -32,7 +32,7 @@ impl ClaimPolicy {
     fn check_issuer_and_audience(
         &self,
         issuer: &str,
-        audience: &Values<'_>,
+        audience: &StringOrStrings<'_>,
     ) -> Result<(), VerificationError> {
         if issuer != self.issuer {
             return Err(VerificationError::invalid(VerificationReason::Issuer));
@@ -44,16 +44,16 @@ impl ClaimPolicy {
     }
 }
 
-enum Values<'a> {
+enum StringOrStrings<'a> {
     One(Cow<'a, str>),
     Many(Vec<Cow<'a, str>>),
 }
 
-impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
+impl<'de: 'a, 'a> Deserialize<'de> for StringOrStrings<'a> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Values<'de>;
+            type Value = StringOrStrings<'de>;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a string or an array of strings")
             }
@@ -61,10 +61,10 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 self,
                 value: &'de str,
             ) -> Result<Self::Value, E> {
-                Ok(Values::One(Cow::Borrowed(value)))
+                Ok(StringOrStrings::One(Cow::Borrowed(value)))
             }
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(Values::One(Cow::Owned(value.to_owned())))
+                Ok(StringOrStrings::One(Cow::Owned(value.to_owned())))
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
                 self,
@@ -74,7 +74,7 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 while let Some(BorrowableString(value)) = seq.next_element()? {
                     values.push(value);
                 }
-                Ok(Values::Many(values))
+                Ok(StringOrStrings::Many(values))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -106,7 +106,7 @@ fn optional_actor(raw: Option<JsonObject<RawAct<'_>>>) -> Result<Option<Actor>, 
     )))
 }
 
-impl Values<'_> {
+impl StringOrStrings<'_> {
     fn contains_any(&self, accepted: &[String]) -> bool {
         let values = match self {
             Self::One(value) => std::slice::from_ref(value),
@@ -124,7 +124,7 @@ struct JwtClaims<'a> {
     #[serde(borrow)]
     iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
-    aud: Option<Values<'a>>,
+    aud: Option<StringOrStrings<'a>>,
     exp: Option<NumericDate>,
     #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<NumericDate>,
@@ -141,7 +141,7 @@ struct JwtClaims<'a> {
     #[serde(borrow, default)]
     scope: ScopeClaim<'a>,
     #[serde(borrow)]
-    scp: Option<Values<'a>>,
+    scp: Option<StringOrStrings<'a>>,
     #[serde(borrow)]
     jti: Option<Cow<'a, str>>,
     iat: Option<NumericDate>,
@@ -154,19 +154,23 @@ enum ScopeClaim<'a> {
     #[default]
     Missing,
     Null,
-    Value(Values<'a>),
+    Value(StringOrStrings<'a>),
 }
 
 impl<'a> ScopeClaim<'a> {
     fn resolve(
         self,
         profile: TokenProfile,
-        scp: Option<Values<'a>>,
-    ) -> Result<Option<Values<'a>>, VerificationError> {
+        scp: Option<StringOrStrings<'a>>,
+    ) -> Result<Option<StringOrStrings<'a>>, VerificationError> {
         match self {
-            Self::Null | Self::Value(Values::Many(_)) if profile == TokenProfile::Rfc9068 => Err(
-                VerificationError::invalid(VerificationReason::MalformedClaims),
-            ),
+            Self::Null | Self::Value(StringOrStrings::Many(_))
+                if profile == TokenProfile::Rfc9068 =>
+            {
+                Err(VerificationError::invalid(
+                    VerificationReason::MalformedClaims,
+                ))
+            }
             Self::Missing | Self::Null => Ok(scp),
             Self::Value(scope) => Ok(Some(scope)),
         }
@@ -191,7 +195,7 @@ struct ActiveClaims<'a> {
     #[serde(borrow)]
     iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
-    aud: Option<Values<'a>>,
+    aud: Option<StringOrStrings<'a>>,
     exp: Option<u64>,
     nbf: Option<u64>,
     #[serde(borrow)]
@@ -201,7 +205,7 @@ struct ActiveClaims<'a> {
     #[serde(borrow, default, deserialize_with = "present_scope_string")]
     scope: Option<Cow<'a, str>>,
     #[serde(borrow)]
-    scp: Option<Values<'a>>,
+    scp: Option<StringOrStrings<'a>>,
     #[serde(borrow)]
     act: Option<JsonObject<RawAct<'a>>>,
 }
@@ -215,7 +219,7 @@ fn present_scope_string<'de: 'a, 'a, D: serde::Deserializer<'de>>(
 
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedClaims {
-    pub(crate) identity: Principal,
+    pub(crate) principal: Principal,
     not_before: Option<Duration>,
 }
 
@@ -224,8 +228,8 @@ impl VerifiedClaims {
         self,
         now: Duration,
     ) -> Result<Principal, VerificationError> {
-        check_lifetime(self.identity.expiry_from_epoch(), self.not_before, now)?;
-        Ok(self.identity)
+        check_lifetime(self.principal.expiry_from_epoch(), self.not_before, now)?;
+        Ok(self.principal)
     }
 }
 
@@ -272,7 +276,7 @@ pub(crate) fn validate_jwt_claims(
         optional_actor(claims.act).map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(VerifiedClaims {
         not_before,
-        identity: Principal::new(
+        principal: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 identifiers,
@@ -353,9 +357,8 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
 impl VerifiedClaims {
-    pub(crate) fn reusable_at(&self, now: u64) -> bool {
-        now < self.identity.expires_at()
-            && !not_yet_valid(self.not_before, Duration::from_secs(now))
+    pub(crate) fn is_reusable_at(&self, now: u64) -> bool {
+        now < self.principal.expires_at() && is_active_at(self.not_before, Duration::from_secs(now))
     }
 }
 
@@ -386,12 +389,12 @@ pub(crate) fn validate_introspection_claims(
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
     let identifiers = Identifiers::from_claims(subject, client_id)?;
-    let scopes = Scopes::from_claim(claims.scope.map(Values::One).or(claims.scp))
+    let scopes = Scopes::from_claim(claims.scope.map(StringOrStrings::One).or(claims.scp))
         .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
     let actor = optional_actor(claims.act).map_err(|()| malformed())?;
     Ok(VerifiedClaims {
         not_before,
-        identity: Principal::new(
+        principal: Principal::new(
             Identity {
                 issuer: policy.issuer.clone(),
                 identifiers,
@@ -416,14 +419,14 @@ fn check_lifetime(
     {
         return Err(VerificationError::invalid(VerificationReason::Expired));
     }
-    if not_yet_valid(not_before, now) {
+    if !is_active_at(not_before, now) {
         return Err(VerificationError::invalid(VerificationReason::NotYetValid));
     }
     Ok(())
 }
 
-fn not_yet_valid(not_before: Option<Duration>, now: Duration) -> bool {
-    not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY))
+fn is_active_at(not_before: Option<Duration>, now: Duration) -> bool {
+    not_before.is_none_or(|not_before| not_before <= now.saturating_add(LEEWAY))
 }
 
 impl Identifiers {
@@ -446,12 +449,14 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
 pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
-    fn from_claim(scope: Option<Values<'_>>) -> Result<Self, ()> {
+    fn from_claim(scope: Option<StringOrStrings<'_>>) -> Result<Self, ()> {
         let mut values: Vec<String> = match scope {
             None => Vec::new(),
-            Some(Values::One(value)) if value.is_empty() => Vec::new(),
-            Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
-            Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
+            Some(StringOrStrings::One(value)) if value.is_empty() => Vec::new(),
+            Some(StringOrStrings::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
+            Some(StringOrStrings::Many(values)) => {
+                values.into_iter().map(Cow::into_owned).collect()
+            }
         };
         if !values
             .iter()
@@ -561,7 +566,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 Duration::from_secs(100),
             )
-            .map(|verified| verified.identity)
+            .map(|verified| verified.principal)
         };
         let principal = verify(serde_json::json!({
             "exp": 130, "sub": null, "client_id": "", "azp": "client", "cid": "other",
@@ -593,7 +598,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 Duration::from_secs(1000),
             )
-            .map(|verified| verified.identity.expires_at())
+            .map(|verified| verified.principal.expires_at())
             .map_err(|error| error.reason)
         };
         for (extra, expected) in [
@@ -683,7 +688,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 now,
             )
-            .map(|verified| verified.identity.expires_at())
+            .map(|verified| verified.principal.expires_at())
             .map_err(|error| error.reason)
         };
         for (exp, nbf, now, expected) in [
@@ -796,7 +801,7 @@ mod tests {
                 TokenProfile::Rfc9068,
                 Duration::from_secs(100),
             )
-            .map(|verified| verified.identity)
+            .map(|verified| verified.principal)
             .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
@@ -827,7 +832,7 @@ mod tests {
                 TokenProfile::ResourceServer,
                 Duration::from_secs(100),
             )
-            .map(|verified| verified.identity)
+            .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
@@ -896,7 +901,7 @@ mod tests {
         let principal = validate_introspection_claims(
             br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":"write read read","tenant":"private-value","region":"first","region":"second","accounts":[{"id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
             &policy(), 100,
-        ).unwrap().identity;
+        ).unwrap().principal;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, "write read read");
@@ -922,7 +927,7 @@ mod tests {
                 &extra,
             );
             validate_introspection_claims(response.to_string().as_bytes(), &policy(), 100)
-                .map(|verified| verified.identity)
+                .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Unavailable);
     }
@@ -1028,7 +1033,7 @@ mod tests {
                 );
                 if let Some(expected) = expected.as_ref().filter(|_| standard_shape) {
                     assert_eq!(
-                        result.unwrap().identity.scopes(),
+                        result.unwrap().principal.scopes(),
                         expected.as_slice(),
                         "{extra}"
                     );
@@ -1047,7 +1052,7 @@ mod tests {
                 );
                 if let Some(expected) = &expected {
                     assert_eq!(
-                        result.unwrap().identity.scopes(),
+                        result.unwrap().principal.scopes(),
                         expected.as_slice(),
                         "{extra}, standard shape: {standard_shape}"
                     );
