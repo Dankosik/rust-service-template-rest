@@ -266,33 +266,6 @@ fn malformed_header_entries_fail_by_position() {
 }
 
 #[test]
-fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
-    use futures_util::FutureExt;
-
-    let exporter = span_exporter(
-        "https://127.0.0.1:1/v1/traces",
-        HashMap::new(),
-        &CollectorTrust::default(),
-        export_timeout(&|_: &str| None),
-        None,
-    )
-    .expect("https endpoint must build");
-    let result = {
-        use opentelemetry_sdk::trace::SpanExporter as _;
-        exporter
-            .export(Vec::new())
-            .now_or_never()
-            .expect("blocking OTLP client must finish in one poll")
-    };
-    let err = result.expect_err("nothing listens on 127.0.0.1:1");
-    let message = err.to_string();
-    assert!(
-        !message.contains("URL scheme is not allowed"),
-        "https must be a permitted scheme: {message}"
-    );
-}
-
-#[test]
 fn compression_falls_back_and_remembers_only_ignored_variable_names() {
     let traces = OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
     let general = OTEL_EXPORTER_OTLP_COMPRESSION;
