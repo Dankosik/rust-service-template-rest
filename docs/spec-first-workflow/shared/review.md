@@ -13,24 +13,30 @@ request).
 
 At the final assembled delivery boundary (in both structured workflows and
 standalone Direct Work), select the disposition for the changed surface. Assign
-one fresh reviewer when full or structure-only review applies.
+fresh reviewer(s) when full or structure-only review applies.
 
-- **Full final review**: Required for any multi-task ledger (≥2 planned code
-  tasks), when requested by the user, when changed behavior affects
+- **Full final review**: Required for any persisted ledger (`tasks.md`) with
+  behavioral code changes, or for any candidate (including Direct Work and
+  inline units) when requested by the user, when changed behavior affects
   authorization, money, data integrity, concurrency safety, or hard-to-reverse
-  migration, or when a material correctness question remains uncertain. Cover
-  unit-local invariants and cross-unit interactions within the [Evidence
-  Contract](evidence-contract.md#local-completion) proof boundary (using the
+  migration, or when a material correctness question remains uncertain. Use the
   2-lens [Complementary
-  Panel](../phases/implementation-review.md#complementary-panel) when
-  triggered).
-- **Structure-only review**: Selected when full review is untriggered and the
-  candidate adds a workspace crate, dependency or crate feature, trait or layer,
-  custom general mechanism, config key, or fallback/shim/parallel path; route to
+  Panel](../phases/implementation-review.md#complementary-panel) for multi-task
+  ledgers (≥2 planned code tasks) or high-risk changes adding structure; use
+  one fresh 4-axis reviewer for all other Full reviews (including a 1-task
+  behavioral code ledger or single-unit Direct Work). Cover unit-local
+  invariants and cross-unit interactions within the [Evidence
+  Contract](evidence-contract.md#local-completion) proof boundary.
+- **Structure-only review**: Selected when Full final review is untriggered
+  (Direct Work, inline unit, or purely mechanical/docs/config ledger) and the
+  candidate adds a workspace crate, dependency or crate feature, trait or
+  layer, custom general mechanism, config key, or fallback/shim/parallel path;
+  route to
   [Structure-only review](../phases/implementation-review.md#structure-only-review).
-- **Direct completion**: Single-task or inline candidate matching neither
-  trigger above; complete final validation directly and record the checked
-  trigger signals in the Completion result.
+- **Direct completion**: Any candidate matching neither trigger above (Direct
+  Work, inline unit, or purely mechanical/docs-only ledger with no risk or
+  structural trigger); complete final validation directly and record the
+  checked trigger signals in the Completion result.
 
 ## Lifecycle
 
@@ -47,11 +53,11 @@ Contract](evidence-contract.md), including their original source and scope.
 For mechanical identity refreshes, use [Transition](transition.md)'s unchanged
 semantic-scope rule instead of restarting an unaffected review.
 
-Use a bounded delta recheck by the same reviewer when repair addresses only
-that reviewer's anchored findings, leaves Outcome, Boundary, accepted inputs,
-interfaces, and risk surface unchanged, and introduces no unrelated behavior or
-writable owner. The reviewer remains read-only and does not prescribe or
-perform the repair.
+For non-Implementation reviews, use a bounded delta recheck by the same
+reviewer when repair addresses only that reviewer's anchored findings, leaves
+Outcome, Boundary, accepted inputs, interfaces, and risk surface unchanged, and
+introduces no unrelated behavior or writable owner. The reviewer remains
+read-only and does not prescribe or perform the repair.
 
 A repair closes the finding; a remedy the finding suggests is evidence. Before
 adopting one, the repair owner weighs what it adds or trades away: an accepted
@@ -62,28 +68,27 @@ that closes its finding through an unjustified crate, dependency, layer,
 configuration key, or parallel path still fails.
 
 For Implementation, batch verified findings per pass and allow at most **two
-bounded repair rounds** for the same anchored defect class on one candidate,
-retaining the reviewer for bounded delta rechecks when the adapter permits
-continuation (or using one fresh delta-scoped reviewer otherwise). If a second
-repair still leaves the defect unresolved or adds no discriminating evidence,
-stop cycling and apply [Parent-Owned
-Recovery](transition.md#parent-owned-recovery) (focused diagnosis,
-`adjudicator-agent`, or `Blocked`); every confirmed blocking defect still must
-close before `PASS`.
+bounded repair rounds** for the same anchored defect class on one candidate.
+Each bounded post-repair recheck uses one fresh `reviewer-agent` in [Delta
+Recheck](../phases/implementation-review.md#delta-recheck) mode (escalating to
+a fresh **full** review per [Trigger](#trigger) whenever repair expands
+writable scope, interfaces, or risk surface). If a second repair still leaves
+the defect unresolved or adds no discriminating evidence, stop cycling and
+apply [Parent-Owned Recovery](transition.md#parent-owned-recovery) (focused
+diagnosis, `adjudicator-agent`, or `Blocked`); every confirmed blocking defect
+still must close before `PASS`.
 
 For non-Implementation reviews, allow at most one bounded delta recheck per
-review result. If that still FAILs, one fresh reviewer inspects the repaired
-candidate, or reopen if Outcome is invalid. Do not start a third cycle on the
-same candidate. Parent-Owned Recovery still governs repeated findings without
-new evidence; reviewer replacement does not restart that allowance.
+review result (if same-reviewer identity is unavailable, one fresh reviewer
+covers the bounded repair delta and invalidated proof). If that still FAILs,
+one fresh reviewer inspects the repaired candidate, or reopen if Outcome is
+invalid. Do not start a third cycle on the same candidate. Parent-Owned
+Recovery still governs repeated findings without new evidence; reviewer
+replacement does not restart that allowance.
 
-If the same-reviewer identity is unavailable, one fresh review covers the
-bounded repair delta and invalidated proof, not the original unit, unless the
-repair expanded the risk surface.
-
-Use a fresh reviewer when repair changes the acceptance boundary, invalidates
-unaffected review reasoning, introduces a new interface or behavior, or expands
-the risk surface.
+Use a fresh **full** review (for any phase) when repair changes the acceptance
+boundary, invalidates unaffected review reasoning, introduces a new interface
+or behavior, or expands the risk surface.
 
 The phase adapter owns lenses and threshold, while the artifact, ledger, or
 [Transition](transition.md) owner decides movement.

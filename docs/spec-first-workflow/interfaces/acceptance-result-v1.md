@@ -21,9 +21,11 @@ next_owner: <next implementation owner, or exact missing input and its owner>
   (single owner of the `Implemented` bar).
 - After mid-task steering changes consumed inputs, identify the steering update
   the result answers (including on `Blocked`).
-- `Blocked` retains partial work and names the exact missing input and owner
-  (or `Delivery Owner — refuted findings` from [Repair
-  Assignment](../phases/implementation/repair.md)).
+- `Blocked` names the exact missing input and owner (retaining partial work—as
+  a WIP commit on the worktree branch when stopping an isolated Lead),
+  `Ledger Orchestrator — scope expansion: <paths>` (live worktree preserved
+  without a WIP commit), or `Delivery Owner — refuted findings` from [Repair
+  Assignment](../phases/implementation/repair.md).
 
 ## Repair Request
 
@@ -63,8 +65,4 @@ next_owner: <exact remaining action and owner, or none>
 
 - Return `Accepted` only when every gate in [Emit Completion
   Result](../phases/implementation/final-validation.md#5-emit-completion-result)
-  holds.
-- Retain passing local results in `evidence` while an explicitly requested
-  external outcome is pending; return `Blocked` only when no authorized
-  progress can obtain the required outcome or proof, recording completed scope
-  in `evidence` and the exact gap and owner in `next_owner`.
+  holds; otherwise return `Blocked` as specified there.
