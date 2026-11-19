@@ -60,32 +60,30 @@ impl UploadChecksum {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    AmazonS3 { expected_bucket_owner: String },
+    Endpoint { url: String, path_style: bool },
+}
+
 #[derive(Debug)]
 pub(crate) struct Admitted {
-    pub(crate) endpoint: Option<String>,
+    pub(crate) target: Target,
     pub(crate) region: String,
-    pub(crate) path_style: bool,
-    pub(crate) expected_bucket_owner: Option<String>,
     pub(crate) checksum: UploadChecksum,
-    pub(crate) cloud_region: Option<String>,
-    pub(crate) workload_identity: bool,
 }
 
 impl Admitted {
     fn at_endpoint(
-        endpoint: String,
+        url: String,
         region: String,
         path_style: bool,
         checksum: UploadChecksum,
     ) -> Self {
         Self {
-            endpoint: Some(endpoint),
+            target: Target::Endpoint { url, path_style },
             region,
-            path_style,
-            expected_bucket_owner: None,
             checksum,
-            cloud_region: None,
-            workload_identity: false,
         }
     }
 }
@@ -108,13 +106,11 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
                 return Err(ConfigError::ExpectedBucketOwner);
             }
             Ok(Admitted {
-                endpoint: None,
-                cloud_region: Some(region.clone()),
+                target: Target::AmazonS3 {
+                    expected_bucket_owner: expected_bucket_owner.clone(),
+                },
                 region,
-                path_style: false,
-                expected_bucket_owner: Some(expected_bucket_owner.clone()),
                 checksum: UploadChecksum::Always,
-                workload_identity: true,
             })
         }
         Provider::CloudflareR2 { endpoint } => {
@@ -236,7 +232,7 @@ fn valid_bucket(bucket: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provider, UploadChecksum, admit};
+    use super::{Provider, Target, UploadChecksum, admit};
     use crate::ConfigError;
 
     const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -251,13 +247,13 @@ mod tests {
             "evidence-bucket",
         )
         .unwrap();
-        assert_eq!(admitted.endpoint, None);
         assert_eq!(
-            admitted.expected_bucket_owner.as_deref(),
-            Some("123456789012")
+            admitted.target,
+            Target::AmazonS3 {
+                expected_bucket_owner: "123456789012".to_owned(),
+            }
         );
         assert_eq!(admitted.checksum, UploadChecksum::Always);
-        assert!(!admitted.path_style);
 
         for region in ["us-gov-west-1", "cn-north-1", "eusc-de-east-1"] {
             let admitted = admit(
@@ -310,9 +306,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(admitted.region, "auto");
-            assert_eq!(admitted.expected_bucket_owner, None);
             assert_eq!(admitted.checksum, UploadChecksum::BytesOnly);
-            assert!(!admitted.endpoint.unwrap().ends_with('/'));
+            let Target::Endpoint { url, path_style } = admitted.target else {
+                panic!("expected endpoint target");
+            };
+            assert!(!path_style);
+            assert!(!url.ends_with('/'));
         }
         for endpoint in [
             "http://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
@@ -347,12 +346,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            admitted.endpoint.as_deref(),
-            Some("https://t3.storageapi.dev")
+            admitted.target,
+            Target::Endpoint {
+                url: "https://t3.storageapi.dev".to_owned(),
+                path_style: false,
+            }
         );
         assert_eq!(admitted.region, "auto");
         assert_eq!(admitted.checksum, UploadChecksum::Never);
-        assert!(!admitted.path_style);
         for endpoint in [
             "http://t3.storageapi.dev",
             "https://t3.storageapi.dev/x",
@@ -387,9 +388,14 @@ mod tests {
             "evidence-bucket",
         )
         .unwrap();
-        assert_eq!(admitted.endpoint.as_deref(), Some("http://127.0.0.1:7070"));
+        assert_eq!(
+            admitted.target,
+            Target::Endpoint {
+                url: "http://127.0.0.1:7070".to_owned(),
+                path_style: true,
+            }
+        );
         assert_eq!(admitted.region, "us-east-1");
-        assert!(admitted.path_style);
     }
 
     #[test]
@@ -404,12 +410,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            admitted.endpoint.as_deref(),
-            Some("https://s3.eu-central-003.backblazeb2.com")
+            admitted.target,
+            Target::Endpoint {
+                url: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
+                path_style: false,
+            }
         );
         assert_eq!(admitted.region, "eu-central-003");
-        assert!(!admitted.path_style);
-        assert_eq!(admitted.expected_bucket_owner, None);
         assert_eq!(admitted.checksum, UploadChecksum::Never);
 
         let admitted = admit(
@@ -422,11 +429,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            admitted.endpoint.as_deref(),
-            Some("https://ceph.internal.example:8443")
+            admitted.target,
+            Target::Endpoint {
+                url: "https://ceph.internal.example:8443".to_owned(),
+                path_style: true,
+            }
         );
         assert_eq!(admitted.region, "us-east-1");
-        assert!(admitted.path_style);
 
         for endpoint in [
             "http://ceph.internal.example",

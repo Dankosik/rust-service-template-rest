@@ -38,7 +38,7 @@ fn media_type(value: &[u8]) -> Option<()> {
     let subtype = after_token(value)?.strip_prefix(b"/")?;
     let mut rest = after_token(subtype)?;
     while !rest.is_empty() {
-        rest = trim_ows(trim_ows(rest).strip_prefix(b";")?);
+        rest = trim_start_ows(trim_start_ows(rest).strip_prefix(b";")?);
         if rest.is_empty() || rest.starts_with(b";") {
             continue;
         }
@@ -59,7 +59,7 @@ fn after_token(value: &[u8]) -> Option<&[u8]> {
     (end != 0).then(|| &value[end..])
 }
 
-fn trim_ows(mut value: &[u8]) -> &[u8] {
+fn trim_start_ows(mut value: &[u8]) -> &[u8] {
     while let [b' ' | b'\t', rest @ ..] = value {
         value = rest;
     }

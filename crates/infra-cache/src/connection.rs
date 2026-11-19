@@ -114,10 +114,14 @@ impl AbandonedReply {
 
 type QueryFuture<T> = BoxFuture<'static, redis::RedisResult<T>>;
 
+struct InFlight<T> {
+    reply: QueryFuture<T>,
+    reservation: OwnedSemaphorePermit,
+}
+
 struct Exchange<'a, T: Send + 'static> {
     generation: &'a Generation,
-    reservation: Option<OwnedSemaphorePermit>,
-    reply: Option<QueryFuture<T>>,
+    in_flight: Option<InFlight<T>>,
     wire_deadline: Deadline,
 }
 
@@ -130,8 +134,10 @@ impl<'a, T: Send + 'static> Exchange<'a, T> {
     ) -> Self {
         Self {
             generation,
-            reservation: Some(reservation),
-            reply: Some(Box::pin(reply)),
+            in_flight: Some(InFlight {
+                reply: Box::pin(reply),
+                reservation,
+            }),
             wire_deadline,
         }
     }
@@ -141,10 +147,10 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
     type Output = redis::RedisResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(mut reply) = self.reply.take() else {
+        let Some(mut in_flight) = self.in_flight.take() else {
             return Poll::Pending;
         };
-        match reply.as_mut().poll(cx) {
+        match in_flight.reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
                 if reply_requires_retirement(&result) {
                     self.generation.retired.cancel();
@@ -152,7 +158,7 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
                 Poll::Ready(result)
             }
             Poll::Pending => {
-                self.reply = Some(reply);
+                self.in_flight = Some(in_flight);
                 Poll::Pending
             }
         }
@@ -167,7 +173,7 @@ fn reply_requires_retirement<T>(reply: &redis::RedisResult<T>) -> bool {
 
 impl<T: Send + 'static> Drop for Exchange<'_, T> {
     fn drop(&mut self) {
-        let (Some(reply), Some(reservation)) = (self.reply.take(), self.reservation.take()) else {
+        let Some(InFlight { reply, reservation }) = self.in_flight.take() else {
             return;
         };
         let wire_deadline = self.wire_deadline;
@@ -476,53 +482,72 @@ impl Drop for SupervisorExit {
     }
 }
 
-async fn query_until(
+enum MaintenanceError {
+    Aborted(ErrorType),
+    Redis(redis::RedisError),
+}
+
+impl MaintenanceError {
+    fn error_type(&self) -> ErrorType {
+        match self {
+            Self::Aborted(error) => *error,
+            Self::Redis(error) => error_type(error),
+        }
+    }
+}
+
+async fn maintenance_query(
     generation: &Generation,
     command: &redis::Cmd,
     accepts: fn(redis::Value) -> bool,
     command_timeout: Duration,
-) -> Result<redis::RedisResult<()>, ErrorType> {
+) -> Result<(), MaintenanceError> {
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
     let reply = tokio::task::unconstrained(connection.send_packed_command(command));
     let result = tokio::select! {
         biased;
-        () = generation.retired.cancelled() => return Err(ErrorType::Io),
+        () = generation.retired.cancelled() => return Err(MaintenanceError::Aborted(ErrorType::Io)),
         result = reply => result,
-        () = async { Deadline::after(command_timeout).wait().await } => return Err(ErrorType::Timeout),
+        () = async { Deadline::after(command_timeout).wait().await } => {
+            return Err(MaintenanceError::Aborted(ErrorType::Timeout));
+        }
     };
-    Ok(result.and_then(reply_data).and_then(|value| {
-        if accepts(value) {
-            Ok(())
-        } else {
-            Err((
+    let value = result
+        .and_then(reply_data)
+        .map_err(MaintenanceError::Redis)?;
+    if accepts(value) {
+        Ok(())
+    } else {
+        Err(MaintenanceError::Redis(
+            (
                 redis::ErrorKind::Parse,
                 "unexpected cache maintenance reply",
             )
-                .into())
-        }
-    }))
+                .into(),
+        ))
+    }
 }
 
-async fn ping_until(
+async fn ping_generation(
     generation: &Generation,
     command_timeout: Duration,
 ) -> Result<(), (ErrorType, Disposition)> {
-    let reply = query_until(
+    maintenance_query(
         generation,
         &redis::Cmd::ping(),
         |value| matches!(value, redis::Value::SimpleString(pong) if pong == "PONG"),
         command_timeout,
     )
     .await
-    .map_err(|error| (error, Disposition::Retire))?;
-    reply.map_err(|error| {
-        let disposition = if error.code() == Some("NOPERM") {
-            Disposition::Keep
-        } else {
-            Disposition::Retire
+    .map_err(|error| {
+        let disposition = match &error {
+            MaintenanceError::Redis(redis_error) if redis_error.code() == Some("NOPERM") => {
+                Disposition::Keep
+            }
+            MaintenanceError::Aborted(_) | MaintenanceError::Redis(_) => Disposition::Retire,
         };
-        (error_type(&error), disposition)
+        (error.error_type(), disposition)
     })
 }
 
@@ -715,7 +740,7 @@ async fn maintain(
                 }
             }
             () = sleep_until(next_ping) => {
-                let outcome = ping_until(generation, command_timeout).await;
+                let outcome = ping_generation(generation, command_timeout).await;
                 let repeated_refusal =
                     std::mem::replace(&mut ping_refusal_logged, outcome.is_err());
                 if let Err((error, disposition)) = outcome {
@@ -819,8 +844,7 @@ impl<'a> Rotation<'a> {
         generation: &Generation,
         command_timeout: Duration,
     ) -> RefreshOutcome {
-        let read_deadline = Instant::now() + PASSWORD_READ_TIMEOUT;
-        let password = match timeout_at(read_deadline, self.file.read(self.tasks)).await {
+        let password = match timeout(PASSWORD_READ_TIMEOUT, self.file.read(self.tasks)).await {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
             Err(_elapsed) => return RefreshOutcome::ReadFailed(ReadFailure::TimedOut),
@@ -830,14 +854,14 @@ impl<'a> Rotation<'a> {
         }
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(password.as_str());
-        let result = query_until(
+        let result = maintenance_query(
             generation,
             &command,
             |value| matches!(value, redis::Value::Okay),
             command_timeout,
         )
         .await
-        .and_then(|reply| reply.map_err(|error| error_type(&error)));
+        .map_err(|error| error.error_type());
         match result {
             Ok(()) => {}
             Err(ErrorType::Auth) => return RefreshOutcome::AuthRefused,
@@ -857,7 +881,9 @@ impl<'a> Rotation<'a> {
         let warning = match outcome {
             RefreshOutcome::ReadFailed(_) => Some(RefreshWarning::Unreadable),
             RefreshOutcome::AuthRefused => Some(RefreshWarning::AuthRefused),
-            _ => None,
+            RefreshOutcome::Unchanged
+            | RefreshOutcome::AuthAccepted
+            | RefreshOutcome::Failed(_) => None,
         };
         let previous = std::mem::replace(&mut self.last_warning, warning);
         if warning.is_some() && warning == previous {

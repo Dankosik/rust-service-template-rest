@@ -149,8 +149,8 @@ impl OperationGuard {
     }
 
     pub(crate) fn answered_by(&mut self, answer: &(impl RequestId + RequestIdExt)) {
-        self.request_id = answer.request_id().and_then(identifier);
-        self.extended_request_id = answer.extended_request_id().and_then(identifier);
+        self.request_id = answer.request_id().and_then(bounded_request_id);
+        self.extended_request_id = answer.extended_request_id().and_then(bounded_request_id);
         if let Some(request_id) = self.request_id.as_deref() {
             self.span.record("aws.request_id", request_id);
         }
@@ -164,7 +164,8 @@ impl OperationGuard {
         self.finish(Outcome::Ok);
     }
 
-    pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
+    pub(crate) fn fail(&mut self, failure: impl Into<Failure>) -> ObjectStorageError {
+        let failure = failure.into();
         let outcome = match failure.error {
             ObjectStorageError::NotFound => Outcome::NotFound,
             ObjectStorageError::TooLarge => Outcome::TooLarge,
@@ -175,7 +176,7 @@ impl OperationGuard {
             ObjectStorageError::Rejected => Outcome::Rejected,
             ObjectStorageError::Integrity => Outcome::Integrity,
         };
-        self.record_failure(outcome, failure);
+        self.record_failure(outcome, &failure);
         failure.error
     }
 
@@ -256,11 +257,11 @@ impl Drop for OperationGuard {
     }
 }
 
-const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_REQUEST_ID_BYTES: usize = 128;
 
-fn identifier(value: &str) -> Option<CompactString> {
+fn bounded_request_id(value: &str) -> Option<CompactString> {
     let bounded = !value.is_empty()
-        && value.len() <= MAX_IDENTIFIER_BYTES
+        && value.len() <= MAX_REQUEST_ID_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic());
     bounded.then(|| CompactString::from(value))
 }

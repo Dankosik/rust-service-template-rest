@@ -89,9 +89,8 @@ impl NamespaceHistograms {
         operation: Operation,
         outcome: Outcome,
     ) -> &Histogram {
-        let error_label = outcome.error_label();
         self.0[operation][outcome].get_or_init(|| {
-            if let Some(error_label) = error_label {
+            if let Some(error_label) = outcome.error_label() {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
@@ -134,7 +133,7 @@ impl<'a> OperationGuard<'a> {
             db.system.name = "redis",
             db.namespace = %server.database_index,
             db.operation.name = operation.redis_name(),
-            db.operation.batch.size = matches!(operation, Operation::Get).then_some(2_i64),
+            db.operation.batch.size = operation.redis_batch_size(),
             cache.name = namespace,
             server.address = server.host.as_str(),
             server.port = server.port,
@@ -158,7 +157,7 @@ impl<'a> OperationGuard<'a> {
         self.finish(outcome);
     }
 
-    pub(crate) fn failed(mut self, error: CommandError) {
+    pub(crate) fn fail(mut self, error: CommandError) {
         if matches!(self.operation, Operation::Set | Operation::Delete) {
             let effect = match error {
                 CommandError::NotApplied(_) => "not_applied",
@@ -168,16 +167,18 @@ impl<'a> OperationGuard<'a> {
         }
         match error.failure() {
             CommandFailure::Stopped(Stopped::Cancelled) => self.finish(Outcome::Cancelled),
-            CommandFailure::Stopped(Stopped::Deadline) => self.fail(ErrorType::Timeout, None),
-            CommandFailure::Failed(error) => self.fail(error, None),
-            CommandFailure::PermissionDenied => {
-                self.fail(ErrorType::ServerErrorReply, Some("permission_denied"));
+            CommandFailure::Stopped(Stopped::Deadline) => {
+                self.record_error(ErrorType::Timeout, None);
             }
-            CommandFailure::InvalidTtl => self.fail(ErrorType::ServerErrorReply, None),
+            CommandFailure::Failed(error) => self.record_error(error, None),
+            CommandFailure::PermissionDenied => {
+                self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
+            }
+            CommandFailure::InvalidTtl => self.record_error(ErrorType::ServerErrorReply, None),
         }
     }
 
-    pub(crate) fn fail(mut self, error_type: ErrorType, reason: Option<&'static str>) {
+    pub(crate) fn record_error(mut self, error_type: ErrorType, reason: Option<&'static str>) {
         let label = error_type.label();
         self.span.record("error.type", label);
         if let Some(reason) = reason {

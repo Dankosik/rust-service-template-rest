@@ -151,7 +151,7 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
             let mut peer = pin!(namespace.get(&caller, "peer"));
             assert!(futures_util::poll!(peer.as_mut()).is_pending());
             fill_with_cancelled_commands(&namespace).await;
-            let mut maintenance = pin!(ping_until(&generation, BUDGET));
+            let mut maintenance = pin!(ping_generation(&generation, BUDGET));
             assert!(futures_util::poll!(maintenance.as_mut()).is_pending());
 
             let mut mutation = Box::pin(async {

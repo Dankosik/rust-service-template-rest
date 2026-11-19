@@ -3,6 +3,7 @@ use std::fmt;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::delete_object::{DeleteObjectError, DeleteObjectOutput};
+use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
 use compact_str::CompactString;
@@ -224,6 +225,26 @@ impl From<UploadFailure> for Failure<MutationError> {
 }
 
 type SdkFailure<E> = SdkError<E, HttpResponse>;
+type PutReply = Result<PutObjectOutput, SdkFailure<PutObjectError>>;
+pub(crate) type PutCallResult = Result<(PutReply, Option<CallStop>), Interrupted>;
+
+pub(crate) fn interpret_put_result(
+    result: &PutCallResult,
+    call: Call,
+    length_mismatch: bool,
+) -> Result<(), Failure<MutationError>> {
+    match result {
+        Ok((Ok(_), _)) => Ok(()),
+        Ok((Err(sdk_error), stopped_on_reply)) => Err(from_sdk_mutation(
+            sdk_error,
+            call,
+            length_mismatch,
+            *stopped_on_reply,
+        )),
+        Err(_) if length_mismatch => Err(UploadFailure::Length.into()),
+        Err(interrupted) => Err((*interrupted).into()),
+    }
+}
 
 pub(crate) fn interpret_delete_result(
     result: &Result<DeleteObjectOutput, SdkFailure<DeleteObjectError>>,
@@ -291,7 +312,7 @@ where
             let status = context.raw().status().as_u16();
             let code = context.err().code();
             let error_type = match code {
-                Some(code) if is_identifier(code) => CompactString::from(code),
+                Some(code) if is_safe_error_code(code) => CompactString::from(code),
                 _ => CompactString::from(status.format_into(&mut fmt::NumBuffer::new())),
             };
             (FailureKind::Status { status, code }, error_type)
@@ -315,15 +336,21 @@ where
     }
 }
 
-fn is_identifier(code: &str) -> bool {
-    !code.is_empty() && code.len() <= 64 && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+const MAX_ERROR_CODE_BYTES: usize = 64;
+
+fn is_safe_error_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= MAX_ERROR_CODE_BYTES
+        && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
     match kind.classify(Call::Read) {
         FailureClass::NotFound => E::NotFound,
-        FailureClass::Unavailable | FailureClass::Conflict | FailureClass::Lost => E::Unavailable,
+        FailureClass::Unavailable | FailureClass::Conflict | FailureClass::OutcomeUnknown => {
+            E::Unavailable
+        }
         FailureClass::Rejected | FailureClass::PreconditionFailed => E::Rejected,
     }
 }
@@ -334,7 +361,7 @@ fn classify_mutation(kind: FailureKind<'_>, call: Call) -> MutationError {
         FailureClass::PreconditionFailed => F::AlreadyExists,
         FailureClass::Conflict => F::Conflict,
         FailureClass::Unavailable => F::Unavailable,
-        FailureClass::Lost => return MutationError::OutcomeUnknown(F::Unavailable),
+        FailureClass::OutcomeUnknown => return MutationError::OutcomeUnknown(F::Unavailable),
         FailureClass::Rejected | FailureClass::NotFound => F::Rejected,
     };
     MutationError::NotApplied(reason)
@@ -346,7 +373,7 @@ enum FailureClass {
     Conflict,
     Unavailable,
     Rejected,
-    Lost,
+    OutcomeUnknown,
 }
 
 impl FailureKind<'_> {
@@ -354,7 +381,7 @@ impl FailureKind<'_> {
         match self {
             Self::NotSent => FailureClass::Rejected,
             Self::NoCredentials => FailureClass::Unavailable,
-            Self::Lost | Self::Timeout => FailureClass::Lost,
+            Self::Lost | Self::Timeout => FailureClass::OutcomeUnknown,
             Self::Status { status, code } => match (classification_status(status, code), code) {
                 (_, Some("NoSuchBucket")) => FailureClass::Rejected,
                 (404, _) if call == Call::Read => FailureClass::NotFound,
@@ -362,7 +389,7 @@ impl FailureKind<'_> {
                 (409, _) if call == Call::CreateOnly => FailureClass::Conflict,
                 (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => FailureClass::Unavailable,
                 (501, _) => FailureClass::Rejected,
-                (500..=599, _) => FailureClass::Lost,
+                (500..=599, _) => FailureClass::OutcomeUnknown,
                 _ => FailureClass::Rejected,
             },
         }

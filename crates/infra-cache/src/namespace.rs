@@ -117,6 +117,13 @@ impl Operation {
             Self::Delete => "DEL",
         }
     }
+
+    pub(super) fn redis_batch_size(self) -> Option<i64> {
+        match self {
+            Self::Get => Some(2),
+            Self::Set | Self::Delete => None,
+        }
+    }
 }
 
 impl CacheNamespace {
@@ -170,13 +177,17 @@ impl CacheNamespace {
             return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
         }
         let build_query = |connection| {
+            const SET_PX_EXTRA_ARGS: usize = 3;
+            const PX_OPTION_BYTES: usize = "PX".len();
+            const MAX_U64_DECIMAL_BYTES: usize = 20;
+
             let options =
                 SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
             let mut command = key.command(
                 operation,
                 ExtraCommandCapacity {
-                    extra_args: 3,
-                    extra_bytes: value.len() + 2 + 20,
+                    extra_args: SET_PX_EXTRA_ARGS,
+                    extra_bytes: value.len() + PX_OPTION_BYTES + MAX_U64_DECIMAL_BYTES,
                 },
             );
             command.arg(value).arg(options);
@@ -227,7 +238,7 @@ impl CacheNamespace {
                 Ok(value)
             }
             Err(error) => {
-                guard.failed(error);
+                guard.fail(error);
                 Err(error)
             }
         }
