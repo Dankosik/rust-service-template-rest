@@ -2758,6 +2758,7 @@ dependencies = [
  "infra-postgres",
  "jiff",
  "json-payload",
+ "memchr",
  "metrics",
  "metrics-util",
  "opentelemetry",
@@ -2786,6 +2787,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "const-hex",
+ "derive-where",
  "derive_more",
  "domain-events",
  "enum-map",
@@ -2813,6 +2815,7 @@ dependencies = [
  "serde_with",
  "sha2 0.11.1",
  "shared-rules",
+ "simdutf8",
  "tempfile",
  "thiserror",
  "time",
@@ -5050,6 +5053,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-untagged"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9faf48a4a2d2693be24c6289dbe26552776eb7737074e6722891fadbe6c5058"
+dependencies = [
+ "erased-serde",
+ "serde",
+ "serde_core",
+ "typeid",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5262,6 +5277,7 @@ dependencies = [
  "rstest",
  "secrecy",
  "serde",
+ "serde-untagged",
  "shared-rules",
  "tempfile",
  "thiserror",

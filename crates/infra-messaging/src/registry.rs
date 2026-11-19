@@ -57,20 +57,11 @@ pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
     }
 }
 
+#[derive_where::derive_where(Clone)]
 pub struct Route<T> {
     subject: async_nats::Subject,
     schema: Option<PayloadSchema>,
     payload: PhantomData<fn(T) -> T>,
-}
-
-impl<T> Clone for Route<T> {
-    fn clone(&self) -> Self {
-        Self {
-            subject: self.subject.clone(),
-            schema: self.schema,
-            payload: PhantomData,
-        }
-    }
 }
 
 impl<T: EventPayload> std::fmt::Debug for Route<T> {
@@ -128,18 +119,10 @@ impl PublicationPolicy {
     }
 }
 
+#[derive_where::derive_where(Clone)]
 pub struct PublicationRoute<T> {
     route: Route<T>,
     max_payload_bytes: usize,
-}
-
-impl<T> Clone for PublicationRoute<T> {
-    fn clone(&self) -> Self {
-        Self {
-            route: self.route.clone(),
-            max_payload_bytes: self.max_payload_bytes,
-        }
-    }
 }
 
 impl<T: EventPayload> std::fmt::Debug for PublicationRoute<T> {

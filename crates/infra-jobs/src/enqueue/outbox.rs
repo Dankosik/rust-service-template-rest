@@ -116,22 +116,17 @@ fn prepare_intent<T: JobKind>(
 }
 
 fn contains_decoded_nul(payload: &str) -> bool {
-    if !payload.contains(r"\u0000") {
-        return false;
-    }
-    let payload = payload.as_bytes();
-    let mut index = 0;
-    while index < payload.len() {
-        if payload[index] == b'\\' {
-            if payload.get(index + 1..index + 6) == Some(b"u0000") {
-                return true;
-            }
-            index += 2;
-        } else {
-            index += 1;
-        }
-    }
-    false
+    static NUL_ESCAPE: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+        std::sync::LazyLock::new(|| memchr::memmem::Finder::new(br"\u0000"));
+    let bytes = payload.as_bytes();
+    NUL_ESCAPE.find_iter(bytes).any(|offset| {
+        let preceding_backslashes = bytes[..offset]
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b'\\')
+            .count();
+        preceding_backslashes.is_multiple_of(2)
+    })
 }
 
 enum ReceiptComparison {
@@ -177,4 +172,32 @@ async fn compare_receipt(
         Some(false) => ReceiptComparison::Different,
         None => ReceiptComparison::Missing,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EnqueueError, JobKind, KIND, PreparedIntent, prepare_intent};
+
+    #[test]
+    fn outbox_admission_distinguishes_literal_escapes_from_nul() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Intent(String);
+
+        impl JobKind for Intent {
+            const NAME: &'static str = KIND;
+        }
+
+        for prefix in ["", "\\", "\\\\"] {
+            let literal = Intent(format!(r"{prefix}\u0000"));
+            assert!(matches!(
+                prepare_intent(&literal, None),
+                Ok(PreparedIntent::Ready(_))
+            ));
+            let nul = Intent(format!("\\u0000{prefix}\0"));
+            std::assert_matches!(
+                prepare_intent(&nul, None).err(),
+                Some(EnqueueError::PayloadContainsNul)
+            );
+        }
+    }
 }

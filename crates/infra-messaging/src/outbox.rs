@@ -50,18 +50,10 @@ pub enum OutboxEnqueueError {
 }
 
 #[derive(Debug)]
+#[derive_where::derive_where(Clone)]
 pub struct OutboxRoute<T: EventPayload> {
     publication: PublicationRoute<T>,
     publisher_id: NonNilUuid,
-}
-
-impl<T: EventPayload> Clone for OutboxRoute<T> {
-    fn clone(&self) -> Self {
-        Self {
-            publication: self.publication.clone(),
-            publisher_id: self.publisher_id,
-        }
-    }
 }
 
 impl<T: EventPayload> PublicationRoute<T> {
@@ -243,10 +235,13 @@ fn publication_job_error(error: PublishError) -> JobError {
 struct InvalidBase64;
 
 mod base64_payload {
+    use std::borrow::Cow;
+
+    use base64::{display::Base64Display, engine::general_purpose::STANDARD};
     use bytes::Bytes;
     use serde::de::IntoDeserializer as _;
-    use serde::{Deserialize, Deserializer, Serializer};
-    use serde_with::{As, base64::Base64};
+    use serde::{Deserializer, Serializer};
+    use serde_with::{As, BorrowCow, base64::Base64};
 
     use super::InvalidBase64;
 
@@ -255,7 +250,7 @@ mod base64_payload {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match source {
-            Ok(bytes) => As::<Base64>::serialize(bytes, serializer),
+            Ok(bytes) => serializer.collect_str(&Base64Display::new(bytes, &STANDARD)),
             Err(InvalidBase64) => Err(serde::ser::Error::custom("payload is not base64")),
         }
     }
@@ -263,9 +258,9 @@ mod base64_payload {
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
-        let encoded = String::deserialize(deserializer)?;
+        let encoded: Cow<'de, str> = As::<BorrowCow>::deserialize(deserializer)?;
         Ok(
-            As::<Base64>::deserialize(encoded.as_str().into_deserializer())
+            As::<Base64>::deserialize(encoded.as_ref().into_deserializer())
                 .map_err(|_: serde::de::value::Error| InvalidBase64),
         )
     }
@@ -332,7 +327,7 @@ impl PublishDomainEvent {
             .payload
             .clone()
             .map_err(|InvalidBase64| "outbox_base64_invalid")?;
-        let json = std::str::from_utf8(&payload).map_err(|_| "outbox_json_invalid")?;
+        let json = simdutf8::compat::from_utf8(&payload).map_err(|_| "outbox_json_invalid")?;
         if !payload_depth_allowed(&payload) {
             return Err("outbox_payload_too_deep");
         }
