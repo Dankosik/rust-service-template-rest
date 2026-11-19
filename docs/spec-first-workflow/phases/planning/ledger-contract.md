@@ -1,15 +1,17 @@
 # Planning Ledger Contract
 
-Use only after Planning selects a persisted [Task Ledger
-V1](../../interfaces/task-ledger-v1.md).
+Use the [Ready Frontier](#ready-frontier) for the readiness dry run. The other
+sections govern a persisted [Task Ledger V1](../../interfaces/task-ledger-v1.md).
 
 ## Task And Acceptance Boundaries
 
-Each ledger task owns one coherent repository outcome and its final acceptance
-criteria, keeping layers of that outcome together while using subtask lanes for
-parallel implementation and recording partial subresults inside the existing
-task status. Separate tasks only for independently consumable outcomes or
-distinct external gates.
+Give each independently usable repository change one task and its acceptance
+criteria. Keep the layers of that outcome together. Subtask lanes can implement
+them in parallel and report partial results under the same task.
+
+Place a required external action at its consuming stage, with its owner and
+success condition. A change to release tooling can have its own task. Approval
+to publish gates publication.
 
 The Lead returns `Implemented` when its planned code, tests, and cleanup are
 ready and its writers have joined. The ledger records that milestone after
@@ -17,19 +19,23 @@ integration. Global Completion owns acceptance of the requested outcome.
 
 ## Ready Frontier
 
-Attach each dependency to the earliest stage that genuinely consumes it—coding,
-final acceptance, or an external effect—using [Task Packet
-V1](../../interfaces/task-packet-v1.md) annotations so agreed contracts unlock
-consumer coding immediately while live providers gate only required runtime or
-external-effect steps.
+At handoff, check each task as if it were the next one dispatched. Its required
+decisions, inputs, and implementation authority must be available and its
+accepted ordering constraints satisfied. Check its writable scope against active
+writers and its exclusive locks against held locks. If two otherwise ready tasks
+need the same free lock, both belong to the frontier.
 
-Start a task once its required decisions, consumed contracts or `Implemented`
-code, disjoint writable scopes, and implementation authority are present,
-keeping acceptance and external-effect gates at final validation or release.
+Record a predecessor only when its output is required or an accepted sequencing
+constraint requires that order. An agreed contract can supply a coding input
+immediately. A task that consumes implemented code waits for it to be integrated.
+Use [Task Packet V1](../../interfaces/task-packet-v1.md) to place each dependency
+where coding, final acceptance, or an external action first needs it.
 
-Dispatch ready independent work up to capacity when writers and exclusive locks
-are disjoint, serializing overlapping mutations and refilling the frontier as
-soon as each `Implemented` result integrates:
+## Dispatch
+
+Choose concurrent tasks from the frontier up to capacity, with disjoint writable
+scopes and exclusive locks. Use priority to choose among eligible tasks. Refill the
+frontier as each `Implemented` result integrates and its locks are released.
 
 - **Pending later gates**: Complete local contract-backed coding, return
   `Implemented`, and leave later acceptance or provider gates in the ledger;
@@ -80,13 +86,15 @@ final validation, owner-held repair, or an authorized requested external step
 can advance. This includes waiting for a running required check. Reserve
 `blocked` for genuinely unavailable required inputs, capabilities, or authority.
 
-Run one consolidated final validation stage across the ledger:
+### Completion Gates
 
-- **Entry gate**: Assign the delivery owner final validation only after every
-  planned code task in the ledger is `Implemented` and assembled with zero
-  active writers.
-- **Pending external actions**: Run local final validation as soon as the
-  candidate is assembled, even when a requested external step is pending.
+Once all planned code tasks are `Implemented` and assembled and all writers
+have joined, assign the assembled candidate to the delivery owner for one
+final validation. Start local validation even if a requested external action
+is pending.
+
+### Delivery
+
 - **Consolidated proof and review**: The delivery owner follows [Final
   Validation](../implementation.md#final-validation) and reports one
   [Completion Result](../../interfaces/acceptance-result-v1.md#completion-result)

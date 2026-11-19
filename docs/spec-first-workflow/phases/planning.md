@@ -14,12 +14,11 @@ directly or through a prerequisite.
 Compare its current-to-target change and acceptance criteria with the source,
 including limits and exceptions. Anchor the accepted mechanism and its owner.
 
-Before expanding task packets, establish each Outcome, dependency, and
-final observable, then apply [Task Review / Readiness's atomicity
-criterion](task-review-readiness.md#atomicity-gate) as author self-check. Correct
-unit boundaries in the same plan before detailing their packets; this adds no
-intermediate artifact or review gate. The completed plan still receives the
-independent review below.
+Before detailing a packet, assume its prerequisites are met and the remaining
+work is deferred. Who can use this outcome now, and what can they do with it?
+Use the [atomicity criterion](task-review-readiness.md#atomicity-gate) to adjust
+the boundaries until each task has one such outcome, its dependencies, and a
+final observable.
 
 For the [implementation handoff](../shared/transition.md#implementation-handoff),
 persist [Task Ledger V1](../interfaces/task-ledger-v1.md) even for one executable
@@ -32,7 +31,8 @@ stay inline only when no durable boundary exists.
 Keep dependencies, status, and results in `tasks.md` and each [Task Packet
 V1](../interfaces/task-packet-v1.md) in `tasks/<ID>-<slug>.md`. Packets cover
 implementation and test writing. Completion owns test execution and review.
-Apply the [Planning Ledger Contract](planning/ledger-contract.md). Load
+Use [Task and Acceptance Boundaries](planning/ledger-contract.md#task-and-acceptance-boundaries)
+to place repository changes and external gates. Load
 [Conditional Planning Branches](planning/conditional-branches.md) only for
 integration-first uncertainty or broad contract fan-out.
 
@@ -41,16 +41,14 @@ integration-first uncertainty or broad contract fan-out.
 Check the whole plan against Completion. Could every task meet its criteria
 while an accepted outcome still fails? Trace each dependency to the source,
 producer, or external owner that can supply it by the stage that consumes it.
-The order must allow all tasks to reach `Implemented` before final validation.
-For example, coding cannot depend on the assembled plan's `Accepted` result.
-Keep an explicitly required release approval at the release step.
+Walk the order through the [Completion gates](planning/ledger-contract.md#completion-gates).
+Every coding task must be able to reach `Implemented` before final validation.
 
-Use the [Ready Frontier](planning/ledger-contract.md#ready-frontier) to identify
-every task eligible to start immediately, regardless of listing order or worker
-capacity. Walk each through implementation from the handoff alone. Confirm
-the existence and semantics of each existing API, type, configuration key, or
-other input it consumes against the current source. For a crate, use the
-source of the version locked in `Cargo.lock`. Reuse source checks shared by
+Walk each task in the [Ready Frontier](planning/ledger-contract.md#ready-frontier)
+through implementation from the handoff alone, regardless of listing order or
+worker capacity. Check each existing API, type, configuration key, or other
+input the task consumes against the current source for existence and semantics.
+For a crate, use the version locked in `Cargo.lock`. Reuse source checks shared by
 several tasks. If a task marked ready lacks a required input or its source
 contradicts the planned use, correct its dependencies or reopen the input.
 
