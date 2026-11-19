@@ -41,8 +41,8 @@ pub struct DisplayErrorChain<'a>(pub &'a (dyn Error + 'static));
 impl fmt::Display for DisplayErrorChain<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0)?;
-        for cause in sources(self.0) {
-            write!(formatter, ": {cause}")?;
+        for source in sources(self.0) {
+            write!(formatter, ": {source}")?;
         }
         Ok(())
     }

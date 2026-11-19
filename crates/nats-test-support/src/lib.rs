@@ -67,10 +67,11 @@ impl AuthObservingRelay {
         let close_first = CancellationToken::new();
         let stop = CancellationToken::new();
         let observations = watch::Sender::<AuthObservations>::default();
-        let observed = observations.clone();
+        let observations_for_task = observations.clone();
         let close_for_task = close_first.clone();
         let stop_for_task = stop.clone();
         let task = tokio::spawn(async move {
+            let never_close = CancellationToken::new();
             let mut first = true;
             loop {
                 let accepted = tokio::select! {
@@ -81,15 +82,17 @@ impl AuthObservingRelay {
                 let broker = TcpStream::connect(&target)
                     .await
                     .expect("authentication relay reaches broker");
-                let close = if first {
-                    close_for_task.clone()
-                } else {
-                    CancellationToken::new()
-                };
-                relay_authenticated_connection(client, broker, &stop_for_task, &close, &observed)
-                    .await;
+                let close = if first { &close_for_task } else { &never_close };
+                relay_authenticated_connection(
+                    client,
+                    broker,
+                    &stop_for_task,
+                    close,
+                    &observations_for_task,
+                )
+                .await;
                 if first {
-                    observed.send_modify(|state| state.first_closed = true);
+                    observations_for_task.send_modify(|state| state.first_closed = true);
                     first = false;
                 }
             }
@@ -134,11 +137,11 @@ impl AuthObservingRelay {
     async fn wait_for(
         &self,
         bound: Duration,
-        observed: impl FnMut(&AuthObservations) -> bool,
+        predicate: impl FnMut(&AuthObservations) -> bool,
         diagnostic: &'static str,
     ) {
         let mut updates = self.observations.subscribe();
-        timeout(bound, updates.wait_for(observed))
+        timeout(bound, updates.wait_for(predicate))
             .await
             .expect(diagnostic)
             .expect("relay holds the observation sender");
@@ -156,6 +159,12 @@ impl AuthObservingRelay {
             .expect("authentication relay stops")
             .expect("authentication relay task completes");
     }
+}
+
+enum ReplyAckState {
+    WaitingForRequest,
+    WaitingForReply(String),
+    Dropped,
 }
 
 impl AckDroppingRelay {
@@ -176,30 +185,26 @@ impl AckDroppingRelay {
     pub async fn start_filtering(
         mut drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static,
     ) -> Self {
-        Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
+        Self::start_withholding(|_, _| false, move |_, payload| drop_reply(payload)).await
     }
 
     pub async fn intercept_second_pull(
         subject: String,
     ) -> (Self, oneshot::Receiver<(String, Bytes)>) {
-        let (intercepted, pull) = oneshot::channel();
-        let mut intercepted = Some(intercepted);
+        let (pull_tx, pull_rx) = oneshot::channel();
+        let mut pull_tx = Some(pull_tx);
         let mut pulls = 0;
-        let relay = Self::start_with_filters(
-            move |line, payload| {
-                let Ok(line) = std::str::from_utf8(line) else {
-                    return false;
-                };
-                let mut fields = line.split_ascii_whitespace();
-                if fields.next() != Some("PUB") || fields.next() != Some(subject.as_str()) {
+        let relay = Self::start_withholding(
+            move |header, payload| {
+                if header.verb != "PUB" || header.subject != subject {
                     return false;
                 }
                 pulls += 1;
                 if pulls != 2 {
                     return false;
                 }
-                let reply = fields.next().expect("pull request has a reply inbox");
-                intercepted
+                let reply = header.reply.expect("pull request has a reply inbox");
+                pull_tx
                     .take()
                     .expect("only one pull is intercepted")
                     .send((reply.to_owned(), Bytes::copy_from_slice(payload)))
@@ -209,52 +214,63 @@ impl AckDroppingRelay {
             |_, _| false,
         )
         .await;
-        (relay, pull)
+        (relay, pull_rx)
     }
 
     pub async fn start_source_ack(stream: &str, durable: &str, dropped: DroppedAck) -> Self {
         let identity = format!(".{stream}.{durable}.");
-        let reply_subject = Arc::new(Mutex::new(None::<String>));
-        let request_reply_subject = Arc::clone(&reply_subject);
-        let mut seen_request = false;
-        Self::start_with_filters(
-            move |line, payload| {
-                let fields = std::str::from_utf8(line)
-                    .unwrap_or_default()
-                    .split_ascii_whitespace()
-                    .collect::<Vec<_>>();
-                if let ["PUB", subject, reply, _] = fields[..]
-                    && !seen_request
-                    && subject.starts_with("$JS.ACK.")
-                    && subject.contains(&identity)
-                    && payload == b"+ACK"
-                {
-                    seen_request = true;
-                    *request_reply_subject.lock().expect("ACK reply lock") = Some(reply.to_owned());
-                    return dropped == DroppedAck::Request;
-                }
-                false
-            },
-            move |line, payload| {
-                let subject = std::str::from_utf8(line)
-                    .unwrap_or_default()
-                    .split_ascii_whitespace()
-                    .nth(1);
-                let mut reply = reply_subject.lock().expect("ACK reply lock");
-                if dropped == DroppedAck::Reply && payload.is_empty() && subject == reply.as_deref()
-                {
-                    reply.take();
-                    return true;
-                }
-                false
-            },
-        )
-        .await
+        match dropped {
+            DroppedAck::Request => {
+                let mut dropped_request = false;
+                Self::start_withholding(
+                    move |header, payload| {
+                        if !dropped_request
+                            && source_ack_reply(header, payload, &identity).is_some()
+                        {
+                            dropped_request = true;
+                            return true;
+                        }
+                        false
+                    },
+                    |_, _| false,
+                )
+                .await
+            }
+            DroppedAck::Reply => {
+                let state = Arc::new(Mutex::new(ReplyAckState::WaitingForRequest));
+                let request_state = Arc::clone(&state);
+                Self::start_withholding(
+                    move |header, payload| {
+                        if let Some(reply) = source_ack_reply(header, payload, &identity) {
+                            let mut state = request_state.lock().expect("ACK reply lock");
+                            if matches!(*state, ReplyAckState::WaitingForRequest) {
+                                *state = ReplyAckState::WaitingForReply(reply.to_owned());
+                            }
+                        }
+                        false
+                    },
+                    move |header, payload| {
+                        let mut state = state.lock().expect("ACK reply lock");
+                        let matched = matches!(
+                            &*state,
+                            ReplyAckState::WaitingForReply(expected)
+                                if payload.is_empty() && header.subject == expected
+                        );
+                        if matched {
+                            *state = ReplyAckState::Dropped;
+                            return true;
+                        }
+                        false
+                    },
+                )
+                .await
+            }
+        }
     }
 
-    async fn start_with_filters(
-        to_broker: impl FnMut(&[u8], &[u8]) -> bool + Send + 'static,
-        to_client: impl FnMut(&[u8], &[u8]) -> bool + Send + 'static,
+    async fn start_withholding(
+        mut withhold_to_broker: impl FnMut(&PayloadHeader<'_>, &[u8]) -> bool + Send + 'static,
+        mut withhold_to_client: impl FnMut(&PayloadHeader<'_>, &[u8]) -> bool + Send + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -268,8 +284,26 @@ impl AckDroppingRelay {
             let broker = TcpStream::connect(target).await.expect("relay broker");
             let (client_read, client_write) = client.into_split();
             let (broker_read, broker_write) = broker.into_split();
-            let requests = relay_frames(client_read, broker_write, to_broker, &dropped);
-            let replies = relay_frames(broker_read, client_write, to_client, &dropped);
+            let requests = relay_frames(client_read, broker_write, |_, payload| {
+                if let Some((header, payload)) = payload
+                    && withhold_to_broker(header, payload)
+                {
+                    dropped.cancel();
+                    FrameAction::Drop
+                } else {
+                    FrameAction::Forward
+                }
+            });
+            let replies = relay_frames(broker_read, client_write, |_, payload| {
+                if let Some((header, payload)) = payload
+                    && withhold_to_client(header, payload)
+                {
+                    dropped.cancel();
+                    FrameAction::Drop
+                } else {
+                    FrameAction::Forward
+                }
+            });
             tokio::select! {
                 result = requests => result.expect("relay requests"),
                 result = replies => result.expect("relay replies"),
@@ -308,12 +342,12 @@ pub fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
 
 #[must_use]
 pub fn relay_target(url: &str) -> String {
-    let authority = url
+    let after_scheme = url
         .strip_prefix("nats://")
-        .expect("integration NATS scheme")
-        .rsplit('@')
-        .next()
-        .expect("broker authority")
+        .expect("integration NATS scheme");
+    let authority = after_scheme
+        .rsplit_once('@')
+        .map_or(after_scheme, |(_, authority)| authority)
         .trim_end_matches('/');
     assert!(
         !authority.is_empty() && !authority.contains('/'),
@@ -322,11 +356,15 @@ pub fn relay_target(url: &str) -> String {
     authority.to_owned()
 }
 
+enum FrameAction {
+    Forward,
+    Drop,
+}
+
 async fn relay_frames(
     reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
-    mut withhold: impl FnMut(&[u8], &[u8]) -> bool,
-    dropped: &CancellationToken,
+    mut on_frame: impl FnMut(&[u8], Option<(&PayloadHeader<'_>, &[u8])>) -> FrameAction,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(reader);
     loop {
@@ -334,14 +372,17 @@ async fn relay_frames(
         if reader.read_until(b'\n', &mut line).await? == 0 {
             return Ok(());
         }
-        let Some(length) = payload_length(&line) else {
-            writer.write_all(&line).await?;
+        let Some(header) = parse_payload_header(&line) else {
+            if matches!(on_frame(&line, None), FrameAction::Forward) {
+                writer.write_all(&line).await?;
+            }
             continue;
         };
-        let (payload, ending) = read_payload_and_ending(&mut reader, length).await?;
-        if withhold(&line, &payload) {
-            dropped.cancel();
-        } else {
+        let (payload, ending) = read_payload_and_ending(&mut reader, header.length).await?;
+        if matches!(
+            on_frame(&line, Some((&header, &payload))),
+            FrameAction::Forward
+        ) {
             writer.write_all(&line).await?;
             writer.write_all(&payload).await?;
             writer.write_all(&ending).await?;
@@ -360,6 +401,25 @@ async fn read_payload_and_ending(
     Ok((payload, ending))
 }
 
+async fn relay_authenticated_requests(
+    client_read: impl AsyncRead + Unpin,
+    mut broker_write: impl AsyncWrite + Unpin,
+    observations: &watch::Sender<AuthObservations>,
+) -> std::io::Result<()> {
+    let mut client_read = BufReader::new(client_read);
+    let mut connect = Vec::new();
+    if client_read.read_until(b'\n', &mut connect).await? == 0 {
+        return Ok(());
+    }
+    if let Some(user) = public_user_from_connect(&connect) {
+        observations.send_modify(|state| state.latest_public_user = Some(user));
+    }
+    broker_write.write_all(&connect).await?;
+    tokio::io::copy(&mut client_read, &mut broker_write)
+        .await
+        .map(|_| ())
+}
+
 async fn relay_authenticated_connection(
     client: TcpStream,
     broker: TcpStream,
@@ -369,45 +429,34 @@ async fn relay_authenticated_connection(
 ) {
     let (client_read, client_write) = client.into_split();
     let (broker_read, broker_write) = broker.into_split();
-    let requests = async move {
-        let mut client_read = BufReader::new(client_read);
-        let mut broker_write = broker_write;
-        let mut connect = Vec::new();
-        if client_read.read_until(b'\n', &mut connect).await? == 0 {
-            return Ok::<(), std::io::Error>(());
+    let requests = relay_authenticated_requests(client_read, broker_write, observations);
+    let replies = relay_frames(broker_read, client_write, |line, _| {
+        if is_broker_auth_refusal(line) {
+            observations.send_modify(|state| state.refused = true);
         }
-        if let Some(user) = public_user_from_connect(&connect) {
-            observations.send_modify(|state| state.latest_public_user = Some(user));
-        }
-        broker_write.write_all(&connect).await?;
-        tokio::io::copy(&mut client_read, &mut broker_write)
-            .await
-            .map(|_| ())
-    };
-    let replies = async move {
-        let mut broker_read = BufReader::new(broker_read);
-        let mut client_write = client_write;
-        loop {
-            let mut line = Vec::new();
-            if broker_read.read_until(b'\n', &mut line).await? == 0 {
-                return Ok::<(), std::io::Error>(());
-            }
-            if is_broker_auth_refusal(&line) {
-                observations.send_modify(|state| state.refused = true);
-            }
-            client_write.write_all(&line).await?;
-            if let Some(length) = payload_length(&line) {
-                let (payload, ending) = read_payload_and_ending(&mut broker_read, length).await?;
-                client_write.write_all(&payload).await?;
-                client_write.write_all(&ending).await?;
-            }
-        }
-    };
+        FrameAction::Forward
+    });
     tokio::select! {
         () = stop.cancelled() => {},
         () = close.cancelled() => {},
         _ = requests => {},
         _ = replies => {},
+    }
+}
+
+fn source_ack_reply<'a>(
+    header: &PayloadHeader<'a>,
+    payload: &[u8],
+    identity: &str,
+) -> Option<&'a str> {
+    if header.verb == "PUB"
+        && header.subject.starts_with("$JS.ACK.")
+        && header.subject.contains(identity)
+        && payload == b"+ACK"
+    {
+        header.reply
+    } else {
+        None
     }
 }
 
@@ -441,10 +490,50 @@ pub fn jwt_subject(jwt: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn payload_length(line: &[u8]) -> Option<usize> {
+struct PayloadHeader<'a> {
+    verb: &'a str,
+    subject: &'a str,
+    reply: Option<&'a str>,
+    length: usize,
+}
+
+fn parse_payload_header(line: &[u8]) -> Option<PayloadHeader<'_>> {
     let mut fields = std::str::from_utf8(line).ok()?.split_ascii_whitespace();
-    match fields.next()? {
-        "PUB" | "HPUB" | "MSG" | "HMSG" => fields.last()?.parse().ok(),
-        _ => None,
-    }
+    let verb = fields.next()?;
+    let subject = fields.next()?;
+    let (reply, length) = match verb {
+        "PUB" => match (fields.next()?, fields.next(), fields.next()) {
+            (length, None, None) => (None, length),
+            (reply, Some(length), None) => (Some(reply), length),
+            _ => return None,
+        },
+        "HPUB" => match (fields.next()?, fields.next()?, fields.next(), fields.next()) {
+            (_, length, None, None) => (None, length),
+            (reply, _, Some(length), None) => (Some(reply), length),
+            _ => return None,
+        },
+        "MSG" => match (fields.next()?, fields.next()?, fields.next(), fields.next()) {
+            (_, length, None, None) => (None, length),
+            (_, reply, Some(length), None) => (Some(reply), length),
+            _ => return None,
+        },
+        "HMSG" => match (
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next(),
+            fields.next(),
+        ) {
+            (_, _, length, None, None) => (None, length),
+            (_, reply, _, Some(length), None) => (Some(reply), length),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(PayloadHeader {
+        verb,
+        subject,
+        reply,
+        length: length.parse().ok()?,
+    })
 }

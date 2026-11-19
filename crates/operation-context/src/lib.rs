@@ -1,8 +1,9 @@
-use std::future::pending;
 use std::time::Duration;
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+const MAX_SLEEP_SLICE: Duration = Duration::from_hours(24);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline {
@@ -58,8 +59,12 @@ impl Deadline {
     }
 
     pub async fn wait(self) {
-        while !self.expired() {
-            tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
+        loop {
+            let remaining = self.remaining();
+            if remaining.is_zero() {
+                return;
+            }
+            tokio::time::sleep(remaining.min(MAX_SLEEP_SLICE)).await;
         }
     }
 }
@@ -159,15 +164,13 @@ impl OperationContext {
     }
 
     pub async fn wait_stopped(&self) -> Stopped {
-        let deadline = async {
-            match self.deadline {
-                Some(deadline) => deadline.wait().await,
-                None => pending().await,
-            }
+        let Some(deadline) = self.deadline else {
+            self.cancellation.cancelled().await;
+            return Stopped::Cancelled;
         };
         tokio::select! {
             biased;
-            () = deadline => Stopped::Deadline,
+            () = deadline.wait() => Stopped::Deadline,
             () = self.cancellation.cancelled() => Stopped::Cancelled,
         }
     }

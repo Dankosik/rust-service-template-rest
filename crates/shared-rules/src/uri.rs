@@ -30,8 +30,8 @@ pub fn authority_has_userinfo(url: &str) -> bool {
         .any(|special| scheme.eq_ignore_ascii_case(special))
     {
         after_scheme.trim_start_matches(['/', '\\'])
-    } else if let Some(authority) = after_scheme.strip_prefix("//") {
-        authority
+    } else if let Some(after_slashes) = after_scheme.strip_prefix("//") {
+        after_slashes
     } else {
         return false;
     };

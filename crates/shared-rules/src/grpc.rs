@@ -1,7 +1,17 @@
 use std::time::Duration;
 
 pub const MAX_TIMEOUT_DIGITS: usize = 8;
-pub const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
+const MAX_TIMEOUT_VALUE: u64 = 99_999_999;
+pub const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
+
+const TIMEOUT_UNITS: [(u8, u128); 6] = [
+    (b'n', Duration::from_nanos(1).as_nanos()),
+    (b'u', Duration::from_micros(1).as_nanos()),
+    (b'm', Duration::from_millis(1).as_nanos()),
+    (b'S', Duration::from_secs(1).as_nanos()),
+    (b'M', Duration::from_mins(1).as_nanos()),
+    (b'H', Duration::from_hours(1).as_nanos()),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StatusNames {
@@ -121,34 +131,22 @@ pub fn parse_timeout(value: &[u8]) -> Option<Duration> {
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let amount: u64 = std::str::from_utf8(digits).ok()?.parse().ok()?;
-    match unit {
-        b'H' => Some(Duration::from_hours(amount)),
-        b'M' => Some(Duration::from_mins(amount)),
-        b'S' => Some(Duration::from_secs(amount)),
-        b'm' => Some(Duration::from_millis(amount)),
-        b'u' => Some(Duration::from_micros(amount)),
-        b'n' => Some(Duration::from_nanos(amount)),
-        _ => None,
-    }
+    let amount: u128 = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    let (_, per_unit) = TIMEOUT_UNITS.into_iter().find(|&(code, _)| code == unit)?;
+    Some(Duration::from_nanos_u128(amount * per_unit))
 }
 
 #[must_use]
 pub fn encode_timeout(remaining: Duration, wire: &mut [u8; MAX_TIMEOUT_DIGITS + 1]) -> &[u8] {
-    const NANOS_PER_UNIT: [(u8, u128); 5] = [
-        (b'n', 1),
-        (b'u', 1_000),
-        (b'm', 1_000_000),
-        (b'S', 1_000_000_000),
-        (b'M', 60_000_000_000),
-    ];
-    const MAX_VALUE: u128 = 99_999_999;
     let nanos = remaining.min(WIRE_TIMEOUT_MAX).as_nanos();
-    let (unit, amount) = NANOS_PER_UNIT
+    let (unit, amount) = TIMEOUT_UNITS
         .into_iter()
         .map(|(unit, per_unit)| (unit, nanos / per_unit))
-        .find(|&(_, amount)| amount <= MAX_VALUE)
-        .unwrap_or((b'H', nanos / 3_600_000_000_000));
+        .find(|&(_, amount)| amount <= u128::from(MAX_TIMEOUT_VALUE))
+        .unwrap_or_else(|| {
+            let (unit, per_unit) = TIMEOUT_UNITS[TIMEOUT_UNITS.len() - 1];
+            (unit, nanos / per_unit)
+        });
     let mut buffer = std::fmt::NumBuffer::new();
     let digits = amount.format_into(&mut buffer);
     let len = digits.len();
