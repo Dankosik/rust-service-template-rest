@@ -551,7 +551,7 @@ fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
         let dispatch = tracing::Dispatch::new(
             Registry::default()
                 .with(filter)
-                .with(sdk_log_cap(level))
+                .with(aws_sdk_log_cap(level))
                 .with(layer),
         );
         tracing::dispatcher::with_default(&dispatch, || {
