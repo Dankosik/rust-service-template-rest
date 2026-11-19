@@ -27,7 +27,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::ClientError;
 use crate::call::{
     ClientCustody, ClientGuards, ClientObservation, StatusHook, attach_client_response,
-    client_deadline, client_stopped, guard_upload,
+    client_deadline_status, client_stopped_status, guard_upload,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -334,17 +334,17 @@ impl PreparedCall {
         let result = async {
             let outcome = tokio::select! {
                 biased;
-                reason = opening.wait_stopped() => Err(client_stopped(reason)),
+                reason = opening.wait_stopped() => Err(client_stopped_status(reason)),
                 dispatched = async {
                     let ready = channel.ready().await.map_err(|err| transport_status(&err))?;
-                    opening.check().map_err(client_stopped)?;
+                    opening.check().map_err(client_stopped_status)?;
                     prepare_dispatch(request.headers_mut())?;
-                    opening.check().map_err(client_stopped)?;
+                    opening.check().map_err(client_stopped_status)?;
                     apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
                     ready.call(request).await.map_err(|err| transport_status(&err))
                 } => dispatched,
             };
-            opening.check().map_err(client_stopped)?;
+            opening.check().map_err(client_stopped_status)?;
             outcome
         }
         .instrument(call.span().clone())
@@ -491,7 +491,7 @@ fn acquire_opening_permit(
     openings: Option<&Arc<Semaphore>>,
     opening: &OperationContext,
 ) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
-    opening.check().map_err(client_stopped)?;
+    opening.check().map_err(client_stopped_status)?;
     let Some(openings) = openings else {
         return Ok(None);
     };
@@ -501,7 +501,7 @@ fn acquire_opening_permit(
         .map_err(|_| {
             opening.stopped().map_or_else(
                 || tonic::Status::resource_exhausted("gRPC client openings at capacity"),
-                client_stopped,
+                client_stopped_status,
             )
         })
 }
@@ -520,7 +520,7 @@ fn apply_forwarded_timeout(
     };
     let remaining = deadline.remaining();
     if remaining.is_zero() {
-        return Err(client_deadline());
+        return Err(client_deadline_status());
     }
     crate::protocol::set_grpc_timeout(headers, remaining);
     Ok(())
@@ -528,7 +528,7 @@ fn apply_forwarded_timeout(
 
 fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
     if error_chain::contains::<tonic::TimeoutExpired>(error) {
-        return client_deadline();
+        return client_deadline_status();
     }
     tracing::warn!(error = %DisplayErrorChain(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
