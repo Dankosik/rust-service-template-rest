@@ -13,8 +13,8 @@ qualifying **one-way door** open fork.
    Architecture](rust-architecture.md#vocabulary-and-deep-module-discipline)
    vocabulary. Describe **only the problem**—constraints, existing call site or
    runtime entry, and consumer need via a short grounding code sketch or flow
-   context—keeping the brief free of proposed mechanisms, new types, or new
-   crates so each lane invents from scratch.
+   context—keeping the frame free of a preferred solution. For an open-ended fork,
+   leave mechanisms, new types and crates to the lanes.
 
 2. **Dispatch 3 parallel fresh `specialist-agent` lanes with contrasting
    pressures** *(use 2 only for a strictly binary fork between two concrete
@@ -22,12 +22,13 @@ qualifying **one-way door** open fork.
    boundary, `Method:
    docs/spec-first-workflow/shared/read-only-delegation.md#candidate-proposal-v1`
    (plus matching domain skills), and **strictly its own pressure** (omit
-   sibling pressures and any parent hypothesis). Each lane pushes its pressure
+   sibling pressures and any parent hypothesis). For a binary fork, identify the two admissible mechanisms in the common
+   constraints and let each lane develop its assigned side. Each lane pushes its pressure
    to its honest extreme and returns [Candidate Proposal
    V1](../../shared/read-only-delegation.md#candidate-proposal-v1).
    - **Derive problem-specific incompatible pressures first** when concrete
-     competing topologies exist (e.g., advisory lock vs unique-upsert + retry vs
-     transactional outbox). Otherwise select presets:
+     alternatives solve the same problem (for example, minimize lock wait
+     versus minimize retry work under contention). Otherwise select presets:
      - *System / integration:* **Reuse-first / minimal state** (existing owners
        and `std`, zero new infra/workers); **Fault-isolated / decoupled**
        (durable transitions, outbox/jobs/queues, bounded async recovery);
