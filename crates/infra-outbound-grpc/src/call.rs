@@ -17,12 +17,15 @@ use crate::protocol::{grpc_code_from_http_status, header_status_code};
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
 type FramePoll = Poll<Option<Result<Frame<Bytes>, tonic::Status>>>;
+type PollStep<B> = (
+    Result<FramePoll, Box<dyn std::any::Any + Send>>,
+    Option<StreamCompletion<B>>,
+);
 
-#[derive(Default)]
 #[expect(dead_code, reason = "guards release resources on drop")]
 pub(crate) struct ClientGuards {
     pub(crate) upload_guard: Option<UploadGuard>,
-    pub(crate) cancel_on_drop: Option<DropGuard>,
+    pub(crate) cancel_on_drop: DropGuard,
 }
 
 pub(crate) struct ClientCustody {
@@ -115,6 +118,7 @@ struct ActiveStream<B> {
     lifetime: OperationContext,
     waker: Option<Waker>,
     on_status: Option<StatusHook>,
+    missing_status: ClientOutcome,
 }
 
 enum StreamPhase<B> {
@@ -142,81 +146,108 @@ impl<B> StreamCompletion<B> {
     }
 }
 
-struct StreamState<B> {
-    phase: StreamPhase<B>,
-    missing_status: ClientOutcome,
-}
-
-impl<B> StreamState<B> {
+impl<B> StreamPhase<B> {
     fn stopped_status(&self) -> Option<tonic::Status> {
-        let StreamPhase::Open(active) = &self.phase else {
+        let Self::Open(active) = self else {
             return None;
         };
         active.lifetime.stopped().map(client_stopped)
     }
 
-    fn transition(
-        &mut self,
-        next: StreamPhase<B>,
-        outcome: ClientOutcome,
-    ) -> Option<StreamCompletion<B>> {
-        match std::mem::replace(&mut self.phase, next) {
-            StreamPhase::Open(active) => Some(StreamCompletion { active, outcome }),
+    fn transition(&mut self, next: Self, outcome: ClientOutcome) -> Option<StreamCompletion<B>> {
+        match std::mem::replace(self, next) {
+            Self::Open(active) => Some(StreamCompletion { active, outcome }),
             terminal => {
-                self.phase = terminal;
+                *self = terminal;
                 None
             }
         }
     }
 
     fn complete_stopped(&mut self, status: &tonic::Status) -> Option<StreamCompletion<B>> {
-        let StreamPhase::Open(active) = &self.phase else {
+        let Self::Open(active) = self else {
             return None;
         };
         active.observation.record_local_stop(status);
         let mut trailers = HeaderMap::new();
         let _ = status.add_header(&mut trailers);
         self.transition(
-            StreamPhase::Trailers(trailers),
+            Self::Trailers(trailers),
             ClientOutcome::local(status.code()),
         )
     }
 
-    fn end_stopped(&mut self, status: &tonic::Status) -> (FramePoll, Option<StreamCompletion<B>>) {
+    fn poll_stopped(&mut self, status: &tonic::Status) -> (FramePoll, Option<StreamCompletion<B>>) {
         let completion = self.complete_stopped(status);
         (self.take_terminal(), completion)
     }
 
     fn complete_polled(&mut self, polled: &FramePoll) -> Option<StreamCompletion<B>> {
-        let StreamPhase::Open(active) = &self.phase else {
+        let Self::Open(active) = self else {
             return None;
         };
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
                 ClientOutcome::from_headers(&active.observation, trailers)
-                    .unwrap_or(self.missing_status)
+                    .unwrap_or(active.missing_status)
             }
             Poll::Ready(Some(Err(error))) => ClientOutcome::local(error.code()),
-            Poll::Ready(None) => self.missing_status,
+            Poll::Ready(None) => active.missing_status,
             Poll::Pending => return None,
         };
-        self.transition(StreamPhase::Done, outcome)
+        self.transition(Self::Done, outcome)
     }
 
     fn take_terminal(&mut self) -> FramePoll {
-        match std::mem::replace(&mut self.phase, StreamPhase::Done) {
-            StreamPhase::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+        match std::mem::replace(self, Self::Done) {
+            Self::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             other => {
-                self.phase = other;
+                *self = other;
                 Poll::Ready(None)
             }
         }
     }
 }
 
+impl<B> StreamPhase<B>
+where
+    B: Body<Data = Bytes, Error = tonic::Status> + Unpin,
+{
+    fn poll_next(&mut self, context: &mut Context<'_>) -> PollStep<B> {
+        let Self::Open(active) = self else {
+            return (Ok(self.take_terminal()), None);
+        };
+        if let Some(reason) = active.lifetime.stopped() {
+            let (frame, completion) = self.poll_stopped(&client_stopped(reason));
+            return (Ok(frame), completion);
+        }
+        store_waker(&mut active.waker, context.waker());
+        let polled = {
+            let _entered = active.observation.span().enter();
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                Pin::new(&mut active.body).poll_frame(context)
+            }))
+        };
+        let polled = match polled {
+            Ok(polled) => polled,
+            Err(panic) => {
+                let completion =
+                    self.transition(Self::Done, ClientOutcome::local(tonic::Code::Cancelled));
+                return (Err(panic), completion);
+            }
+        };
+        if let Some(status) = self.stopped_status() {
+            let (frame, completion) = self.poll_stopped(&status);
+            return (Ok(frame), completion);
+        }
+        let completion = self.complete_polled(&polled);
+        (Ok(polled), completion)
+    }
+}
+
 struct ClientResponseBody<B> {
-    state: Arc<Mutex<StreamState<B>>>,
+    state: Arc<Mutex<StreamPhase<B>>>,
     watcher: Option<AbortOnDropHandle<()>>,
     #[cfg(test)]
     watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -267,39 +298,33 @@ where
     ) -> Self {
         let ended = body.is_end_stream();
         let watch_stop = custody.watch_stop;
-        let mut state = StreamState {
-            phase: StreamPhase::Open(ActiveStream {
-                body,
-                observation,
-                _guards: custody.guards,
-                lifetime: custody.lifetime,
-                waker: None,
-                on_status: custody.on_status,
-            }),
+        let mut phase = StreamPhase::Open(ActiveStream {
+            body,
+            observation,
+            _guards: custody.guards,
+            lifetime: custody.lifetime,
+            waker: None,
+            on_status: custody.on_status,
             missing_status,
-        };
+        });
         let completion = if let Some(outcome) = initial {
-            state.transition(StreamPhase::Done, outcome)
-        } else if let Some(status) = state.stopped_status() {
-            state.complete_stopped(&status)
+            phase.transition(StreamPhase::Done, outcome)
+        } else if let Some(status) = phase.stopped_status() {
+            phase.complete_stopped(&status)
         } else if ended {
-            state.transition(StreamPhase::Done, missing_status)
+            phase.transition(StreamPhase::Done, missing_status)
         } else {
             None
         };
         if let Some(completion) = completion {
             completion.finish();
         }
-        let watched = if watch_stop {
-            match &state.phase {
-                StreamPhase::Open(active) => Some(active.lifetime.clone()),
-                StreamPhase::Trailers(_) | StreamPhase::Done => None,
-            }
-        } else {
-            None
+        let watched = match &phase {
+            StreamPhase::Open(active) if watch_stop => Some(active.lifetime.clone()),
+            StreamPhase::Open(_) | StreamPhase::Trailers(_) | StreamPhase::Done => None,
         };
         let mut response_body = Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(phase)),
             watcher: None,
             #[cfg(test)]
             watcher_done: None,
@@ -349,7 +374,7 @@ where
     }
 }
 
-fn terminate_stream<B>(state: &Mutex<StreamState<B>>, status: &tonic::Status) {
+fn terminate_stream<B>(state: &Mutex<StreamPhase<B>>, status: &tonic::Status) {
     let completion = state.lock().complete_stopped(status);
     if let Some(mut completion) = completion {
         if let Some(waker) = completion.active.waker.take() {
@@ -369,41 +394,7 @@ where
     fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> FramePoll {
         let this = self.get_mut();
         this.reap_watcher(context);
-        let mut state = this.state.lock();
-        let StreamPhase::Open(active) = &mut state.phase else {
-            return state.take_terminal();
-        };
-        let (polled, completion) = if let Some(reason) = active.lifetime.stopped() {
-            let (frame, completion) = state.end_stopped(&client_stopped(reason));
-            (Ok(frame), completion)
-        } else {
-            store_waker(&mut active.waker, context.waker());
-            let polled = {
-                let _entered = active.observation.span().enter();
-                std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Pin::new(&mut active.body).poll_frame(context)
-                }))
-            };
-            match polled {
-                Ok(polled) => {
-                    let (frame, completion) = if let Some(status) = state.stopped_status() {
-                        state.end_stopped(&status)
-                    } else {
-                        let completion = state.complete_polled(&polled);
-                        (polled, completion)
-                    };
-                    (Ok(frame), completion)
-                }
-                Err(panic) => {
-                    let completion = state.transition(
-                        StreamPhase::Done,
-                        ClientOutcome::local(tonic::Code::Cancelled),
-                    );
-                    (Err(panic), completion)
-                }
-            }
-        };
-        drop(state);
+        let (polled, completion) = this.state.lock().poll_next(context);
         if let Some(completion) = completion {
             this.watcher = None;
             completion.finish();
@@ -415,13 +406,11 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        let state = self.state.lock();
-        matches!(state.phase, StreamPhase::Done)
+        matches!(*self.state.lock(), StreamPhase::Done)
     }
 
     fn size_hint(&self) -> SizeHint {
-        let state = self.state.lock();
-        match &state.phase {
+        match &*self.state.lock() {
             StreamPhase::Open(active) => active.body.size_hint(),
             StreamPhase::Trailers(_) | StreamPhase::Done => SizeHint::with_exact(0),
         }
@@ -430,7 +419,7 @@ where
 
 impl<B> Drop for ClientResponseBody<B> {
     fn drop(&mut self) {
-        let phase = std::mem::replace(&mut self.state.lock().phase, StreamPhase::Done);
+        let phase = std::mem::replace(&mut *self.state.lock(), StreamPhase::Done);
         drop(self.watcher.take());
         drop(phase);
     }
@@ -662,6 +651,13 @@ mod tests {
         drop(guard);
     }
 
+    fn test_guards(upload_guard: Option<UploadGuard>) -> ClientGuards {
+        ClientGuards {
+            upload_guard,
+            cancel_on_drop: CancellationToken::new().drop_guard(),
+        }
+    }
+
     #[tokio::test]
     async fn unbounded_opening_only_response_does_not_spawn_watcher() {
         let open_without_watch = ClientResponseBody::start(
@@ -670,7 +666,7 @@ mod tests {
             ClientCustody {
                 lifetime: OperationContext::unbounded(),
                 watch_stop: false,
-                guards: ClientGuards::default(),
+                guards: test_guards(None),
                 on_status: None,
             },
             None,
@@ -684,7 +680,7 @@ mod tests {
             ClientCustody {
                 lifetime: OperationContext::unbounded(),
                 watch_stop: true,
-                guards: ClientGuards::default(),
+                guards: test_guards(None),
                 on_status: None,
             },
             None,
@@ -698,7 +694,7 @@ mod tests {
             ClientCustody {
                 lifetime: OperationContext::unbounded(),
                 watch_stop: true,
-                guards: ClientGuards::default(),
+                guards: test_guards(None),
                 on_status: None,
             },
             Some(ClientOutcome::local(tonic::Code::Ok)),
@@ -722,7 +718,7 @@ mod tests {
                 watch_stop: true,
                 guards: ClientGuards {
                     upload_guard: None,
-                    cancel_on_drop: Some(child.drop_guard()),
+                    cancel_on_drop: child.drop_guard(),
                 },
                 on_status: None,
             },
@@ -771,7 +767,7 @@ mod tests {
                 watch_stop: true,
                 guards: ClientGuards {
                     upload_guard,
-                    cancel_on_drop: Some(cancellation.clone().drop_guard()),
+                    cancel_on_drop: cancellation.clone().drop_guard(),
                 },
                 on_status: None,
             },
@@ -819,10 +815,7 @@ mod tests {
             ClientCustody {
                 lifetime,
                 watch_stop: true,
-                guards: ClientGuards {
-                    upload_guard,
-                    cancel_on_drop: None,
-                },
+                guards: test_guards(upload_guard),
                 on_status: None,
             },
             None,
@@ -887,7 +880,7 @@ mod tests {
             ClientCustody {
                 lifetime,
                 watch_stop: true,
-                guards: ClientGuards::default(),
+                guards: test_guards(None),
                 on_status: Some(on_status),
             },
             None,

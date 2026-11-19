@@ -1,14 +1,14 @@
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("decode gRPC file descriptor set: {0}")]
+    #[error("decode gRPC file descriptor set")]
     DecodeDescriptorSet(#[source] prost::DecodeError),
-    #[error("inspect gRPC reflection file descriptor: {0}")]
+    #[error("inspect gRPC reflection file descriptor")]
     InspectReflectionFile(#[source] prost::DecodeError),
     #[error("inspect gRPC reflection file descriptor: missing file name")]
     MissingReflectionFileName,
-    #[error("build gRPC v1 reflection service: {0}")]
+    #[error("build gRPC v1 reflection service")]
     BuildReflectionV1(#[source] tonic_reflection::server::Error),
-    #[error("build gRPC v1alpha reflection service: {0}")]
+    #[error("build gRPC v1alpha reflection service")]
     BuildReflectionV1Alpha(#[source] tonic_reflection::server::Error),
     #[error("gRPC descriptors disagree on the methods of service {0}")]
     ConflictingServiceDescription(String),
@@ -43,7 +43,7 @@ pub enum Error {
     UnregisteredCallerRule(String),
     #[error("gRPC caller rule is declared twice for {0}")]
     DuplicateCallerRule(String),
-    #[error("gRPC caller rule for {path}: {source}")]
+    #[error("gRPC caller rule for {path} is invalid")]
     InvalidCallerRule {
         path: String,
         source: infra_serviceauth::InvalidServiceName,

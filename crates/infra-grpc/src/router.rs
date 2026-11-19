@@ -22,7 +22,7 @@ use tonic::server::NamedService as _;
 use tower::Layer as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, deadline_status, stopped_status, wrap_response};
+use crate::call::{ServerCustody, check_open, deadline_status, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
@@ -150,9 +150,60 @@ pub fn router(
         services.attach_reflection()?;
     }
     services.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
+    let authentication = prepare_business_auth(authentication, &mut services)?;
+    if limits.max_in_flight.is_some() {
+        observe::register_shed();
+    }
+    observe::describe();
+    let methods = Arc::new(services.methods());
+    let admission = limits.max_in_flight.map(|count| {
+        let count = count.get() as usize;
+        AdmissionPermits {
+            opening: Arc::new(Semaphore::new(count)),
+            call: Arc::new(Semaphore::new(count)),
+            max_wait: limits.max_admission_wait,
+        }
+    });
+    Ok(Application {
+        // template:begin service-auth:grpc-app-tls-init
+        requires_tls: matches!(authentication, BusinessAuth::ServiceTokens { .. }),
+        // template:end service-auth:grpc-app-tls-init
+        router: {
+            let state = Arc::new(BusinessState {
+                authentication,
+                methods: Arc::clone(&methods),
+                request_timeout: limits.request_timeout,
+                reflection_enabled: services.reflection,
+                admission,
+            });
+            let business = services
+                .routes
+                .routes()
+                .into_axum_router()
+                .layer(axum::middleware::from_fn_with_state(state, business_call));
+            native_router(
+                business,
+                services.listener_layer,
+                readiness,
+                services.names,
+                methods,
+                limits.request_timeout,
+                trust_trace_context,
+            )
+        },
+    })
+}
+
+fn prepare_business_auth(
+    authentication: Authentication,
+    #[allow(
+        unused_variables,
+        reason = "optional auth template regions consume services"
+    )]
+    services: &mut Services,
+) -> Result<BusinessAuth, Error> {
     // template:begin service-auth:grpc-router-caller-rules
-    let uses_service_tokens = matches!(authentication, Authentication::ServiceTokens(_));
-    if uses_service_tokens {
+    if matches!(authentication, Authentication::ServiceTokens(_)) {
         services.validate_caller_rules()?;
     } else if !services.caller_rules.is_empty() {
         return Err(Error::CallerRulesRequireServiceTokens);
@@ -172,59 +223,20 @@ pub fn router(
         return Err(Error::ScopesWithServiceTokens);
     }
     // template:end authn:grpc-router-authenticate
-    if limits.max_in_flight.is_some() {
-        observe::register_shed();
-    }
-    observe::describe();
-    let methods = Arc::new(services.methods());
-    let authentication = match authentication {
+    Ok(match authentication {
         Authentication::None => BusinessAuth::None,
         // template:begin authn:grpc-router-bearer-init
         Authentication::Bearer(verifier) => BusinessAuth::Bearer {
             verifier,
-            scopes: services.scopes,
+            scopes: std::mem::take(&mut services.scopes),
         },
         // template:end authn:grpc-router-bearer-init
         // template:begin service-auth:grpc-router-caller-init
         Authentication::ServiceTokens(verifier) => BusinessAuth::ServiceTokens {
             verifier,
-            caller_rules: services.caller_rules,
+            caller_rules: std::mem::take(&mut services.caller_rules),
         },
         // template:end service-auth:grpc-router-caller-init
-    };
-    let admission = limits.max_in_flight.map(|count| {
-        let count = count.get() as usize;
-        AdmissionPermits {
-            opening: Arc::new(Semaphore::new(count)),
-            call: Arc::new(Semaphore::new(count)),
-            max_wait: limits.max_admission_wait,
-        }
-    });
-    let state = Arc::new(BusinessState {
-        authentication,
-        methods: Arc::clone(&methods),
-        request_timeout: limits.request_timeout,
-        reflection_enabled: services.reflection,
-        admission,
-    });
-    let business = services
-        .routes
-        .routes()
-        .into_axum_router()
-        .layer(axum::middleware::from_fn_with_state(state, business_call));
-    Ok(Application {
-        router: native_router(
-            business,
-            services.listener_layer,
-            readiness,
-            services.names,
-            methods,
-            limits.request_timeout,
-            trust_trace_context,
-        ),
-        // template:begin service-auth:grpc-app-tls-init
-        requires_tls: uses_service_tokens,
-        // template:end service-auth:grpc-app-tls-init
     })
 }
 
@@ -282,7 +294,7 @@ async fn native_grpc(
             [(http::header::ALLOW, "POST")],
         )
             .into_response()
-    } else if !crate::protocol::native_content_type(request.headers()) {
+    } else if !crate::protocol::has_native_content_type(request.headers()) {
         http::StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response()
     } else {
         infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
@@ -295,6 +307,72 @@ async fn native_grpc(
 struct Admitted {
     response: Response,
     permit: Option<OwnedSemaphorePermit>,
+}
+
+struct StartedCall {
+    call_type: Option<CallType>,
+    call: observe::Call,
+    fallback: Option<opentelemetry::Context>,
+    opening_deadline: Deadline,
+    response_deadline: Option<Deadline>,
+}
+
+fn start_call(request: &mut Request, methods: &Methods, request_timeout: Duration) -> StartedCall {
+    sanitize_extensions(request.extensions_mut());
+    let path = request.uri().path();
+    let method = methods.resolve(path);
+    let call = observe::Call::start(method, path);
+    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
+    let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
+    StartedCall {
+        call_type: method.call_type,
+        call,
+        fallback,
+        opening_deadline,
+        response_deadline,
+    }
+}
+
+struct BusinessLifecycle {
+    opening_context: OperationContext,
+    response_context: ResponseContext,
+    custody: ServerCustody,
+}
+
+fn business_lifecycle(
+    path: &str,
+    call_type: Option<CallType>,
+    opening_deadline: Deadline,
+    response_deadline: Option<Deadline>,
+    connection: Option<infra_http_transport::ConnectionInfo>,
+    reflection_enabled: bool,
+) -> BusinessLifecycle {
+    let streams_response = matches!(
+        call_type,
+        Some(CallType::ServerStream | CallType::BidiStream)
+    );
+    let response_token = match connection.filter(|_| streams_response) {
+        Some(info) => info.child_drain_token(),
+        None => CancellationToken::new(),
+    };
+    let opening_context =
+        OperationContext::new(Some(opening_deadline), response_token.child_token());
+    let response_context = ResponseContext(OperationContext::new(
+        response_deadline,
+        response_token.clone(),
+    ));
+    let custody = ServerCustody {
+        deadline: response_deadline,
+        end_on_drain: (reflection_enabled && REFLECTION_PATHS.contains(&path))
+            .then(|| response_token.clone()),
+        cancel_on_drop: Some(response_token.drop_guard()),
+        ..ServerCustody::default()
+    };
+    BusinessLifecycle {
+        opening_context,
+        response_context,
+        custody,
+    }
 }
 
 async fn business_call(
@@ -314,62 +392,50 @@ async fn business_call(
         return tonic::Status::unauthenticated("service tokens require TLS").into_http();
     }
     // template:end service-auth:grpc-router-verified-transport
-    sanitize_extensions(request.extensions_mut());
 
-    let path = request.uri().path();
-    let method = state.methods.resolve(path);
-    let call = observe::Call::start(method, path);
-    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
-    let (opening_deadline, response_deadline) =
-        call_deadlines(request.headers(), state.request_timeout);
-
-    let call_type = method.call_type;
-    let streams_response = matches!(
-        call_type,
-        Some(CallType::ServerStream | CallType::BidiStream)
+    let started = start_call(&mut request, &state.methods, state.request_timeout);
+    let lifecycle = business_lifecycle(
+        request.uri().path(),
+        started.call_type,
+        started.opening_deadline,
+        started.response_deadline,
+        connection,
+        state.reflection_enabled,
     );
-    let response_token = match connection.filter(|_| streams_response) {
-        Some(info) => info.child_drain_token(),
-        None => CancellationToken::new(),
-    };
-    let opening_context =
-        OperationContext::new(Some(opening_deadline), response_token.child_token());
-    let response_context = ResponseContext(OperationContext::new(
-        response_deadline,
-        response_token.clone(),
-    ));
-    let custody = ServerCustody {
-        deadline: response_deadline,
-        end_on_drain: (state.reflection_enabled && REFLECTION_PATHS.contains(&path))
-            .then(|| response_token.clone()),
-        cancel_on_drop: Some(response_token.drop_guard()),
-        ..ServerCustody::default()
-    };
-    request.extensions_mut().insert(opening_context.clone());
-    request.extensions_mut().insert(response_context);
+    request
+        .extensions_mut()
+        .insert(lifecycle.opening_context.clone());
+    request.extensions_mut().insert(lifecycle.response_context);
 
-    #[allow(clippy::result_large_err, reason = "the panic fallback returns the same refusal response")]
+    #[allow(
+        clippy::result_large_err,
+        reason = "the panic fallback returns the same refusal response"
+    )]
     let outcome = run_in_span(
         async {
             let outcome = tokio::select! {
                 biased;
-                reason = opening_context.wait_stopped() => {
+                reason = lifecycle.opening_context.wait_stopped() => {
                     Err(stopped_status(reason).into_http())
                 }
-                outcome = open_business(&state, &opening_context, call_type, request, next) => outcome,
+                outcome = open_business(
+                    &state,
+                    &lifecycle.opening_context,
+                    started.call_type,
+                    request,
+                    next,
+                ) => outcome,
             };
-            if let Some(reason) = opening_context.stopped() {
-                return Err(stopped_status(reason).into_http());
-            }
+            check_open(&lifecycle.opening_context)?;
             outcome
         },
-        call.span(),
-        fallback.as_ref(),
+        started.call.span(),
+        started.fallback.as_ref(),
         || Err(internal_status().into_http()),
     )
     .await;
 
-    finish_call(outcome, call, fallback, custody)
+    finish_call(outcome, started.call, started.fallback, lifecycle.custody)
 }
 
 #[expect(
@@ -394,7 +460,7 @@ async fn open_business(
         request,
     )
     .await?;
-    let admission: Result<_, Response> = match &state.authentication {
+    let authenticated: Result<_, Response> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
         BusinessAuth::Bearer { verifier, scopes } => {
             crate::authn::authenticate(verifier, scopes, opening_context, request).await
@@ -417,7 +483,7 @@ async fn open_business(
             Ok(request)
         }
     };
-    let request = admission?;
+    let request = authenticated?;
     if call_type.is_none() {
         let status = tonic::Status::unimplemented("");
         return Err(reject_with_budget(opening_context, request, status).await);
@@ -453,9 +519,7 @@ async fn acquire_permit(
     let Ok((permit, waited)) =
         infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
     else {
-        if let Some(reason) = opening_context.stopped() {
-            return Err(stopped_status(reason).into_http());
-        }
+        check_open(opening_context)?;
         return Err(reject_shed(opening_context, request).await);
     };
     *remaining_wait = remaining_wait.saturating_sub(waited.unwrap_or_default());
@@ -493,19 +557,14 @@ async fn health_call(
     request
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
-    sanitize_extensions(request.extensions_mut());
-
-    let path = request.uri().path();
-    let call = observe::Call::start(methods.resolve(path), path);
-    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
-    let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
+    let started = start_call(&mut request, &methods, request_timeout);
     let response = run_in_span(
         async {
             tokio::select! {
                 biased;
-                () = opening_deadline.wait() => deadline_status().into_http(),
+                () = started.opening_deadline.wait() => deadline_status().into_http(),
                 response = next.run(request) => {
-                    if opening_deadline.expired() {
+                    if started.opening_deadline.expired() {
                         deadline_status().into_http()
                     } else {
                         response
@@ -513,17 +572,17 @@ async fn health_call(
                 }
             }
         },
-        call.span(),
-        fallback.as_ref(),
+        started.call.span(),
+        started.fallback.as_ref(),
         || internal_status().into_http(),
     )
     .await;
 
     let custody = ServerCustody {
-        deadline: response_deadline,
+        deadline: started.response_deadline,
         ..ServerCustody::default()
     };
-    wrap_response(response, call, fallback, custody)
+    wrap_response(response, started.call, started.fallback, custody)
 }
 
 fn call_deadlines(
