@@ -38,7 +38,7 @@ outcomes. Return one replaceable
 Completion after assembly:
 
 ```text
-Implemented: <unit>; verification: pending final validation; candidate: <bounded diff, tree, or commit>
+Implemented: <unit>; verification: pending final validation; candidate: <bounded diff, tree, or commit>; decisions: <carried from the Lead's result; omit when none>; unverified: <carried from the Lead's result; omit when none>
 Accepted: Completion; evidence: <claim-matched result>; candidate: <identity>
 Blocked: <unit>; unverified: <claim>; evidence: <narrower result>; next owner: <owner and condition>; candidate: <identity or none>
 ```

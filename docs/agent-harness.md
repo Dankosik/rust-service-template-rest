@@ -86,8 +86,8 @@ resetting context.
 
 ## Nested Execution
 
-Orchestrator owns the ledger; Leads return `Implemented`; one assigned delivery
-owner owns final validation and acceptance. Workers delegate strict subsets
+Orchestrator owns the ledger; Leads return `Implemented`; one assigned Delivery
+Owner owns final validation and acceptance. Workers delegate strict subsets
 only if the adapter permits descendants and Implementation's benefit,
 ownership, and lock rules hold. Missing product/architecture decisions return to
 their owner; unwritten tests do not block delegation. At a depth/tool limit, the

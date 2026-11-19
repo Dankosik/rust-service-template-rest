@@ -58,9 +58,8 @@ OUTPUT_SCHEMA_LINES = {
     ),
     "review-result-v1": "Return `docs/spec-first-workflow/interfaces/review-result-v1.md`.",
     "delegated-result-v1": (
-        "Return fields: result, changed_paths, proof (omit for initial "
-        "implementation; scoped results/gaps for repair or verification), "
-        "candidate, gap."
+        "Return fields: result, changed_paths, proof (checks actually run "
+        "with their results, or none), candidate, gap."
     ),
 }
 
@@ -433,7 +432,11 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         _fail(".agents/roles contains no canonical role files")
 
     implementation = "../../docs/spec-first-workflow/phases/implementation.md"
-    lead_method = f"Apply [Implementation as Acceptance-Unit Lead]({implementation}#acceptance-unit-lead)\n"
+    lead_phase = implementation.removesuffix(".md")
+    lead_method = (
+        f"Apply [Unit Implementation]({lead_phase}/unit.md) for an assigned unit, or\n"
+        f"[Final Validation]({lead_phase}/final-validation.md) as Delivery Owner,\n"
+    )
     orchestrator_method = f"Apply [Implementation as Ledger Orchestrator]({implementation}#carrier)\n"
     lead_tail = (
         "Apply the fixed unit packet and its named Method. Return\n"

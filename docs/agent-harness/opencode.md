@@ -59,8 +59,7 @@ for implementation scheduling and final acceptance.
   sets `edit: deny`. No native Goal exists; background Task requires
   `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (foreground is default).
 - OpenCode ignores `disable-model-invocation`, so `build` and `plan` deny
-  `user/workflow` skills in `opencode.json` while keeping `orchestrator` loadable
-  on `build`. Never commit `.opencode/` runtime files excluded by `.opencode/.gitignore`.
+  `user/workflow` skills in `opencode.json`. Never commit `.opencode/` runtime files excluded by `.opencode/.gitignore`.
 
 ### Models And Dispatch
 

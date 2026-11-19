@@ -30,7 +30,7 @@ stay inline only when no durable boundary exists.
 
 Keep dependencies, status, and results in `tasks.md` and each [Task Packet
 V1](../interfaces/task-packet-v1.md) in `tasks/<ID>-<slug>.md`. Packets cover
-implementation and test writing. [Feedback During Coding](implementation.md#feedback-during-coding)
+implementation and test writing. [Checks While Coding](implementation/unit.md#checks-while-coding)
 governs checks during implementation. Completion owns required validation and
 any selected review of the assembled candidate.
 Use [Task and Acceptance Boundaries](planning/ledger-contract.md#task-and-acceptance-boundaries)

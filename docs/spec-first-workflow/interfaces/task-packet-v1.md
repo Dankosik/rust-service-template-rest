@@ -26,7 +26,7 @@ Exclusive locks:
 
 Final validation:
 - Claim: <what must be true in the assembled ledger>
-- Checks: <local completion checks; any explicit additional requirement with its source, or none; concrete test commands remain executor-owned>
+- Checks: <local completion checks; any explicit additional requirement with its source, or none; concrete test commands remain Lead-owned>
 - Observable: <what result at the affected entry point distinguishes the accepted behavior from a plausible incomplete change? Include any proof boundary the accepted source requires.>
 
 Reopen if:

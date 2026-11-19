@@ -6,16 +6,16 @@ sections govern a persisted [Task Ledger V1](../../interfaces/task-ledger-v1.md)
 ## Task And Acceptance Boundaries
 
 Give each independently usable repository change one task and its acceptance
-criteria. Keep the layers of that outcome together. Subtask lanes can implement
+criteria. Keep the layers of that outcome together. Lanes can implement
 them in parallel and report partial results under the same task.
 
 Place a required external action at its consuming stage, with its owner and
 success condition. A change to release tooling can have its own task. Approval
 to publish gates publication.
 
-The Lead returns `Implemented` when its planned code, tests, and cleanup are
-ready and its writers have joined. The ledger records that milestone after
-integration. Global Completion owns acceptance of the requested outcome.
+The Lead returns `Implemented` at the [Implemented
+bar](../../interfaces/acceptance-result-v1.md#implementation-result). The
+ledger records that milestone after integration. Global Completion owns acceptance of the requested outcome.
 
 ## Ready Frontier
 
@@ -69,9 +69,11 @@ return a fresh result. Only a current return can change ledger state, release
 locks, or unlock dependents. Preserve useful edits from an obsolete return for
 the current owner.
 
-On a current `Implemented`, integrate the change serially into the local
-development candidate, record it, release its locks, and refill the ready
-frontier. A repeat after all four steps requires no action. If interrupted,
+On a current `Implemented`, integrate the change serially into the candidate:
+in a shared checkout, confirm the returned paths lie inside the granted scope
+and match the tree; from an isolated worktree, merge the returned candidate.
+Record the result with its `decisions` and `unverified` entries, release its
+locks, and refill the ready frontier. A repeat after all four steps requires no action. If interrupted,
 resume at the first unfinished step. Preserve external-effect boundaries
 (push, deploy, auto-deploy branches). Return semantic merge conflicts to the
 owning Lead against the assembled tree and invalidate affected proof.
@@ -89,20 +91,21 @@ can advance. This includes waiting for a running required check. Reserve
 ### Completion Gates
 
 Once all planned code tasks are `Implemented` and assembled and all writers
-have joined, assign the assembled candidate to the delivery owner for one
-final validation. Start local validation even if a requested external action
+have joined, assign the assembled candidate to the Delivery Owner for one
+final validation. Assign a Lead that implemented none of the ledger's units; a
+one-task ledger may keep its Lead. Start local validation even if a requested external action
 is pending.
 
 ### Delivery
 
-- **Consolidated proof and review**: The delivery owner follows [Final
-  Validation](../implementation.md#final-validation) and reports one
+- **Consolidated proof and review**: The Delivery Owner follows [Final
+  Validation](../implementation/final-validation.md) and reports one
   [Completion Result](../../interfaces/acceptance-result-v1.md#completion-result)
   for the requested scope.
 - **Repairs and verdict**: Route defects back to their implementation Leads
   (granting one Lead a combined writable scope across both sides of an
-  `INTEGRATION_DEFECT` seam while no conflicting writer is active). The delivery
-  owner resumes the validation plan after repair. The Orchestrator records the
+  `INTEGRATION_DEFECT` seam while no conflicting writer is active). The Delivery
+  Owner resumes the validation plan after repair. The Orchestrator records the
   resulting verdict directly.
 
 Mark `done` once final `Accepted` closes Completion, then apply

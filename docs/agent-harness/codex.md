@@ -18,7 +18,7 @@ availability alone does not authorize use.
   commands/navigation; brief paths or command `cwd` do not reload that project's
   config, roles, or tools.
 - For each ready ledger unit, spawn a general-purpose subagent with
-  [Implementation](../spec-first-workflow/phases/implementation.md) as Method
+  [Unit Implementation](../spec-first-workflow/phases/implementation/unit.md) as Method
   and that packet as boundary (it is Acceptance-Unit Lead; `worker-agent` and
   read-only roles lack acceptance authority). A root-local Lead handles
   a single fixed inline unit.

@@ -26,7 +26,7 @@ completed phases.
 5. Resolve current files and writer identities before consuming Implemented
    outputs. Evaluate proof reuse only when final validation begins under the
    [Evidence Contract](evidence-contract.md). Resume the actual execution stage:
-   coding uses Implementation's feedback boundary; final-validation repair
+   coding uses Unit Implementation's checks while coding; final-validation repair
    includes its focused rerun under existing authority. Retire a superseded
    code-only repair brief without restarting the ledger or its review cycle.
 
