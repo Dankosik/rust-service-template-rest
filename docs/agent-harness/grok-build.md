@@ -24,8 +24,8 @@ a deeper native route.
   [Agent Harness](../agent-harness.md) selects isolation, create a Git worktree
   and pass its absolute path via `--cwd` (headless `-p` does not create a
   worktree from `--worktree`). Retain `sessionId`, continue with `--resume`
-  (never `--restore-code` routinely), and consume
-  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  (never `--restore-code` routinely), and consume [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
 - Delegated lanes use `spawn_subagent` (`worker-agent`, `specialist-agent`,
   `evidence-agent`, `reviewer-agent`, `adjudicator-agent`) with `prompt`,
   `description`, `subagent_type`, `background`, `isolation`, `resume_from`,

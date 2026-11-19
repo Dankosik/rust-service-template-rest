@@ -2,7 +2,7 @@
 
 Fresh, read-only review of one fixed implementation candidate (assembled ledger,
 Direct Work, or standalone review). Falsify independently and return [Review
-Result V1](../interfaces/review-result-v1.md) without repairing, re-scoping, or
+Result](../shared/review.md#review-result) without repairing, re-scoping, or
 accepting.
 
 Pin the brief's diff command (`git diff <Base>..HEAD` or supplied command) and

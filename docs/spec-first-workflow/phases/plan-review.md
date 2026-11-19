@@ -2,8 +2,8 @@
 
 Fresh, static, read-only review of the assembled preparation bundle
 (`specs/<task>/spec.md`, optional `specs/<task>/design.md`, `tasks.md`, and
-`tasks/*.md`) before Implementation starts. Return [Review Result
-V1](../interfaces/review-result-v1.md) under [Review
+`tasks/*.md`) before Implementation starts. Return [Review
+Result](../shared/review.md#review-result) under [Review
 Lifecycle](../shared/review.md#lifecycle).
 
 ## Topology And Brief Hygiene

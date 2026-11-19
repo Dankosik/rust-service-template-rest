@@ -18,11 +18,11 @@ workflow (Direct Work still runs in-session).
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by
   selecting `orchestrator` as the App's primary agent.
 - Dispatch ready units via `invoke_subagent` with role
-  `acceptance-unit-lead` within capacity, consuming [Acceptance
-  Result](../spec-first-workflow/interfaces/acceptance-result-v1.md). Never
-  substitute `self`, `research`, or `define_subagent` for this implementation Lead;
-  report a missing `acceptance-unit-lead` or missing conversation ID as a
-  carrier gap before dispatch.
+  `acceptance-unit-lead` within capacity, consuming [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
+  Never substitute `self`, `research`, or `define_subagent` for this
+  implementation Lead; report a missing `acceptance-unit-lead` or missing
+  conversation ID as a carrier gap before dispatch.
 - Delegated lanes use `invoke_subagent` with `worker-agent`,
   `specialist-agent`, `evidence-agent`, `reviewer-agent`, or
   `adjudicator-agent`. Read-only roles carry no edit tool; mutable roles may

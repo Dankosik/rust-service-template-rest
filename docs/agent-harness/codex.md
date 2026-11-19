@@ -88,9 +88,10 @@ spawning a fresh agent. Never wait on an idle lane or blindly repeat uncertain
 dispatch; reconcile once from native status, ledger, and Git candidate identity.
 
 For isolated work, validate the worktree and base before accepting bytes. An
-isolated Acceptance-Unit Lead returns [Acceptance
-Result](../spec-first-workflow/interfaces/acceptance-result-v1.md) with a fixed
-`candidate`; the Orchestrator integrates it serially under [Implementation Step
+isolated Acceptance-Unit Lead returns [Implementation
+Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result)
+with a fixed `candidate`; the Orchestrator integrates it serially under
+[Implementation Step
 3](../spec-first-workflow/phases/implementation.md#3-acceptance-transition).
 Spawn independent reviews as fresh `reviewer-agent` (`fork_turns: "none"`) with
 the phase review Method, and retain agent identities across

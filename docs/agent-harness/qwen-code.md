@@ -12,8 +12,8 @@ outrank prose.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds Ledger Orchestrator. Dispatch ready units via `agent`
   (`subagent_type: "acceptance-unit-lead"`, display name `Agent`, not `task`)
-  within capacity; the `.qwen/agents/` carrier returns
-  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  within capacity; the `.qwen/agents/` carrier returns [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
   `todo_write` mirrors execution only; `tasks.md` owns acceptance.
 - Ordinary named agents nest via `agent` (`model.maxSubagentDepth: 5`);
   teammates, forks, and workflow-spawned agents cannot nest. Missing tools or

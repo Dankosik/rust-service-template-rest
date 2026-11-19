@@ -44,7 +44,8 @@ instructions and role dispatch are independent of the 1.x Task plugin.
   if `.opencode/plugins/task-subagents.js` blurbs are stale; never substitute
   `general`, `explore`, `scout`, or generic workers. Integrate candidates via
   [acceptance transition](../spec-first-workflow/phases/implementation.md#3-acceptance-transition)
-  from [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  from [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
 - Report a carrier gap only if Task rejects the call, returns unknown agent or
   no identity, or `subagent_depth` is 1. `opencode.json` sets `subagent_depth: 3`
   (root -> Lead -> worker -> worker); generated workers allow Task only to

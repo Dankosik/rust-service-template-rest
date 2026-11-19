@@ -13,7 +13,8 @@ callable Task fields outrank public prose.
   binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
   directly.
 - Dispatch ready units via Task (`subagent_type: "acceptance-unit-lead"`) within
-  capacity, consuming [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  capacity, consuming [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
   Never substitute `generalPurpose`, `explore`, `shell`, or generic workers;
   report missing `acceptance-unit-lead` or missing agent identity as a carrier
   gap before dispatch.

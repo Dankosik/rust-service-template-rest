@@ -13,8 +13,8 @@ schemas outrank prose.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator. Dispatch ready units via `Agent`
   (`subagent_type: "acceptance-unit-lead"`) within capacity; the
-  `.claude/agents/` carrier returns
-  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  `.claude/agents/` carrier returns [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
 - Named subagents nest via `Agent`; `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:
   "3"` sets three levels. Report unavailable tools or exhausted depth as an
   exact capability gap.

@@ -20,8 +20,8 @@ Frontier` through final verification, independent review, and closeout.
 
 The Orchestrator schedules tasks, lands work serially, verifies the assembled
 result, runs independent review, and alone writes [Ledger Runtime
-State](../interfaces/acceptance-result-v1.md#ledger-runtime-state). Leave unit
-coding and repair edits strictly to fresh `ACCEPTANCE_UNIT_LEAD` subagents.
+State](#ledger-runtime-state). Leave unit coding and repair edits strictly to
+fresh `ACCEPTANCE_UNIT_LEAD` subagents.
 
 ### 1. Pin Baseline And Controls
 
@@ -124,7 +124,9 @@ scoped `no-commit` candidate diff from Step 1):
      - Confirmed `TASK_DEFECT` or `INTEGRATION_DEFECT`: batch into Step 4.3.
      - Complete refutation (zero code changes): never self-approve past `FAIL`;
        dispatch `adjudicator-agent` with both sides' primary anchors under
-       [Review Lifecycle](../shared/review.md#lifecycle).
+       [Review Lifecycle](../shared/review.md#lifecycle) (repairing if
+       adjudication confirms the defect, or recording the resolution and
+       clearing if it rejects the finding with primary proof).
 3. **Repair confirmed defects:** batch confirmed `TASK_DEFECT`,
    `INTEGRATION_DEFECT`, or bounded technical `UPSTREAM_GAP` fixes (or
    pre-review Step 4.1 failures) into one fresh [Repair
@@ -137,11 +139,8 @@ scoped `no-commit` candidate diff from Step 1):
      Step 4.2; otherwise dispatch one fresh `Delta Recheck` reviewer (or a fresh
      full review if repair expanded scope, interfaces, or risk).
    - On complete refutation (`Blocked`, `next_owner: Orchestrator — refuted
-     findings`): retire the Repair Lead without a landing, never self-approve
-     past `FAIL`, and dispatch `adjudicator-agent` with both sides' primary
-     anchors under [Review Lifecycle](../shared/review.md#lifecycle) (repairing
-     if adjudication confirms the defect, or recording the resolution and
-     clearing if it rejects the finding with primary proof).
+     findings`): retire the Repair Lead without a landing and run the Step 4.2
+     complete-refutation adjudication path above.
 - *Done when:* every required local check and `Observable claim` passes on the
   current candidate and required review clears (`PASS`).
 
@@ -160,3 +159,27 @@ scoped `no-commit` candidate diff from Step 1):
     owner.
 - Report impact, executed checks, material limitations, and any pending
   external gates.
+
+## Ledger Runtime State
+
+Appended to `specs/<task>/tasks.md` strictly by the Ledger Orchestrator
+(preserved on Planning reopen):
+
+- **Header:** `Base: <commit SHA>` (pinned before first dispatch so worktrees,
+  verification, and review share one diff baseline) and optional `Commit mode:
+  no-commit` when local commits are forbidden.
+- **Per-task routing:** `Execution: <native agent locator>` (set on dispatch,
+  cleared when the writer stops) and optional `Resume: <remaining action>` only
+  when native state cannot recover after interruption.
+- **Checkboxes and receipts:** `[x]` marks integrated `Implemented` code only
+  (`Blocked` stays unchecked); replace one receipt in place per task and one
+  final `Completion` receipt (flip `status: done` only after final verification
+  and required review pass):
+
+```text
+Implemented: <unit>; candidate: <commit or bounded diff>
+  - decisions: <carried verbatim; omit when none>
+  - unverified: <carried verbatim; omit when none>
+Accepted: Completion; evidence: <checks + review verdict>; candidate: <identity>
+Blocked: <unit>; unverified: <claim>; next owner: <owner and condition>; candidate: <identity or none>
+```

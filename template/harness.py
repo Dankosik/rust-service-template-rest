@@ -110,21 +110,17 @@ ALLOWED_ROLE_KEYS = frozenset({
 
 OUTPUT_SCHEMA_LINES = {
     "lane-result-v1": (
-        "Return fields: conclusion, evidence (primary locator and result), "
-        "uncertainty_or_conflict, disposition (accept | reject | repair | "
-        "carry_as_proof_or_risk | reopen), destination."
+        "Return fields: conclusion, evidence (primary locators, commands, and "
+        "results), gaps (uncertainty, conflict, or missing owner, or none)."
     ),
     "specialist-result-v1": (
-        "Return Decision Result V1 (disposition: decision | constraint_only | "
-        "proof_only | no_new_decision_required | blocked, decision_or_constraint, "
-        "forced_consequences, proof_or_gap, blocker, "
-        "strongest_rejected_alternative, rejection_reason, "
-        "reopen_owner_or_condition), or Candidate Proposal V1 when dispatched "
-        "as a generative candidate lane (pressure, proposal, caller_sketch, "
-        "hidden_complexity, dependencies_and_cost, thin_leverage_and_risks, "
-        "blocker_or_gap, anchors)."
+        "Return fields: recommendation (policy, constraint, proof obligation, "
+        "or blocked), rejected_steelman (strongest simpler substitute and "
+        "broken invariant, or none), consequences_and_proof, reopen_if; for "
+        "Design It Twice, return "
+        "`docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`."
     ),
-    "review-result-v1": "Return `docs/spec-first-workflow/interfaces/review-result-v1.md`.",
+    "review-result-v1": "Return `docs/spec-first-workflow/shared/review.md#review-result`.",
     "delegated-result-v1": (
         "Return fields: result, changed_paths, proof (checks actually run "
         "with their results, or none), candidate, gap."
@@ -358,7 +354,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     orch_method = f"Apply [Implementation as Ledger Orchestrator]({impl}#carrier)\n"
     lead_tail = (
         "Apply the assigned packet or repair brief and its named Method. Return\n"
-        "`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.\n"
+        "`docs/spec-first-workflow/phases/implementation/unit.md#implementation-result`.\n"
     )
 
     lead_specs = (

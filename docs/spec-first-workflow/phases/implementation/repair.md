@@ -2,8 +2,7 @@
 
 Fix one batched set of confirmed final-verification or review defects as a fresh
 `ACCEPTANCE_UNIT_LEAD` inside the granted writable scope, then return an
-[Implementation
-Result](../../interfaces/acceptance-result-v1.md#implementation-result).
+[Implementation Result](unit.md#implementation-result).
 
 ## Steps
 
@@ -40,5 +39,4 @@ Result](../../interfaces/acceptance-result-v1.md#implementation-result).
    - Escalate scope expansions, ungranted crates, or exposed `UPSTREAM_GAP`s
      under [Unit Escalation](unit.md#escalation).
    - *Done when:* every confirmed defect is `green`, self-audited, and returned
-     in [Implementation
-     Result](../../interfaces/acceptance-result-v1.md#implementation-result).
+     in [Implementation Result](unit.md#implementation-result).

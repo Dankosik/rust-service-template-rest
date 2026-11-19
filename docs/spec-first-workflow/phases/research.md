@@ -27,8 +27,8 @@ choices to the requesting phase owner.
 - **Delegation:** offload read-heavy inventories to a fresh `evidence-agent` via
   [Read-Only Delegation](../shared/read-only-delegation.md), verifying
   decision-critical primary sources directly.
-- **Output weight:** return [Lane Result
-  V1](../shared/read-only-delegation.md#lane-result-v1) inline for a
+- **Output weight:** return [Lane
+  Result](../shared/read-only-delegation.md#lane-result) inline for a
   single-phase lookup. When reused downstream or needing refresh, persist
   `specs/<task>/research/<topic>.md` with: **Question & affected decision**,
   **Verified facts** (primary locator, scope/version, `valid as of`),

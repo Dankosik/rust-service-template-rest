@@ -2,8 +2,8 @@
 
 Implement the assigned task packet's unit-local `Outcome` and `Provides` cleanly
 on top of the integration tip, then return an [Implementation
-Result](../../interfaces/acceptance-result-v1.md#implementation-result). The
-Orchestrator owns assembled validation and review.
+Result](#implementation-result). The Orchestrator owns assembled validation and
+review.
 
 ## Steps
 
@@ -52,9 +52,8 @@ Orchestrator owns assembled validation and review.
      Resolution](../../../../.agents/skills/merge-conflict-resolution/SKILL.md)
      and rechecking affected seams), and return a clean fast-forwardable
      candidate. In a shared checkout, leave edits uncommitted.
-   - *Done when:* [Implementation
-     Result](../../interfaces/acceptance-result-v1.md#implementation-result) is
-     returned with diff-independent `decisions` and exact `unverified` gaps.
+   - *Done when:* [Implementation Result](#implementation-result) is returned
+     with diff-independent `decisions` and exact `unverified` gaps.
 
 ## Escalation
 
@@ -66,3 +65,22 @@ Orchestrator owns assembled validation and review.
 - If live evidence shows `Outcome` already holds or invalidates behavior or
   architecture, preserve partial work (as a WIP commit in an isolated worktree)
   and return `Blocked` naming the exact evidence and smallest owner.
+
+## Implementation Result
+
+Return format for `ACCEPTANCE_UNIT_LEAD` (unit implementation and repair
+passes):
+
+```text
+unit: <T<ID> or repair round>
+verdict: Implemented | Blocked
+candidate: <commit/branch, bounded diff, or none if blocked>
+provides: <implemented contract; no acceptance claim>
+decisions: <only diff-independent facts downstream needs: new/changed public symbols, error codes, defaults, test helpers, packet deviations, repair root causes/refutations; or none>
+unverified: <unchecked assumptions or unrun tests with exact reason, or none>
+next_owner: <Orchestrator, Orchestrator — scope expansion: <paths>, Orchestrator — refuted findings, or exact missing input and owner>
+```
+
+Return `Implemented` only after passing Step 3. On `Blocked`, preserve partial
+work (as a WIP commit in an isolated worktree; keep the live worktree untouched
+without a WIP commit for scope expansion).

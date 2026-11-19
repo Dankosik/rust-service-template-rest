@@ -18,13 +18,12 @@ Triggered from [Spec And Design](../spec-and-design.md#steps) for a qualifying
    pressures** *(use 2 only for a strictly binary fork between two concrete
    mechanisms)*. Give every lane the identical neutral frame, read-only
    boundary, `Method:
-   docs/spec-first-workflow/shared/read-only-delegation.md#candidate-proposal-v1`
+   docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`
    (plus matching domain skills), and **strictly its own pressure** (omit
    sibling pressures and any parent hypothesis). For a binary fork, name the two
    admissible mechanisms in the common constraints and let each lane develop its
    assigned side. Each lane pushes its pressure to its honest extreme and
-   returns [Candidate Proposal
-   V1](../../shared/read-only-delegation.md#candidate-proposal-v1).
+   returns [Candidate Proposal](#candidate-proposal).
    - **Derive problem-specific incompatible pressures first** when concrete
      alternatives solve the same problem (for example, minimize lock wait
      versus minimize retry work under contention). Otherwise select presets:
@@ -54,3 +53,19 @@ Triggered from [Spec And Design](../spec-and-design.md#steps) for a qualifying
    - *Done when:* `D<n>` records the chosen architecture and its strongest
      rejected candidate as steelman (or the single product/risk trade-off is
      returned to the user).
+
+## Candidate Proposal
+
+Return one contrasting design candidate without picking a winner or comparing
+against sibling lanes:
+
+```text
+pressure: <assigned optimization axis>
+proposal: <flow or Rust interface: types, methods, invariants, ordering, error modes, lifetimes>
+caller_sketch: <3-8 line realistic call-site usage against existing workspace types, or entry->finality trace>
+hidden_complexity: <what stays inside the module or mechanism behind the seam>
+dependencies_and_cost: <dependency category/adapters, failure/cancellation/concurrency profile, budgets & unit cost>
+thin_leverage_and_risks: <where this candidate bends, breaks, pays extra cost, or locks in one-way doors>
+blocker_or_gap: <hard constraint conflict, infeasible pressure, missing spec rule, or none>
+anchors: <source-verified repo and Cargo.lock locators used, or uncached gaps>
+```

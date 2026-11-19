@@ -33,7 +33,7 @@ standalone `research only` syntheses.
   author rationale and self-review claims so framing never anchors the
   reviewer.
 - The reviewer stays read-only, attempts to falsify the candidate, reuses valid
-  evidence, and returns [Review Result V1](../interfaces/review-result-v1.md).
+  evidence, and returns [Review Result](#review-result).
   Missing optional proof and preferences never block `PASS`; confirmed in-scope
   defects must close.
 - **Verify before repairing:** check every finding's anchor and witness against
@@ -69,6 +69,36 @@ standalone `research only` syntheses.
 | Assembled implementation delivery (ledger, Direct Work, or standalone review) | [Implementation Review](../phases/implementation-review.md) |
 
 For a surviving material evidence-backed conflict across panel lenses or
-refutations, dispatch `adjudicator-agent` for [Lane Result
-V1](read-only-delegation.md#lane-result-v1) while keeping synthesis authority in
-the parent.
+refutations, dispatch `adjudicator-agent` for [Lane
+Result](read-only-delegation.md#lane-result) while keeping synthesis authority
+in the parent.
+
+## Review Result
+
+Every independent review returns:
+
+```text
+candidate: <fixed artifact revision, diff, tree, or commit>
+verdict: PASS | CONCERNS | FAIL | NEEDS_PARENT | REVIEW_HANDOFF_INVALID
+findings: <anchored surviving findings grouped by axis, or none>
+evidence_boundary: <primary files, symbols, checks, or mutated branches actually inspected>
+reopen_owner: <smallest owner or none>
+```
+
+Each surviving finding names its anchor, outcome impact, classification,
+smallest owner, and evidence boundary. Missing mandatory proof is never
+downgraded to a concern.
+
+| Scope | Classifications | Allowed verdicts |
+| --- | --- | --- |
+| Plan / Research review | `PHASE_DEFECT` (local repair), `UPSTREAM_GAP` (reopen user or external owner), `CONCERN` (bounded downstream risk with risk, owner, and closing action) | `PASS \| CONCERNS \| FAIL \| REVIEW_HANDOFF_INVALID` (`PASS \| FAIL` only on zero-delta checks) |
+| Implementation review | `TASK_DEFECT` (repair owning task), `INTEGRATION_DEFECT` (repair seam across tasks), `UPSTREAM_GAP` (invalid accepted requirement/design in candidate scope), `FOLLOW_UP` (non-blocking) | `PASS \| FAIL \| NEEDS_PARENT \| REVIEW_HANDOFF_INVALID` |
+
+- `FAIL`: witnessed in-scope defect (`PHASE_DEFECT`, `TASK_DEFECT`,
+  `INTEGRATION_DEFECT`) or confirmed `UPSTREAM_GAP` invalidating the candidate
+  or plan.
+- `NEEDS_PARENT`: review cannot close because required proof, authority, or an
+  authoritative input outside the candidate diff is missing or unavailable.
+- `REVIEW_HANDOFF_INVALID`: broken review handoff (missing artifact/boundary,
+  unresolved ref, or empty diff); fix the handoff and redispatch without
+  consuming a repair round.
