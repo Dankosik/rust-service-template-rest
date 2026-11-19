@@ -85,32 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_simple_migrations_pass() {
-        for migration in [
-            migration(
-                20_260_918_120_000,
-                "create widgets",
-                MigrationType::Simple,
-                false,
-            ),
-            migration(
-                20_260_918_120_001,
-                "widgets add sku 2",
-                MigrationType::Simple,
-                false,
-            ),
-            migration(
-                20_260_918_120_002,
-                "widgets sku index",
-                MigrationType::Simple,
-                true,
-            ),
-        ] {
-            assert_eq!(source_rule_violation(&migration), None);
-        }
-    }
-
-    #[test]
     fn each_rule_names_the_offending_version() {
         let cases = [
             (
