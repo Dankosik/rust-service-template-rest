@@ -1940,7 +1940,11 @@ mod tests {
                 &super::RememberedExpiry,
                 &token.into_bytes().into_boxed_slice(),
                 &remembered,
-                (remembered.remember_until - expected_held) + insertion_delay,
+                remembered
+                    .remember_until
+                    .checked_sub(expected_held)
+                    .unwrap()
+                    + insertion_delay,
             );
             assert_eq!(ttl, Some(Duration::from_millis(ttl_millis)), "{exp}");
         }
