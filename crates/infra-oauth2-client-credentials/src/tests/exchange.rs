@@ -122,38 +122,27 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
 }
 
 #[tokio::test]
-async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange() {
-    let fixture = Fixture::new().await;
-    let mut short = exchange_response("short");
-    short["expires_in"] = serde_json::json!(5);
-    fixture.token_json(StatusCode::OK, &short);
-    let client = fixture.exchange_client();
-    for expected_exchanges in 1..=2 {
-        fixture
-            .send_request(&client, fixture.on_behalf_of_request("alice"))
-            .await
-            .unwrap();
-        assert_eq!(fixture.token_request_count(), expected_exchanges);
+async fn short_or_missing_lifetime_makes_each_exchange_token_request_only() {
+    for expires_in in [Some(5), None] {
+        let fixture = Fixture::new().await;
+        let mut response = exchange_response("request-only");
+        if let Some(expires_in) = expires_in {
+            response["expires_in"] = serde_json::json!(expires_in);
+        } else {
+            response.as_object_mut().unwrap().remove("expires_in");
+        }
+        fixture.token_json(StatusCode::OK, &response);
+        let client = fixture.exchange_client();
+        for requests in 1..=2 {
+            fixture
+                .send_request(&client, fixture.on_behalf_of_request("subject"))
+                .await
+                .unwrap();
+            assert_eq!(fixture.token_request_count(), requests, "{expires_in:?}");
+            assert_eq!(fixture.resource_request_count(), requests, "{expires_in:?}");
+        }
+        fixture.finish().await;
     }
-    fixture.finish().await;
-}
-
-#[tokio::test]
-async fn an_exchanged_token_without_lifetime_is_request_only() {
-    let fixture = Fixture::new().await;
-    let mut response = exchange_response("request-only");
-    response.as_object_mut().unwrap().remove("expires_in");
-    fixture.token_json(StatusCode::OK, &response);
-    let client = fixture.exchange_client();
-    for _ in 0..2 {
-        fixture
-            .send_request(&client, fixture.on_behalf_of_request("subject"))
-            .await
-            .unwrap();
-    }
-    assert_eq!(fixture.token_request_count(), 2);
-    assert_eq!(fixture.resource_request_count(), 2);
-    fixture.finish().await;
 }
 
 #[tokio::test]
