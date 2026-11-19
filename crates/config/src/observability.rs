@@ -62,10 +62,6 @@ pub enum TracesSampler {
     ParentBasedTraceIdRatio,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-struct TracesSamplerInput(#[serde(deserialize_with = "crate::de::string_enum")] TracesSampler);
-
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 struct TracesSamplerArgInput(#[serde(deserialize_with = "crate::de::ratio")] f64);
@@ -99,7 +95,8 @@ impl<Sampler: Default, SamplerArg: Default, Exporter: Default> Default
     }
 }
 
-type OtelInput = OtelFields<TracesSamplerInput, TracesSamplerArgInput, OtelExporterConfig>;
+type OtelInput =
+    OtelFields<crate::de::StrictEnum<TracesSampler>, TracesSamplerArgInput, OtelExporterConfig>;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "OtelInput")]

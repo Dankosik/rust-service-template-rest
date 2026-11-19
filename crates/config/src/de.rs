@@ -96,6 +96,18 @@ where
     Ok(Option::<StrictBool>::deserialize(deserializer)?.map(|value| value.0))
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct StrictEnum<T>(pub(crate) T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for StrictEnum<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        string_enum(deserializer).map(Self)
+    }
+}
+
 pub(crate) fn string_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -111,9 +123,7 @@ where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,
 {
-    optional_string(deserializer)?
-        .map(|raw| T::deserialize(raw.as_str().into_deserializer()))
-        .transpose()
+    Ok(Option::<StrictEnum<T>>::deserialize(deserializer)?.map(|value| value.0))
 }
 
 #[allow(

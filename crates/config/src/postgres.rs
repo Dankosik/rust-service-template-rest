@@ -65,12 +65,6 @@ pub(crate) struct PostgresFields<
     migration_deadline: Deadline,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct SessionBudgetsInput(
-    #[serde(deserialize_with = "crate::de::string_enum")] PostgresSessionBudgets,
-);
-
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct MaxConnectionsInput(
@@ -103,13 +97,21 @@ impl Default for Notifications {
     }
 }
 
-pub(crate) type PostgresInput =
-    PostgresFields<SessionBudgetsInput, MaxConnectionsInput, IgnoredAny, Notifications>;
+pub(crate) type PostgresInput = PostgresFields<
+    crate::de::StrictEnum<PostgresSessionBudgets>,
+    MaxConnectionsInput,
+    IgnoredAny,
+    Notifications,
+>;
 type MigrationPostgresInput =
     PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny, Option<SecretString>>;
 // template:begin jobs:postgres-operator-input
-pub(crate) type OperatorPostgresInput =
-    PostgresFields<SessionBudgetsInput, IgnoredAny, IgnoredAny, IgnoredAny>;
+pub(crate) type OperatorPostgresInput = PostgresFields<
+    crate::de::StrictEnum<PostgresSessionBudgets>,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+>;
 // template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]

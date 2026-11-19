@@ -22,7 +22,7 @@ impl ValidationError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{}", join(.0))]
+#[error("{}", join_errors(.0))]
 pub struct ValidationErrors(Vec<ValidationError>);
 
 impl ValidationErrors {
@@ -45,7 +45,7 @@ impl<'a> IntoIterator for &'a ValidationErrors {
     }
 }
 
-fn join(errors: &[ValidationError]) -> String {
+pub(crate) fn join_errors<E: std::fmt::Display>(errors: &[E]) -> String {
     errors
         .iter()
         .map(ToString::to_string)

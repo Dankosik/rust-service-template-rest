@@ -9,8 +9,8 @@ fn railway() -> ObjectStorageInput {
     ObjectStorageInput {
         provider: ProviderKind::Railway,
         bucket: "results-jdhhd8oe18xi".to_owned(),
-        endpoint: "https://t3.storageapi.dev".to_owned(),
-        access_key_id: "tid_example".to_owned(),
+        endpoint: Some("https://t3.storageapi.dev".to_owned()),
+        access_key_id: Some("tid_example".to_owned()),
         secret_access_key: Some(SecretString::from("hunter2".to_owned())),
         ..ObjectStorageInput::default()
     }
@@ -19,9 +19,9 @@ fn railway() -> ObjectStorageInput {
 fn amazon() -> ObjectStorageInput {
     ObjectStorageInput {
         provider: ProviderKind::AmazonS3,
-        endpoint: String::new(),
-        region: "eu-central-1".to_owned(),
-        expected_bucket_owner: "123456789012".to_owned(),
+        endpoint: None,
+        region: Some("eu-central-1".to_owned()),
+        expected_bucket_owner: Some("123456789012".to_owned()),
         ..railway()
     }
 }
@@ -74,14 +74,14 @@ fn an_active_provider_needs_bucket_and_credentials() {
             "object_storage.bucket",
         ),
         (
-            |input| input.access_key_id.clear(),
+            |input| input.access_key_id = None,
             "object_storage.access_key_id",
         ),
         (
             |input| input.secret_access_key = None,
             "object_storage.secret_access_key",
         ),
-        (|input| input.endpoint.clear(), "object_storage.endpoint"),
+        (|input| input.endpoint = None, "object_storage.endpoint"),
     ] {
         let mut input = railway();
         mutate(&mut input);
@@ -93,8 +93,8 @@ fn an_active_provider_needs_bucket_and_credentials() {
 fn every_violated_rule_is_reported_together() {
     let input = ObjectStorageInput {
         bucket: String::new(),
-        endpoint: String::new(),
-        access_key_id: String::new(),
+        endpoint: None,
+        access_key_id: None,
         max_concurrency: 0,
         ..railway()
     };
@@ -111,11 +111,16 @@ fn every_violated_rule_is_reported_together() {
 
 #[test]
 fn blank_optional_regions_are_absent() {
-    let mut input = railway();
-    input.region = "  ".to_owned();
-    let admitted = admit(input, false).unwrap().unwrap();
+    let cfg = load_env(&[
+        ("APP__OBJECT_STORAGE__PROVIDER", "railway"),
+        ("APP__OBJECT_STORAGE__BUCKET", "results-jdhhd8oe18xi"),
+        ("APP__OBJECT_STORAGE__ENDPOINT", "https://t3.storageapi.dev"),
+        ("APP__OBJECT_STORAGE__REGION", "  "),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "tid_example"),
+        ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
+    ]);
     assert_matches!(
-        admitted.provider,
+        cfg.object_storage.as_ref().unwrap().provider,
         ObjectStorageProvider::Railway { region: None, .. }
     );
 }
@@ -133,7 +138,7 @@ fn providers_accept_only_their_own_keys() {
     );
     assert!(errors.names("object_storage.region"));
     assert!(errors.names("object_storage.expected_bucket_owner"));
-    other.endpoint.clear();
+    other.endpoint = None;
     assert_eq!(
         keys(other.clone(), false),
         [
@@ -141,7 +146,7 @@ fn providers_accept_only_their_own_keys() {
             "object_storage.expected_bucket_owner"
         ]
     );
-    other.region = "eu-central-1".to_owned();
+    other.region = Some("eu-central-1".to_owned());
     assert_eq!(key_of(other, false), "object_storage.expected_bucket_owner");
     assert_eq!(
         admit(amazon(), false).unwrap().unwrap().provider,
@@ -153,16 +158,16 @@ fn providers_accept_only_their_own_keys() {
 
     let mut r2 = railway();
     r2.provider = ProviderKind::CloudflareR2;
-    r2.region = "eu-central-1".to_owned();
+    r2.region = Some("eu-central-1".to_owned());
     assert_eq!(key_of(r2.clone(), false), "object_storage.region");
-    r2.region = "auto".to_owned();
+    r2.region = Some("auto".to_owned());
     assert_eq!(
         admit(r2.clone(), false).unwrap().unwrap().provider,
         ObjectStorageProvider::CloudflareR2 {
             endpoint: "https://t3.storageapi.dev".to_owned(),
         }
     );
-    r2.expected_bucket_owner = "123456789012".to_owned();
+    r2.expected_bucket_owner = Some("123456789012".to_owned());
     let errors = admit(r2, false).unwrap_err();
     let error = errors.iter().next().unwrap();
     assert_eq!(error.key, "object_storage.expected_bucket_owner");
@@ -174,14 +179,24 @@ fn providers_accept_only_their_own_keys() {
 
 #[test]
 fn cloudflare_r2_trims_blank_and_auto_regions() {
+    for accepted in ["", "   ", "auto", " auto ", "\tauto\n"] {
+        let cfg = load_env(&[
+            ("APP__OBJECT_STORAGE__PROVIDER", "cloudflare_r2"),
+            ("APP__OBJECT_STORAGE__BUCKET", "results-jdhhd8oe18xi"),
+            ("APP__OBJECT_STORAGE__ENDPOINT", "https://t3.storageapi.dev"),
+            ("APP__OBJECT_STORAGE__REGION", accepted),
+            ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "tid_example"),
+            ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
+        ]);
+        assert_matches!(
+            cfg.object_storage.as_ref().unwrap().provider,
+            ObjectStorageProvider::CloudflareR2 { .. }
+        );
+    }
     let mut r2 = railway();
     r2.provider = ProviderKind::CloudflareR2;
-    for accepted in ["", "   ", "auto", " auto ", "\tauto\n"] {
-        r2.region = accepted.to_owned();
-        admit(r2.clone(), false).unwrap();
-    }
     for rejected in ["eu-central-1", " eu-central-1 ", "AUTO"] {
-        r2.region = rejected.to_owned();
+        r2.region = Some(rejected.to_owned());
         assert_eq!(key_of(r2.clone(), false), "object_storage.region");
     }
 }
@@ -197,7 +212,7 @@ fn workload_identity_is_amazon_only_and_takes_no_access_key() {
             "object_storage.secret_access_key"
         ]
     );
-    input.access_key_id.clear();
+    input.access_key_id = None;
     assert_eq!(
         key_of(input.clone(), false),
         "object_storage.secret_access_key"
@@ -210,7 +225,7 @@ fn workload_identity_is_amazon_only_and_takes_no_access_key() {
 
     let mut other = railway();
     other.credentials = CredentialsKind::WorkloadIdentity;
-    other.access_key_id.clear();
+    other.access_key_id = None;
     other.secret_access_key = None;
     assert_eq!(key_of(other, false), "object_storage.credentials");
 }
@@ -227,7 +242,7 @@ fn path_style_belongs_to_the_generic_provider() {
             ..
         }
     );
-    generic.expected_bucket_owner = "123456789012".to_owned();
+    generic.expected_bucket_owner = Some("123456789012".to_owned());
     assert_eq!(
         key_of(generic, false),
         "object_storage.expected_bucket_owner"
@@ -298,7 +313,7 @@ fn limits_are_bounded_even_when_inert() {
 #[test]
 fn debug_output_hides_the_secret_and_destination() {
     let mut input = railway();
-    input.endpoint = "https://bucket.example/private-destination".to_owned();
+    input.endpoint = Some("https://bucket.example/private-destination".to_owned());
     let rendered = format!("{:?}", admit(input, false).unwrap());
     assert!(!rendered.contains("hunter2"));
     assert!(!rendered.contains("private-destination"));
