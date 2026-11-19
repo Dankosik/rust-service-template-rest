@@ -200,7 +200,13 @@ fn parse_jwks_entries(
             Err(reason) => *rejected.entry(reason).or_default() += 1,
         }
     }
-    if configured.contains(&JwtAlgorithm::Rs256) && configured.contains(&JwtAlgorithm::Ps256) {
+    let mut rsa_algorithms = configured
+        .iter()
+        .copied()
+        .filter(|algorithm| algorithm.family() == KeyFamily::Rsa);
+    if let Some(first) = rsa_algorithms.next()
+        && rsa_algorithms.any(|other| other != first)
+    {
         let conflicts = reject_conflicting_rsa_keys(&mut keys);
         if conflicts != 0 {
             *rejected.entry(KeyRejection::AlgorithmBinding).or_default() += conflicts;
@@ -210,8 +216,7 @@ fn parse_jwks_entries(
 }
 
 fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
-    let rejected_without_usable_keys = parsed.has_non_encryption_rejections_without_keys();
-    for (reason, count) in parsed.rejected {
+    for (&reason, &count) in &parsed.rejected {
         tracing::debug!(
             reason = reason.label(),
             count,
@@ -219,7 +224,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
-    if rejected_without_usable_keys {
+    if parsed.has_non_encryption_rejections_without_keys() {
         return Err(KeySetFailure::NoUsableKeys);
     }
     Ok(KeySet {
@@ -369,15 +374,17 @@ fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {
         AlgorithmParameters::Other(key)
             if key.fields.get("kty").and_then(serde_json::Value::as_str) == Some("OKP") =>
         {
+            const X25519_PUBLIC_KEY_BYTES: usize = 32;
+            const X448_PUBLIC_KEY_BYTES: usize = 56;
             let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
-                Some("X25519") => 32,
-                Some("X448") => 56,
+                Some("X25519") => X25519_PUBLIC_KEY_BYTES,
+                Some("X448") => X448_PUBLIC_KEY_BYTES,
                 _ => return false,
             };
             let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
                 return false;
             };
-            let mut bytes = [0_u8; 56];
+            let mut bytes = [0_u8; X448_PUBLIC_KEY_BYTES];
             URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
                 && bytes[..length].iter().any(|&byte| byte != 0)
         }

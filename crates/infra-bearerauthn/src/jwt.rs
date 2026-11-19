@@ -109,8 +109,8 @@ mod fixtures {
     }
 }
 
-const MAX_REMEMBERED: u64 = 1024;
-const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
+const VERIFIED_CACHE_CAPACITY: u64 = 1024;
+const MAX_VERIFIED_CACHE_TTL: Duration = REFRESH_INTERVAL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenProfile {
@@ -121,26 +121,22 @@ pub enum TokenProfile {
 }
 
 #[derive(Clone)]
-struct Remembered {
+struct CachedVerification {
     verified: VerifiedClaims,
     key_generation: u64,
-    remember_until: MonotonicInstant,
+    expires_at: MonotonicInstant,
 }
 
-struct RememberedExpiry;
+struct CachedVerificationExpiry;
 
-impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
+impl Expiry<Box<[u8]>, CachedVerification> for CachedVerificationExpiry {
     fn expire_after_create(
         &self,
         _token: &Box<[u8]>,
-        remembered: &Remembered,
+        cached: &CachedVerification,
         created_at: MonotonicInstant,
     ) -> Option<Duration> {
-        Some(
-            remembered
-                .remember_until
-                .saturating_duration_since(created_at),
-        )
+        Some(cached.expires_at.saturating_duration_since(created_at))
     }
 }
 
@@ -157,7 +153,7 @@ pub(crate) struct JwtVerifier {
     algorithms: Vec<JwtAlgorithm>,
     key_store: Arc<KeyStore>,
     jwks_max_age: Duration,
-    remembered: Cache<Box<[u8]>, Remembered, foldhash::quality::RandomState>,
+    cache: Cache<Box<[u8]>, CachedVerification, foldhash::quality::RandomState>,
 }
 
 impl JwtVerifier {
@@ -174,9 +170,9 @@ impl JwtVerifier {
             algorithms,
             key_store,
             jwks_max_age,
-            remembered: Cache::builder()
-                .max_capacity(MAX_REMEMBERED)
-                .expire_after(RememberedExpiry)
+            cache: Cache::builder()
+                .max_capacity(VERIFIED_CACHE_CAPACITY)
+                .expire_after(CachedVerificationExpiry)
                 .build_with_hasher(foldhash::quality::RandomState::default()),
         }
     }
@@ -198,19 +194,19 @@ impl JwtVerifier {
         let bytes = token.as_bytes();
         let keys = self.key_store.current();
         keys.require_fresh(self.jwks_max_age)?;
-        if let Some(remembered) = self.remembered.get(bytes) {
-            if remembered.key_generation == keys.generation() {
-                let result = remembered.verified.into_principal_checked_at(unix_now()?);
+        if let Some(cached) = self.cache.get(bytes) {
+            if cached.key_generation == keys.generation() {
+                let result = cached.verified.into_principal_checked_at(unix_now()?);
                 if matches!(&result, Err(error) if error.reason == VerificationReason::Expired) {
-                    self.remembered.invalidate(bytes);
+                    self.cache.invalidate(bytes);
                 }
                 return result;
             }
-            self.remembered.invalidate(bytes);
+            self.cache.invalidate(bytes);
         }
-        let remembered = self.verify_uncached(token, &unix_now, keys).await?;
-        let principal = remembered.verified.principal.clone();
-        self.remembered.insert(bytes.into(), remembered);
+        let cached = self.verify_uncached(token, &unix_now, keys).await?;
+        let principal = cached.verified.principal.clone();
+        self.cache.insert(bytes.into(), cached);
         Ok(principal)
     }
 
@@ -219,7 +215,7 @@ impl JwtVerifier {
         token: &PresentedToken<'_>,
         unix_now: &impl Fn() -> Result<Duration, VerificationError>,
         keys: Arc<KeySet>,
-    ) -> Result<Remembered, VerificationError> {
+    ) -> Result<CachedVerification, VerificationError> {
         let rfc7515::Compact {
             signing_input: message,
             header,
@@ -259,10 +255,10 @@ impl JwtVerifier {
         let now = unix_now()?;
         let verified = validate_claims(payload, now)?;
         signing_keys.require_fresh(self.jwks_max_age)?;
-        let held_for =
-            MAX_REMEMBERED_FOR.min(verified.principal.expiry_from_epoch().saturating_sub(now));
-        Ok(Remembered {
-            remember_until: sampled_at + held_for,
+        let ttl =
+            MAX_VERIFIED_CACHE_TTL.min(verified.principal.expiry_from_epoch().saturating_sub(now));
+        Ok(CachedVerification {
+            expires_at: sampled_at + ttl,
             verified,
             key_generation: signing_keys.generation(),
         })
@@ -343,7 +339,9 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED, TokenProfile};
+    use super::{
+        ClaimPolicy, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile, VERIFIED_CACHE_CAPACITY,
+    };
     use crate::{
         Failure, Transport, VerificationReason,
         jwks::{
@@ -1644,8 +1642,8 @@ mod tests {
     }
 
     fn remembered_count(verifier: &JwtVerifier) -> u64 {
-        verifier.remembered.run_pending_tasks();
-        verifier.remembered.entry_count()
+        verifier.cache.run_pending_tasks();
+        verifier.cache.entry_count()
     }
 
     #[tokio::test]
@@ -1809,9 +1807,9 @@ mod tests {
         let memo = ec_verifier(&signing, "k");
         let token = ec_token(&signing, "k", &serde_json::json!({}));
         let generation = |memo: &JwtVerifier| {
-            memo.remembered
+            memo.cache
                 .get(token.as_bytes())
-                .map(|remembered| remembered.key_generation)
+                .map(|cached| cached.key_generation)
         };
         verify_at(&memo, &token, 1_000).await.unwrap();
         assert_eq!(
@@ -1851,11 +1849,8 @@ mod tests {
         );
         memo.key_store.finish(1, Ok(rotated_set));
         assert_eq!(call.await.unwrap(), Ok(()));
-        let remembered = memo.remembered.get(token.as_bytes()).unwrap();
-        assert_eq!(
-            remembered.key_generation,
-            memo.key_store.current().generation()
-        );
+        let cached = memo.cache.get(token.as_bytes()).unwrap();
+        assert_eq!(cached.key_generation, memo.key_store.current().generation());
         assert!(verify_at(&memo, &token, 1_000).await.is_ok());
     }
 
@@ -1895,7 +1890,7 @@ mod tests {
     async fn the_memo_never_holds_more_than_its_entry_bound() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        for index in 0..MAX_REMEMBERED + 200 {
+        for index in 0..VERIFIED_CACHE_CAPACITY + 200 {
             let token = ec_token(
                 &signing,
                 "k",
@@ -1903,7 +1898,7 @@ mod tests {
             );
             verify_at(&memo, &token, 1_000).await.unwrap();
         }
-        assert!(remembered_count(&memo) <= MAX_REMEMBERED);
+        assert!(remembered_count(&memo) <= VERIFIED_CACHE_CAPACITY);
     }
 
     #[tokio::test]
@@ -1912,9 +1907,9 @@ mod tests {
         let memo = ec_verifier(&signing, "k");
         let token = ec_token(&signing, "k", &serde_json::json!({ "exp": 1_001 }));
         verify_at(&memo, &token, 1_000).await.unwrap();
-        assert!(memo.remembered.get(token.as_bytes()).is_some());
+        assert!(memo.cache.get(token.as_bytes()).is_some());
         tokio::time::sleep(Duration::from_millis(1_200)).await;
-        assert!(memo.remembered.get(token.as_bytes()).is_none());
+        assert!(memo.cache.get(token.as_bytes()).is_none());
     }
 
     #[tokio::test]
@@ -1932,23 +1927,18 @@ mod tests {
                 .await
                 .unwrap();
             let after = std::time::Instant::now();
-            let remembered = memo.remembered.get(token.as_bytes()).unwrap();
+            let cached = memo.cache.get(token.as_bytes()).unwrap();
             let expected_held = Duration::from_millis(expected_held_millis);
             assert!(
-                (before + expected_held..=after + expected_held)
-                    .contains(&remembered.remember_until),
+                (before + expected_held..=after + expected_held).contains(&cached.expires_at),
                 "{exp}"
             );
             let insertion_delay = Duration::from_millis(250);
             let ttl = moka::Expiry::expire_after_create(
-                &super::RememberedExpiry,
+                &super::CachedVerificationExpiry,
                 &token.into_bytes().into_boxed_slice(),
-                &remembered,
-                remembered
-                    .remember_until
-                    .checked_sub(expected_held)
-                    .unwrap()
-                    + insertion_delay,
+                &cached,
+                cached.expires_at.checked_sub(expected_held).unwrap() + insertion_delay,
             );
             assert_eq!(ttl, Some(Duration::from_millis(ttl_millis)), "{exp}");
         }
