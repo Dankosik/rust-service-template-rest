@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use aws_sdk_s3::config::{
     BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
-    SharedHttpClient, StalledStreamProtectionConfig,
+    SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
@@ -156,20 +156,31 @@ impl PresignedUrl {
 
 impl ObjectStorage {
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
+        let admitted = provider::admit(&options.provider, &options.bucket)?;
+        if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {
+            return Err(ConfigError::MaxConcurrency);
+        }
+        let http_client = https_client();
+        let credentials = options
+            .credentials
+            .credentials_provider(&admitted, &http_client)?;
+        Ok(Self::build(options, admitted, http_client, credentials))
+    }
+
+    fn build(
+        options: ObjectStorageOptions,
+        admitted: provider::Admitted,
+        http_client: SharedHttpClient,
+        credentials: SharedCredentialsProvider,
+    ) -> Self {
         let ObjectStorageOptions {
             provider,
             bucket,
-            credentials,
+            credentials: _,
             max_object_bytes,
             max_concurrency,
             operation_timeout,
         } = options;
-        let admitted = provider::admit(&provider, &bucket)?;
-        if !(1..=Semaphore::MAX_PERMITS).contains(&max_concurrency) {
-            return Err(ConfigError::MaxConcurrency);
-        }
-        let http_client = https_client();
-        let credentials = credentials.credentials_provider(&admitted, &http_client)?;
         let (timeout, retry) = call_policy(Call::Read, operation_timeout, operation_timeout);
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
@@ -199,7 +210,7 @@ impl ObjectStorage {
         };
         config = config.region(Region::new(admitted.region));
         observe::describe();
-        Ok(Self {
+        Self {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
                 provider_name: provider.name(),
@@ -212,7 +223,7 @@ impl ObjectStorage {
                 admission: Arc::new(Semaphore::new(max_concurrency)),
                 histograms: Arc::default(),
             }),
-        })
+        }
     }
 
     #[must_use]

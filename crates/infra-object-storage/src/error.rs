@@ -225,15 +225,11 @@ impl From<UploadFailure> for Failure<MutationError> {
 }
 
 type SdkFailure<E> = SdkError<E, HttpResponse>;
+type PutReply = Result<PutObjectOutput, SdkFailure<PutObjectError>>;
+pub(crate) type PutCallResult = Result<(PutReply, Option<CallStop>), Interrupted>;
 
 pub(crate) fn interpret_put_result(
-    result: &Result<
-        (
-            Result<PutObjectOutput, SdkFailure<PutObjectError>>,
-            Option<CallStop>,
-        ),
-        Interrupted,
-    >,
+    result: &PutCallResult,
     call: Call,
     length_mismatch: bool,
 ) -> Result<(), Failure<MutationError>> {
