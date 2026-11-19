@@ -6,6 +6,7 @@ use infra_postgres::{
     in_tx_with_deadline, is_transient, observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
+use sqlx::postgres::PgBindIterExt as _;
 
 use crate::record::HeaderPair;
 use crate::{READ_COMMITTED, Record, Store};
@@ -347,7 +348,6 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    let headers = record.encode_headers();
     let written = observed(
         "write idempotency record",
         sqlx::query!(
@@ -367,7 +367,7 @@ async fn write(
             scope.digest.as_slice(),
             fingerprint.as_bytes().as_slice(),
             record.encode_status(),
-            &headers as _,
+            record.encode_headers().bind_iter() as _,
             record.body(),
             scope.caller.issuer,
             scope.caller.kind.as_str(),

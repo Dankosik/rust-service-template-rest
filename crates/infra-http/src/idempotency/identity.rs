@@ -39,11 +39,16 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
         .trim_matches([' ', '\t'])
         .as_bytes();
     let decoded = if value.first() == Some(&b'"') {
-        let item = sfv::Parser::new(value).parse::<sfv::Item>().ok()?;
-        let sfv::BareItem::String(value) = item.bare_item else {
+        let item = sfv::Parser::new(value)
+            .parse_item::<sfv::BareItemFromInput<'_>>()
+            .ok()?;
+        let sfv::BareItemFromInput::String(value) = item else {
             return None;
         };
-        Cow::Owned(String::from(value).into_bytes())
+        match value {
+            Cow::Borrowed(value) => Cow::Borrowed(value.as_str().as_bytes()),
+            Cow::Owned(value) => Cow::Owned(String::from(value).into_bytes()),
+        }
     } else if value.iter().all(u8::is_ascii_graphic) {
         Cow::Borrowed(value)
     } else {
@@ -86,13 +91,15 @@ pub(super) fn request_fingerprint(
     let trailers = input.trailers();
     if !trailers.is_empty() {
         hasher.update(b"trailers/v1\0");
-        let mut fields = trailers
-            .iter()
-            .collect::<smallvec::SmallVec<[(&HeaderName, &axum::http::HeaderValue); 4]>>();
-        fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
-        for (name, value) in fields {
-            frame(&mut hasher, name.as_str().as_bytes());
-            frame(&mut hasher, value.as_bytes());
+        let mut names = trailers
+            .keys()
+            .collect::<smallvec::SmallVec<[&HeaderName; 4]>>();
+        names.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+        for name in names {
+            for value in trailers.get_all(name) {
+                frame(&mut hasher, name.as_str().as_bytes());
+                frame(&mut hasher, value.as_bytes());
+            }
         }
     }
     RequestFingerprint::from_bytes(hasher.finalize().into())
@@ -100,7 +107,14 @@ pub(super) fn request_fingerprint(
 
 fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderName) {
     let values = headers.get_all(name);
-    hasher.update((values.iter().count() as u64).to_be_bytes());
+    let iter = values.iter();
+    let (lower, upper) = iter.size_hint();
+    let count = if upper == Some(lower) {
+        lower
+    } else {
+        iter.count()
+    };
+    hasher.update((count as u64).to_be_bytes());
     for value in values {
         frame(hasher, value.as_bytes());
     }
@@ -160,9 +174,9 @@ mod tests {
             decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]),
             Some(Cow::Owned(value)) if value.as_slice() == b"a b\\c"
         );
-        assert_eq!(
-            decode_key([b"\"same\"".as_slice()]),
-            decode_key([b"same".as_slice()])
+        std::assert_matches!(
+            decode_key([b"\"same\";flag;choice=1;choice=\"last\"".as_slice()]),
+            Some(Cow::Borrowed(b"same"))
         );
     }
 
@@ -277,6 +291,10 @@ mod tests {
         first.append("x-region", HeaderValue::from_static("east"));
         first.append("x-region", HeaderValue::from_static("west"));
         first.append("x-note", HeaderValue::from_static("note"));
+        assert_eq!(
+            fingerprint(Some(&first)),
+            decode_digest("39fc017a345d7c3b438fb1442422d26a7c7e886c177537a474fdc79f5b975b8f")
+        );
         let mut reordered = HeaderMap::new();
         reordered.append("x-note", HeaderValue::from_static("note"));
         reordered.append("x-region", HeaderValue::from_static("east"));
