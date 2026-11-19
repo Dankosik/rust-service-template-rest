@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from template import harness, init as template_init, runtime_progress
+from template import check as template_check, harness, init as template_init, runtime_progress
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -264,6 +265,15 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
 
             ref.write_text("# Workspace utility crates\n\nNo bullets here.\n", encoding="utf-8")
             self.assertTrue(any("contains no crate entries" in item for item in harness.check_workspace_crates_reference(repo)))
+
+    def test_ci_template_matrix_shards_cover_every_canonical_profile_once(self) -> None:
+        ci_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        section = ci_text.split("template-matrix:", 1)[1].split("  # template:end source-template:ci-template-job", 1)[0]
+        profiles: list[str] = []
+        for match in re.finditer(r"^\s+profiles:\s+(.+)$", section, re.M):
+            profiles.extend(match.group(1).split())
+        self.assertEqual(len(profiles), len(set(profiles)), f"duplicate profiles in template-matrix shards: {profiles}")
+        self.assertEqual(set(profiles), set(template_check.CANONICAL_PROFILES))
 
 
 if __name__ == "__main__":

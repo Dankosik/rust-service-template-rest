@@ -13,7 +13,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 permissions:
   contents: read
@@ -58,6 +58,7 @@ jobs:
         uses: ./.github/actions/detect-changes # zizmor: ignore[self-repository]
         with:
           github_token: ${{ github.token }}
+          main_coalesce_seconds: ${{ vars.MAIN_PUSH_COALESCE_SECONDS || '60' }}
 
   secrets:
     needs: changes
@@ -73,6 +74,7 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just gitleaks
+          cache_key_prefix: mise-secrets
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Secret scan
         env:
@@ -98,6 +100,7 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just typos zizmor actionlint shellcheck ruff lychee promtool
+          cache_key_prefix: mise-repo-lint
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Repository linters
         env:
@@ -223,6 +226,7 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just cargo-deny
+          cache_key_prefix: mise-security
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Dependency policy and vendored drift
         run: |
@@ -249,6 +253,7 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just buf
+          cache_key_prefix: mise-grpc
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check protobuf schemas and generated Rust
         env:
@@ -278,7 +283,7 @@ jobs:
       - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          key: integration
+          shared-key: integration
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
@@ -340,7 +345,8 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just
-          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache_key_prefix: mise-just
+          cache_save: false
       - name: Keycloak OAuth integration
         run: REQUIRE_DOCKER=1 just test-integration-oauth
   # template:end outbound-auth:ci-oauth-job
@@ -358,6 +364,7 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just
+          cache_key_prefix: mise-just
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -402,13 +409,14 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
           cache-bin: "false"
-          shared-key: runtime-progress
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          shared-key: rust-quality
+          save-if: "false"
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
         with:
           version: "2026.11.10"
           install_args: just
-          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache_key_prefix: mise-just
+          cache_save: false
       - id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -436,7 +444,7 @@ jobs:
     needs: [changes, secrets]
     if: "!cancelled() && needs.changes.outputs.template == 'true'"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -446,32 +454,56 @@ jobs:
         with:
           version: "2026.11.10"
           install_args: just
-          cache_key_prefix: mise-tpl
+          cache_key_prefix: mise-just
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          cache_save_post: true
       - name: Projection and unit checks
         run: |
           set -euo pipefail
           just template-check
           just template-test
-      - if: needs.changes.outputs.post_merge == 'true'
-        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - if: needs.changes.outputs.post_merge == 'true'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
+
+  template-matrix:
+    needs: [changes, secrets]
+    if: "!cancelled() && needs.changes.outputs.template == 'true' && needs.changes.outputs.post_merge == 'true'"
+    name: template-matrix (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: core-auth
+            profiles: minimal authn-jwt authn-introspection outbound-oauth
+          - shard: adapters-grpc
+            profiles: postgres cache-s3 grpc-service-auth
+          - shard: durable-full
+            profiles: postgres-full messaging-outbox full
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          shared-key: template-matrix
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: rust-quality
           cache-bin: "false"
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Canonical profile build and test matrix
-        if: needs.changes.outputs.post_merge == 'true'
+          save-if: "false"
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10 # zizmor: ignore[cache-poisoning]
+        with:
+          version: "2026.11.10"
+          install_args: just cargo-nextest
+          cache_key_prefix: mise-int
+          cache_save: false
+      - name: Canonical profile build and test shard
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          MISE_GITHUB_TOKEN: ${{ github.token }}
+          PROFILES: ${{ matrix.profiles }}
         run: |
           set -euo pipefail
-          mise install --locked cargo-nextest
           cargo fetch --locked
-          just template-matrix
+          read -r -a selected_profiles <<<"${PROFILES}"
+          just template-matrix --profiles "${selected_profiles[@]}"
   # template:end source-template:ci-template-job
 
   required:
@@ -497,6 +529,7 @@ jobs:
       # template:end source-template:ci-required-runtime-progress
       # template:begin source-template:ci-required-template
       - template
+      - template-matrix
       # template:end source-template:ci-required-template
     runs-on: ubuntu-latest
     timeout-minutes: 2

@@ -6,6 +6,10 @@ inputs:
     description: GITHUB_TOKEN used to resolve the green branch on main pushes.
     required: false
     default: ${{ github.token }}
+  main_coalesce_seconds:
+    description: Seconds to wait on main push runs so back-to-back merges coalesce before allocating heavy runners.
+    required: false
+    default: "60"
 
 outputs:
   rust:
@@ -56,6 +60,18 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Coalesce rapid pushes to main
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      shell: bash
+      env:
+        DELAY: ${{ inputs.main_coalesce_seconds }}
+      run: |
+        set -euo pipefail
+        if [[ "${DELAY}" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Waiting ${DELAY}s so back-to-back merges to main coalesce before allocating heavy runners"
+          sleep "${DELAY}"
+        fi
+
     - name: Resolve last green base
       id: green
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
