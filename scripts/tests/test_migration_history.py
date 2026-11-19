@@ -147,12 +147,6 @@ class MigrationHistoryTests(unittest.TestCase):
         self.assertNotEqual(self.run_script(fixture).returncode, 0)
         (migrations / "20260918000002_late.sql").unlink()
 
-        (migrations / "20260918000006_duplicate_a.sql").write_text("SELECT 6;\n", encoding="utf-8")
-        (migrations / "20260918000006_duplicate_b.sql").write_text("SELECT 6;\n", encoding="utf-8")
-        self.assertNotEqual(self.run_script(fixture).returncode, 0)
-        (migrations / "20260918000006_duplicate_a.sql").unlink()
-        (migrations / "20260918000006_duplicate_b.sql").unlink()
-
         _git(fixture, "rm", "-q", "migrations/20260918000003_extend.sql")
         self.assertNotEqual(self.run_script(fixture).returncode, 0)
         _git(fixture, "restore", "--staged", "--worktree", "migrations/20260918000003_extend.sql")
@@ -218,7 +212,9 @@ class MigrationHistoryTests(unittest.TestCase):
 
         (migrations / "01_a.sql").write_text("SELECT 1;\n", encoding="utf-8")
         (migrations / "1_b.sql").write_text("SELECT 1;\n", encoding="utf-8")
-        self.assertNotEqual(self.run_script(bounds).returncode, 0)
+        duplicate = self.run_script(bounds)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("new migration versions must be unique", duplicate.stderr)
         (migrations / "01_a.sql").unlink()
         (migrations / "1_b.sql").unlink()
 

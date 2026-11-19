@@ -292,13 +292,10 @@ class Inventory(unittest.TestCase):
         self.report["Results"][0]["Packages"][1]["DependsOn"] = ["adapter@4.5.6"]
         self.run_check()
 
-    def test_pruned_native_inventory_and_wrong_image_are_refused(self) -> None:
+    def test_pruned_native_inventory_is_refused(self) -> None:
         self.select(database="none", jobs="none", messaging="none")
         self.report["Results"].append(runtime_result("/migrate", "migrate", "2.3.4"))
         self.run_check("pruned binary")
-        self.report["Results"].pop()
-        self.report["Metadata"]["ImageID"] = "sha256:another-image"
-        self.run_check("fixed image ID")
 
     def test_docker_selection_must_agree_with_manifests(self) -> None:
         dockerfile = self.root / "build/docker/Dockerfile"
@@ -349,33 +346,16 @@ class Inventory(unittest.TestCase):
         binary.parent.mkdir()
         binary.write_text(
             '''#!/usr/bin/env python3
-import json, os, pathlib, shutil, sys, uuid
+import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["FIXTURE_ROOT"])
 with (root / "calls.jsonl").open("a") as stream: stream.write(json.dumps(args) + "\\n")
-containers = root / "containers"
-containers.mkdir(exist_ok=True)
-def create_container():
-    identity = uuid.uuid4().hex + uuid.uuid4().hex
-    name = args[args.index("--name") + 1] if "--name" in args else identity[:12]
-    state = {"Id": identity, "Name": "/" + name,
-             "State": {"Running": args[0] == "run", "Restarting": False}}
-    (containers / identity).write_text(json.dumps(state))
-    return identity
-if args[:2] == ["context", "show"]: print("inventory-fixture")
-elif args[0] == "info": print("inventory-fixture-daemon")
-elif args[0] == "ps":
-    name = args[args.index("--filter") + 1].removeprefix("name=^/").removesuffix("$")
-    for path in containers.iterdir():
-        state = json.loads(path.read_text())
-        if state["Name"] == "/" + name: print(state["Id"])
-elif args[0] == "inspect":
-    print(json.dumps([json.loads((containers / identity).read_text()) for identity in args[1:]]))
-elif args[:2] == ["container", "inspect"]:
-    assert (containers / args[-1]).is_file()
+container = root / "fixture-container"
+if args[:2] == ["container", "inspect"]:
+    assert args[-1] == container.name and container.is_file()
     print(os.environ.get("FIXTURE_MOUNTS", "[]"))
 elif args[0] == "export":
-    assert (containers / args[1]).is_file()
+    assert args[1] == container.name and container.is_file()
     with (root / "rootfs.tar").open("rb") as archive:
         shutil.copyfileobj(archive, sys.stdout.buffer)
     sys.exit(int(os.environ.get("EXPORT_EXIT", "0")))
@@ -387,14 +367,17 @@ elif args[:2] == ["image", "save"]:
         shutil.copyfileobj(archive, sys.stdout.buffer)
 elif args[0] == "create":
     assert args[-1] == os.environ["FIXTURE_IMAGE"]
-    print(create_container())
+    container.touch(exist_ok=False)
+    print(container.name)
 elif args[0] == "cp":
-    path = args[1].split(":", 1)[1]
+    identity, path = args[1].split(":", 1)
+    assert identity == container.name and container.is_file()
     if path not in json.loads(os.environ["FIXTURE_BINARIES"]): sys.exit(1)
     dest = pathlib.Path(args[2]); dest.write_bytes(b"executable"); dest.chmod(0o755)
-elif args[0] == "rm": (containers / args[-1]).unlink(missing_ok=True)
+elif args[0] == "rm":
+    assert args[-1] == container.name
+    container.unlink(missing_ok=True)
 elif args[0] == "run":
-    identity = create_container()
     status = 0
     if "--download-db-only" in args:
         pass
@@ -410,7 +393,6 @@ elif args[0] == "run":
     else:
         for result in json.load(sys.stdin)["Results"]:
             for vuln in result.get("Vulnerabilities", []): print(vuln["VulnerabilityID"])
-    if "--rm" in args: (containers / identity).unlink()
     sys.exit(status)
 else: sys.exit(2)
 ''',

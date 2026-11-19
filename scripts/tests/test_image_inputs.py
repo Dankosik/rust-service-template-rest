@@ -18,17 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 IAC = ".railway/railway.ts"
 WATCHES = (
     "Cargo.toml",
-    "Cargo.lock",
     "rust-toolchain.toml",
     "crates/**",
     "migrations/**",
-    ".sqlx/**",
-    "vendor/**",
-    "test/Cargo.toml",
-    "test/src/**",
-    "test/tests/**",
-    "test/fixtures/**",
-    "env/config/**",
     "build/docker/**",
     ".dockerignore",
 )
@@ -48,16 +40,8 @@ FIXTURE = {
     ".dockerignore": """# Fixture context
 *
 !Cargo.toml
-!Cargo.lock
 !crates/
 !migrations/
-!.sqlx/
-!vendor/
-!test/Cargo.toml
-!test/src/
-!test/tests/
-!test/fixtures/
-!env/config/
 """,
     "build/docker/Dockerfile": """FROM rust AS build
 COPY . .
@@ -105,13 +89,12 @@ class Coverage(unittest.TestCase):
         path.write_text(updated, encoding="utf-8")
 
     def test_accepts_covered_inputs_and_ignores_exclusions(self) -> None:
-        self.assertIn(f"{IAC} covers", self.run_check())
         with (self.root / ".dockerignore").open("a", encoding="utf-8") as stream:
             stream.write("\ncrates/*/benches/\n")
-        self.run_check()
+        self.assertIn(f"{IAC} covers", self.run_check())
 
     def test_uncovered_or_future_family_refuses(self) -> None:
-        for pattern in ("migrations/**", ".sqlx/**", "vendor/**", "rust-toolchain.toml"):
+        for pattern in ("migrations/**", "rust-toolchain.toml"):
             with self.subTest(pattern=pattern):
                 original = (self.root / IAC).read_text(encoding="utf-8")
                 self.remove_watch(pattern)

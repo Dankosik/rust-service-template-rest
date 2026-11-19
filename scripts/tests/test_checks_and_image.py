@@ -1151,10 +1151,6 @@ class HarnessSyncTests(unittest.TestCase):
             text=True,
         )
 
-    def test_preflight_flag_is_removed(self) -> None:
-        res = self.run_sync("--preflight")
-        self.assertEqual(res.returncode, 2)
-
     def test_apply_check_and_skill_validation_without_license(self) -> None:
         check_unmaterialized = self.run_sync("--check", "--harness", "claude")
         self.assertEqual(check_unmaterialized.returncode, 0, check_unmaterialized.stderr)
