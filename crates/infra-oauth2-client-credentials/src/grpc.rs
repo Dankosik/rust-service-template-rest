@@ -137,8 +137,10 @@ impl AuthenticatedClient {
                     Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
                     _ => status,
                 })?;
-        let context = prepared.opening_context();
-        if let Err(error) = self.tokens.check_active(acquisition_deadline(&context)) {
+        if let Err(error) = self
+            .tokens
+            .check_active(acquisition_deadline(prepared.opening_context()))
+        {
             return Err(prepared.refuse(acquisition_status(error)));
         }
         if has_authorization {
@@ -146,23 +148,18 @@ impl AuthenticatedClient {
                 "authorization conflicts with client credentials",
             )));
         }
-        Ok(Box::pin(send_admitted(
-            prepared,
-            self.tokens.clone(),
-            context,
-        )))
+        Ok(Box::pin(send_admitted(prepared, self.tokens.clone())))
     }
 }
 
 async fn send_admitted(
     mut prepared: PreparedCall,
     tokens: BoundTokens,
-    context: OperationContext,
 ) -> Result<Response<Body>, Status> {
-    let token = match tokens
-        .acquire_for_request(acquisition_deadline(&context))
-        .await
-    {
+    let acquired = tokens
+        .acquire_for_request(acquisition_deadline(prepared.opening_context()))
+        .await;
+    let token = match acquired {
         Ok(acquired) => acquired,
         Err(error) => return Err(prepared.refuse(acquisition_status(error))),
     };
