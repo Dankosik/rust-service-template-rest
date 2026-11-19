@@ -12,14 +12,17 @@ codebase/contract facts (directly or via a fresh `evidence-agent`) so overloaded
 terms and code-exposed product forks settle before Definition. Route deeper
 external-contract or baseline gaps to [Research](research.md).
 
-When reopened with `specs/<task>/spec.md` at `status: blocked`, open the
-interview with its `Blocked decisions` (`B1..Bn`) root frontier as the first
-grilling round—holding back any `Follow-up if <option>` lines until the
-requester's answer takes that branch—then ask triggered follow-ups and any newly
-revealed requester uncertainty until the frontier closes, fold answers into
-`specs/<task>/intent.md`, and return control so Definition can resume without
-re-asking settled branches. On any other reopen, interview strictly on what
-changed.
+When reopened with `Blocked decisions` (`B1..Bn`)—from `specs/<task>/spec.md`
+or `specs/<task>/design/design.md` at `status: blocked`, or inline from a
+blocked handoff—open the interview with its root frontier as the first grilling
+round—holding back any `Follow-up if <option>` lines until the requester's
+answer takes that branch—then ask triggered follow-ups and any newly revealed
+requester uncertainty until the frontier closes, fold answers into
+`specs/<task>/intent.md`, and return control to the earliest phase invalidated
+by the updated `intent.md` (reopening Definition when `spec.md` exists and
+observable behavior or baseline changed; resuming the blocked phase directly
+only when `spec.md` is unaffected or Definition was skipped). On any other
+reopen, interview strictly on what changed.
 
 Check whether a plausible reading fulfills the wording while leaving the
 requester's real problem unsolved, weighing it against their goal, prior
