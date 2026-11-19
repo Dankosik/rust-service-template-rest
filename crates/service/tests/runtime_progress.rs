@@ -2272,7 +2272,7 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
         task_errors: Arc::default(),
     };
     let prefix = std::env::var("RUNTIME_PROGRESS_CONTAINER_PREFIX")
-        .expect("run the quota proof through scripts/profiles/runtime_progress.sh");
+        .expect("run the quota proof through scripts/runtime-progress.sh");
     let identity = docker(
         &args(&["image", "inspect", &image]),
         Duration::from_secs(10),

@@ -5,7 +5,6 @@ use tokio::time::Instant;
 #[error("stop signal receiver closed unexpectedly")]
 pub(crate) struct SignalError;
 
-/* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
@@ -37,7 +36,6 @@ impl Signals {
             })
         }
     }
-    /* jscpd:ignore-end */
 
     pub(crate) fn first_stop(&self) -> Option<Instant> {
         self.first_stop

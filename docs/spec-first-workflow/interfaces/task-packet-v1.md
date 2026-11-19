@@ -82,8 +82,7 @@ Reopen if:
   writes collide on (concrete file or directory path, never globs or prose)
   across four categories (or `none`):
   1. *Manifests & policy:* `Cargo.toml`, `Cargo.lock`,
-     `quality/architecture.json`, `scripts/template/profiles.json`,
-     `make/template.mk`, `template-owned.paths`.
+     `quality/architecture.json`, `template/profiles.json`, `Makefile`.
   2. *Ordered or generated surfaces:* `migrations/`, `.sqlx/`,
      `api/openapi/service.yaml`, `api/proto/`.
   3. *Shared wiring & module registries:* parent crate `lib.rs`/`mod.rs` when

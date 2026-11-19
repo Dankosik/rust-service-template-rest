@@ -36,7 +36,7 @@ availability alone does not authorize use.
 
 ## Nested Execution
 
-`.agents/codex-project.toml` (`scripts/harness/sync.py`) enables agents
+`.agents/codex-project.toml` (`scripts/harness-sync.py`) enables agents
 and Multi-Agent V2. V2 ignores `agents.max_depth` (do not add one); its
 20-open-subagent ceiling limits session-tree concurrency (excluding root), not
 depth. At capacity, finish existing work or execute bounded work locally within

@@ -1,12 +1,5 @@
 name: CodeQL
 
-# Advanced setup: the repository's default CodeQL setup is not configured, so
-# this workflow owns the analyses. Rust (GA since CodeQL 2.23.3) and Actions
-# run on the surfaces that change them; `codeql-required` is the one status
-# to protect and accepts an analysis the surfaces did not select. The Rust
-# analysis runs after merge, on main, where main-health.yml reports a failure;
-# like ci.yml, a push to main classifies the diff from the `green` branch.
-
 on:
   push:
     branches: [main]
@@ -22,7 +15,6 @@ concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Only the analyze jobs upload results; they widen their own permissions.
 permissions:
   contents: read
 
@@ -35,23 +27,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
-      rust_analysis: ${{ steps.surfaces.outputs.rust_analysis }}
-      post_merge: ${{ steps.surfaces.outputs.post_merge }}
+      codeql_actions: ${{ steps.detect.outputs.codeql_actions }}
+      codeql_rust: ${{ steps.detect.outputs.codeql_rust }}
+      post_merge: ${{ steps.detect.outputs.post_merge }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Classify changed surfaces
-        id: surfaces
-        uses: ./.github/actions/resolve-changes # zizmor: ignore[self-repository]
+      - id: detect
+        uses: ./.github/actions/detect-changes # zizmor: ignore[self-repository]
         with:
           github_token: ${{ github.token }}
 
   analyze-actions:
     needs: changes
-    if: needs.changes.outputs.github_workflows == 'true'
+    if: needs.changes.outputs.codeql_actions == 'true'
     name: Analyze (actions)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -63,20 +54,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: actions
           build-mode: none
           queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
-      - name: Analyze
-        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
   analyze-rust:
     needs: changes
-    if: >-
-      needs.changes.outputs.post_merge == 'true' &&
-      needs.changes.outputs.rust_analysis == 'true'
+    if: needs.changes.outputs.post_merge == 'true' && needs.changes.outputs.codeql_rust == 'true'
     name: Analyze (rust)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -88,24 +75,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install pinned toolchain
-        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Initialize CodeQL
-        id: init
+      - uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
+      - id: init
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: rust
           build-mode: none
           config-file: ./.github/codeql/rust.yml
           queries: security-and-quality
-      - name: Restore extractor caches
-        # The extractor's internal cargo builds the build scripts and
-        # proc-macros it needs into a fresh scratch directory on every run;
-        # its cargo_target_dir option points it at this persistent target.
-        # The CLI version is in the key because each CLI pins the toolchain
-        # its extractor builds with, and the vendored crates are separate
-        # Cargo projects with their own manifests and lockfiles.
-        id: cargo-cache
+      - id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -115,17 +93,14 @@ jobs:
             ${{ runner.temp }}/codeql-cargo-target
           key: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'vendor/*/Cargo.toml', 'vendor/*/Cargo.lock') }}
           restore-keys: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-
-      - name: Analyze
-        id: analyze
+      - id: analyze
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         env:
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
-      - name: Save extractor caches
-        if: >-
+      - if: >-
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
-          steps.cargo-cache.outcome == 'success' &&
           steps.cargo-cache.outputs.cache-hit != 'true' &&
           steps.analyze.outcome == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -148,18 +123,17 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          python3 -c '
+          python3 - <<'PY'
           import json, os, sys
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failed = []
-          if needs.get("changes", {}).get("result") != "success":
-              failed.append("changes=" + str(needs.get("changes", {}).get("result")))
-          for name, state in sorted(needs.items()):
-              result = state.get("result")
-              if name != "changes" and result not in {"success", "skipped"}:
-                  failed.append(f"{name}={result}")
+          failed = [
+              f"{k}={v.get('result')}"
+              for k, v in sorted(needs.items())
+              if (k == "changes" and v.get("result") != "success")
+              or (k != "changes" and v.get("result") not in {"success", "skipped"})
+          ]
           if failed:
-              print("CodeQL analyses did not pass: " + ", ".join(failed), file=sys.stderr)
+              print("CodeQL analyses failed: " + ", ".join(failed), file=sys.stderr)
               sys.exit(1)
           print("all applicable CodeQL analyses passed")
-          '
+          PY

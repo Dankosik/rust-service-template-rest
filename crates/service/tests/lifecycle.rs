@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use common::{agent, baseline_env, get, poll_until, spawn_stdout_lines, terminate};
+use common::{baseline_env, get, poll_until, spawn_stdout_lines, terminate};
 
 #[expect(
     clippy::disallowed_types,
@@ -344,31 +344,28 @@ fn missing_grpc_verifier_lists_only_the_supported_modes() {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "reads the local template projection lock in a synchronous process test"
+    reason = "inspects retained workspace profile files in a synchronous process test"
 )]
 fn expected_grpc_verifier_modes() -> String {
-    let lock = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../template.lock");
-    match std::fs::read(&lock) {
-        Ok(contents) => {
-            let lock: serde_json::Value = serde_json::from_slice(&contents).expect("template lock");
-            let profiles = &lock["profiles"];
-            let authn = profiles["authn"].as_str().expect("authn profile");
-            let service_auth = profiles["service_auth"]
-                .as_str()
-                .expect("service auth profile");
-            assert!(matches!(authn, "oidc-jwt" | "oidc-introspection"));
-            if service_auth == "jwt" {
-                format!("authn.mode = {authn} or service_auth.mode = jwt")
-            } else {
-                format!("authn.mode = {authn}")
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            "authn.mode = oidc-jwt or authn.mode = oidc-introspection or service_auth.mode = jwt"
-                .to_owned()
-        }
-        Err(error) => panic!("read template lock {}: {error}", lock.display()),
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut modes = Vec::new();
+    if root.join("crates/infra-bearerauthn/src/jwt.rs").is_file() {
+        modes.push("authn.mode = oidc-jwt");
     }
+    if root
+        .join("crates/infra-bearerauthn/src/introspection.rs")
+        .is_file()
+    {
+        modes.push("authn.mode = oidc-introspection");
+    }
+    if root.join("crates/infra-serviceauth/Cargo.toml").is_file() {
+        modes.push("service_auth.mode = jwt");
+    }
+    assert!(
+        !modes.is_empty(),
+        "expected at least one retained gRPC verifier mode"
+    );
+    modes.join(" or ")
 }
 // template:end grpc-authn:service-grpc-verifier-lifecycle
 
@@ -733,7 +730,7 @@ async fn restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_
         .unwrap()
         .signatures(id.as_bytes(), timestamp, body)
         .unwrap();
-    let response = agent()
+    let response = common::agent()
         .post(&format!("http://{api}/webhooks/partner"))
         .header("webhook-id", id)
         .header("webhook-timestamp", timestamp.to_string())

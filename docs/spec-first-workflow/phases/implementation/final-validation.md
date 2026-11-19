@@ -25,10 +25,10 @@ through `NeedsRepair`. For `no-commit` or inline-unit overrides, follow
   Trigger](../../shared/review.md#trigger) so Step 2 stays inside your smart
   zone without duplicating Full Review's diff audit.
 - Pick one non-overlapping plan from [Validation
-  budget](../../../../AGENTS.md#validation-budget); on mixed surfaces, run
-  read-only `BASE_REF=<Base> make plan` (ignoring `docs-check` links only when
-  triggered solely by untracked `specs/<task>/`) and load [Validation
-  Routing](../../../validation-routing.md) when policy rules apply. Load
+  budget](../../../../AGENTS.md#validation-budget); on mixed surfaces, load
+  [Validation Routing](../../../validation-routing.md) to pick the matching leaf
+  checks (ignoring `docs-check` failures caused solely by untracked
+  `specs/<task>/`). Load
   [Evidence Contract](../../shared/evidence-contract.md) only for reuse,
   additional required proof, or unavailable infrastructure.
 - Run mechanical checks (`fmt-check`, `lint`, `build`, relevant tests,

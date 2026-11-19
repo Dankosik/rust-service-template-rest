@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Code, `Cargo.toml`/`Cargo.lock`, SQL migrations, committed schemas (`api/`),
-`make/template.mk`, and CI workflows are the sole source of truth for
+`Makefile`, and CI workflows are the sole source of truth for
 repository facts. Markdown owns only [Authority](#authority) boundaries,
 accepted task artifacts, [Rust Change Surface](#rust-change-surface) rules,
 operational runbooks, and non-code decision reasons (`Why` / `Reopen if`).
@@ -141,36 +141,32 @@ relevant passing tests, in-scope defect repairs, and any applicable final review
 complete. Respect explicit phase or deferred-execution boundaries, and report
 any unverified behavior explicitly as unverified.
 
-Select commands from [`make/template.mk`](make/template.mk):
+Select commands from [`Makefile`](Makefile):
 
 | Changed surface | Local validation |
 | --- | --- |
-| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` using `scripts/verify/affected_crates.py` |
+| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>` |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
-| Observed database behavior (transaction, lock, commit, migration, or readiness) | `ALLOW_HEAVY=1 make test-integration-db` (plus `make migration-check` / `ALLOW_HEAVY=1 make migration-validate` on migration edits) when PostgreSQL is retained |
+| Observed database behavior (transaction, lock, commit, migration, or readiness) | `make test-integration-db` (plus `make migration-check` / `make migration-validate` on migration edits) when PostgreSQL is retained |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; `make docs-check` for relative links/fragments; `make check-instructions` for skills, roles, and generated carriers |
-| Mixed or unclear surfaces | `make plan` shows the selected route; `make verify` runs it and records a receipt |
-| Full-repository claim, explicitly requested | `ALLOW_FULL=1 make check` |
+| Full-repository check | `make check` |
 
-Type-check while editing with `make lint-changed PKGS="<crates>"` or `cargo
+Type-check while editing with `make lint-package PKG=<crate>` or `cargo
 check -p <crate> --all-targets --locked`; run the table's commands once it
 type-checks.
 
 Cargo validation runs with `--locked`; update `Cargo.lock` deliberately only
 during initial resolution or an accepted dependency change, inspect its diff,
 and validate with `--locked`. Reuse adequate coverage, count only executed
-required tests as passes within existing harnesses, serialize CPU-heavy
-validation, keep each Git worktree's `target/` separate, and preserve shared
-caches (`make check` and `make verify` acquire `scripts/verify/lock.py`).
+required tests as passes within existing harnesses, keep each Git worktree's
+`target/` separate, and preserve shared caches.
 Remove temporary files and clean task worktrees created for the session only
 after accepted results are preserved and no live process or lock uses them.
 
 Keep local completion distinct from CI, release, deployment, and runtime
-outcomes while keeping existing CI gates intact. Steps `make verify` marks
-CI-owned belong to CI (push and take PR gate results when authorized; otherwise
-report them as pending CI), `main`-only proofs report as pending on `main`, and
-`ALLOW_FULL` or `ALLOW_HEAVY` run locally only when explicitly requested.
+outcomes while keeping existing CI gates intact. Report CI-only or `main`-only
+proofs as pending when not run locally.
 
 ## Work Selection And Loading
 
@@ -218,7 +214,7 @@ explicit verification and phase-only boundaries.
 | Drafting a handoff prompt for another session, phase, or repository entry skill | [Prompt Composition](docs/prompt-composition.md) |
 | Operating a repository role carrier, multi-phase delegation tree, or durable Goal, or selecting harness model/effort tiers | [Agent Harness](docs/agent-harness.md) |
 | Build or container compile time slows iteration, or workstation build caching is configured | [Build Speed](docs/build-speed.md) |
-| Specialized security, container, delivery, OpenAPI, database, or quality verification beyond `make plan` / `make verify` | [Validation Routing](docs/validation-routing.md) |
+| Specialized security, container, delivery, OpenAPI, database, or quality verification beyond the validation budget table | [Validation Routing](docs/validation-routing.md) |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); `rust-delivery-platform` owns the method |
 | An open `main-red` issue is the task, or names a change you own | [Red main](docs/ci-cd-production-ready.md#red-main) |
 | Deployment policy for a derived service | [Railway Deployment Profile](docs/railway-deployment-profile.md) |

@@ -18,7 +18,7 @@ codebase file:
   `5`, `6`).
 - **Axis 1 — Grounding, Fidelity & Codebase Reality (`2`, `3`):** inspect
   `intent.md`, `spec.md`, `research/*.md`, and uncited primary sources (`api/`,
-  code, migrations, config, `scripts/template/profiles.json`, tests,
+  code, migrations, config, `template/profiles.json`, tests,
   `docs/decisions/`, [Domain
   Vocabulary](../../repo-architecture.md#domain-vocabulary), [Production
   Contract](../../production-contract.md))—never treating prose as evidence.

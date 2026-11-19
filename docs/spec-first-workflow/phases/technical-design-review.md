@@ -99,7 +99,7 @@ malformed sections while still reporting upstream gaps found in the same pass.*
    non-obvious `Cargo.lock` crate sources (`Cargo.lock` or `cargo metadata
    --locked --format-version 1`, checking signatures and semantics),
    [`quality/architecture.json`](../../../quality/architecture.json)
-   (`allow_dependents`), `scripts/template/profiles.json`, `Cargo.toml`
+   (`allow_dependents`), `template/profiles.json`, `Cargo.toml`
    `[workspace.lints]`, `clippy.toml`, and `vendor/` forks. `FAIL` on:
    - any contradicted or uninspected anchor (genuinely uncached crates carried
      in `Assumptions (Reopen if)` are `CONCERNS`);

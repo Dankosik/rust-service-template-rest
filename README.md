@@ -44,7 +44,7 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity
 
    The initializer renames the service, keeps the profiles you select, and
    deletes the rest. It never commits, so you review the diff first.
-   [Initialization](docs/template-sync.md) lists every option.
+   [Initialization](docs/template-init.md) lists every option.
 3. Describe the first feature to your agent.
 <!-- template:end source-template:readme-template-overview -->
 
@@ -88,9 +88,8 @@ these files, so this step is not needed there.
 
 ## Profiles
 
-Optional capabilities are chosen at initialization and recorded in
-`template.lock`. Unselected ones are deleted; selected ones stay inert until
-configured.
+Optional capabilities are chosen once at initialization. Unselected ones are
+deleted; selected ones stay inert until configured.
 
 <!-- template:begin postgres:readme-postgres-profile -->
 - `DATABASE=postgres`: PostgreSQL through sqlx, with migrations and
@@ -184,8 +183,7 @@ make build && make test && make run
 curl http://127.0.0.1:8080/health/ready
 ```
 
-`make help` lists every command. Later template changes arrive through
-[template sync](docs/template-sync.md).
+`make help` lists every command.
 
 ## Documentation
 

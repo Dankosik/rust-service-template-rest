@@ -18,7 +18,7 @@ Contract](../shared/evidence-contract.md#required-and-optional-proof).
 Load only the sources and `.agents/skills/rust-*` standards assigned to your
 review mode so parallel lenses stay disjoint and lean. Skip anything
 deterministic tooling (`rustc`, `clippy`, `rustfmt`,
-`quality/architecture.json`, `jscpd`) already enforces.
+`quality/architecture.json`) already enforces.
 
 | Mode | Read inputs | Standards to load |
 | --- | --- | --- |

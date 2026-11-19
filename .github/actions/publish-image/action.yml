@@ -1,36 +1,18 @@
 name: Publish runtime image
-description: >-
-  Build, prove, scan, describe, push, sign, attest, verify, and only then
-  promote the runtime image tags anyone deploys from.
-
-# The one publication path, used by both cd.yml modes, so a release cannot be
-# published under rules main has already moved past.
-#
-# It is a composite action rather than a reusable workflow on purpose: a
-# reusable workflow becomes the job_workflow_ref in the Fulcio certificate and
-# would change the keyless signing identity every consumer verifies against
-# (`.../.github/workflows/cd.yml@<ref>`). A composite action runs inside the
-# calling job and leaves that identity untouched.
-#
-# The two publications differ only in what they name; the metadata step is
-# the only place they branch. Everything after it is one sequence, and every
-# make target it calls is the one CI already ran on the candidate.
+description: Build, smoke-check, scan, SBOM, push, sign, attest, verify, and promote runtime image tags.
 
 inputs:
   mode:
-    description: >-
-      Which publication this is. Both build a run-scoped candidate; "main"
-      promotes sha-<12> plus `main`, "release" promotes the v* tag plus
-      `latest`, each only after verification.
+    description: '"main" promotes sha-<12> + main; "release" promotes v* + latest.'
     required: true
   candidate_sha:
-    description: The commit being published; the checkout must be at it.
+    description: Exact commit SHA being published.
     required: true
   github_token:
-    description: GITHUB_TOKEN for the GHCR login and the gh attestation queries.
+    description: GITHUB_TOKEN for GHCR login and gh attestation queries.
     required: true
   trivy_db_repository:
-    description: Vulnerability database source for the scan and the SBOM.
+    description: Vulnerability database source for Trivy.
     required: false
     default: ghcr.io/aquasecurity/trivy-db:2
 
@@ -43,9 +25,6 @@ runs:
         set -euo pipefail
         grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
 
-    # The only step that knows which publication this is: the candidate tag,
-    # the tags promoted after verification, the artifact name, and the signing
-    # identity this run is verified against.
     - name: Prepare image metadata
       id: meta
       shell: bash
@@ -56,7 +35,7 @@ runs:
       run: |
         set -euo pipefail
         test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
-        python3 ./scripts/image/publish_metadata.py prepare
+        python3 .github/actions/publish-image/publish.py prepare
 
     - name: Login to GHCR
       shell: bash
@@ -71,8 +50,8 @@ runs:
         cosign-release: v${{ env.COSIGN_VERSION }}
 
     - name: Set up Buildx
-      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       id: buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       with:
         version: v${{ env.BUILDX_VERSION }}
         cache-binary: false
@@ -80,10 +59,6 @@ runs:
         use: false
         cleanup: false
 
-    # Publication runs only on pushes to main and on tags, so writing the
-    # layer cache here is safe. The cooked layer lives beside the image in
-    # GHCR rather than in the Actions cache, whose 10 GB budget the Cargo
-    # caches already fill and which evicted CI's exported image cache.
     - name: Build image
       id: build
       shell: bash
@@ -100,38 +75,38 @@ runs:
         metadata_dir=$(mktemp -d "${RUNNER_TEMP}/runtime-export.XXXXXXXX")
         trap 'rm -rf -- "${metadata_dir}"' EXIT
         export RUNTIME_IMAGE_METADATA_FILE="${metadata_dir}/metadata.json"
-        make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
-        python3 ./scripts/image/publish_metadata.py identify
+        make image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
+        python3 .github/actions/publish-image/publish.py identify
 
-    - name: Runtime image lifecycle
+    - name: Smoke-test runtime image
       shell: bash
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      run: make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
+      run: make image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
 
     - name: Scan image with Trivy
       shell: bash
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make container-security CONTAINER_IMAGE="${IMAGE_ID}"
+      run: make image-scan CONTAINER_IMAGE="${IMAGE_ID}"
 
     - name: Generate SBOM (CycloneDX)
       shell: bash
       env:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT=sbom.cdx.json
+      run: make image-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT=sbom.cdx.json
 
-    - name: Push candidate and confirm its registry identity
+    - name: Push candidate and confirm registry identity
       id: digest
       shell: bash
       env:
         PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         ID_KIND: ${{ steps.build.outputs.id_kind }}
-      run: python3 ./scripts/image/publish_metadata.py push
+      run: python3 .github/actions/publish-image/publish.py push
 
     - name: Sign container image (keyless)
       shell: bash
@@ -158,8 +133,6 @@ runs:
         push-to-registry: true
         create-storage-record: false
 
-    # The gate every promotion depends on: what was just signed and attested
-    # is verified back out of the registry before any tag moves.
     - name: Verify release trust
       shell: bash
       env:
@@ -186,23 +159,6 @@ runs:
         gh attestation verify "oci://${image}" "${policy[@]}" --predicate-type "https://cyclonedx.org/bom" --format json |
           jq -e --slurpfile sbom sbom.cdx.json 'any(.[]; .verificationResult.statement.predicate == $sbom[0])'
 
-    - name: Record verified image
-      shell: bash
-      env:
-        IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
-        DIGEST: ${{ steps.digest.outputs.digest }}
-        VERSION: ${{ steps.meta.outputs.version }}
-        PROMOTE_TAGS: ${{ steps.meta.outputs.promote_tags }}
-      run: |
-        {
-          echo "### Verified image"
-          echo
-          # shellcheck disable=SC2016
-          printf '`%s@%s`\n' "${IMAGE_REPO}" "${DIGEST}"
-          echo
-          echo "Version: ${VERSION}; intended tags: ${PROMOTE_TAGS}"
-        } >>"${GITHUB_STEP_SUMMARY}"
-
     - name: Upload SBOM artifact
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -217,4 +173,4 @@ runs:
         IMAGE_ID: ${{ steps.build.outputs.image_id }}
         DIGEST: ${{ steps.digest.outputs.digest }}
         PROMOTE_TAGS: ${{ steps.meta.outputs.promote_tags }}
-      run: python3 ./scripts/image/publish_metadata.py promote-summary
+      run: python3 .github/actions/publish-image/publish.py promote

@@ -1,0 +1,85 @@
+name: Detect changed surfaces
+description: Resolve comparison base (including green branch on main pushes) and classify changed surfaces.
+
+inputs:
+  github_token:
+    description: GITHUB_TOKEN used to resolve the green branch on main pushes.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  rust:
+    value: ${{ steps.classify.outputs.rust }}
+  deps:
+    value: ${{ steps.classify.outputs.deps }}
+  openapi:
+    value: ${{ steps.classify.outputs.openapi }}
+  grpc:
+    value: ${{ steps.classify.outputs.grpc }}
+  migrations:
+    value: ${{ steps.classify.outputs.migrations }}
+  integration:
+    value: ${{ steps.classify.outputs.integration }}
+  oauth:
+    value: ${{ steps.classify.outputs.oauth }}
+  docker:
+    value: ${{ steps.classify.outputs.docker }}
+  runtime_progress:
+    value: ${{ steps.classify.outputs.runtime_progress }}
+  repo_lint:
+    value: ${{ steps.classify.outputs.repo_lint }}
+  template:
+    value: ${{ steps.classify.outputs.template }}
+  codeql_actions:
+    value: ${{ steps.classify.outputs.codeql_actions }}
+  codeql_rust:
+    value: ${{ steps.classify.outputs.codeql_rust }}
+  base_sha:
+    value: ${{ steps.classify.outputs.base_sha }}
+  post_merge:
+    value: ${{ steps.classify.outputs.post_merge }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve last green base
+      id: green
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        base=${BEFORE_SHA}
+        green=$(gh api "repos/${GITHUB_REPOSITORY}/branches/green" --jq .commit.sha 2>/dev/null || true)
+        if [[ ${green} =~ ^[0-9a-f]{40}$ && $(gh api "repos/${GITHUB_REPOSITORY}/compare/${green}...${GITHUB_SHA}" --jq .status) == ahead ]]; then
+          base=${green}
+        fi
+        echo "sha=${base}" >>"${GITHUB_OUTPUT}"
+
+    - name: Classify changed surfaces
+      id: classify
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+      run: |
+        set -euo pipefail
+        post_merge=true
+        if [[ "${EVENT_NAME}" == pull_request || "${EVENT_NAME}" == merge_group ]]; then
+          post_merge=false
+        fi
+        if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* || -z "${BASE_SHA}" || "${BASE_SHA}" == 0000000000000000000000000000000000000000 ]]; then
+          resolved_base=""
+          out=$(python3 .github/actions/detect-changes/detect.py --all)
+        else
+          resolved_base=${BASE_SHA}
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          out=$(python3 .github/actions/detect-changes/detect.py --base "${BASE_SHA}")
+        fi
+        {
+          printf 'base_sha=%s\n' "${resolved_base}"
+          printf 'post_merge=%s\n' "${post_merge}"
+          printf '%s\n' "${out}"
+        } | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"

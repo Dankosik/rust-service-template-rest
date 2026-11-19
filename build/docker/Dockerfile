@@ -6,7 +6,7 @@
 #
 # - The builder tag is the toolchain authority for the image; .dockerignore
 #   keeps rust-toolchain.toml out of the context so rustup does not download
-#   components in every stage. `make tools-check` asserts the tag equals the
+#   components in every stage. `make dockerfile-check` asserts the tag equals the
 #   channel in rust-toolchain.toml.
 # - Builder and runtime share one Debian release (trixie / debian13): a
 #   trixie-built glibc binary does not start on an older cc-debian image.
@@ -20,7 +20,7 @@
 #   OS packages alone cannot satisfy it. Source revision and vendor custody
 #   records identify local patches beyond auditable names and versions.
 # - Every ARG has a default because Railway passes only the service variables
-#   an ARG names; `make tools-check` asserts the tool defaults equal
+#   an ARG names; `make dockerfile-check` asserts the tool defaults equal
 #   tools/versions.env. Railway sets RAILWAY_GIT_COMMIT_SHA, which wins over
 #   VCS_REF. No ARG carries a credential: BuildKit prints a referenced ARG in
 #   the build log, and Railway's builds have no secret mounts.
@@ -222,7 +222,7 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 # Empty: the dependency alone makes the selected unit-test gate part of the build.
 COPY --from=unit-tests / /
-# The version is the Cargo package version; scripts/image/build.sh
+# The version is the Cargo package version; scripts/image.sh
 # passes it from the workspace manifest.
 ARG APP_VERSION=unknown
 ARG VCS_REF=unknown

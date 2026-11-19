@@ -99,8 +99,8 @@ result as a new run. When relevant equivalence is uncertain, rerun that affected
 check, not unrelated proof.
 
 The Delivery Owner selects one non-overlapping plan for the local criterion and
-explicit additions. One result may support several claims. Neither `make plan`,
-`make verify`, nor `ALLOW_FULL=1 make check` is an automatic completion gate.
+explicit additions. One result may support several claims. Running full
+`make check` is not an automatic completion gate.
 When expanded verification is explicitly required, select its matching canonical
 leaves or aggregate without duplicating covered checks. Heavy execution still
 needs its existing authorization and guards.
