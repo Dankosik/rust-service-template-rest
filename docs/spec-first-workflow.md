@@ -33,10 +33,11 @@ current evidence changes coordination, ownership, reversibility, or proof.
 ## Macro Phases
 
 For a new change that needs planning, the root session conducts
-[Intake](spec-first-workflow/phases/intake.md) with the user and writes
-`specs/<task>/intent.md`, reusing a complete, current Intent when available.
+[Intake](spec-first-workflow/phases/intake.md) with the user until
+`specs/<task>/intent.md` is confirmed at `status: ready`, reusing a complete,
+current ready Intent when available.
 The root retains the conversation and handles any later clarification of
-requester meaning. Once Intent is ready, the root coordinates the following
+requester meaning. Once Intent is `ready`, the root coordinates the following
 phases under [Transition](spec-first-workflow/shared/transition.md#cross-phase-continuation).
 
 | Macro phase | Possible owners |
@@ -62,7 +63,7 @@ Evaluate these triggers before loading a phase owner:
 
 | Observable trigger | Owner |
 | --- | --- |
-| New structured work lacks a complete [Intent](spec-first-workflow/interfaces/intent.md), or outcome, scope, authority, observable success, or first owner is ambiguous | [Intake](spec-first-workflow/phases/intake.md) |
+| New structured work lacks a confirmed [Intent](spec-first-workflow/interfaces/intent.md) at `status: ready`, or outcome, scope, authority, observable success, or first owner is ambiguous | [Intake](spec-first-workflow/phases/intake.md) |
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
 | Structured work lacks a reviewed behavioral contract ([Specification V1](spec-first-workflow/interfaces/spec-v1.md)) | [Specification](spec-first-workflow/phases/specification.md) |
 | Structured work lacks a reviewed technical design ([Design V1](spec-first-workflow/interfaces/design-v1.md)) because Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery or rollout mechanism, or Rust placement, invariant ownership, caller obligations, or dependency direction (even with fixed files) | [Technical Design](spec-first-workflow/phases/technical-design.md) |
