@@ -219,7 +219,7 @@ impl ExchangeTokens {
                 self.acquire_exchange(key, subject, deadline),
             )
             .await
-            .map_err(|_| deadline.expiry_error)?
+            .map_err(|_| deadline.expiry_error())?
         };
         registration.check_active(deadline)?;
         result
