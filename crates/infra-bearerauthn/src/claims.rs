@@ -608,24 +608,28 @@ mod tests {
         );
     }
 
+    fn verify_registered_claims(
+        policy: &ClaimPolicy,
+        extra: serde_json::Value,
+    ) -> Result<u64, VerificationReason> {
+        let mut claims = serde_json::json!({
+            "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            claims[key] = value.clone();
+        }
+        validate_jwt_claims(
+            claims.to_string().into_bytes(),
+            policy,
+            TokenProfile::ResourceServer,
+            Duration::from_secs(1000),
+        )
+        .map(|verified| verified.principal.expires_at())
+        .map_err(|error| error.reason)
+    }
+
     #[test]
     fn registered_claim_validation_enforces_shape_and_order() {
-        let verify = |policy: &ClaimPolicy, extra: serde_json::Value| {
-            let mut claims = serde_json::json!({
-                "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
-            });
-            for (key, value) in extra.as_object().unwrap() {
-                claims[key] = value.clone();
-            }
-            validate_jwt_claims(
-                claims.to_string().into_bytes(),
-                policy,
-                TokenProfile::ResourceServer,
-                Duration::from_secs(1000),
-            )
-            .map(|verified| verified.principal.expires_at())
-            .map_err(|error| error.reason)
-        };
         let single_audience = policy();
         for (extra, expected) in [
             (serde_json::json!({}), Ok(1000)),
@@ -698,9 +702,16 @@ mod tests {
                 Err(VerificationReason::MalformedClaims),
             ),
         ] {
-            assert_eq!(verify(&single_audience, extra.clone()), expected, "{extra}");
+            assert_eq!(
+                verify_registered_claims(&single_audience, extra.clone()),
+                expected,
+                "{extra}"
+            );
         }
+    }
 
+    #[test]
+    fn any_configured_audience_can_match_a_string_or_array() {
         let multiple_audiences = ClaimPolicy::try_new(
             "https://issuer.example".to_owned(),
             Vec::from(["api", "accounts", "storefront", "billing"].map(str::to_owned)),
@@ -715,7 +726,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                verify(&multiple_audiences, serde_json::json!({"aud": audience})),
+                verify_registered_claims(&multiple_audiences, serde_json::json!({"aud": audience})),
                 expected,
                 "{audience}"
             );

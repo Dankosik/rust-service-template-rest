@@ -1853,7 +1853,7 @@ mod tests {
             &[jwk(&rotated, Algorithm::ES256, Some("new"), true)],
             &[JwtAlgorithm::Es256],
         );
-        now.set(Duration::from_secs(1_500));
+        now.set(Duration::from_mins(25));
         memo.key_store.finish(1, Ok(rotated_set));
         assert_eq!(
             expiring_waiter.await.unwrap_err().reason,

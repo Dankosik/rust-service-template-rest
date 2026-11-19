@@ -117,7 +117,7 @@ impl KeySet {
             .ok_or(SignatureVerificationError::NoCandidate)?;
         let verifies =
             |key: &ParsedPublicKey| key.verify_sig(input.message, input.signature).is_ok();
-        let verified = if let Some(kid) = input.kid {
+        let signature_matches = if let Some(kid) = input.kid {
             keys.by_kid
                 .get(kid)
                 .ok_or(SignatureVerificationError::NoCandidate)?
@@ -126,7 +126,7 @@ impl KeySet {
         } else {
             keys.all.iter().any(verifies)
         };
-        if verified {
+        if signature_matches {
             Ok(())
         } else {
             Err(SignatureVerificationError::BadSignature)
