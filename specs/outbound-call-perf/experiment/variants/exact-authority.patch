@@ -1,0 +1,13 @@
+diff --git a/crates/infra-outbound-http/src/policy.rs b/crates/infra-outbound-http/src/policy.rs
+--- a/crates/infra-outbound-http/src/policy.rs
++++ b/crates/infra-outbound-http/src/policy.rs
+@@ -50,6 +50,9 @@
+     pub(crate) fn admits(&self, uri: &Uri) -> bool {
+         uri.scheme() == Some(&self.scheme)
+             && uri.authority().is_some_and(|authority| {
++                if authority.as_str().as_bytes() == self.host_header.as_bytes() {
++                    return true;
++                }
+                 let host = authority.host();
+                 host.eq_ignore_ascii_case(&self.host)
+                     && shared_rules::uri::http_origin_port(

@@ -1,0 +1,19 @@
+diff --git a/vendor/hyper-util/src/client/legacy/client.rs b/vendor/hyper-util/src/client/legacy/client.rs
+--- a/vendor/hyper-util/src/client/legacy/client.rs
++++ b/vendor/hyper-util/src/client/legacy/client.rs
+@@ -325,6 +325,15 @@
+             authority_form(req.uri_mut());
+         }
+
++        if req.headers_mut().remove("x-outbound-perf-retry-probe").is_some() && pooled.is_reused() {
++            eprintln!("outbound-perf: injected unstarted retry on a reused connection");
++            return Err(TrySendError::Retryable {
++                error: e!(Canceled).with_connect_info(pooled.conn_info.clone()),
++                req,
++                connection_reused: true,
++            });
++        }
++
+         let mut res = match pooled.try_send_request(req).await {
+             Ok(res) => res,
+             Err(mut err) => {

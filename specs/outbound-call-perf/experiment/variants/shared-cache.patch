@@ -1,0 +1,97 @@
+diff --git a/crates/infra-oauth2-client-credentials/src/credentials.rs b/crates/infra-oauth2-client-credentials/src/credentials.rs
+--- a/crates/infra-oauth2-client-credentials/src/credentials.rs
++++ b/crates/infra-oauth2-client-credentials/src/credentials.rs
+@@ -5,7 +5,7 @@
+
+ use infra_outbound_http::{Client, RequestContext};
+ use operation_context::{Deadline, OperationContext};
+-use parking_lot::{Mutex, MutexGuard};
++use parking_lot::{RwLock, RwLockWriteGuard};
+ use secrecy::{ExposeSecret as _, SecretString};
+ use tokio::{
+     sync::{mpsc, oneshot, watch},
+@@ -136,7 +136,7 @@
+     registration: Arc<RegistrationState>,
+     target: ServiceTokenTarget,
+     resource_origin: http::Uri,
+-    cached: Mutex<Cached>,
++    cached: RwLock<Cached>,
+     fetch_lock: tokio::sync::Mutex<()>,
+ }
+
+@@ -230,7 +230,7 @@
+             registration: self.shared.clone(),
+             target,
+             resource_origin,
+-            cached: Mutex::default(),
++            cached: RwLock::default(),
+             fetch_lock: tokio::sync::Mutex::new(()),
+         });
+         let (refresh_requests, requests) = mpsc::channel(1);
+@@ -418,14 +418,24 @@
+     }
+
+     fn reuse_service_token_and_schedule_refresh(&self, now: Instant) -> Option<Arc<Token>> {
+-        let mut cached = self.lock_cached();
+-        let service = cached
+-            .service
+-            .as_ref()
+-            .filter(|service| service.token.is_reusable(now))?;
+-        let token = service.token.clone();
+-        if now >= service.refresh_after {
+-            self.schedule_refresh_ahead(&mut cached, now, &token);
++        let (token, refresh_due) = {
++            let cached = self.0.inner.cached.read();
++            let service = cached
++                .service
++                .as_ref()
++                .filter(|service| service.token.is_reusable(now))?;
++            (service.token.clone(), now >= service.refresh_after)
++        };
++        if refresh_due {
++            let mut cached = self.lock_cached();
++            let now = Instant::now();
++            if cached.service.as_ref().is_some_and(|service| {
++                Arc::ptr_eq(&service.token, &token)
++                    && service.token.is_reusable(now)
++                    && now >= service.refresh_after
++            }) {
++                self.schedule_refresh_ahead(&mut cached, now, &token);
++            }
+         }
+         Some(token)
+     }
+@@ -445,7 +455,7 @@
+             .is_ok();
+     }
+
+-    pub(crate) fn lock_cached(&self) -> MutexGuard<'_, Cached> {
++    pub(crate) fn lock_cached(&self) -> RwLockWriteGuard<'_, Cached> {
+         self.0.inner.lock_cached()
+     }
+
+@@ -456,12 +466,12 @@
+ }
+
+ impl ServiceState {
+-    fn lock_cached(&self) -> MutexGuard<'_, Cached> {
+-        self.cached.lock()
++    fn lock_cached(&self) -> RwLockWriteGuard<'_, Cached> {
++        self.cached.write()
+     }
+
+     fn cached_failure(&self, now: Instant) -> Option<AcquisitionError> {
+-        self.lock_cached().cached_failure(now)
++        self.cached.read().cached_failure(now)
+     }
+
+     fn remember_failure(&self, error: AcquisitionError) {
+@@ -491,7 +501,7 @@
+         if now >= request.deadline || self.cached_failure(now).is_some() {
+             return;
+         }
+-        if !self.lock_cached().service.as_ref().is_some_and(|service| {
++        if !self.cached.read().service.as_ref().is_some_and(|service| {
+             Arc::ptr_eq(&service.token, &request.current) && !service.token.is_rejected()
+         }) {
+             return;

@@ -1,0 +1,39 @@
+diff --git a/crates/infra-outbound-http/src/lib.rs b/crates/infra-outbound-http/src/lib.rs
+--- a/crates/infra-outbound-http/src/lib.rs
++++ b/crates/infra-outbound-http/src/lib.rs
+@@ -370,17 +370,30 @@
+
+     let (parts, body) = response.into_parts();
+     let mut body = Limited::new(body, limit);
++    let mut first_frame = None;
+     let mut collected = Vec::new();
+     loop {
+         context.check()?;
+         let Some(frame) = body.frame().await else {
+             break;
+         };
+-        if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
+-            append_with_capacity_cap(&mut collected, &data, limit);
+-        }
+-    }
+-    Ok(Response::from_parts(parts, Bytes::from(collected)))
++        let Ok(data) = frame.map_err(map_body_error)?.into_data() else {
++            continue;
++        };
++        if data.is_empty() {
++            continue;
++        }
++        if collected.is_empty() {
++            let Some(first) = first_frame.take() else {
++                first_frame = Some(data);
++                continue;
++            };
++            append_with_capacity_cap(&mut collected, &first, limit);
++        }
++        append_with_capacity_cap(&mut collected, &data, limit);
++    }
++    let body = first_frame.unwrap_or_else(|| Bytes::from(collected));
++    Ok(Response::from_parts(parts, body))
+ }
+
+ impl From<Stopped> for Error {

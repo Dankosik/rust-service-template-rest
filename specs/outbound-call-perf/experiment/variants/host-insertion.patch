@@ -1,0 +1,10 @@
+diff --git a/crates/infra-outbound-http/src/transport.rs b/crates/infra-outbound-http/src/transport.rs
+--- a/crates/infra-outbound-http/src/transport.rs
++++ b/crates/infra-outbound-http/src/transport.rs
+@@ -80,5 +80,6 @@
+         .pool_timer(hyper_util::rt::TokioTimer::new())
+         .pool_idle_timeout(Duration::from_secs(30))
+         .http1_max_headers(limits.response_header_count)
++        .set_host(false)
+         .build(https.enable_http1().wrap_connector(http))
+ }
