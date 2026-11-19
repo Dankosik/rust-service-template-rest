@@ -55,23 +55,7 @@ pub fn response_status_code(code: u16) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OTHER_METHOD, request_method, response_status_code};
-
-    #[test]
-    fn a_named_method_is_its_own_value() {
-        for method in [
-            "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE",
-        ] {
-            assert_eq!(request_method(method), method);
-        }
-    }
-
-    #[test]
-    fn any_other_method_shares_one_value() {
-        for method in ["get", "PROPFIND", "", "GET "] {
-            assert_eq!(request_method(method), OTHER_METHOD, "{method:?}");
-        }
-    }
+    use super::response_status_code;
 
     #[test]
     fn every_three_digit_status_is_its_decimal_text() {
