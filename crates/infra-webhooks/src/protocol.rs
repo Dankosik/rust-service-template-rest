@@ -141,14 +141,14 @@ impl KeyRing {
         }
         let mut timestamp_buffer = NumBuffer::new();
         let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
-        let matches = |key: &SigningKey| {
+        let verify_key = |key: &SigningKey| {
             matches_v1_signature(&signatures, || {
                 tag(key, message_id.as_bytes(), timestamp_bytes, body)
             })
         };
-        let matched = match matches(&self.active) {
+        let matched = match verify_key(&self.active) {
             Some(true) => true,
-            Some(false) => self.previous.as_ref().and_then(matches) == Some(true),
+            Some(false) => self.previous.as_ref().and_then(verify_key) == Some(true),
             None => false,
         };
         if matched {
