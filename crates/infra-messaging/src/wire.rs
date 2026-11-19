@@ -70,7 +70,7 @@ pub fn decode_envelope(
         return Err(EnvelopeError::Subject);
     }
     let mut encoded = HEADER_PREAMBLE_BYTES;
-    let mut found = Found::default();
+    let mut found = EnvelopeHeaders::default();
     for (header, values) in headers.iter() {
         let header: &str = header.as_ref();
         for value in values {
@@ -112,7 +112,7 @@ pub fn decode_envelope(
 }
 
 #[derive(Default)]
-struct Found<'a> {
+struct EnvelopeHeaders<'a> {
     message_id: Option<&'a str>,
     event_type: Option<&'a str>,
     schema: Option<&'a str>,
@@ -144,16 +144,16 @@ impl InboundEnvelope {
 }
 
 pub(crate) fn valid_subject(subject: &str) -> bool {
-    let mut previous_dot = true;
+    let mut at_token_start = true;
     for byte in subject.bytes() {
         match byte {
             b' ' | b'\t' | b'\r' | b'\n' | b'*' | b'>' => return false,
-            b'.' if previous_dot => return false,
-            b'.' => previous_dot = true,
-            _ => previous_dot = false,
+            b'.' if at_token_start => return false,
+            b'.' => at_token_start = true,
+            _ => at_token_start = false,
         }
     }
-    !previous_dot
+    !at_token_start
 }
 
 pub(crate) fn matches_filter(filter: &str, subject: &str) -> bool {
@@ -281,7 +281,7 @@ pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), 
 }
 
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
-    validate_identity(value).map_err(|_| EnvelopeError::CreatedAtInvalid)?;
+    valid_identity(value).ok_or(EnvelopeError::CreatedAtInvalid)?;
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .and_then(|value| value.checked_to_offset(UtcOffset::UTC))

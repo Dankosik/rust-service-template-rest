@@ -295,17 +295,17 @@ impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
             payload: Ok(event.payload().clone()),
-            ..Self::with_text(event, &event.outbox_text())
+            ..Self::without_payload(event, &event.outbox_text())
         }
     }
 }
 
 impl PublishDomainEvent {
     fn for_metadata_sizing(event: &PreparedEvent) -> Self {
-        Self::with_text(event, &OutboxText::default())
+        Self::without_payload(event, &OutboxText::default())
     }
 
-    fn with_text(event: &PreparedEvent, text: &OutboxText<'_>) -> Self {
+    fn without_payload(event: &PreparedEvent, text: &OutboxText<'_>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             subject: text.subject.to_owned(),

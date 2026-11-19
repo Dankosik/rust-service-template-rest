@@ -38,8 +38,8 @@ pub enum ContractError {
 
 impl Registry {
     pub fn asyncapi(&self, title: &str, version: &str) -> Result<Value, ContractError> {
-        let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
-        let mut schemas = BTreeMap::<String, Value>::new();
+        let mut channel_messages = BTreeMap::<&str, BTreeMap<String, Value>>::new();
+        let mut seen_schemas = BTreeMap::<String, Value>::new();
         for (key, route) in self.routes() {
             let RouteKey {
                 event_type,
@@ -54,19 +54,19 @@ impl Registry {
             let mut definitions = BTreeMap::new();
             for (name, raw_schema) in raw_definitions {
                 let mut rendered_schema = serde_json::to_value(raw_schema)?;
-                match schemas.get(&name) {
+                match seen_schemas.get(&name) {
                     Some(original) if original != &rendered_schema => {
                         return Err(ContractError::SchemaName(name));
                     }
                     Some(_) => {}
                     None => {
-                        schemas.insert(name.clone(), rendered_schema.clone());
+                        seen_schemas.insert(name.clone(), rendered_schema.clone());
                     }
                 }
                 relocate_schema_refs(&mut rendered_schema);
                 definitions.insert(name, rendered_schema);
             }
-            channels.entry(subject).or_default().insert(
+            channel_messages.entry(subject).or_default().insert(
                 format!("{event_type}.v{schema_version}"),
                 message(
                     event_type,
@@ -76,7 +76,7 @@ impl Registry {
                 ),
             );
         }
-        let channels: BTreeMap<&str, Value> = channels
+        let channels: BTreeMap<&str, Value> = channel_messages
             .into_iter()
             .map(|(subject, messages)| {
                 (subject, json!({ "address": subject, "messages": messages }))

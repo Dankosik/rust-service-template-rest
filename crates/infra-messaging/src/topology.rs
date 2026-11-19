@@ -86,7 +86,7 @@ impl DeadLetterTopology {
         server_max_payload_bytes: usize,
     ) -> Result<usize, MessagingError> {
         let bounds_unavailable = || {
-            refusal_failure(
+            report_refusal_failure(
                 "dead_letter_stream",
                 Refusal::DeadLetterBoundsUnavailable,
                 0,
@@ -109,7 +109,7 @@ impl DeadLetterTopology {
         )
         .ok_or_else(bounds_unavailable)?;
         if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
-            return Err(refusal_failure(
+            return Err(report_refusal_failure(
                 "dead_letter_stream",
                 Refusal::DeadLetterHeaderSize,
                 bounds.headers,
@@ -117,7 +117,7 @@ impl DeadLetterTopology {
             ));
         }
         if bounds.total > server_max_payload_bytes {
-            return Err(refusal_failure(
+            return Err(report_refusal_failure(
                 "server",
                 Refusal::ServerMaxPayload,
                 bounds.total,
@@ -128,7 +128,7 @@ impl DeadLetterTopology {
             .dead_letter_max_message_bytes
             .filter(|limit| limit.get() < bounds.total)
         {
-            return Err(refusal_failure(
+            return Err(report_refusal_failure(
                 "dead_letter_stream",
                 Refusal::StreamMessageSize,
                 bounds.total,
@@ -148,7 +148,7 @@ pub(crate) async fn admit_topology(
     cancel: &CancellationToken,
 ) -> Result<TopologyAdmission, MessagingError> {
     validate_server(client, envelope_limit_bytes).map_err(|refusal| {
-        refusal_failure(
+        report_refusal_failure(
             "server",
             refusal,
             envelope_limit_bytes,
@@ -164,8 +164,9 @@ pub(crate) async fn admit_topology(
     )
     .await?;
     let source_config = &source.cached_info().config;
-    validate_stream_publication(source_config)
-        .map_err(|refusal| refusal_failure("source_stream", refusal, envelope_limit_bytes, None))?;
+    validate_stream_publication(source_config).map_err(|refusal| {
+        report_refusal_failure("source_stream", refusal, envelope_limit_bytes, None)
+    })?;
     let consumer = match &options.consumer {
         Some(consumer) => Some(
             admit_consumer_topology(
@@ -200,7 +201,7 @@ async fn admit_consumer_topology(
 ) -> Result<ConsumerAdmission, MessagingError> {
     let source_max_message_bytes = source_message_limit(raw_source_limit, envelope_limit_bytes)
         .map_err(|refusal| {
-            refusal_failure(
+            report_refusal_failure(
                 "source_stream",
                 refusal,
                 envelope_limit_bytes,
@@ -212,7 +213,7 @@ async fn admit_consumer_topology(
         None => stream_name_for_subject(jetstream, &consumer.dlq_subject, deadline, cancel).await?,
     };
     if dead_letter_name == source_stream {
-        return Err(refusal_failure(
+        return Err(report_refusal_failure(
             "dead_letter_stream",
             Refusal::DeadLetterIsSource,
             envelope_limit_bytes,
@@ -229,7 +230,7 @@ async fn admit_consumer_topology(
     .await?;
     let dead_letter_config = &dead_letter.cached_info().config;
     validate_stream_publication(dead_letter_config).map_err(|refusal| {
-        refusal_failure("dead_letter_stream", refusal, envelope_limit_bytes, None)
+        report_refusal_failure("dead_letter_stream", refusal, envelope_limit_bytes, None)
     })?;
     if !wire::valid_subject(&consumer.dlq_subject)
         || !dead_letter_config
@@ -237,7 +238,7 @@ async fn admit_consumer_topology(
             .iter()
             .any(|filter| wire::matches_filter(filter, &consumer.dlq_subject))
     {
-        return Err(refusal_failure(
+        return Err(report_refusal_failure(
             "dead_letter_stream",
             Refusal::DeadLetterSubjectMismatch,
             envelope_limit_bytes,
@@ -398,7 +399,7 @@ async fn get_stream(
     bounded_operation(deadline, cancel, async {
         jetstream.get_stream(name).await.map_err(|error| {
             let broker = stream_broker_error(&error);
-            topology_failure("get_stream", Some(role), &error, broker.as_ref())
+            report_topology_failure("get_stream", Some(role), &error, broker.as_ref())
         })
     })
     .await
@@ -429,7 +430,7 @@ async fn stream_name_for_subject(
                     GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
                     _ => None,
                 };
-                topology_failure("stream_by_subject", None, &error, broker.as_ref())
+                report_topology_failure("stream_by_subject", None, &error, broker.as_ref())
             })
     })
     .await
@@ -448,7 +449,7 @@ async fn find_durable(
             {
                 Ok(None)
             }
-            ConsumerErrorKind::JetStream(broker) => Err(topology_failure(
+            ConsumerErrorKind::JetStream(broker) => Err(report_topology_failure(
                 "get_consumer",
                 None,
                 &error,
@@ -457,7 +458,7 @@ async fn find_durable(
             ConsumerErrorKind::TimedOut => Err(MessagingError::TimedOut {
                 budget: BROKER_OPERATION_BUDGET,
             }),
-            _ => Err(topology_failure("get_consumer", None, &error, None)),
+            _ => Err(report_topology_failure("get_consumer", None, &error, None)),
         },
     }
 }
@@ -498,7 +499,7 @@ async fn create_or_find_durable(
         ConsumerCreateStrictErrorKind::AlreadyExists => find_durable(jetstream, stream, name)
             .await?
             .ok_or(MessagingError::Topology),
-        ConsumerCreateStrictErrorKind::JetStream(broker) => Err(topology_failure(
+        ConsumerCreateStrictErrorKind::JetStream(broker) => Err(report_topology_failure(
             "create_consumer",
             None,
             &error,
@@ -507,7 +508,12 @@ async fn create_or_find_durable(
         ConsumerCreateStrictErrorKind::TimedOut => Err(MessagingError::TimedOut {
             budget: BROKER_OPERATION_BUDGET,
         }),
-        _ => Err(topology_failure("create_consumer", None, &error, None)),
+        _ => Err(report_topology_failure(
+            "create_consumer",
+            None,
+            &error,
+            None,
+        )),
     }
 }
 
@@ -543,7 +549,7 @@ pub(crate) fn durable_contract_error_type(
     (!compatible).then_some("durable_configuration")
 }
 
-fn topology_failure(
+fn report_topology_failure(
     operation: &'static str,
     stream_role: Option<&'static str>,
     error: &(dyn std::error::Error + 'static),
@@ -646,7 +652,7 @@ impl Refusal {
     }
 }
 
-pub(crate) fn refusal_failure(
+pub(crate) fn report_refusal_failure(
     operation: &'static str,
     refusal: Refusal,
     required_bytes: usize,
