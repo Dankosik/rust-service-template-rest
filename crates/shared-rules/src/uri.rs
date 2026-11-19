@@ -12,7 +12,7 @@ pub fn http_origin_port(scheme: &str, authority: &str, host: &str) -> Option<u16
         "" | ":" => Some(default),
         suffix => {
             let digits = suffix.strip_prefix(':')?;
-            if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            if !digits.as_bytes().first()?.is_ascii_digit() {
                 return None;
             }
             digits.parse().ok()

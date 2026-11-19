@@ -8,6 +8,11 @@ pub enum NoBearer {
 
 /// RFC 6750 §2.1
 pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, NoBearer> {
+    std::str::from_utf8(token_bytes(values)?).map_err(|_| NoBearer::Malformed)
+}
+
+/// RFC 6750 §2.1
+pub fn token_bytes<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a [u8], NoBearer> {
     let mut values = values.into_iter();
     let value = values.next().ok_or(NoBearer::Missing)?;
     if values.next().is_some() {
@@ -18,10 +23,10 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
         .position(|byte| *byte == b' ')
         .unwrap_or(value.len());
     let (scheme, rest) = value.split_at(separator);
-    if scheme.is_empty() || !scheme.iter().all(|byte| is_tchar(*byte)) {
-        return Err(NoBearer::Malformed);
-    }
     if !scheme.eq_ignore_ascii_case(b"Bearer") {
+        if scheme.is_empty() || !scheme.iter().all(|byte| is_tchar(*byte)) {
+            return Err(NoBearer::Malformed);
+        }
         return Err(NoBearer::Missing);
     }
     let start = rest
@@ -32,7 +37,7 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
     if !is_b64token(token) {
         return Err(NoBearer::Malformed);
     }
-    std::str::from_utf8(token).map_err(|_| NoBearer::Malformed)
+    Ok(token)
 }
 
 /// RFC 6750 §2.1

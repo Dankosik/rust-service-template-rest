@@ -162,14 +162,12 @@ impl Verifier {
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Caller, Failure> {
-        let result = rfc6750::token(authorization)
+        let result = rfc6750::token_bytes(authorization)
             .map_err(|refusal| match refusal {
                 NoBearer::Missing => Reason::Missing,
                 NoBearer::Malformed => Reason::Malformed,
             })
-            .and_then(|token| {
-                self.verify_at(token.as_bytes(), unix_seconds().ok_or(Reason::Clock)?)
-            });
+            .and_then(|token| self.verify_at(token, unix_seconds().ok_or(Reason::Clock)?));
         match result {
             Ok(caller) => {
                 self.0.verified.increment(1);
