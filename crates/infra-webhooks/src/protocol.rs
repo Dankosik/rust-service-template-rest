@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::fmt::NumBuffer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,7 +6,7 @@ use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use foldhash::HashMap;
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderValue, header::GetAll};
 
 pub(crate) const WEBHOOK_ID: &str = "webhook-id";
 pub(crate) const WEBHOOK_TIMESTAMP: &str = "webhook-timestamp";
@@ -105,7 +106,13 @@ impl KeyRing {
         ensure_body_size(body)?;
         ensure_message_id(message_id)?;
         let candidate_bytes = SIGNATURE_PREFIX.len() + ENCODED_TAG_BYTES;
-        let mut signatures = String::with_capacity(2 * candidate_bytes + 1);
+        let mut signatures = String::with_capacity(if self.previous.is_some() {
+            2 * candidate_bytes + 1
+        } else {
+            candidate_bytes
+        });
+        let mut timestamp_buffer = NumBuffer::new();
+        let timestamp = timestamp.format_into(&mut timestamp_buffer).as_bytes();
         for key in self.keys() {
             if !signatures.is_empty() {
                 signatures.push(' ');
@@ -128,14 +135,23 @@ impl KeyRing {
         let timestamp = parse_timestamp(unambiguous_header(headers, WEBHOOK_TIMESTAMP)?)?;
         ensure_timestamp_window(timestamp, now)?;
 
-        if !headers.contains_key(WEBHOOK_SIGNATURE) {
+        let signatures = headers.get_all(WEBHOOK_SIGNATURE);
+        if signatures.iter().next().is_none() {
             return Err(ProtocolError::MissingHeader);
         }
+        let mut timestamp_buffer = NumBuffer::new();
+        let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
         let matches = |key: &SigningKey| {
-            let expected = tag(key, message_id.as_bytes(), timestamp, body);
-            matches_v1_signature(headers, &expected)
+            matches_v1_signature(&signatures, || {
+                tag(key, message_id.as_bytes(), timestamp_bytes, body)
+            })
         };
-        if self.keys().any(matches) {
+        let matched = match matches(&self.active) {
+            Some(true) => true,
+            Some(false) => self.previous.as_ref().and_then(matches) == Some(true),
+            None => false,
+        };
+        if matched {
             return Ok(VerifiedMessage {
                 message_id: Bytes::copy_from_slice(message_id.as_bytes()),
                 timestamp,
@@ -278,29 +294,37 @@ fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), Protoc
         .ok_or(ProtocolError::TimestampOutOfWindow)
 }
 
-fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac::Tag {
+fn tag(key: &SigningKey, message_id: &[u8], timestamp: &[u8], body: &[u8]) -> hmac::Tag {
     let mut context = hmac::Context::with_key(&key.0);
     context.update(message_id);
     context.update(b".");
-    context.update(timestamp.format_into(&mut NumBuffer::new()).as_bytes());
+    context.update(timestamp);
     context.update(b".");
     context.update(body);
     context.sign()
 }
 
-fn matches_v1_signature(headers: &HeaderMap, expected: &hmac::Tag) -> bool {
+fn matches_v1_signature(
+    signatures: &GetAll<'_, HeaderValue>,
+    make_tag: impl Fn() -> hmac::Tag,
+) -> Option<bool> {
+    let expected = OnceCell::new();
     let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
-    headers
-        .get_all(WEBHOOK_SIGNATURE)
+    let matched = signatures
         .iter()
+        .filter(|value| value.as_bytes().contains(&b'='))
         .flat_map(|value| value.as_bytes().split(u8::is_ascii_whitespace))
         .filter_map(|token| token.strip_prefix(SIGNATURE_PREFIX.as_bytes()))
         .any(|encoded| {
             encoded.len() == ENCODED_TAG_BYTES
                 && matches!(STANDARD.decode_slice(encoded, &mut scratch), Ok(TAG_BYTES))
-                && constant_time::verify_slices_are_equal(expected.as_ref(), &scratch[..TAG_BYTES])
-                    .is_ok()
-        })
+                && constant_time::verify_slices_are_equal(
+                    expected.get_or_init(&make_tag).as_ref(),
+                    &scratch[..TAG_BYTES],
+                )
+                .is_ok()
+        });
+    expected.get().map(|_| matched)
 }
 
 #[cfg(test)]
@@ -567,6 +591,18 @@ mod tests {
         assert!(
             many < one * 50,
             "one candidate {one:?}, 3800 candidates {many:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_candidates_do_not_compute_an_expected_tag() {
+        let malformed_base64 = "!".repeat(super::ENCODED_TAG_BYTES - 1);
+        let headers = headers("msg_1", "1", &format!("v1, v1,{malformed_base64}="));
+        assert_eq!(
+            super::matches_v1_signature(&headers.get_all(super::WEBHOOK_SIGNATURE), || {
+                panic!("malformed candidates should be rejected before the HMAC")
+            }),
+            None
         );
     }
 
