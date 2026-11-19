@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(failure.stage(), "connect");
         assert!(!failure.to_string().contains("fixture-secret"));
         assert_eq!(failure.report.before, None);
-        assert!(failure.report.applied.is_empty());
+        assert_eq!(failure.report.applied, Vec::<i64>::new());
     }
 
     #[tokio::test]
