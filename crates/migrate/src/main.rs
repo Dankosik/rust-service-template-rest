@@ -14,11 +14,95 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
-const FALLBACK_LOGGING: LoggingOptions<'static> = LoggingOptions {
-    level: "info,migrate_record=info",
-    format: LoggingFormat::Json,
-    tracer_provider: None,
-};
+const RECORD_TARGET: &str = "migrate_record";
+
+fn record_level(base: &str) -> String {
+    format!("{base},{RECORD_TARGET}=info")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RunContext {
+    started: Instant,
+    target: Option<i64>,
+}
+
+impl RunContext {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            target: MIGRATOR.iter().map(|migration| migration.version).max(),
+        }
+    }
+
+    fn finish_config_failure(self, message: String) -> ExitCode {
+        let level = record_level("info");
+        let Ok(logger) = install_subscriber(&LoggingOptions {
+            level: &level,
+            format: LoggingFormat::Json,
+            tracer_provider: None,
+        }) else {
+            return write_stderr_failure(&message);
+        };
+        self.finish_run(None, logger, Err(Failure::Setup(message)))
+    }
+
+    fn finish_run(
+        self,
+        runtime: Option<tokio::runtime::Runtime>,
+        logger: LoggerGuard,
+        outcome: Result<Report, Failure>,
+    ) -> ExitCode {
+        let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
+        logger.begin_shutdown();
+        let exit_code = self.record_outcome(outcome);
+        if let Some(runtime) = runtime {
+            runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
+        }
+        let _ = logger.shutdown(cleanup_deadline);
+        exit_code
+    }
+
+    fn record_outcome(self, outcome: Result<Report, Failure>) -> ExitCode {
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match outcome {
+            Ok(report) => {
+                tracing::event!(
+                    target: RECORD_TARGET,
+                    tracing::Level::INFO,
+                    migration.before = report.before,
+                    migration.target = self.target,
+                    migration.after = report.after(),
+                    migration.applied_count = report.applied.len(),
+                    migration.duration_ms = duration_ms,
+                    outcome = if report.applied.is_empty() {
+                        "no_change"
+                    } else {
+                        "success"
+                    },
+                    "migration_run"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(failure) => {
+                let report = failure.report();
+                tracing::event!(
+                    target: RECORD_TARGET,
+                    tracing::Level::ERROR,
+                    migration.before = report.and_then(|report| report.before),
+                    migration.target = self.target,
+                    migration.after = report.and_then(Report::after),
+                    migration.applied_count = report.map(|report| report.applied.len()),
+                    migration.duration_ms = duration_ms,
+                    outcome = "error",
+                    stage = failure.stage(),
+                    error = %failure,
+                    "migration_run"
+                );
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 enum Failure {
@@ -56,16 +140,15 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let started = Instant::now();
-    let target = MIGRATOR.iter().map(|migration| migration.version).max();
+    let run = RunContext::start();
     let options = LoadOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
     let config = service_config::load_migration(&options, BUILD_INFO);
     let log = match &config {
         Ok(config) => config.log(),
         Err(MigrationLoadError::PostgresDisabled { log }) => log,
-        Err(err) => return finish_config_failure(err.to_string(), target, started),
+        Err(err) => return run.finish_config_failure(err.to_string()),
     };
-    let level = format!("{},migrate_record=info", log.level);
+    let level = record_level(&log.level);
     let logger = match install_subscriber(&LoggingOptions {
         level: &level,
         format: match log.format {
@@ -75,30 +158,11 @@ fn main() -> ExitCode {
         tracer_provider: None,
     }) {
         Ok(logger) => logger,
-        Err(err) => {
-            let Ok(fallback) = install_subscriber(&FALLBACK_LOGGING) else {
-                return process_failure(&err);
-            };
-            return finish_run(
-                None,
-                fallback,
-                Err(Failure::Setup(format!("install logger: {err}"))),
-                target,
-                started,
-            );
-        }
+        Err(err) => return run.finish_config_failure(format!("install logger: {err}")),
     };
     let config = match config {
         Ok(config) => config,
-        Err(err) => {
-            return finish_run(
-                None,
-                logger,
-                Err(Failure::Setup(err.to_string())),
-                target,
-                started,
-            );
-        }
+        Err(err) => return run.finish_run(None, logger, Err(Failure::Setup(err.to_string()))),
     };
     install_panic_hook();
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -106,87 +170,20 @@ fn main() -> ExitCode {
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => {
-            return finish_run(None, logger, Err(Failure::Runtime(err)), target, started);
-        }
+        Err(err) => return run.finish_run(None, logger, Err(Failure::Runtime(err))),
     };
 
-    let outcome = runtime.block_on(apply(&config, target));
-    finish_run(Some(runtime), logger, outcome, target, started)
+    let outcome = runtime.block_on(apply(&config, run.target));
+    run.finish_run(Some(runtime), logger, outcome)
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "terminal diagnostic when fallback logging is unavailable"
 )]
-fn process_failure(message: &dyn std::fmt::Display) -> ExitCode {
+fn write_stderr_failure(message: &dyn std::fmt::Display) -> ExitCode {
     let _ = writeln!(std::io::stderr().lock(), "{message}");
     ExitCode::FAILURE
-}
-
-fn finish_config_failure(message: String, target: Option<i64>, started: Instant) -> ExitCode {
-    let Ok(logger) = install_subscriber(&FALLBACK_LOGGING) else {
-        return process_failure(&message);
-    };
-    finish_run(None, logger, Err(Failure::Setup(message)), target, started)
-}
-
-fn finish_run(
-    runtime: Option<tokio::runtime::Runtime>,
-    logger: LoggerGuard,
-    outcome: Result<Report, Failure>,
-    target: Option<i64>,
-    started: Instant,
-) -> ExitCode {
-    let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
-    logger.begin_shutdown();
-    let primary = finish(outcome, target, started);
-    if let Some(runtime) = runtime {
-        runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
-    }
-    let _ = logger.shutdown(cleanup_deadline);
-    primary
-}
-
-fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instant) -> ExitCode {
-    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match outcome {
-        Ok(report) => {
-            tracing::event!(
-                target: "migrate_record",
-                tracing::Level::INFO,
-                migration.before = report.before,
-                migration.target = target,
-                migration.after = report.after(),
-                migration.applied_count = report.applied.len(),
-                migration.duration_ms = duration_ms,
-                outcome = if report.applied.is_empty() {
-                    "no_change"
-                } else {
-                    "success"
-                },
-                "migration_run"
-            );
-            ExitCode::SUCCESS
-        }
-        Err(failure) => {
-            let report = failure.report();
-            tracing::event!(
-                target: "migrate_record",
-                tracing::Level::ERROR,
-                migration.before = report.and_then(|report| report.before),
-                migration.target = target,
-                migration.after = report.and_then(Report::after),
-                migration.applied_count = report.map(|report| report.applied.len()),
-                migration.duration_ms = duration_ms,
-                outcome = "error",
-                stage = failure.stage(),
-                error = %failure,
-                "migration_run"
-            );
-            ExitCode::FAILURE
-        }
-    }
 }
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
@@ -197,7 +194,7 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
         config.app().is_local_development(),
     )?;
     tracing::event!(
-        target: "migrate_record",
+        target: RECORD_TARGET,
         tracing::Level::INFO,
         app.env = %config.app().env,
         app.version = %config.app().version,

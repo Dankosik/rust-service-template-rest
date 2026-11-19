@@ -9,7 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::dsn::DsnError;
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
-const PASSWORD_FILE_BYTES: usize = 16 * 1024;
+const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -38,32 +38,32 @@ pub async fn refresh_password_periodically(
 #[derive(Default)]
 struct Refresh {
     last_installed: Option<Zeroizing<String>>,
-    unreadable: bool,
+    read_error_logged: bool,
 }
 
 impl Refresh {
     async fn step(&mut self, pool: &PgPool, path: &Path) {
-        match read(path).await {
-            Ok(password) => {
-                self.unreadable = false;
-                if self.last_installed.as_ref() == Some(&password) {
-                    metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
-                    return;
-                }
-                let options = (*pool.connect_options()).clone().password(&password);
-                pool.set_connect_options(options);
-                if self.last_installed.replace(password).is_some() {
-                    tracing::info!("postgres_password_reloaded");
-                }
-                metrics::counter!(REFRESHES_METRIC, "outcome" => "installed").increment(1);
-            }
+        let password = match read(path).await {
+            Ok(password) => password,
             Err(error) => {
                 metrics::counter!(REFRESHES_METRIC, "outcome" => "read_failed").increment(1);
-                if !std::mem::replace(&mut self.unreadable, true) {
+                if !std::mem::replace(&mut self.read_error_logged, true) {
                     tracing::warn!(%error, "postgres_password_file_unreadable");
                 }
+                return;
             }
+        };
+        self.read_error_logged = false;
+        if self.last_installed.as_ref() == Some(&password) {
+            metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
+            return;
         }
+        let options = (*pool.connect_options()).clone().password(&password);
+        pool.set_connect_options(options);
+        if self.last_installed.replace(password).is_some() {
+            tracing::info!("postgres_password_reloaded");
+        }
+        metrics::counter!(REFRESHES_METRIC, "outcome" => "installed").increment(1);
     }
 }
 
@@ -100,8 +100,8 @@ fn read_file(path: &Path) -> io::Result<String> {
     if !file.metadata()?.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    let mut content = io::read_to_string(file.take(PASSWORD_FILE_BYTES as u64 + 1))?;
-    if content.len() > PASSWORD_FILE_BYTES {
+    let mut content = io::read_to_string(file.take(MAX_PASSWORD_FILE_BYTES as u64 + 1))?;
+    if content.len() > MAX_PASSWORD_FILE_BYTES {
         content.zeroize();
         return Err(io::ErrorKind::InvalidData.into());
     }
@@ -174,7 +174,7 @@ mod tests {
 
         std::fs::remove_file(&file).unwrap();
         refresh.step(&pool, &file).await;
-        assert!(refresh.unreadable);
+        assert!(refresh.read_error_logged);
         assert_eq!(password(&pool).as_deref(), Some("second"));
         std::fs::write(&file, vec![b'x'; 16 * 1024 + 1]).unwrap();
         refresh.step(&pool, &file).await;
@@ -185,7 +185,7 @@ mod tests {
 
         std::fs::write(&file, "third\n").unwrap();
         refresh.step(&pool, &file).await;
-        assert!(!refresh.unreadable);
+        assert!(!refresh.read_error_logged);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         dir.close().unwrap();
         let snapshot = snapshotter.snapshot().into_hashmap();

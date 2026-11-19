@@ -12,7 +12,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Postgres};
 
 use crate::dsn::Dsn;
-use crate::observe::{acquisition, observed};
+use crate::observe::{observe_acquisition, observed};
 use crate::transaction::Isolation;
 
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -45,7 +45,7 @@ pub enum ConnectError {
     Connect(#[source] sqlx::Error),
     #[error(
         "postgres session: {setting} is {}, expected a limit of at most {budget:?}; {}",
-        found(*.found_ms),
+        format_timeout_ms(*.found_ms),
         .session_settings_source.remedy()
     )]
     SessionBudget {
@@ -65,7 +65,7 @@ pub enum ConnectError {
     },
 }
 
-fn found(milliseconds: i64) -> String {
+fn format_timeout_ms(milliseconds: i64) -> String {
     if milliseconds == 0 {
         "unlimited".to_owned()
     } else {
@@ -262,7 +262,7 @@ async fn acquire_with_queue(
 ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
     let budget = pool.options().get_acquire_timeout();
     let deadline = tokio::time::Instant::now() + budget;
-    acquisition(operation, budget, async {
+    observe_acquisition(operation, budget, async {
         let _slot = take_slot(pool, deadline, queue).await?;
         tokio::time::timeout_at(deadline, pool.acquire())
             .await
@@ -280,7 +280,7 @@ pub async fn acquire_until(
     operation: &'static str,
     deadline: tokio::time::Instant,
 ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquisition(
+    observe_acquisition(
         operation,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         async {

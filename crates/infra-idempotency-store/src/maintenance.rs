@@ -11,7 +11,7 @@ use crate::{READ_COMMITTED, Store};
 
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
-const EXPIRED_RECORDS: CleanupBatchOptions = CleanupBatchOptions {
+const EXPIRED_RECORDS_BATCH: CleanupBatchOptions = CleanupBatchOptions {
     transaction: READ_COMMITTED,
     limit: 500,
     removed_metric: CLEANUP_REMOVED_METRIC,
@@ -72,7 +72,7 @@ impl Store {
             .run_until_short_batch(
                 &self.pool,
                 cancel,
-                &EXPIRED_RECORDS,
+                &EXPIRED_RECORDS_BATCH,
                 Self::delete_expired_batch,
             )
             .await

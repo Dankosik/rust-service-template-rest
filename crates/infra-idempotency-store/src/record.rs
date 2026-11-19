@@ -69,7 +69,7 @@ pub(crate) enum Undecodable {
 }
 
 impl Undecodable {
-    pub(crate) const fn class(self) -> &'static str {
+    pub(crate) const fn cause(self) -> &'static str {
         match self {
             Self::BodyLimit => "body_limit",
             Self::Status => "status",
@@ -159,7 +159,7 @@ impl Record {
         })
     }
 
-    pub(crate) const fn status(&self) -> i16 {
+    pub(crate) const fn encode_status(&self) -> i16 {
         self.status.as_u16().cast_signed()
     }
 
@@ -254,7 +254,7 @@ mod tests {
         let body = Bytes::from_static(b"stored");
         let record = Record::capture(StatusCode::CREATED, &headers, body.clone()).unwrap();
 
-        assert_eq!(record.status(), 201);
+        assert_eq!(record.encode_status(), 201);
         assert_eq!(record.body(), b"stored");
         assert_eq!(
             record.encode_headers(),
@@ -266,7 +266,7 @@ mod tests {
             ]
         );
         let (status, headers, body) =
-            Record::decode(record.status(), record.encode_headers(), body)
+            Record::decode(record.encode_status(), record.encode_headers(), body)
                 .unwrap()
                 .into_parts();
         assert_eq!(status, StatusCode::CREATED);

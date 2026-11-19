@@ -298,6 +298,7 @@ impl MaintenanceAttempt<'_> {
         received: MaintenanceClock,
     ) -> Option<f64> {
         let received_at = received.wall?;
+        let requested_at = self.requested.wall?;
         let PopulationSample {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
@@ -306,10 +307,7 @@ impl MaintenanceAttempt<'_> {
             && received.agrees_with(self.requested)
             && observed_at.is_finite()
             && observed_at > 0.0
-            && self
-                .requested
-                .wall
-                .is_some_and(|start| observed_at >= start - CLOCK_TOLERANCE_SECONDS)
+            && observed_at >= requested_at - CLOCK_TOLERANCE_SECONDS
             && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
             && oldest
                 .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
