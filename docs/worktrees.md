@@ -191,16 +191,19 @@ worktree and local branch are retired. Follow
      still removed—verify the PR merged first).
    - **Plain Git or squash-merged PR where `wt remove` reports
      `retained_unmerged`** (for example, when later commits on `main` edited the
-     same lines): run from outside the worktree:
+     same lines): run from outside the worktree (`--pr <PR>` is optional for
+     ancestry merges and required for squash-merged PRs):
      ```bash
-     python3 scripts/worktree-sync.py retire <branch> --pr <PR>
+     python3 scripts/worktree-sync.py retire <branch> [--pr <PR>]
      ```
-     `retire` refuses the primary worktree, default branch, locked or dirty
+     `retire` refuses the primary worktree, default or target base branch,
+     symbolic refs, duplicate or nested checkouts, locked/dirty/in-progress
      checkouts, and invocations from inside the target worktree; verifies merge
      provenance via Git ancestry (`merge-base --is-ancestor`) or exact GitHub PR
-     proof (`state == "MERGED"`, matching `headRefName`, `baseRefName`, and
-     exact `headRefOid == local SHA`); removes the worktree; atomically deletes
-     the verified local branch; and prunes the deleted remote-tracking ref.
+     proof (`state == "MERGED"`, matching `headRefName`, `baseRefName`,
+     `headRefOid == local SHA`, and `mergeCommit.oid` present in `origin/main`);
+     removes the worktree; deletes the verified local branch; and prunes the
+     deleted remote-tracking ref.
    - **Harness-managed worktree:** use the harness's retirement operation.
 
 **Periodic stale sweeps are one-way doors.** To preview older merged worktrees
