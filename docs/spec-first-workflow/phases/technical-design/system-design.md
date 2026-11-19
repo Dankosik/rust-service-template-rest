@@ -1,91 +1,79 @@
 # System Design
 
-Load from [Technical Design](../technical-design.md) when Implementation would
-otherwise choose a runtime boundary, source of truth, material crossing,
-failure/cancellation/recovery behavior, scale/cost bound, operator signal, or
-rollout mechanism. Own one behaviorally equivalent system mechanism and its
-end-to-end flows without prescribing Rust function bodies or task slicing.
+Disclosed branch of [Technical Design](../technical-design.md). Own one
+behaviorally equivalent system mechanism, its data/trust invariants, and its
+end-to-end material flows.
 
-## Mechanism Selection And Reuse
+## Mechanism Selection And Material Flows
 
-- When several viable same-level substitutes could meet the same obligation,
-  compare them using the same concrete scenario—including the current mechanism
-  when viable—showing where their consequences differ on a material driver;
-  weigh against all accepted drivers, choose the simplest when equivalent, or
-  name the single fact that settles the choice when only one is viable. Never
-  compare prerequisites, complements, or defense-in-depth layers as
-  substitutes.
-- Follow the reuse ladder: existing repository owner -> Rust `std` and locked
-  workspace crates -> approved infrastructure or maintained OSS (checked
-  against [Backend Library Selection](../../../backend-library-selection.md)
-  and `docs/decisions/`) -> custom infrastructure mechanism only when a named
-  current requirement or lifecycle cost rules out existing options and their
-  supported extension points.
-- Durable delivery, replay, and reconciliation have no dedicated skill; decide
-  them from [Repository Architecture](../../../repo-architecture.md) and record
-  the decision.
-- For a hard-to-reverse open fork, use [Design It Twice](design-it-twice.md).
-  For an independent bounded domain question, use [Read-Only
-  Delegation](../../shared/read-only-delegation.md); resolve any surviving
-  technical disagreement through [Parent-Owned
-  Recovery](../../shared/transition.md#parent-owned-recovery) before closing.
-- For any signature-sensitive wire or payload shape, fix exact bytes,
-  algorithm, and one deterministic non-secret vector.
+- Compare only viable same-level substitutes against the same concrete scenario
+  (including the current mechanism when viable); choose the simplest when
+  equivalent, or name the decisive fact when only one is viable. Never compare
+  prerequisites, complements, or defense-in-depth layers as substitutes.
+- Decide durable delivery, replay, and reconciliation from [Repository
+  Architecture](../../../repo-architecture.md). For signature-sensitive wire or
+  payload shapes, fix exact bytes, algorithm, and one deterministic non-secret
+  vector.
+- Use [Design It Twice](design-it-twice.md) for hard-to-reverse forks and
+  [Read-Only Delegation](../../shared/read-only-delegation.md) for independent
+  domain questions, resolving disagreements via [Parent-Owned
+  Recovery](../../shared/transition.md#parent-owned-recovery).
+- Trace each trigger from entry to caller-visible completion or durable
+  finality (showing current vs target only where the delta changes a decision,
+  using a diagram only when compact text cannot make ordering or recovery
+  reviewable). At every real crossing (service, datastore, cache, queue,
+  external provider, worker, config/secret seam), fix initiating/receiving
+  owners, transferred responsibility, canonical representation (identifiers,
+  units, absence, ordering, freshness, consistency, finality), and produced
+  effect.
 
-## End-To-End Material Flows
+## Seven Failure, Trust, And Operational Probes
 
-Trace each affected actor or trigger from entry to caller-visible completion or
-durable finality. Show current vs target flows only when their difference
-changes a decision. Use a diagram only when compact text cannot make ordering,
-fan-out, transformation, or recovery reviewable; normative text and canonical
-contracts remain authoritative.
+Attack every real crossing with the probes it exposes; omit inapplicable probes:
 
-At every real crossing (service boundary, datastore, queue, external provider,
-background worker, or config/secret boundary), close only what Implementation
-must not invent: initiating and receiving owners, transferred responsibility,
-canonical contract and representation (identifiers, units, absence, ordering,
-freshness, consistency, and finality), and produced state or effect.
-
-## Six Failure And Operational Probes
-
-Attack every real crossing in the selected mechanism with the probes it
-exposes; omit inapplicable probes rather than writing `N/A` boilerplate:
-
-1. **Source of truth & enforcement:** For each critical invariant, name the
-   single canonical writer, the mechanism and boundary that enforce it, and
-   every effectful path that could bypass it.
-2. **Ambiguous outcome (`CommitUnknown`) & recovery:** Where a database commit,
-   queue publish, or remote call can succeed despite a timeout, disconnect, or
-   crash, name the retry and exhaustion owner, idempotency key and window,
-   replay or reconciliation path, and restoration boundary. Never retry
+1. **Data model, transaction scope & source of truth:** Single canonical writer
+   and enforcing boundary per invariant; exact atomic transaction scope (**zero
+   network I/O inside an open DB transaction or held pool connection**); query
+   access patterns and indexes; retention/pruning bounds preserving
+   replay/dedup invariants; for shared caching (`crates/infra-cache`),
+   namespace, tenant-isolated key, TTL, invalidation, and cache-down fallback.
+2. **Trust boundary & attacker paths:** AuthN/AuthZ and tenant isolation on
+   every effectful entry point (HTTP, gRPC, worker, webhook redrive) with
+   bypass paths closed; secret/PII custody and redaction across logs, metrics,
+   spans, `Debug`, and `infra_http::Problem` / `tonic::Status` /
+   `service_failure::Code` details; egress/SSRF and untrusted
+   parser/decompression bounds.
+3. **Ambiguous outcome (`CommitUnknown`) & recovery:** Where DB commit, queue
+   publish, or remote call can succeed despite timeout, disconnect, or crash,
+   fix retry owner and attempt budget, exact idempotency key, storage owner,
+   and TTL (covering duplicate-in-flight, duplicate-after-commit, and
+   post-expiry), replay/reconciliation path, and restoration point. Never retry
    `CommitUnknown` blindly.
-3. **Cancellation & drop safety:** When a caller disconnects, a request
-   deadline expires, or the process drains mid-flight, state what happens to
-   in-flight futures, held locks, open transactions, pooled connections, and
-   spawned background work.
-4. **Concurrency, interleaving & races:** Where concurrent requests, workers,
-   or retries touch shared state (TOCTOU, double-apply, duplicate delivery,
-   cache stampede), name the lock, unique constraint, transaction isolation
-   level, or atomic conditional write that serializes them. When interacting
-   flows affect the same guarantee, trace the smallest ordering, interruption,
-   or replay that could break it: identify at the decisive step what happened,
-   what the next actor can know, and what the design permits it to do,
-   resolving any case where an allowed action breaks the guarantee or blocks
-   required recovery.
-5. **Unit cost & bound:** For each flow run per request, message, or job, or
-   over caller-controlled input, state its cost per unit in round trips,
-   queries, held locks, and buffered bytes—and what hard limit bounds
-   amplification, queueing, and memory. Derive the cost from the mechanism;
-   measure only when an accepted budget or Research requires it.
-6. **Operator signal & lifecycle:** For each failure, degradation, or recovery
-   path, name the specific log event, metric label, span outcome, or probe
-   state that tells an operator this path apart from its neighbors and from
-   success, plus how any new dependency or worker participates in readiness
-   (`crates/health`) and staged shutdown (`crates/service/src/bootstrap`).
+4. **Cancellation & drop safety:** Behavior on client disconnect, deadline
+   expiry, or process drain for in-flight futures, held locks, open
+   transactions, pooled connections, streaming response permits, and spawned
+   background tasks.
+5. **Concurrency, interleaving & races:** Lock, unique constraint, isolation
+   level, or atomic conditional write serializing concurrent callers, workers,
+   or retries (TOCTOU, double-apply, duplicate delivery, stampede). For
+   interacting flows sharing a guarantee, trace the smallest ordering,
+   interruption, or replay that could break it (what happened, what the next
+   actor knows, what the design permits) and close any breaking path or blocked
+   recovery.
+6. **Budgets & unit cost:** End-to-end deadline, retry, and drain budget
+   arithmetic (`sum(sequential hops + retry backoff) <= caller/operation
+   deadline` via `OperationContext`; worker/task drain `<= bootstrap shutdown
+   budget` across `crates/service` and `crates/jobs-worker`). Per-unit cost
+   (round trips, queries, held locks, buffered bytes) and the hard limit
+   enforcing it.
+7. **Operator signals & lifecycle:** Exact log event, metric label, span
+   outcome, or probe state distinguishing each failure, degradation, and
+   recovery path from neighbors and success, plus readiness (`crates/health`)
+   and staged shutdown (`crates/service/src/bootstrap`, `crates/jobs-worker`).
 
 ## Rollout And Mixed-Version Impact
 
-Record deployment impact explicitly (`none` or `standard single-step deploy`
-when verified, or the [Release Closure](../../rubrics/release-closure.md) gate
-sequence and `rollout.md` when triggered), accounting for mixed-version rolling
-deploys where old and new replicas serve traffic simultaneously.
+Record deployment impact (`none`, `standard single-step deploy`, or [Release
+Closure](../../rubrics/release-closure.md) in `rollout.md`), covering
+rolling-deploy mixed-version overlap (old and new replicas/workers running
+together) and lock-safe DDL (`expand -> migrate -> contract`).

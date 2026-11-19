@@ -50,11 +50,15 @@ OUTPUT_SCHEMA_LINES = {
         "uncertainty_or_conflict, disposition (accept | reject | repair | "
         "carry_as_proof_or_risk | reopen), destination."
     ),
-    "decision-result-v1": (
-        "Return fields: disposition (decision | constraint_only | proof_only | "
-        "no_new_decision_required | blocked), decision_or_constraint, "
+    "specialist-result-v1": (
+        "Return Decision Result V1 (disposition: decision | constraint_only | "
+        "proof_only | no_new_decision_required | blocked, decision_or_constraint, "
         "forced_consequences, proof_or_gap, blocker, "
-        "strongest_rejected_alternative, rejection_reason, reopen_owner_or_condition."
+        "strongest_rejected_alternative, rejection_reason, "
+        "reopen_owner_or_condition), or Candidate Proposal V1 when dispatched "
+        "as a generative candidate lane (pressure, proposal, caller_sketch, "
+        "hidden_complexity, dependencies_and_cost, thin_leverage_and_risks, "
+        "blocker_or_gap, anchors)."
     ),
     "review-result-v1": "Return `docs/spec-first-workflow/interfaces/review-result-v1.md`.",
     "delegated-result-v1": (
