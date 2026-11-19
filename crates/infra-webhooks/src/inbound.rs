@@ -127,8 +127,10 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
+        let verifier = self.verifier(endpoint_id)?;
         self.receive_inner(
             endpoint_id,
+            verifier,
             headers,
             ReceiveBody::Borrowed(body),
             now,
@@ -146,8 +148,38 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
+        let verifier = self.verifier(endpoint_id)?;
         self.receive_inner(
             endpoint_id,
+            verifier,
+            headers,
+            ReceiveBody::Owned(body),
+            now,
+            deadline,
+        )
+        .await
+    }
+
+    fn verifier(&self, endpoint_id: &str) -> Result<&dyn Verifier, ReceiveError> {
+        self.endpoints
+            .get(endpoint_id)
+            .map(AsRef::as_ref)
+            .ok_or(ReceiveError::UnknownEndpoint)
+    }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    async fn receive_configured_bytes(
+        &self,
+        endpoint_id: &str,
+        verifier: &dyn Verifier,
+        headers: &HeaderMap,
+        body: Bytes,
+        now: SystemTime,
+        deadline: Instant,
+    ) -> Result<ReceiptOutcome, ReceiveError> {
+        self.receive_inner(
+            endpoint_id,
+            verifier,
             headers,
             ReceiveBody::Owned(body),
             now,
@@ -159,15 +191,13 @@ impl Receiver {
     async fn receive_inner(
         &self,
         endpoint_id: &str,
+        verifier: &dyn Verifier,
         headers: &HeaderMap,
         body: ReceiveBody<'_>,
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let Some(verifier) = self.endpoints.get(endpoint_id) else {
-            return Err(ReceiveError::UnknownEndpoint);
-        };
-        let admitted = admit(verifier.as_ref(), headers, body, now)
+        let admitted = admit(verifier, headers, body, now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
         in_tx_with_deadline(

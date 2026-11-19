@@ -175,14 +175,14 @@ impl Handler<Delivery> for Dispatcher {
             return Err(outcomes.fail(DeliveryFailure::ClockUnavailable));
         };
         let message_id = job.id().to_string();
-        let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
+        let Some(request) = endpoint.signed_request(delivery, message_id, timestamp) else {
             return Err(outcomes.fail(DeliveryFailure::InvalidPayload));
         };
         let response = endpoint
             .client
             .execute_for_headers(request, &job.context())
             .await;
-        outcomes.finish_attempt(response, SystemTime::now())
+        outcomes.finish_attempt(response)
     }
 }
 
@@ -261,9 +261,8 @@ impl EndpointOutcomes {
     fn finish_attempt(
         &self,
         response: Result<http::response::Parts, HttpError>,
-        response_time: SystemTime,
     ) -> Result<(), JobError> {
-        match classify_response(response, response_time) {
+        match classify_response(response) {
             Ok(status) => {
                 self.record_delivered(status);
                 Ok(())
@@ -422,7 +421,6 @@ impl DeliveryFailure {
 
 fn classify_response(
     response: Result<http::response::Parts, HttpError>,
-    response_time: SystemTime,
 ) -> Result<StatusCode, (DeliveryFailure, JobError)> {
     match response {
         Ok(response) if response.status.is_success() => Ok(response.status),
@@ -432,7 +430,7 @@ fn classify_response(
         }
         Ok(response) => {
             let failure = DeliveryFailure::Status(response.status);
-            let Some(delay) = retry_after(&response.headers, response_time) else {
+            let Some(delay) = retry_after(&response.headers, SystemTime::now()) else {
                 return Err((failure, failure.into_job_error()));
             };
             if let Ok(retry) = JobError::retry_after_at_least(failure.reason(), delay) {
@@ -453,14 +451,15 @@ impl Endpoint {
     fn signed_request(
         &self,
         delivery: &Delivery,
-        message_id: &str,
+        message_id: String,
         timestamp: i64,
     ) -> Option<Request<Bytes>> {
+        let destination = self.destination.clone()?;
         let signatures = self
             .keys
             .signatures(message_id.as_bytes(), timestamp, &delivery.body)
             .ok()?;
-        Request::post(self.destination.clone()?)
+        Request::post(destination)
             .header(header::CONTENT_TYPE, &delivery.content_type)
             .header(WEBHOOK_ID, message_id)
             .header(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp))
@@ -537,10 +536,16 @@ mod tests {
         };
 
         let endpoint = Endpoint::try_new(&destination, ring()).unwrap();
-        let request = endpoint.signed_request(&delivery, "id", 0).unwrap();
+        let request = endpoint
+            .signed_request(&delivery, "id".to_owned(), 0)
+            .unwrap();
         assert_eq!(request.uri().to_string(), destination);
         let endpoint = Endpoint::try_new(&format!("{destination}a"), ring()).unwrap();
-        assert!(endpoint.signed_request(&delivery, "id", 0).is_none());
+        assert!(
+            endpoint
+                .signed_request(&delivery, "id".to_owned(), 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -626,7 +631,7 @@ mod tests {
                 response(410),
                 Err(super::HttpError::Timeout),
             ] {
-                let _ = outcomes.finish_attempt(exchange, UNIX_EPOCH);
+                let _ = outcomes.finish_attempt(exchange);
             }
             let _ = dispatcher.fail_missing_endpoint("removed");
             let _ = dispatcher.fail_missing_endpoint("removed");
