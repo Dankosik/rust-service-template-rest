@@ -6,8 +6,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
-    Verifier, async_trait,
+    Consumer, Consumers, Incoming, ReceiptOutcome, ReceiveError, Receiver, Rejection, Verifier,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{dsn_for, poll_until};
@@ -107,26 +106,10 @@ fn mounted_receiver_with_limit(
 }
 
 fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
-    let message_id = message_id.as_ref();
     let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "webhook-id",
-        HeaderValue::from_bytes(message_id).expect("message id"),
-    );
-    headers.insert(
-        "webhook-timestamp",
-        HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
-    );
-    headers.insert(
-        "webhook-signature",
-        HeaderValue::from_str(
-            &keys
-                .signatures(message_id, timestamp, body)
-                .expect("signature"),
-        )
-        .expect("signature header"),
-    );
+    keys.write_headers(&mut headers, message_id.as_ref(), timestamp, body)
+        .expect("signed webhook headers");
     headers.insert(
         "content-type",
         HeaderValue::from_bytes(b"application/webhook\xff").expect("opaque content type"),
@@ -528,7 +511,6 @@ struct EffectConsumer {
     release: Notify,
 }
 
-#[async_trait]
 impl Consumer for EffectConsumer {
     async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError> {
         sqlx::query("INSERT INTO webhook_effects (message_id, content_type) VALUES ($1, $2)")
@@ -552,7 +534,10 @@ struct RunningProcessor {
 impl RunningProcessor {
     fn start(pool: &PgPool, consumers: Consumers) -> Self {
         let mut kinds = KindsBuilder::new();
-        Processor::new(consumers).register(&mut kinds);
+        consumers
+            .into_processor([])
+            .expect("webhook processor")
+            .register(&mut kinds);
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("webhook processor registry"),
@@ -571,7 +556,7 @@ impl RunningProcessor {
         }
     }
 
-    fn with_consumer(pool: &PgPool, consumer: Arc<dyn Consumer>) -> Self {
+    fn with_consumer(pool: &PgPool, consumer: impl Consumer) -> Self {
         let mut consumers = Consumers::new();
         consumers.bind(ENDPOINT, consumer).expect("first binding");
         Self::start(pool, consumers)
@@ -619,7 +604,7 @@ async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(po
         .execute(&pool)
         .await
         .expect("two attempts remain");
-    let running = RunningProcessor::with_consumer(&pool, Arc::new(EffectConsumer::default()));
+    let running = RunningProcessor::with_consumer(&pool, EffectConsumer::default());
     let summary = poll_until(
         "the deadlock schedules a retry",
         super::WAIT,
@@ -677,8 +662,7 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
         .expect("consumer effects table");
     accept_for_processing(&pool, "message-stale").await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running =
-        RunningProcessor::with_consumer(&pool, Arc::clone(&consumer) as Arc<dyn Consumer>);
+    let running = RunningProcessor::with_consumer(&pool, Arc::clone(&consumer));
     super::bounded(
         "the consumer effect is pending",
         consumer.entered.notified(),
@@ -742,8 +726,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     .expect("historical accepted job");
     let (proxy, worker) = proxied_pool(&pool).await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running =
-        RunningProcessor::with_consumer(&worker, Arc::clone(&consumer) as Arc<dyn Consumer>);
+    let running = RunningProcessor::with_consumer(&worker, Arc::clone(&consumer));
     super::bounded(
         "the consumer is ready to commit",
         consumer.entered.notified(),

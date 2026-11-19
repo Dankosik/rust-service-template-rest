@@ -29,7 +29,7 @@ use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder};
 use infra_webhooks::inbound::{
-    Consumer as WebhookConsumer, Consumers, Incoming, Processor, Receiver, Verifier,
+    Consumer as WebhookConsumer, Consumers, Incoming, Receiver, Verifier,
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
@@ -1791,23 +1791,8 @@ fn webhook_headers(message_id: &str, body: &[u8]) -> http::HeaderMap {
     let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let keys = KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key");
     let mut headers = http::HeaderMap::new();
-    headers.insert(
-        "webhook-id",
-        http::HeaderValue::from_str(message_id).expect("message id"),
-    );
-    headers.insert(
-        "webhook-timestamp",
-        http::HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
-    );
-    headers.insert(
-        "webhook-signature",
-        http::HeaderValue::from_str(
-            &keys
-                .signatures(message_id.as_bytes(), timestamp, body)
-                .expect("signature"),
-        )
-        .expect("signature header"),
-    );
+    keys.write_headers(&mut headers, message_id.as_bytes(), timestamp, body)
+        .expect("signed webhook headers");
     headers
 }
 
@@ -1817,7 +1802,6 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
-#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
     async fn process(
         &self,
@@ -1854,13 +1838,13 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     let held = Arc::new(HeldWebhookConsumer::default());
     let mut consumers = Consumers::new();
     consumers
-        .bind(
-            WEBHOOK_ENDPOINT,
-            Arc::clone(&held) as Arc<dyn WebhookConsumer>,
-        )
+        .bind(WEBHOOK_ENDPOINT, Arc::clone(&held))
         .expect("first binding");
     let mut webhook_kinds = KindsBuilder::new();
-    Processor::new(consumers).register(&mut webhook_kinds);
+    consumers
+        .into_processor([WEBHOOK_ENDPOINT])
+        .expect("bound webhook endpoint")
+        .register(&mut webhook_kinds);
     let mut engine = Engine::new(
         shared_pool.clone(),
         webhook_kinds.validate().expect("webhook registry is valid"),

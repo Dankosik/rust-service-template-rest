@@ -31,6 +31,7 @@ metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
 tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 enum-map = { workspace = true, features = ["derive"] }
@@ -44,7 +45,6 @@ url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 arc-swap = { workspace = true }
-async-trait = { workspace = true }
 axum = { workspace = true }
 http-body-util = { workspace = true }
 infra-http = { workspace = true }
@@ -52,7 +52,6 @@ parking_lot = { workspace = true }
 smallvec = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
-tokio = { workspace = true, features = ["time"] }
 # template:end inbound-webhooks:webhooks-inbound-dependencies
 
 [dev-dependencies]

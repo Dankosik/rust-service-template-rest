@@ -25,8 +25,6 @@ use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_i
 
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
-pub use async_trait::async_trait;
-
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
@@ -48,26 +46,72 @@ pub enum ReceiveError {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rejection(&'static str);
+#[derive(Clone, Copy)]
+pub struct Rejection(RejectionKind);
+
+#[derive(Clone, Copy)]
+enum RejectionKind {
+    Protocol(ProtocolError),
+    PayloadTooLarge,
+    Custom(&'static str),
+}
 
 impl Rejection {
     #[must_use]
     pub const fn new(reason: &'static str) -> Self {
-        Self(reason)
+        Self(RejectionKind::Custom(reason))
     }
 
     #[must_use]
     pub const fn reason(self) -> &'static str {
+        match self.0 {
+            RejectionKind::Protocol(error) => error.reason(),
+            RejectionKind::PayloadTooLarge => "payload_too_large",
+            RejectionKind::Custom(reason) => reason,
+        }
+    }
+
+    const fn kind(self) -> RejectionKind {
         self.0
     }
 }
 
-const PAYLOAD_TOO_LARGE: Rejection = Rejection::new("payload_too_large");
+impl PartialEq for Rejection {
+    fn eq(&self, other: &Self) -> bool {
+        self.reason() == other.reason()
+    }
+}
+
+impl Eq for Rejection {}
+
+impl fmt::Debug for Rejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("Rejection")
+            .field(&self.reason())
+            .finish()
+    }
+}
+
+const PAYLOAD_TOO_LARGE: Rejection = Rejection(RejectionKind::PayloadTooLarge);
 
 impl From<ProtocolError> for Rejection {
     fn from(error: ProtocolError) -> Self {
-        Self(error.reason())
+        Self(RejectionKind::Protocol(error))
+    }
+}
+
+enum EndpointReceiveError {
+    Rejected(Rejection),
+    Unavailable,
+}
+
+impl From<EndpointReceiveError> for ReceiveError {
+    fn from(error: EndpointReceiveError) -> Self {
+        match error {
+            EndpointReceiveError::Rejected(rejection) => Self::Rejected(rejection),
+            EndpointReceiveError::Unavailable => Self::Unavailable,
+        }
     }
 }
 
@@ -111,15 +155,6 @@ impl Receiver {
         }
     }
 
-    #[must_use]
-    pub fn has_endpoint(&self, endpoint_id: &str) -> bool {
-        self.endpoints.contains_key(endpoint_id)
-    }
-
-    pub fn endpoint_ids(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.endpoints.keys().map(String::as_str)
-    }
-
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
@@ -130,7 +165,8 @@ impl Receiver {
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
         let verifier = self.verifier(endpoint_id)?;
-        self.receive_inner(
+        receive_for_endpoint(
+            &self.pool,
             endpoint_id,
             verifier,
             headers,
@@ -139,6 +175,7 @@ impl Receiver {
             deadline,
         )
         .await
+        .map_err(ReceiveError::from)
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -151,7 +188,8 @@ impl Receiver {
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
         let verifier = self.verifier(endpoint_id)?;
-        self.receive_inner(
+        receive_for_endpoint(
+            &self.pool,
             endpoint_id,
             verifier,
             headers,
@@ -160,6 +198,7 @@ impl Receiver {
             deadline,
         )
         .await
+        .map_err(ReceiveError::from)
     }
 
     fn verifier(&self, endpoint_id: &str) -> Result<&dyn Verifier, ReceiveError> {
@@ -168,75 +207,55 @@ impl Receiver {
             .map(AsRef::as_ref)
             .ok_or(ReceiveError::UnknownEndpoint)
     }
+}
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn receive_configured_bytes(
-        &self,
-        endpoint_id: &str,
-        verifier: &dyn Verifier,
-        headers: &HeaderMap,
-        body: Bytes,
-        now: SystemTime,
-        deadline: Instant,
-    ) -> Result<ReceiptOutcome, ReceiveError> {
-        self.receive_inner(
-            endpoint_id,
-            verifier,
-            headers,
-            ReceiveBody::Owned(body),
-            now,
-            deadline,
-        )
-        .await
-    }
-
-    async fn receive_inner(
-        &self,
-        endpoint_id: &str,
-        verifier: &dyn Verifier,
-        headers: &HeaderMap,
-        body: ReceiveBody<'_>,
-        now: SystemTime,
-        deadline: Instant,
-    ) -> Result<ReceiptOutcome, ReceiveError> {
-        let admitted = admit(verifier, headers, body, now)
-            .map_err(|rejection| rejected(endpoint_id, rejection))?;
-        let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_with_deadline(
-            &self.pool,
-            deadline,
-            READ_COMMITTED,
-            async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
-                let inserted = observed!(
-                    "insert webhook receipt",
-                    sqlx::query!(
-                        "INSERT INTO webhook_receipts (endpoint_id, message_id) \
-                         VALUES ($1, $2) \
-                         ON CONFLICT (endpoint_id, message_id) DO NOTHING",
-                        endpoint_id,
-                        admitted.message_id.as_ref(),
-                    )
-                    .execute(&mut *tx),
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+async fn receive_for_endpoint(
+    pool: &PgPool,
+    endpoint_id: &str,
+    verifier: &dyn Verifier,
+    headers: &HeaderMap,
+    body: ReceiveBody<'_>,
+    now: SystemTime,
+    deadline: Instant,
+) -> Result<ReceiptOutcome, EndpointReceiveError> {
+    let admitted = admit(verifier, headers, body, now)
+        .map_err(|rejection| rejected(endpoint_id, rejection))?;
+    let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
+    in_tx_with_deadline(
+        pool,
+        deadline,
+        READ_COMMITTED,
+        async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
+            let inserted = observed!(
+                "insert webhook receipt",
+                sqlx::query!(
+                    "INSERT INTO webhook_receipts (endpoint_id, message_id) \
+                     VALUES ($1, $2) \
+                     ON CONFLICT (endpoint_id, message_id) DO NOTHING",
+                    endpoint_id,
+                    admitted.message_id.as_ref(),
                 )
-                .await?;
-                if inserted.rows_affected() == 0 {
-                    return Ok(ReceiptOutcome::Duplicate);
-                }
-                let incoming = Incoming::new(endpoint_id, admitted, content_type);
-                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
-                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
-                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
-                }
-            },
-        )
-        .await
-        .map_err(|error| match error {
-            ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
-                rejected(endpoint_id, PAYLOAD_TOO_LARGE)
+                .execute(&mut *tx),
+            )
+            .await?;
+            if inserted.rows_affected() == 0 {
+                return Ok(ReceiptOutcome::Duplicate);
             }
-            error => receipt_unavailable(endpoint_id, &error),
-        })
-    }
+            let incoming = Incoming::new(endpoint_id, admitted, content_type);
+            match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
+                Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
+                Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
+            }
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
+            rejected(endpoint_id, PAYLOAD_TOO_LARGE)
+        }
+        error => receipt_unavailable(endpoint_id, &error),
+    })
 }
 
 impl fmt::Debug for Receiver {
@@ -262,16 +281,16 @@ enum ReceiptFailure {
     UnexpectedDuplicate,
 }
 
-fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
+fn rejected(endpoint_id: &str, rejection: Rejection) -> EndpointReceiveError {
     tracing::info!(
         webhook.endpoint = endpoint_id,
         webhook.reason = rejection.reason(),
         "webhook_delivery_rejected"
     );
-    ReceiveError::Rejected(rejection)
+    EndpointReceiveError::Rejected(rejection)
 }
 
-fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveError {
+fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> EndpointReceiveError {
     let (stage, reason, driver) = match error {
         ReceiptFailure::Query(err) => ("insert_receipt", "unavailable", Some(err)),
         ReceiptFailure::Enqueue(EnqueueError::Database(err)) => {
@@ -293,7 +312,7 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
         cause = driver.map(failure_cause),
         "webhook_receipt_unavailable"
     );
-    ReceiveError::Unavailable
+    EndpointReceiveError::Unavailable
 }
 
 struct AdmittedBody<'a> {
@@ -461,5 +480,15 @@ mod tests {
             format!("{without_type:?}"),
             r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: false, body: "[REDACTED]" }"#
         );
+    }
+
+    #[test]
+    fn rejection_equality_and_debug_preserve_reason_spelling() {
+        let protocol = Rejection::from(ProtocolError::InvalidSignature);
+        let custom = Rejection::new("invalid_signature");
+        assert_eq!(protocol, custom);
+        assert_eq!(format!("{protocol:?}"), r#"Rejection("invalid_signature")"#);
+        assert_eq!(format!("{custom:?}"), r#"Rejection("invalid_signature")"#);
+        assert_eq!(PAYLOAD_TOO_LARGE, Rejection::new("payload_too_large"));
     }
 }
