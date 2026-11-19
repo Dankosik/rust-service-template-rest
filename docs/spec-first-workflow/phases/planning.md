@@ -1,173 +1,91 @@
 # Planning
 
-Turn accepted upstream contracts into a ready task ledger for fresh parallel
-Leads. Consume closed decisions from `spec.md`, `design/`, and primary code —
-reopen the smallest upstream owner on an open product or architecture fork
-rather than loading `.agents/skills/rust-*` here, and leave test cases,
-fixtures, proving layers, and test commands to Implementation.
+Prepare executable slices from accepted decisions. Work statically against
+primary sources without running builds, tests, or services. Return open product
+or architecture decisions to their upstream owner.
 
 ## Steps
 
-1. **Reconcile accepted inputs and delta.**
-   - Read present artifacts in `specs/<task>/`: `intent.md`, `spec.md` (or the
-     cited external contract when Definition was skipped), `design/` (or
-     Technical Design's reviewed no-open-decisions `Transition Result` when
-     Technical Design ran and omitted `design/design.md`), `rollout.md`,
-     `research/*.md`, `workflow-plan.md`, and any existing `tasks.md`
-     (`blocked`, `draft`, or `ready` on reopen).
-   - Verify every present upstream artifact (`intent.md`, `spec.md`,
-     `design/design.md`, `rollout.md`) is `status: ready` (or Technical
-     Design's reviewed no-open-decisions result when Technical Design ran
-     without `design.md`); on unready, missing, or conflicting authority, take
-     [Blocked Exit](#blocked-exit).
-   - **On reopen:** keep `tasks.md` untouched through Steps 1–3; note
-     unaffected `T<ID>` anchors and any already-integrated `[x]` tasks (`Base:`
-     and landed receipts; drop runtime fields if zero `[x]` tasks landed),
-     reconcile only invalidated slices, and write `status: draft` (removing
-     `Blocked stop:`) in Step 4.
-   - Dispose every accepted obligation:
+1. **Reconcile inputs and remaining work.** Read the task's accepted intent,
+   specification (or cited fixed external contract for skipped Definition),
+   and applicable design and rollout decisions. When Technical Design ran
+   without a design document, consume its reviewed no-open-decisions result.
+   Check `status: ready` on present intent, spec, design and rollout documents.
+   Read applicable research, active `workflow-plan.md` rules and existing
+   ledger state. Route missing required authority through [Blocked Exit](#blocked-exit).
 
-     | Input | Exact fields | Target home |
-     | --- | --- | --- |
-     | `intent.md` | `I<n>` (`Binding` / `Rejected`), `Hard constraints & Must not`, `Scope & non-goals`, `Priority / tie-breakers` | Preserved across slice boundaries, `Global constraints`, and `Completion` (reopen upstream on conflict) |
-     | `spec.md` (or external contract) | `R<n>`, `G<n>`, limits | Owning task `Sources` + `Outcome`/`Observable claim` (or `Completion`) |
-     | `spec.md` | `Downstream handoff` (`Planning`), `Durable contract update` | Fold `Durable contract update` into landing slice `Boundary -> In scope`; route `Downstream handoff` (`Planning`) to `Boundary -> In scope`, `Global constraints`, or slicing shape |
-     | `design/design.md` (or Technical Design's reviewed no-open-decisions result) | `D<n>`, `S<n>`, `forced owners`, `Verified anchors`, `Pinned shared identifiers`, `Shared mutated surfaces`, `Superseded paths and generated contracts`, `Durable doc updates`, `Planning hooks` | Task `Sources`, `Mutable owners`, `Boundary -> In scope`, `Exclusive locks`, `Global constraints`, or slicing shape |
-     | `rollout.md` | Gates, deploy boundaries | Consuming-stage `[effect:<action>]` gates; keep post-deploy phases out of Release 1's ledger |
-     | `spec.md`, `design/design.md` (or no-open-decisions result) | `Carried concerns` | **Close** `owner: Planning` concerns now (take [Blocked Exit](#blocked-exit) if unclosable); carry `Implementation` / `Delivery Owner` concerns into `Global constraints` or affected packet `Reopen if` (never `Final validation`) |
-     | `spec.md`, `design/design.md` (or no-open-decisions result), `workflow-plan.md` | `Decisions, assumptions, and reopen triggers`, `Assumptions and reopen triggers`, `D<n>` `Reopen if`, active rules | Affected packet `Reopen if` and `tasks.md` `Global constraints` |
+   On reopen, leave the ledger and packets intact during analysis. Preserve
+   unaffected IDs and integrated work against its original `Base`.
 
-   - If zero implementation delta and zero unaccepted integrated `[x]` tasks
-     remain, follow [No-Implementation Exit](#no-implementation-exit) (if
-     unaccepted `[x]` tasks remain with zero new coding delta, keep only those
-     `[x]` tasks in `tasks.md` and run Steps 4–7 to hand off Final Validation).
-   - If a ledger is produced while an individual `R<n>`/`D<n>`/`S<n>` already
-     holds on base code, record `<ID>: already holds (<primary locator>)` in
-     `tasks.md` `Global constraints` (or take [Blocked Exit](#blocked-exit) if
-     stale upstream prose contradicts the accepted delta).
-   - *Done when:* every present upstream artifact is `status: ready` and every
-     row above maps to `T<ID>`, `<ID>: already holds (<primary locator>)`,
-     `closed in Planning`, or an authorized exit.
+   Map each accepted obligation once:
 
-2. **Ground in primary code, `--all-targets` blast radius, and locked crates
-   (static — read-only, no builds, tests, or services).**
-   - Verify upstream claims against primary code: inspect touched symbols,
-     trait bounds, error/edge behavior, [Task Packet
-     V1](../interfaces/task-packet-v1.md#field-rules)'s four `Exclusive locks`
-     categories, and superseded code/tests. For every modified signature or
-     exhaustive public workspace enum/struct, **search all call and match sites
-     across the workspace — including tests compiled under `--all-targets`**.
-     Spot `prefactor` opportunities now.
-   - Check `Cargo.lock` sources (`cargo metadata --locked --offline
-     --format-version 1` or cached paths) for **non-obvious, unanchored (absent
-     from `design.md -> Verified anchors`), or slicing-critical** external
-     crate APIs. Flag uncached crates for `Reopen if`; take [Blocked
-     Exit](#blocked-exit) on any source contradiction or unpinned shared
-     identifier needed across concurrent tasks.
-   - For large multi-crate lookups, delegate bounded searches to
-     `evidence-agent` ([Read-Only Delegation](../shared/read-only-delegation.md)),
-     verifying decision-critical facts directly.
-   - *Done when:* every modified signature/exhaustive type has its
-     `--all-targets` call sites listed, every mutated lock surface is
-     identified, and non-obvious external APIs are source-verified (or recorded
-     in `Reopen if`) with zero contradictions.
+   | Input | Disposition |
+   | --- | --- |
+   | Intent decisions (`I<n>`, binding or rejected), hard constraints, exclusions and priorities | Preserve in slice boundaries, global constraints or completion criteria. |
+   | Spec requirements, guarantees (`R<n>`, `G<n>`) and limits | Cite the source in the owning task and express its delta or preserved guarantee in the claim or assembled completion target. |
+   | Spec downstream handoff and durable contract updates | Apply Planning constraints to slicing or scope. Include required updates in the landing slice. |
+   | Design decisions and seams (`D<n>`, `S<n>`), forced owners, verified anchors, shared identifiers and mutated surfaces | Assign sources, mutable owners and locks. Include superseded paths, generated contracts and durable doc updates in the landing slice. Apply Planning hooks or give the obligations reviewer the reason for declining one. |
+   | Rollout gates and deployment boundaries | Gate the consuming stage and keep later-release work outside the ledger. |
+   | Carried concerns | Close Planning-owned concerns with a locator. Carry Implementation and Delivery Owner risks, owners and closing actions in global constraints or the affected packet's `Reopen if`. |
+   | Upstream assumptions, decision reopen conditions and active workflow rules | Record cross-task rules in global constraints and task-specific triggers in `Reopen if`. |
 
-3. **Design and pressure-test the task graph.**
-   - Slice under [Task Shapes And Granularity](#task-shapes-and-granularity),
-     honoring `Planning hooks` (if declining a hook, pass why in the Step 6
-     Axis 1 / Full brief). Keep `quality/architecture.json`,
-     `template/profiles.json`, and `Cargo.toml`/`Cargo.lock` updates
-     atomic with their slice, and update broken `--all-targets` callers inside
-     the mutating task (or via additive `expand -> migrate -> contract`).
-   - **Two-way alternative-cut check:**
-     - *If 1 task (spanning `≥3` crates, mixed risk/gate boundaries, or an
-       unverified external seam):* test whether reading inputs, callers, tests,
-       and compile iterations truly fit one fresh Lead's smart zone, or whether
-       splitting independent outcomes / pulling forward `integration-first` or
-       `prefactor` retires risk earlier.
-     - *If `≥2` tasks:* test (a) merging lock- or owner-coupled pairs (including
-       `Cargo.toml`/`Cargo.lock` or `lib.rs` serialization); and (b) pulling
-       forward a `prefactor` or `integration-first` slice when it simplifies or
-       de-risks `≥2` downstream tasks.
-   - *Done when:* every remaining implementation obligation maps to a task,
-     every task passes the **deletion test** and shape rules, every broken
-     `--all-targets` caller compiles on landing, and the DAG is acyclic with a
-     non-empty Ready Frontier.
+   For an individual `R<n>`, `D<n>` or `S<n>` already satisfied on the
+   baseline, record `<ID>: already holds (<primary locator>)` in global constraints.
 
-4. **Persist draft ledger and packets.**
-   Write `specs/<task>/tasks.md` at `status: draft` ([Authoring
-   Schema](../interfaces/task-ledger-v1.md#authoring-schema-planning-owned),
-   even for one task, removing any resolved `Blocked stop:`) and each packet
-   ([Task Packet V1](../interfaces/task-packet-v1.md)), placing all Step 1
-   items in their schema homes and deleting any superseded orphan packets under
-   `specs/<task>/tasks/`.
-   - *Done when:* ledger and packets exist on disk conforming to both schemas
-     with zero orphans.
+   When no coding delta remains, take [No-Implementation Exit](#no-implementation-exit)
+   if all integrated work has been accepted. If acceptance remains, keep the
+   integrated tasks, packets and receipts and resume at Step 4 for Final Validation.
+   For remaining coding work, continue with Step 2.
 
-5. **Run mechanical check and semantic pre-review audit (static).**
-   - **Mechanical gate:** run `make ledger-check TASK=<task>` (`python3
-     scripts/check-ledger.py specs/<task>`) and fix every error.
-   - **Semantic audit (close gaps in place, or take [Blocked
-     Exit](#blocked-exit) on upstream gaps):**
-     - *Producer isolation:* for each edge `T_a -> T_b`, read *only* `T_a`'s
-       packet and cited `Sources` and confirm every contract `T_b` assumes is
-       pinned in `T_a`.
-     - *Concurrent collisions:* check every concurrently eligible pair (no
-       directed coding-dependency path between them) for **undeclared**
-       collisions across `Mutable owners`, [Task Packet
-       V1](../interfaces/task-packet-v1.md#field-rules)'s four `Exclusive
-       locks` categories, and exhaustive-type updates, with cross-task
-       identifiers pinned once.
-     - *Base-commit witness:* record one current-code `path::Symbol` (or shape
-       witness) falsifying each `Outcome`, `Observable claim`, and `Completion`
-       today and rejecting stubs or partial wiring.
-   - *Done when:* `make ledger-check TASK=<task>` passes and every semantic
-     witness holds.
+2. **Ground the proposed changes.** Inspect touched symbols, trait bounds,
+   error paths, superseded code and tests, and the [packet's lock
+   surfaces](../interfaces/task-packet-v1.md#field-rules). Locate production
+   and test callers and match sites across all workspace targets for changed
+   signatures and exhaustive public types. Verify non-obvious, unanchored or
+   slicing-critical crate APIs against locked sources (offline metadata or
+   cached paths). Record an unavailable source in `Reopen if` only if the
+   task boundary and producer contract are settled. Delegate large multi-crate
+   lookups under [Read-Only Delegation](../shared/read-only-delegation.md)
+   and verify decision-critical anchors directly.
 
-6. **Submit for independent readiness review.**
-   Dispatch fresh `reviewer-agent`(s) running [Task Review /
-   Readiness](task-review-readiness.md) under [Review](../shared/review.md):
-   **1 reviewer (`Full`)** for 1–2 task ledgers with `≤2` mutated crates and no
-   `rollout.md` or wide refactor, or **2 parallel fresh reviewers (`Axis 1` and
-   `Axis 2`)** when `≥3` tasks, `rollout.md`, wide refactor, or `≥3` mutated
-   crates apply.
-   - **Brief hygiene:** pass assigned mode (`Full`, `Axis 1`, `Axis 2`, or
-     `Delta Recheck`), method path (`task-review-readiness.md`), candidate
-     paths (`tasks.md`, packets), and `make ledger-check` output. Pass present
-     upstream input paths, declined `Planning hooks` rationale, and `owner:
-     Planning` concern closure locators to **Axis 1 / Full only**—omit author
-     summaries or `"already verified"` claims so Axis 2 stays strictly
-     cold-start over candidate files and cited `Sources`. `Delta Recheck` adds
-     only anchored findings and the repair delta or refuting primary locators.
-   - **On `FAIL`:** verify **every** finding's citation and witness against
-     primary sources and handle refuted findings under [Review
-     Lifecycle](../shared/review.md#lifecycle):
-     - *Confirmed `PHASE_DEFECT`:* repair in place (deleting orphans on reslice
-       and rerunning `make ledger-check` and affected Step 5 checks); re-run
-       failed or invalidated axes (an Axis 1 repair altering edges, locks, or
-       sources invalidates Axis 2; an Axis 2 repair altering slicing, coverage,
-       or claims invalidates Axis 1), or run fresh review on reslice or changed
-       outcomes/boundaries per [Review Lifecycle](../shared/review.md#lifecycle).
-     - *Confirmed `UPSTREAM_GAP`:* take [Blocked Exit](#blocked-exit) carrying
-       the review result.
-   - *Done when:* every active axis returns `PASS` or `CONCERNS` on the current
-     candidate (or closes via `adjudicator-agent` under [Review
-     Lifecycle](../shared/review.md#lifecycle)), or [Blocked
-     Exit](#blocked-exit) returns.
+3. **Choose the task graph.** Apply [Task Shapes And Granularity](#task-shapes-and-granularity).
+   Keep architecture, profile and manifest updates atomic with their slice.
+   Cover every affected caller in the changing task or in a compatible staged
+   migration. For a single task spanning three or more crates, mixed gates or
+   an unverified seam, compare a split against the work one fresh Lead can
+   hold. For multiple tasks, try merging coupled pairs and pulling forward
+   risk retirement or a prefactor that simplifies two or more dependents.
+   Remove a task if its deletion loses no accepted outcome or prerequisite.
 
-7. **Finalize and hand off.**
-   Ensure every bounded review `CONCERN` is recorded in its Step 1 target home,
-   set `status: ready` in `tasks.md`, delete `workflow-plan.md` when present
-   ([Artifacts](../shared/artifacts.md)), and rerun `make ledger-check
-   TASK=<task>`. Emit [Transition Result
-   V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
-   Planning`, `result: specs/<task>/tasks.md`, `movement_evidence: <carried
-   CONCERNS, plus execution waves, lock serializations, and active Reopen if
-   risks from ledger-check>`, `next_owner: Implementation`) for [Implementation
-   Handoff](../shared/transition.md#implementation-handoff).
-   - *Done when:* `tasks.md` is `status: ready`, `make ledger-check` exits
-     clean, and the receipt is emitted. **Stop here; never start implementation
-     inside Planning.**
+4. **Write the draft.** Set `status: draft` in the [ledger](../interfaces/task-ledger-v1.md)
+   and write its [packets](../interfaces/task-packet-v1.md), including for one task.
+   Clear any resolved blocked stop, remove superseded orphan packets and
+   discard runtime fields on a fresh draft with no integrated work.
+
+5. **Check the candidate.** Run `make ledger-check TASK=<task>` and repair
+   mechanical errors. Audit each producer using only its packet and sources
+   against every contract its dependents assume. Check pairs with no coding
+   path between them for undeclared owner, lock and exhaustive-type collisions.
+   Locate the baseline witness for each local outcome, assembled claim and
+   completion target under the packet's shape rules. Use the retained baseline
+   for integrated tasks. Resolve Planning defects in place and route upstream
+   contradictions through [Blocked Exit](#blocked-exit).
+
+6. **Review readiness.** Dispatch the [readiness review](task-review-readiness.md)
+   for the fixed draft. Apply the shared [Review Lifecycle](../shared/review.md#lifecycle)
+   to findings and disputes. For confirmed Planning defects, repeat Steps 4–5
+   on the repair. Recheck both axes when changed edges, locks or sources affect
+   isolation or when changed slices, coverage or claims affect obligations.
+   Reslicing requires fresh review. Send confirmed upstream gaps to
+   [Blocked Exit](#blocked-exit) with the review result.
+
+7. **Hand off.** Once all assigned axes clear, record bounded concerns in their
+   Step 1 homes. Mark the ledger ready and retire pre-ledger coordination under
+   [Artifacts](../shared/artifacts.md) before rerunning `make ledger-check TASK=<task>`.
+   Return the ready ledger in [Transition Result V1](../shared/transition.md#transition-result-v1)
+   with Implementation as next owner. Include checked execution waves, lock
+   serializations, carried concerns and active reopen risks in movement evidence.
+   End preparation at [Implementation Handoff](../shared/transition.md#implementation-handoff).
 
 ## Task Shapes And Granularity
 
@@ -197,15 +115,14 @@ zone** (one coherent outcome, bounded crate set, uniform risk/gate boundary).
 
 ## Blocked Exit
 
-Use on any unready, missing, or conflicting upstream input, unclosable `owner:
-Planning` concern, source contradiction, unpinned concurrent shared identifier,
-or confirmed review `UPSTREAM_GAP`:
+Use when a required upstream input is missing, unready or contradicted, or a
+Planning concern or concurrent identifier needs an upstream decision.
 
 - If `specs/<task>/tasks.md` exists and clean slices or already-integrated
   `[x]` tasks (`Base:` runtime state) survive the blocker, keep `tasks.md` at
   `status: blocked` with `Blocked stop:` naming the missing input and owner,
   and set `result: specs/<task>/tasks.md`.
-- Otherwise delete any stale draft `tasks.md` and `specs/<task>/tasks/*.md` and
+- Otherwise delete any obsolete `tasks.md` and `specs/<task>/tasks/*.md` and
   carry collected blockers inline in `result:`.
 - Emit [Transition Result V1](../shared/transition.md#transition-result-v1)
   (`status: blocked`, `owner: Planning`, `reopen_owner: <smallest upstream
@@ -213,23 +130,15 @@ or confirmed review `UPSTREAM_GAP`:
 
 ## No-Implementation Exit
 
-When Step 1 proves zero implementation delta and zero unaccepted integrated
-`[x]` tasks remain:
+Keep existing execution artifacts until the [no-implementation
+review](task-review-readiness.md#no-implementation-result) clears. Submit the
+accepted obligations and primary evidence, naming owners and stages for any
+outstanding proof or external effects.
 
-1. Create no new ledger (keep any existing `tasks.md` / `specs/<task>/tasks/`
-   untouched until review passes); submit the verified primary evidence (naming
-   owners and stages of any outstanding proof or external effects) to 1 fresh
-   `reviewer-agent` running [No-Implementation
-   Result](task-review-readiness.md#no-implementation-result).
-2. On `FAIL`: verify citations and handle refuted findings under [Review
-   Lifecycle](../shared/review.md#lifecycle). Continue from Step 2 on confirmed
-   `PHASE_DEFECT` (`reopen_owner: Planning`), or take [Blocked
-   Exit](#blocked-exit) carrying the review result on confirmed `UPSTREAM_GAP`.
-3. On `PASS` (or review closure under [Review
-   Lifecycle](../shared/review.md#lifecycle)): delete any stale `tasks.md` and
-   `specs/<task>/tasks/*.md`, carry active `workflow-plan.md` rules needed by a
-   named external `next_owner` into `result:`, delete `workflow-plan.md` when
-   present ([Artifacts](../shared/artifacts.md)), and emit [Transition Result
-   V1](../shared/transition.md#transition-result-v1) (`status: ready`, `owner:
-   Planning`, `result: <verified primary evidence>`, `movement_evidence: <zero
-   implementation delta verified>`, `next_owner: none` or named external owner).
+Handle disputed findings under the [Review Lifecycle](../shared/review.md#lifecycle).
+If implementation work remains, resume at Step 2. Send confirmed upstream gaps
+to [Blocked Exit](#blocked-exit) with the review result. Once cleared, remove
+the obsolete ledger and packets, retire coordination under
+[Artifacts](../shared/artifacts.md), and return a ready Planning transition
+with the verified zero-delta evidence and the named external next owner or
+`none`.

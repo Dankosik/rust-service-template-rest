@@ -51,7 +51,9 @@ Reopen if:
   | **Behavior-preserving / quantitative** | Structural, ownership, or perf/resource delta keeping `G<n>` intact | Preserved `G<n>` + base-commit-failing structural witness (old path/callers gone, architecture rule) or measurable perf/resource target |
   | **Prefactor** (`[prefactor]`) | Existing-code cleanup preserving `G<n>` and unlocking an internal seam | Preserved `G<n>` + unlocked internal seam invariant (zero new feature behavior) |
   | **Shared contract** (`[shared-contract]`) | Minimal compiling contract/schema | Compiling contract/schema and boundary invariants (consumer behavior lives downstream) |
-  | **Conditional shapes** | Follow [Conditional Claim Rules](../phases/planning/conditional-branches.md#claim-rules). | Follow [Conditional Claim Rules](../phases/planning/conditional-branches.md#claim-rules). |
+
+  For integration-first and staged migrations, use the [conditional claim
+  rules](../phases/planning/conditional-branches.md#claim-rules) for both fields.
 
   - *Observable:* `POST /webhooks` with a tampered signature returns `401
     invalid_signature` and writes zero inbox rows (fails on base commit);
@@ -63,8 +65,8 @@ Reopen if:
   (see [Task Ledger V1](task-ledger-v1.md#authoring-schema-planning-owned) for
   stage syntax and parity). A producer Lead reads only its own packet, so
   whenever another task depends on `T<ID>`, `Provides` + `Sources` must pin
-  every public type, trait, signature, error variant, config key, export, or
-  schema invariant any dependent assumes (e.g., `infra_http::rate_limit::RateLimitLayer`,
+  every consumed public type, trait, signature, error variant, config key, export, or
+  schema invariant any dependent assumes, citing the canonical shared pin where applicable (e.g., `infra_http::rate_limit::RateLimitLayer`,
   `RateLimitError::Exceeded { retry_after: Duration }` — not `"rate limiter"`).
   Write `none (leaf)` when no downstream task depends on `T<ID>`.
 - **`Sources` & shared identifiers:** cite exact owned anchors (`spec.md#r1-...`,
@@ -74,7 +76,7 @@ Reopen if:
   non-obvious `crate@version::item` (no line numbers, copied prose, or
   speculative new internal `.rs` paths). Link `design/design.md#<section>` when
   a sketch or table already lives there; inline a short snippet **only** when
-  `design/` was skipped or Planning pins a new cross-task
+  no design document was required or Planning pins a new cross-task
   `shared-contract`/`prefactor` type. Pin any additional cross-task shared
   identifier once in `tasks.md`'s `Global constraints`.
 - **`Mutable owners` & `Exclusive locks`:** scope `Mutable owners` by `<crate>

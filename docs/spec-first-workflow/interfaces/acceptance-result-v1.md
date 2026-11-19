@@ -71,8 +71,7 @@ next_owner: <exact remaining action and owner, or none>
 ## Ledger Runtime State
 
 Orchestrator-owned fields appended to `specs/<task>/tasks.md` during
-[Implementation](../phases/implementation.md#orchestrator-loop); Planning omits
-these fields.
+[Implementation](../phases/implementation.md#orchestrator-loop); Planning preserves integrated state on [reopen](../phases/planning.md#steps).
 
 - `Base: <commit SHA>` (header, pinned before the first dispatch so worktrees,
   Final Validation, and Review share one exact diff baseline; add `Commit mode:
