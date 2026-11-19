@@ -626,7 +626,7 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         .unwrap();
     std::assert_matches!(
         build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/Unary"),
+        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/BidiStream"),
         "a verifier without any rule"
     );
     let mut services = Services::new();
@@ -637,7 +637,7 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         .add(EchoServiceServer::new(Echo::default()))
         .unwrap();
     services
-        .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
+        .allow_callers(&format!("{ECHO}/BidiStream"), &["orders"])
         .unwrap();
     std::assert_matches!(
         build(services, Authentication::ServiceTokens(keys.verifier())),
