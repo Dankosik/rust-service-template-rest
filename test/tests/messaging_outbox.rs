@@ -406,9 +406,8 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
         const SCHEMA_VERSION: u16 = 1;
     }
 
-    let fixture = Fixture::create().await;
     let jobs = template_pool(&pool, 3).await;
-    let route = Route::<Payload>::new(fixture.subject.clone());
+    let route = Route::<Payload>::new("tests.outbox.checked");
     let mut registry = Registry::default();
     let publication = registry
         .declare_publication(&route, 1024)
@@ -470,7 +469,6 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
         assert_eq!(outbox_count(&jobs).await, before + 1);
     }
     close_pools(&[&jobs]).await;
-    fixture.cleanup().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -490,7 +488,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     const ORIGINAL_JSON: &str = r#"{"account_id":"42","status":"active"}"#;
     const REORDERED_JSON: &str = r#"{"status":"active","account_id":"42"}"#;
 
-    let fixture = Fixture::create_with_window(false, Duration::from_secs(1)).await;
+    let fixture = Fixture::create().await;
     let messaging = fixture
         .connect_producer()
         .await
@@ -616,7 +614,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         .prepare(&event)
         .expect("rebuilt account update");
 
-    verify_completed_identity(&fixture, &messaging, &business, &reordered, &same, &row.id).await;
+    verify_completed_identity(&messaging, &business, &reordered, &same, &row.id).await;
     finish(run, &[&publisher, &business]).await;
     assert_eq!(fixture.published().await, 1);
     close(messaging).await;
@@ -624,7 +622,6 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
 }
 
 async fn verify_completed_identity(
-    fixture: &Fixture,
     messaging: &Messaging,
     business: &PgPool,
     reordered: &infra_messaging::PreparedEvent,
@@ -644,7 +641,6 @@ async fn verify_completed_identity(
                 .await
                 .unwrap();
             assert_eq!(cleanup.remove_expired().await.unwrap(), 1);
-            tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
         }
         let conflicting = in_tx(business, async |tx| -> Result<_, Step> {
             sqlx::query("INSERT INTO business_effects (id) VALUES ('conflicting')")
@@ -1152,6 +1148,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     assert_eq!(permanent.attempts, 1);
     assert_eq!(permanent.failure_reason.as_deref(), Some("permanent"));
     fixture.restore_source().await;
+    make_due(generation).await;
     let interrupted = prepared(&fixture, "final-lease", "interrupted");
     in_tx(&jobs, async |tx| -> Result<(), Step> {
         interrupted.enqueue(tx).await?;
@@ -1170,7 +1167,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     .unwrap();
     let completed = poll_until(
         "restoring the stream resumes the outstanding publication without redrive",
-        Duration::from_secs(60) + WAIT,
+        WAIT,
         POLL,
         async || {
             let row = job(&jobs, &key).await;
