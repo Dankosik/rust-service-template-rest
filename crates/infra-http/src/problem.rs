@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -9,7 +10,8 @@ use compact_str::CompactString;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
-use utoipa::ToSchema;
+use utoipa::openapi::{RefOr, Schema};
+use utoipa::{PartialSchema, ToSchema};
 
 #[allow(
     clippy::match_same_arms,
@@ -75,49 +77,106 @@ pub struct InvalidParam {
     pub reason: CompactString,
 }
 
-/// RFC 9457 problem details with a stable `code` from the closed failure catalog.
-#[serde_with::skip_serializing_none]
-#[derive(Clone, Debug, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Problem {
-    /// Stable machine-readable error code.
-    #[schema(value_type = String, example = json!(Code::BadRequest.as_str()))]
     code: Code,
-    /// Always `about:blank`: the problem has no semantics beyond its HTTP
-    /// status, and `code` names the specific failure.
-    #[serde(rename = "type")]
-    #[schema(format = "uri-reference", example = json!(ABOUT_BLANK))]
-    type_uri: &'static str,
-    /// The HTTP status phrase.
-    #[schema(example = json!(http_title(Code::BadRequest)))]
-    title: &'static str,
-    #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
-    status: u16,
-    #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
     detail: Option<CompactString>,
-    /// URI reference identifying this occurrence when the service exposes
-    /// one.
-    #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
     instance: Option<CompactString>,
-    #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
     request_id: Option<CompactString>,
-    /// Which parts of the request failed validation, following the RFC 9457
-    /// extension-member example. Present only on a validation rejection,
-    /// and never carrying the submitted value.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     invalid_params: Vec<InvalidParam>,
-    #[serde(skip)]
     retry_after: Option<Duration>,
+}
+
+const _: () = assert!(std::mem::size_of::<Problem>() <= 128);
+
+#[allow(
+    single_use_lifetimes,
+    reason = "utoipa::ToSchema derive emits impl<'a> without #[automatically_derived]"
+)]
+mod wire {
+    use serde::Serialize;
+    use utoipa::ToSchema;
+
+    use super::{ABOUT_BLANK, Code, InvalidParam, http_status, http_title};
+
+    /// RFC 9457 problem details with a stable `code` from the closed failure catalog.
+    #[serde_with::skip_serializing_none]
+    #[derive(Serialize, ToSchema)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct ProblemWire<'a> {
+        /// Stable machine-readable error code.
+        #[schema(value_type = String, example = json!(Code::BadRequest.as_str()))]
+        pub(super) code: Code,
+        /// Always `about:blank`: the problem has no semantics beyond its HTTP
+        /// status, and `code` names the specific failure.
+        #[serde(rename = "type")]
+        #[schema(format = "uri-reference", example = json!(ABOUT_BLANK))]
+        pub(super) type_uri: &'static str,
+        /// The HTTP status phrase.
+        #[schema(example = json!(http_title(Code::BadRequest)))]
+        pub(super) title: &'static str,
+        #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
+        pub(super) status: u16,
+        #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
+        pub(super) detail: Option<&'a str>,
+        /// URI reference identifying this occurrence when the service exposes
+        /// one.
+        #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
+        pub(super) instance: Option<&'a str>,
+        #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
+        pub(super) request_id: Option<&'a str>,
+        /// Which parts of the request failed validation, following the RFC 9457
+        /// extension-member example. Present only on a validation rejection,
+        /// and never carrying the submitted value.
+        #[serde(skip_serializing_if = "is_empty_params")]
+        pub(super) invalid_params: &'a [InvalidParam],
+    }
+
+    const fn is_empty_params(params: &[InvalidParam]) -> bool {
+        params.is_empty()
+    }
+}
+
+impl Serialize for Problem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        wire::ProblemWire {
+            code: self.code,
+            type_uri: ABOUT_BLANK,
+            title: http_title(self.code),
+            status: http_status(self.code).as_u16(),
+            detail: self.detail.as_deref(),
+            instance: self.instance.as_deref(),
+            request_id: self.request_id.as_deref(),
+            invalid_params: &self.invalid_params,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl PartialSchema for Problem {
+    fn schema() -> RefOr<Schema> {
+        <wire::ProblemWire<'static> as PartialSchema>::schema()
+    }
+}
+
+impl ToSchema for Problem {
+    fn name() -> Cow<'static, str> {
+        Cow::Borrowed("Problem")
+    }
+
+    fn schemas(schemas: &mut Vec<(String, RefOr<Schema>)>) {
+        <wire::ProblemWire<'static> as ToSchema>::schemas(schemas);
+    }
 }
 
 impl Problem {
     #[must_use]
-    pub fn new(code: Code) -> Self {
+    pub const fn new(code: Code) -> Self {
         Self {
             code,
-            type_uri: ABOUT_BLANK,
-            title: http_title(code),
-            status: http_status(code).as_u16(),
             detail: None,
             instance: None,
             request_id: None,
@@ -127,7 +186,7 @@ impl Problem {
     }
 
     #[must_use]
-    pub fn code(&self) -> Code {
+    pub const fn code(&self) -> Code {
         self.code
     }
 

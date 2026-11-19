@@ -55,17 +55,39 @@ pub struct TlsOptions {
 // template:end grpc:http2-listener-options
 
 #[derive(Debug, thiserror::Error)]
-pub enum ServerError {
-    #[error("bind http listener {addr}: {source}")]
-    Bind {
-        addr: SocketAddr,
+#[error("bind http listener {addr}: {source}")]
+pub struct BindError {
+    addr: SocketAddr,
+    #[source]
+    source: std::io::Error,
+}
+
+impl BindError {
+    #[must_use]
+    pub const fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DrainError {
+    #[error("http accept loop task: {source}")]
+    AcceptTask {
         #[source]
-        source: std::io::Error,
+        source: tokio::task::JoinError,
+        residue: DrainResidue,
     },
-    #[error("http accept loop task: {0}")]
-    AcceptTask(#[source] tokio::task::JoinError),
     #[error("http accept loop termination was not confirmed before the drain deadline")]
-    AcceptTimeout,
+    AcceptTimeout { residue: DrainResidue },
+}
+
+impl DrainError {
+    #[must_use]
+    pub const fn residue(&self) -> DrainResidue {
+        match *self {
+            Self::AcceptTask { residue, .. } | Self::AcceptTimeout { residue } => residue,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +99,10 @@ pub enum AcceptFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drained {
     Complete,
-    TimedOut { remaining_connections: usize },
+    TimedOut {
+        remaining_at_deadline: usize,
+        residue: DrainResidue,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,11 +164,11 @@ pub struct BoundListener {
 }
 
 impl BoundListener {
-    pub fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
-        let listener = listen(addr).map_err(|source| ServerError::Bind { addr, source })?;
+    pub fn bind(addr: SocketAddr) -> Result<Self, BindError> {
+        let listener = listen(addr).map_err(|source| BindError { addr, source })?;
         let local_addr = listener
             .local_addr()
-            .map_err(|source| ServerError::Bind { addr, source })?;
+            .map_err(|source| BindError { addr, source })?;
         Ok(Self {
             listener,
             local_addr,
@@ -266,7 +291,7 @@ fn configure_accepted(stream: &TcpStream) {
 }
 
 impl Server {
-    pub fn bind(addr: SocketAddr, app: Router, options: Http1Options) -> Result<Self, ServerError> {
+    pub fn bind(addr: SocketAddr, app: Router, options: Http1Options) -> Result<Self, BindError> {
         Ok(BoundListener::bind(addr)?.serve(app, options))
     }
 
@@ -290,35 +315,38 @@ impl Server {
         }
     }
 
-    pub async fn drain(self, budget: Duration) -> Result<Drained, ServerError> {
+    pub async fn drain(self, budget: Duration) -> Result<Drained, DrainError> {
         let deadline = deadline_after(budget);
-        self.drain_until(deadline, deadline).await.0
+        self.drain_until(deadline, deadline).await
     }
 
     pub async fn drain_until(
         mut self,
         graceful_deadline: Instant,
         confirmation_deadline: Instant,
-    ) -> (Result<Drained, ServerError>, DrainResidue) {
+    ) -> Result<Drained, DrainError> {
+        enum GracefulStop {
+            AcceptTimeout,
+            AcceptTask(tokio::task::JoinError),
+            TimedOut(usize),
+        }
+
         self.connection_shutdown.drain.cancel();
-        let joined = self.join_accept_until(graceful_deadline).await;
-        let graceful_result = match joined {
+        let stop = match self.join_accept_until(graceful_deadline).await {
             None => {
                 self.accept_loop.abort();
-                Err(ServerError::AcceptTimeout)
+                GracefulStop::AcceptTimeout
             }
-            Some(Err(error)) => Err(ServerError::AcceptTask(error)),
+            Some(Err(error)) => GracefulStop::AcceptTask(error),
             Some(Ok(())) => {
                 if self.drain_tasks_until(graceful_deadline).await {
-                    return (Ok(Drained::Complete), DrainResidue::default());
+                    return Ok(Drained::Complete);
                 }
-                Ok(Drained::TimedOut {
-                    remaining_connections: self.connections.len(),
-                })
+                GracefulStop::TimedOut(self.connections.len())
             }
         };
         self.connection_shutdown.force.cancel();
-        let accept_confirmed = !matches!(graceful_result, Err(ServerError::AcceptTimeout))
+        let accept_confirmed = !matches!(stop, GracefulStop::AcceptTimeout)
             || self
                 .join_accept_until(confirmation_deadline)
                 .await
@@ -334,7 +362,14 @@ impl Server {
             remaining_connections: self.connections.len(),
             remaining_delegated_tasks: self.delegated.tasks.len(),
         };
-        (graceful_result, residue)
+        match stop {
+            GracefulStop::AcceptTimeout => Err(DrainError::AcceptTimeout { residue }),
+            GracefulStop::AcceptTask(source) => Err(DrainError::AcceptTask { source, residue }),
+            GracefulStop::TimedOut(remaining_at_deadline) => Ok(Drained::TimedOut {
+                remaining_at_deadline,
+                residue,
+            }),
+        }
     }
 
     async fn join_accept_until(

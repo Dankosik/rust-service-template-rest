@@ -135,7 +135,7 @@ pub(crate) enum BootstrapError {
     },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
-    Server(#[from] infra_http_transport::ServerError),
+    Server(#[from] infra_http_transport::BindError),
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
@@ -875,12 +875,7 @@ mod tests {
             &mut serving,
         )
         .await;
-        std::assert_matches!(
-            result,
-            Err(BootstrapError::Server(
-                infra_http_transport::ServerError::Bind { .. }
-            ))
-        );
+        std::assert_matches!(result, Err(BootstrapError::Server(_)));
         assert!(!serving.admitted);
         assert!(serving.http_server.is_none());
         std::assert_matches!(

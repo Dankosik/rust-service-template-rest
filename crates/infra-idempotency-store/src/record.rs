@@ -100,7 +100,10 @@ impl Undecodable {
     }
 }
 
-impl Record {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessRecord(Record);
+
+impl SuccessRecord {
     pub fn capture(
         status: StatusCode,
         headers: &HeaderMap,
@@ -109,10 +112,26 @@ impl Record {
         if !status.is_success() {
             return Err(CaptureError::InvalidStatus);
         }
-        Self::capture_parts(status, headers, body)
+        Record::capture_parts(status, headers, body).map(Self)
     }
 
-    pub fn capture_terminal_refusal(
+    #[must_use]
+    pub fn into_record(self) -> Record {
+        self.0
+    }
+}
+
+impl From<SuccessRecord> for Record {
+    fn from(record: SuccessRecord) -> Self {
+        record.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRefusal(Record);
+
+impl TerminalRefusal {
+    pub fn capture(
         status: StatusCode,
         headers: &HeaderMap,
         body: Bytes,
@@ -120,9 +139,22 @@ impl Record {
         if !is_terminal_refusal(status) {
             return Err(CaptureError::InvalidStatus);
         }
-        Self::capture_parts(status, headers, body)
+        Record::capture_parts(status, headers, body).map(Self)
     }
 
+    #[must_use]
+    pub fn into_record(self) -> Record {
+        self.0
+    }
+}
+
+impl From<TerminalRefusal> for Record {
+    fn from(refusal: TerminalRefusal) -> Self {
+        refusal.0
+    }
+}
+
+impl Record {
     fn capture_parts(
         status: StatusCode,
         headers: &HeaderMap,
@@ -181,11 +213,6 @@ impl Record {
 
     pub(crate) const fn encode_status(&self) -> i16 {
         self.status.as_u16().cast_signed()
-    }
-
-    #[must_use]
-    pub fn is_terminal_refusal(&self) -> bool {
-        is_terminal_refusal(self.status)
     }
 
     pub(crate) fn encode_headers(&self) -> impl Iterator<Item = HeaderPairRef<'_>> {
@@ -270,7 +297,9 @@ mod tests {
         headers.append(CONTENT_TYPE, HeaderValue::from_bytes(&[0xff]).unwrap());
         headers.append("set-cookie", HeaderValue::from_static("secret"));
         let body = Bytes::from_static(b"stored");
-        let record = Record::capture(StatusCode::CREATED, &headers, body.clone()).unwrap();
+        let record = SuccessRecord::capture(StatusCode::CREATED, &headers, body.clone())
+            .unwrap()
+            .into_record();
 
         assert_eq!(record.encode_status(), 201);
         assert_eq!(record.body(), b"stored");
@@ -342,10 +371,38 @@ mod tests {
     }
 
     #[test]
+    fn success_and_terminal_refusal_enforce_disjoint_status_sets() {
+        for status in [StatusCode::OK, StatusCode::CREATED, StatusCode::NO_CONTENT] {
+            assert!(SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()).is_ok());
+            assert_eq!(
+                TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+        for status in [StatusCode::CONFLICT, StatusCode::UNPROCESSABLE_ENTITY] {
+            assert!(TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()).is_ok());
+            assert_eq!(
+                SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::INTERNAL_SERVER_ERROR] {
+            assert_eq!(
+                SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+            assert_eq!(
+                TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+    }
+
+    #[test]
     fn debug_output_omits_payloads_and_raw_header_pairs() {
         let mut headers = HeaderMap::new();
         headers.insert(LOCATION, HeaderValue::from_static("/private-resource"));
-        let record = Record::capture(
+        let record = SuccessRecord::capture(
             StatusCode::OK,
             &headers,
             Bytes::from_static(b"private-body"),

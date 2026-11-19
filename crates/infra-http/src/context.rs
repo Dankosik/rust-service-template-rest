@@ -27,6 +27,9 @@ use crate::request_id::REQUEST_ID_HEADER;
 pub struct RequestContext {
     operation: OperationContext,
     tracking: Option<Arc<RequestTracking>>,
+    // template:begin request-budget:http-request-context-deadline-field
+    deadline: Option<RequestDeadline>,
+    // template:end request-budget:http-request-context-deadline-field
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +46,13 @@ impl RequestContext {
     pub const fn operation(&self) -> &OperationContext {
         &self.operation
     }
+
+    // template:begin request-budget:http-request-context-deadline
+    #[must_use]
+    pub const fn deadline(&self) -> Option<RequestDeadline> {
+        self.deadline
+    }
+    // template:end request-budget:http-request-context-deadline
 
     pub async fn read_body_frame(
         &self,
@@ -181,7 +191,7 @@ impl ResponseContext {
 // template:begin request-budget:http-request-deadline
 const MAX_RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestDeadline {
     at: tokio::time::Instant,
     response_reserve: Duration,
@@ -205,6 +215,17 @@ impl RequestDeadline {
         self.at
             .checked_sub(self.response_reserve)
             .filter(|end| *end > tokio::time::Instant::now())
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for RequestDeadline {
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(extension::<Self>(parts))
     }
 }
 // template:end request-budget:http-request-deadline
@@ -287,18 +308,24 @@ pub(crate) async fn enforce_request_budget(
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
+    // template:begin request-budget:http-request-deadline-value
+    let request_deadline = RequestDeadline::from_deadline(deadline, budget);
+    // template:end request-budget:http-request-deadline-value
     let context = RequestContext {
         operation: OperationContext::new(
             Some(deadline),
             response_context.operation().cancellation().clone(),
         ),
         tracking: track_request.then(Arc::default),
+        // template:begin request-budget:http-request-deadline-field-init
+        deadline: request_deadline,
+        // template:end request-budget:http-request-deadline-field-init
     };
     let version = request.version();
     request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
     // template:begin request-budget:http-request-deadline-projection
-    if let Some(deadline) = RequestDeadline::from_deadline(deadline, budget) {
+    if let Some(deadline) = request_deadline {
         request.extensions_mut().insert(deadline);
     }
     // template:end request-budget:http-request-deadline-projection
@@ -463,4 +490,25 @@ mod tests {
             "application/problem+json"
         );
     }
+
+    // template:begin request-budget:http-missing-request-deadline-test
+    #[tokio::test]
+    async fn missing_request_deadline_is_a_sanitized_internal_failure() {
+        let handler = |_: RequestDeadline| async { "unreachable" };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new().route("/", get(handler));
+        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+    }
+    // template:end request-budget:http-missing-request-deadline-test
 }

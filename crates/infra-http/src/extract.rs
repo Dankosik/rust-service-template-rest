@@ -63,10 +63,6 @@ pub(crate) fn is_json_media_type(value: &str) -> bool {
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the extractor returns Problem by value"
-)]
 pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
     let json = content_type
         .and_then(|value| value.to_str().ok())
@@ -78,7 +74,7 @@ pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> R
     }
 }
 
-pub(crate) fn decode_json<T: DeserializeOwned, E: From<Problem>>(bytes: &[u8]) -> Result<T, E> {
+pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Problem> {
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut input)
         .map_err(|error| json_problem(&error, bytes))?;
@@ -134,10 +130,6 @@ where
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the extractor returns Problem by value"
-)]
 pub(crate) fn decode_query<T: DeserializeOwned>(query: &str) -> Result<T, Problem> {
     let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
     serde_path_to_error::deserialize(fields).map_err(|error| query_problem(error.path()))

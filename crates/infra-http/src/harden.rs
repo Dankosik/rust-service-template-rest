@@ -71,7 +71,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
     let closing = options
         .draining
         .clone()
-        .map(|draining| middleware::from_fn_with_state(Arc::new(draining), close_while_draining));
+        .map(|draining| middleware::from_fn_with_state(draining, close_while_draining));
 
     let chain = ServiceBuilder::new()
         .layer(option_layer(closing))
@@ -115,7 +115,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
 }
 
 async fn close_while_draining(
-    State(readiness): State<Arc<ReadinessReader>>,
+    State(readiness): State<ReadinessReader>,
     request: Request,
     next: Next,
 ) -> Response {

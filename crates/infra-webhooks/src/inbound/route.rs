@@ -10,7 +10,7 @@ use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use infra_http::extract::Path;
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
-use infra_http::{Code, Problem, RequestContext, RequestDeadline};
+use infra_http::{Code, Problem, RequestContext};
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{OpenApi, ToResponse};
@@ -194,10 +194,11 @@ async fn receive(
         return state.reject_unknown_endpoint();
     };
     let (parts, body) = request.into_parts();
-    let (Some(deadline), Some(context)) = (
-        parts.extensions.get::<RequestDeadline>(),
-        parts.extensions.get::<RequestContext>(),
-    ) else {
+    let Some((context, deadline)) = parts
+        .extensions
+        .get::<RequestContext>()
+        .and_then(|context| Some((context, context.deadline()?)))
+    else {
         tracing::error!(
             endpoint = %endpoint_id,
             failure = "deadline_missing",

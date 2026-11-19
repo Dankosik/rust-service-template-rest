@@ -5,7 +5,9 @@ use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use bytes::{BufMut as _, BytesMut};
-use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
+use infra_idempotency_store::{
+    CaptureError, MAX_STORED_BODY_BYTES, Record, SuccessRecord, TerminalRefusal,
+};
 use serde::Serialize;
 use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
 use utoipa::{IntoResponses, PartialSchema};
@@ -73,57 +75,53 @@ pub enum ReplayError {
 }
 
 #[derive(Debug)]
-pub struct TerminalProblem(Box<Problem>);
+pub struct TerminalProblem(Problem);
 
 impl TerminalProblem {
-    pub(super) fn capture(&self) -> Result<Record, ReplayError> {
-        let problem = self.0.as_ref();
+    pub(super) fn capture(&self) -> Result<TerminalRefusal, ReplayError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE));
-        Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
+        TerminalRefusal::capture(http_status(self.0.code()), &headers, json_body(&self.0)?)
             .map_err(ReplayError::from)
     }
 
     #[must_use]
-    pub fn conflict() -> Self {
-        Self(Box::new(Problem::new(Code::Conflict)))
+    pub const fn conflict() -> Self {
+        Self(Problem::new(Code::Conflict))
     }
 
     #[must_use]
-    pub fn already_exists() -> Self {
-        Self(Box::new(Problem::new(Code::AlreadyExists)))
+    pub const fn already_exists() -> Self {
+        Self(Problem::new(Code::AlreadyExists))
     }
 
     #[must_use]
-    pub fn unprocessable_content() -> Self {
-        Self(Box::new(Problem::new(Code::UnprocessableContent)))
+    pub const fn unprocessable_content() -> Self {
+        Self(Problem::new(Code::UnprocessableContent))
     }
 
     #[must_use]
-    pub fn detail(mut self, detail: impl Into<compact_str::CompactString>) -> Self {
-        *self.0 = self.0.detail(detail);
-        self
+    pub fn detail(self, detail: impl Into<compact_str::CompactString>) -> Self {
+        Self(self.0.detail(detail))
     }
 
     #[must_use]
-    pub fn instance(mut self, instance: impl Into<compact_str::CompactString>) -> Self {
-        *self.0 = self.0.instance(instance);
-        self
+    pub fn instance(self, instance: impl Into<compact_str::CompactString>) -> Self {
+        Self(self.0.instance(instance))
     }
 
     #[must_use]
     pub fn invalid_param(
-        mut self,
+        self,
         name: impl Into<compact_str::CompactString>,
         reason: impl Into<compact_str::CompactString>,
     ) -> Self {
-        *self.0 = self.0.invalid_param(name, reason);
-        self
+        Self(self.0.invalid_param(name, reason))
     }
 }
 
 #[derive(Debug)]
-pub struct ReplayableResponse(Record);
+pub struct ReplayableResponse(SuccessRecord);
 
 impl ReplayableResponse {
     pub fn bytes(
@@ -131,7 +129,7 @@ impl ReplayableResponse {
         headers: &HeaderMap,
         body: Bytes,
     ) -> Result<Self, ReplayError> {
-        Record::capture(status, headers, body)
+        SuccessRecord::capture(status, headers, body)
             .map(Self)
             .map_err(ReplayError::from)
     }
@@ -149,7 +147,7 @@ impl ReplayableResponse {
         Self::bytes(status, headers, Bytes::new())
     }
 
-    pub(super) fn into_record(self) -> Record {
+    pub(super) fn into_success(self) -> SuccessRecord {
         self.0
     }
 }
@@ -307,7 +305,7 @@ mod tests {
             &1,
         )
         .unwrap();
-        let response = response_from_record(captured.into_record());
+        let response = response_from_record(Record::from(captured.into_success()));
         assert!(!response.headers().contains_key(CONTENT_ENCODING));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(
@@ -342,7 +340,7 @@ mod tests {
             let captured = ReplayableResponse::bytes(
                 StatusCode::from_u16(status).unwrap(), &header_map(&pairs), Bytes::from(body.clone())
             ).unwrap();
-            let response = response_from_record(captured.into_record());
+            let response = response_from_record(Record::from(captured.into_success()));
 
             proptest::prop_assert_eq!(response.status().as_u16(), status);
             let allowed = [
