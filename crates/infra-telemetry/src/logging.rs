@@ -115,7 +115,7 @@ pub(crate) fn publish_observations() {
 
 enum DirectiveFilter {
     Targets(Targets),
-    Env(EnvFilter),
+    Env(Box<EnvFilter>),
 }
 
 impl<S> Layer<S> for DirectiveFilter
@@ -185,7 +185,7 @@ fn directive_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
     let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
     let inner = match static_targets(directive) {
         Some(targets) => DirectiveFilter::Targets(targets),
-        None => DirectiveFilter::Env(filter),
+        None => DirectiveFilter::Env(Box::new(filter)),
     };
     Ok(AdmissionFilter(inner))
 }
