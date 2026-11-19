@@ -687,7 +687,7 @@ def _check_messaging_without_jobs(source: Path, candidate: str, initializer, wor
         relative.rstrip("/") for relative in initializer._profile_data(source).removals["worker"]
     )
     _assert_profile_output(initializer, nodes, "worker", worker_paths)
-    _assert_recovery_example_output(initializer, nodes, retained=False)
+    _assert_messaging_output(initializer, nodes, messaging=True, outbox=False)
     _emit(
         "messaging-without-jobs-selection",
         profiles=inputs.profiles(),
@@ -696,17 +696,21 @@ def _check_messaging_without_jobs(source: Path, candidate: str, initializer, wor
     )
 
 
-def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, retained: bool) -> None:
+def _assert_messaging_output(initializer, nodes: dict[str, Node], *, messaging: bool, outbox: bool) -> None:
     worker = nodes.get("crates/jobs-worker/src/lib.rs")
     payload = worker.payload if worker is not None and isinstance(worker.payload, bytes) else b""
-    if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != retained:
+    if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != outbox:
         raise initializer.Refusal("deferred message factory did not follow the outbox profile")
     for path in ("test/fixtures/messaging_recovery.sql", "test/tests/messaging_recovery.rs"):
-        if (path in nodes) != retained:
+        if (path in nodes) != outbox:
             raise initializer.Refusal(f"outbox recovery fixture projection mismatch: {path}")
-    messaging = "crates/infra-messaging/Cargo.toml" in nodes
-    if ("crates/infra-messaging/examples/dlq_recovery.rs" in nodes) != messaging:
-        raise initializer.Refusal("owned DLQ example projection mismatch")
+    assertion = _assert_profile_output if messaging else _assert_no_profile_output
+    assertion(initializer, nodes, "messaging", (
+        "crates/infra-messaging/Cargo.toml",
+        "crates/infra-messaging/examples/dlq_recovery.rs",
+        "crates/infra-messaging/tests/fixtures/go-wire/go_wire_compat_bridge_test.go",
+        "scripts/profiles/messaging_go_compat.sh",
+    ))
     if messaging:
         manifest = nodes["crates/infra-messaging/Cargo.toml"]
         examples = tomllib.loads(manifest.payload.decode()).get("example", [])
@@ -735,7 +739,7 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
         with tempfile.TemporaryDirectory(prefix=f"grpc-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "grpc", grpc_paths)
-        _assert_recovery_example_output(initializer, nodes, retained=outbox == "postgres")
+        _assert_messaging_output(initializer, nodes, messaging=messaging == "nats-jetstream", outbox=outbox == "postgres")
         if outbound_auth == "oauth2-client-credentials":
             _assert_profile_output(initializer, nodes, "outbound-auth-grpc", combined_paths)
         else:

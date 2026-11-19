@@ -181,6 +181,35 @@ class SurfacesTests(unittest.TestCase):
         for name in false_names:
             self.assertFalse(verdicts.get(name), f"{file}: expected {name}=False, got {verdicts}")
 
+    def test_go_wire_bridge_follows_the_profile_script_route(self) -> None:
+        shell = "scripts/profiles/messaging_go_compat.sh"
+        bridge = "crates/infra-messaging/tests/fixtures/go-wire/go_wire_compat_bridge_test.go"
+        (self.source_fixture / "crates/infra-messaging").mkdir(parents=True)
+
+        def active_surfaces(repo: Path, path: str) -> set[str]:
+            return {name for name, selected in surfaces.classify_files(repo, [path]).items() if selected}
+
+        def assert_route(repo: Path, expected: set[str]) -> None:
+            for path in (shell, bridge):
+                with self.subTest(repo=repo.name, path=path, expected=expected):
+                    self.assertEqual(active_surfaces(repo, path), expected)
+
+        assert_route(self.source_fixture, {"shell", "messaging_integration", "module_initializer"})
+        assert_route(self.derived_fixture, {"shell"})
+        self._write_lock(
+            self.derived_fixture,
+            {"database": "none", "messaging": "nats-jetstream", "agent_harness": "core"},
+        )
+        assert_route(self.derived_fixture, {"shell", "messaging_integration"})
+
+        hook_dir = self.derived_fixture / "scripts/service"
+        hook_dir.mkdir(parents=True)
+        (hook_dir / "changed-surfaces.sh").write_text(
+            f'service_changed_surfaces() {{ if [[ "$1" == "{bridge}" ]]; then mark documentation; fi; }}\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(active_surfaces(self.derived_fixture, bridge), {"shell", "messaging_integration", "documentation"})
+
     def test_batched_service_hook_runs_once(self) -> None:
         hook_dir = self.source_fixture / "scripts/service"
         hook_dir.mkdir(parents=True)

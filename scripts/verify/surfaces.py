@@ -257,7 +257,10 @@ def classify_report(
     hook_marks = _run_service_hook(repo, clean_files)
     unclassified: list[str] = []
 
-    for idx, file in enumerate(clean_files):
+    for idx, changed_file in enumerate(clean_files):
+        file = changed_file
+        if file == "crates/infra-messaging/tests/fixtures/go-wire/go_wire_compat_bridge_test.go":
+            file = "scripts/profiles/messaging_go_compat.sh"
         matched = False
 
         def mark(*names: str) -> None:
@@ -622,7 +625,7 @@ def classify_report(
             mark(*hook_marks[idx])
 
         if not matched:
-            unclassified.append(file)
+            unclassified.append(changed_file)
 
     if source_only:
         if surfaces["initializer_runtime"]:
