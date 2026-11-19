@@ -11,9 +11,8 @@ directory:
   description. The rest of this document describes them.
 - **Workflow skills** (`orchestrator`, `acceptance-unit-lead`,
   `spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
-  `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
-  `thermo-nuclear-code-quality-review`) are carriers for the
-  [workflow](spec-first-workflow.md) and the [harness](agent-harness.md): a
+  `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`) are
+  carriers for the [workflow](spec-first-workflow.md) and the [harness](agent-harness.md): a
   user or a role invokes them, never the model on its own, and their bodies link
   to the phase, interface, and contract documents instead of restating them. See
   [Workflow skills](#workflow-skills).

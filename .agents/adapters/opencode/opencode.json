@@ -24,8 +24,7 @@
           "idea-refine": "deny",
           "planning-and-task-breakdown": "deny",
           "spec-document-designer": "deny",
-          "spec-first-brainstorming": "deny",
-          "thermo-nuclear-code-quality-review": "deny"
+          "spec-first-brainstorming": "deny"
         }
       }
     },
@@ -38,8 +37,7 @@
           "idea-refine": "deny",
           "planning-and-task-breakdown": "deny",
           "spec-document-designer": "deny",
-          "spec-first-brainstorming": "deny",
-          "thermo-nuclear-code-quality-review": "deny"
+          "spec-first-brainstorming": "deny"
         }
       }
     }
