@@ -1,4 +1,6 @@
-use super::exporter::{CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, TrustFile};
+use super::exporter::{
+    CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, SettingScope, TrustFile,
+};
 use super::*;
 
 mod delivery;

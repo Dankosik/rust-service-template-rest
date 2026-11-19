@@ -223,7 +223,8 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     const HEADER_VALUE: &str = "private-header";
 
     let files = tempfile::tempdir().expect("directory for trust files");
-    let file = |variable, name: &str| TrustFile {
+    let file = |scope, variable, name: &str| TrustFile {
+        scope,
         variable,
         path: files.path().join(name),
     };
@@ -235,14 +236,18 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     for (trust, diagnostic) in [
         (
             CollectorTrust {
-                certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
+                certificate: Some(file(
+                    SettingScope::Signal,
+                    CERTIFICATE_VARS[0],
+                    "absent.pem",
+                )),
                 ..CollectorTrust::default()
             },
             "could not read the OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(file(CERTIFICATE_VARS[0], "large.pem")),
+                certificate: Some(file(SettingScope::Signal, CERTIFICATE_VARS[0], "large.pem")),
                 ..CollectorTrust::default()
             },
             "exceeds the 1048576-byte limit",
@@ -250,36 +255,48 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         #[cfg(unix)]
         (
             CollectorTrust {
-                certificate: Some(file(CERTIFICATE_VARS[0], "directory.pem")),
+                certificate: Some(file(
+                    SettingScope::Signal,
+                    CERTIFICATE_VARS[0],
+                    "directory.pem",
+                )),
                 ..CollectorTrust::default()
             },
             "must select a regular OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
+                certificate: Some(file(SettingScope::Common, CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "must select a usable PEM certificate bundle",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
+                client_certificate: Some(file(
+                    SettingScope::Common,
+                    CLIENT_CERTIFICATE_VARS[1],
+                    "text.pem",
+                )),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
+                client_key: Some(file(SettingScope::Common, CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
-                client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
+                client_certificate: Some(file(
+                    SettingScope::Common,
+                    CLIENT_CERTIFICATE_VARS[1],
+                    "text.pem",
+                )),
+                client_key: Some(file(SettingScope::Common, CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
             "usable PEM identity",

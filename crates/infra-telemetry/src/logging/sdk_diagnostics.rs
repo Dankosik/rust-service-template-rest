@@ -62,7 +62,7 @@ impl Observed {
     }
 
     fn add(&self, amount: u64) {
-        add(&self.value, amount);
+        saturating_add(&self.value, amount);
         self.seen.store(true, Ordering::Release);
     }
 
@@ -102,7 +102,7 @@ pub(super) fn is_known_diagnostic(metadata: &Metadata<'_>) -> bool {
     metadata.is_event() && SdkEvent::from_name(metadata.name()).is_some()
 }
 
-fn add(counter: &AtomicU64, amount: u64) {
+fn saturating_add(counter: &AtomicU64, amount: u64) {
     let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(amount))
     });
@@ -137,7 +137,7 @@ pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
     let Some(sdk_event) = SdkEvent::from_name(metadata.name()) else {
         return;
     };
-    add(&COUNTS[sdk_event], 1);
+    saturating_add(&COUNTS[sdk_event], 1);
     match sdk_event {
         SdkEvent::SpansDropped => {
             if let Some(count) = numeric_field(event, "dropped_span_count") {
@@ -149,7 +149,12 @@ pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
                 REJECTED.add(count);
             }
         }
-        _ => {}
+        SdkEvent::SpanDroppingStarted
+        | SdkEvent::ResponseParseError
+        | SdkEvent::StatusError
+        | SdkEvent::NetworkError
+        | SdkEvent::ResponseBodyTooLarge
+        | SdkEvent::ExportError => {}
     }
 }
 
