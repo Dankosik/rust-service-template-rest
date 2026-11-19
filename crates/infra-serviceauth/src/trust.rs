@@ -414,7 +414,7 @@ mod tests {
                 &serde_json::json!({"alg": "ES256", "typ": "example-svc+jwt", "kid": key.kid()}),
                 &serde_json::json!({"iss": issuer, "sub": issuer, "aud": "catalog", "iat": 1_000, "exp": 1_060}),
             );
-            let caller = verifier.verify(token.as_bytes(), || Ok(1_000)).unwrap();
+            let caller = verifier.verify(token.as_bytes(), 1_000).unwrap();
             assert_eq!(caller.name().as_str(), issuer, "{}", key.kid());
         }
     }
