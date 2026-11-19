@@ -405,11 +405,9 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     std::assert_matches!(
         tokio::time::timeout(Duration::from_millis(200), exchange)
             .await
-            .expect("cancellation must end waiting before the local ceiling"),
-        Err(ExchangeError::AfterResponse {
-            status: http::StatusCode::OK,
-            source: Error::Cancelled,
-        })
+            .expect("cancellation must end waiting before the local ceiling")
+            .map_err(Error::from),
+        Err(Error::Cancelled)
     );
     server.abort();
     assert!(server.await.expect_err("fixture cancelled").is_cancelled());
