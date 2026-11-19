@@ -63,17 +63,29 @@ pub struct ObjectStorage {
     inner: Arc<Inner>,
 }
 
+struct AmazonS3Target {
+    cloud_region: String,
+    expected_bucket_owner: String,
+}
+
 struct Inner {
     client: aws_sdk_s3::Client,
     provider_name: &'static str,
-    cloud_region: Option<String>,
+    amazon_s3: Option<AmazonS3Target>,
     bucket: String,
-    expected_bucket_owner: Option<String>,
     checksum: provider::UploadChecksum,
     max_object_bytes: u64,
     operation_timeout: Duration,
     admission: Arc<Semaphore>,
     histograms: Arc<Histograms>,
+}
+
+impl Inner {
+    fn expected_bucket_owner(&self) -> Option<String> {
+        self.amazon_s3
+            .as_ref()
+            .map(|target| target.expected_bucket_owner.clone())
+    }
 }
 
 impl std::fmt::Debug for ObjectStorage {
@@ -196,16 +208,19 @@ impl ObjectStorage {
                     .grace_period(STALL_GRACE)
                     .build(),
             );
-        let (cloud_region, expected_bucket_owner) = match admitted.target {
+        let amazon_s3 = match admitted.target {
             provider::Target::AmazonS3 {
                 expected_bucket_owner,
             } => {
                 config = config.force_path_style(false);
-                (Some(admitted.region.clone()), Some(expected_bucket_owner))
+                Some(AmazonS3Target {
+                    cloud_region: admitted.region.clone(),
+                    expected_bucket_owner,
+                })
             }
             provider::Target::Endpoint { url, path_style } => {
                 config = config.endpoint_url(url).force_path_style(path_style);
-                (None, None)
+                None
             }
         };
         config = config.region(Region::new(admitted.region));
@@ -214,9 +229,8 @@ impl ObjectStorage {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
                 provider_name: provider.name(),
-                cloud_region,
+                amazon_s3,
                 bucket,
-                expected_bucket_owner,
                 checksum: admitted.checksum,
                 max_object_bytes,
                 operation_timeout,
@@ -278,22 +292,22 @@ impl ObjectStorage {
             .set_content_type(options.content_type.map(ContentType::into_string))
             .set_checksum_algorithm(checksum)
             .set_if_none_match(if_none_match)
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+            .set_expected_bucket_owner(self.inner.expected_bucket_owner())
             .customize()
             .config_override(call_config)
             .interceptor(ResponseLimit::SuccessBody)
             .send();
-        let mut dispatched = None;
+        let mut dispatched_outcomes = None;
         let result = within_mutation(&context, async {
             if let Some(outcomes) = &body.outcomes {
                 outcomes.dispatched();
-                dispatched = Some(outcomes);
+                dispatched_outcomes = Some(outcomes);
             }
             request.await
         })
         .await;
         if let Ok((answer, _)) = &result {
-            guard.answered_by(answer);
+            guard.record_request_ids(answer);
         }
         let outcome = match error::interpret_put_result(&result, call, body.source.mismatched()) {
             Ok(()) => {
@@ -302,10 +316,10 @@ impl ObjectStorage {
             }
             Err(failure) => Err(guard.fail_mutation(failure)),
         };
-        if let Some(dispatched) = dispatched
+        if let Some(dispatched_outcomes) = dispatched_outcomes
             && !matches!(outcome, Err(MutationError::OutcomeUnknown(_)))
         {
-            dispatched.settled();
+            dispatched_outcomes.settled();
         }
         outcome
     }
@@ -315,7 +329,6 @@ impl ObjectStorage {
         parent: &OperationContext,
         key: &ObjectKey,
     ) -> Result<Download, ObjectStorageError> {
-        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Get)?;
         let permit = self.admit(&mut guard)?;
         let request = Box::pin(
@@ -325,9 +338,9 @@ impl ObjectStorage {
                 .bucket(&self.inner.bucket)
                 .key(key.as_str())
                 .checksum_mode(ChecksumMode::Enabled)
-                .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+                .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.operation_config(&context, call))
+                .config_override(self.operation_config(&context, Call::Read))
                 .send(),
         );
         let result =
@@ -347,7 +360,6 @@ impl ObjectStorage {
         parent: &OperationContext,
         key: &ObjectKey,
     ) -> Result<ObjectMetadata, ObjectStorageError> {
-        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Head)?;
         let _permit = self.admit(&mut guard)?;
         let request = self
@@ -356,9 +368,9 @@ impl ObjectStorage {
             .head_object()
             .bucket(&self.inner.bucket)
             .key(key.as_str())
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+            .set_expected_bucket_owner(self.inner.expected_bucket_owner())
             .customize()
-            .config_override(self.operation_config(&context, call))
+            .config_override(self.operation_config(&context, Call::Read))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
         let result =
@@ -380,7 +392,6 @@ impl ObjectStorage {
         parent: &OperationContext,
         key: &ObjectKey,
     ) -> Result<(), MutationError> {
-        let call = Call::UnconditionalMutation;
         let (context, mut guard) = self.begin_mutation(parent, Operation::Delete)?;
         let _permit = self.admit_mutation(&mut guard)?;
         let request = self
@@ -389,15 +400,15 @@ impl ObjectStorage {
             .delete_object()
             .bucket(&self.inner.bucket)
             .key(key.as_str())
-            .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
+            .set_expected_bucket_owner(self.inner.expected_bucket_owner())
             .customize()
-            .config_override(self.operation_config(&context, call))
+            .config_override(self.operation_config(&context, Call::UnconditionalMutation))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
         let (result, stopped_on_reply) = within_mutation(&context, request)
             .await
             .map_err(|interrupted| guard.fail_mutation(interrupted))?;
-        guard.answered_by(&result);
+        guard.record_request_ids(&result);
         error::interpret_delete_result(&result, stopped_on_reply)
             .map_err(|failure| guard.fail_mutation(failure))?;
         guard.succeed();
@@ -410,7 +421,6 @@ impl ObjectStorage {
         key: &ObjectKey,
         expires_in: Duration,
     ) -> Result<PresignedUrl, ObjectStorageError> {
-        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
             return Err(guard.fail(LocalFailure::PresignExpiry));
@@ -424,7 +434,7 @@ impl ObjectStorage {
             .bucket(&self.inner.bucket)
             .key(key.as_str())
             .customize()
-            .config_override(self.operation_config(&context, call))
+            .config_override(self.operation_config(&context, Call::Read))
             .presigned(config);
         let result = within(&context, request)
             .await
@@ -447,7 +457,10 @@ impl ObjectStorage {
         OperationGuard::start(
             Arc::clone(&self.inner.histograms),
             operation,
-            self.inner.cloud_region.as_deref(),
+            self.inner
+                .amazon_s3
+                .as_ref()
+                .map(|target| target.cloud_region.as_str()),
         )
     }
 
@@ -502,7 +515,7 @@ impl ObjectStorage {
         guard: &mut OperationGuard,
     ) -> Result<R, ObjectStorageError> {
         let reply = result.map_err(|interrupted| guard.fail(interrupted))?;
-        guard.answered_by(&reply);
+        guard.record_request_ids(&reply);
         Self::fail_if_stopped(context, guard)?;
         Ok(reply)
     }

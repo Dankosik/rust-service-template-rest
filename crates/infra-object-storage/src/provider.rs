@@ -47,15 +47,15 @@ impl Provider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UploadChecksum {
     Always,
-    BytesOnly,
+    InMemoryOnly,
     Never,
 }
 
 impl UploadChecksum {
     pub(crate) fn applies_to(self, source: &UploadSource) -> bool {
         match (self, source) {
-            (Self::Always, _) | (Self::BytesOnly, UploadSource::InMemory) => true,
-            (Self::BytesOnly, UploadSource::Streamed { .. }) | (Self::Never, _) => false,
+            (Self::Always, _) | (Self::InMemoryOnly, UploadSource::InMemory) => true,
+            (Self::InMemoryOnly, UploadSource::Streamed { .. }) | (Self::Never, _) => false,
         }
     }
 }
@@ -122,7 +122,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
                 origin_without_path(&origin),
                 "auto".to_owned(),
                 false,
-                UploadChecksum::BytesOnly,
+                UploadChecksum::InMemoryOnly,
             ))
         }
         Provider::Railway { endpoint, region } => {
@@ -306,7 +306,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(admitted.region, "auto");
-            assert_eq!(admitted.checksum, UploadChecksum::BytesOnly);
+            assert_eq!(admitted.checksum, UploadChecksum::InMemoryOnly);
             let Target::Endpoint { url, path_style } = admitted.target else {
                 panic!("expected endpoint target");
             };

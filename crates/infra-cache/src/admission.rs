@@ -9,8 +9,8 @@ use crate::credentials::{PasswordFile, read_regular_file};
 use crate::dial::Tls;
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 
-const PEM_CHAIN_BYTES: usize = 1024 * 1024;
-const PRIVATE_KEY_BYTES: usize = 64 * 1024;
+const MAX_PEM_CHAIN_BYTES: usize = 1024 * 1024;
+const MAX_PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
@@ -127,7 +127,7 @@ fn admit_password(
 }
 
 fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, CacheError> {
-    let bytes = read_regular_file(path, PEM_CHAIN_BYTES)
+    let bytes = read_regular_file(path, MAX_PEM_CHAIN_BYTES)
         .map_err(|error| CacheError::CaFile { kind: error.kind() })?;
     let mut roots = rustls::RootCertStore::empty();
     for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
@@ -144,9 +144,9 @@ struct ClientIdentity {
 fn read_client_certificate(certificate: &ClientCertificate) -> Result<ClientIdentity, CacheError> {
     use rustls::pki_types::pem::PemObject;
 
-    let client_cert = read_regular_file(&certificate.cert_path, PEM_CHAIN_BYTES)
+    let client_cert = read_regular_file(&certificate.cert_path, MAX_PEM_CHAIN_BYTES)
         .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
-    let client_key = read_regular_file(&certificate.key_path, PRIVATE_KEY_BYTES)
+    let client_key = read_regular_file(&certificate.key_path, MAX_PRIVATE_KEY_BYTES)
         .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
     let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
     let key =

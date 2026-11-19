@@ -44,7 +44,7 @@ impl FullPipeline {
         let shared = Arc::new(Shared {
             max_concurrency: APPLICATION_SLOTS,
             state: ArcSwap::from_pointee(State::Connected(generation.clone())),
-            write: Mutex::new(()),
+            state_lock: Mutex::new(()),
             changed: Notify::new(),
             retirements: Counter::noop(),
             tasks: TaskTracker::new(),
