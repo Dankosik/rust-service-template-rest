@@ -42,7 +42,7 @@ impl Emulator {
         ObjectStorage::try_new(ObjectStorageOptions {
             provider: Provider::Local {
                 endpoint: self.endpoint.clone(),
-                region: String::new(),
+                region: None,
             },
             bucket: BUCKET.to_owned(),
             credentials: CredentialSource::AccessKey {

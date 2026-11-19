@@ -19,6 +19,11 @@ fn var(name: &str) -> String {
     std::env::var(format!("APP__OBJECT_STORAGE__{name}")).unwrap_or_default()
 }
 
+fn optional_var(name: &str) -> Option<String> {
+    let value = var(name);
+    (!value.trim().is_empty()).then_some(value)
+}
+
 struct Target {
     provider: Provider,
     bucket: String,
@@ -44,11 +49,11 @@ impl Target {
             },
             "railway" => Provider::Railway {
                 endpoint: var("ENDPOINT"),
-                region: var("REGION"),
+                region: optional_var("REGION"),
             },
             "s3_compatible" => Provider::S3Compatible {
                 endpoint: var("ENDPOINT"),
-                region: var("REGION"),
+                region: optional_var("REGION"),
                 path_style: var("PATH_STYLE") == "true",
             },
             other => panic!("APP__OBJECT_STORAGE__PROVIDER {other:?} is not a live provider"),
@@ -106,13 +111,9 @@ impl Target {
                 .region(aws_sdk_s3::config::Region::new("auto"))
                 .endpoint_url(endpoint),
             Provider::Railway { endpoint, region } => {
-                let region = region.trim();
+                let region = region.as_deref().map_or("auto", str::trim);
                 config
-                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                        "auto".to_owned()
-                    } else {
-                        region.to_owned()
-                    }))
+                    .region(aws_sdk_s3::config::Region::new(region.to_owned()))
                     .endpoint_url(endpoint)
             }
             Provider::S3Compatible {
@@ -120,13 +121,9 @@ impl Target {
                 region,
                 path_style,
             } => {
-                let region = region.trim();
+                let region = region.as_deref().map_or("us-east-1", str::trim);
                 config
-                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                        "us-east-1".to_owned()
-                    } else {
-                        region.to_owned()
-                    }))
+                    .region(aws_sdk_s3::config::Region::new(region.to_owned()))
                     .force_path_style(*path_style)
                     .endpoint_url(endpoint)
             }

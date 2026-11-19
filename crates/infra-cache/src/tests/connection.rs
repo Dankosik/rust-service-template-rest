@@ -6,7 +6,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use operation_context::Stopped;
 
 use super::*;
-use crate::{CacheLookup, MutationError, OperationError, SetError};
+use crate::{CacheLookup, MutationError, OperationError, SetError, UnknownOutcome};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -245,7 +245,7 @@ async fn acl_denial_is_distinct_in_traces_and_keeps_the_response_series_and_conn
 async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
     let caller = OperationContext::unbounded();
     let refused = MutationError::NotApplied(OperationError::Unavailable);
-    let unknown = MutationError::OutcomeUnknown(OperationError::Unavailable);
+    let unknown = MutationError::OutcomeUnknown(UnknownOutcome::Unavailable);
     for (set, reply, expected) in [
         (true, &b"-NOPERM access denied\r\n"[..], Err(refused)),
         (true, b"-NOREPLICAS not enough replicas\r\n", Err(refused)),
@@ -292,7 +292,7 @@ async fn direct_cache_start_rejects_unsupported_byte_limits() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, CacheError::InvalidSizeLimit);
+        assert_eq!(error, StartError::InvalidSizeLimit);
     }
 }
 
@@ -305,7 +305,7 @@ async fn a_cache_window_must_leave_room_for_maintenance() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, CacheError::InvalidConcurrency);
+        assert_eq!(error, StartError::InvalidConcurrency);
     }
 }
 
@@ -322,6 +322,7 @@ async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stop
     .unwrap();
     let reserve = Duration::from_secs(8);
     let lookup = CacheLookup::new(Some(cache.namespace(namespace!("aside"))), reserve);
+    assert!(lookup.namespace().is_some());
     let unbounded = OperationContext::unbounded();
     assert_eq!(lookup.lookup(&unbounded, "miss").await, Ok(None));
     server
@@ -335,6 +336,7 @@ async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stop
     assert_eq!(server.command_count("GETRANGE", Some("aside:hit")), 1);
 
     let disabled = CacheLookup::new(None, reserve);
+    assert!(disabled.namespace().is_none());
     assert_eq!(disabled.lookup(&unbounded, "missing_cache").await, Ok(None));
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
@@ -565,7 +567,7 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
     assert_eq!(
         tokio::time::timeout(limit, write).await,
         Ok(Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Stopped(Stopped::Cancelled)
+            UnknownOutcome::Stopped(Stopped::Cancelled)
         ))))
     );
     assert_eq!(server.connections(), 1);
@@ -1104,7 +1106,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
                 )
                 .await,
             Err(SetError::Mutation(MutationError::OutcomeUnknown(
-                OperationError::Unavailable
+                UnknownOutcome::Unavailable
             )))
         );
         assert!(
@@ -1137,7 +1139,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let old = server.stall_existing();
     assert_eq!(
         namespace.delete(&caller, "delete-once").await,
-        Err(MutationError::OutcomeUnknown(OperationError::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     metrics.wait_for_retirements(4).await;
     assert_work_metrics(&metrics, 0, 0, 4);
@@ -1340,7 +1342,7 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
     assert_eq!(
         pending.await,
         Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Unavailable
+            UnknownOutcome::Unavailable
         )))
     );
     server
@@ -1613,7 +1615,7 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
             .await
             .expect("cancellation must end waiting before the local ceiling"),
         Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Stopped(Stopped::Cancelled)
+            UnknownOutcome::Stopped(Stopped::Cancelled)
         )))
     );
     assert_work_metrics(&metrics, 0, 0, 0);
@@ -1943,7 +1945,7 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
             .await
             .expect("admission must time out while the blocking worker is unavailable")
             .unwrap_err();
-        assert_eq!(error, CacheError::AdmissionTimedOut);
+        assert_eq!(error, StartError::AdmissionTimedOut);
 
         let tasks = tokio_util::task::TaskTracker::new();
         {

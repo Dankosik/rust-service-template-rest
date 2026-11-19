@@ -17,7 +17,7 @@ pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, Conf
         },
         ObjectStorageProvider::Railway { endpoint, region } => Provider::Railway {
             endpoint: endpoint.clone(),
-            region: region.clone().unwrap_or_default(),
+            region: region.clone(),
         },
         ObjectStorageProvider::S3Compatible {
             endpoint,
@@ -25,12 +25,12 @@ pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, Conf
             path_style,
         } => Provider::S3Compatible {
             endpoint: endpoint.clone(),
-            region: region.clone().unwrap_or_default(),
+            region: region.clone(),
             path_style: *path_style,
         },
         ObjectStorageProvider::Local { endpoint, region } => Provider::Local {
             endpoint: endpoint.clone(),
-            region: region.clone().unwrap_or_default(),
+            region: region.clone(),
         },
     };
     let credentials = match &settings.credentials {

@@ -407,7 +407,7 @@ impl Link {
             () = budget.wait_stopped() => {
                 return Err(CommandError::NotApplied(budget.classify_stop()));
             }
-            () = async { generation.retired.cancelled().await } => return Err(ErrorType::Io.into()),
+            () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
         budget.check_before_dispatch(&generation)?;
         Ok((generation, reservation))
@@ -527,11 +527,12 @@ async fn maintenance_query(
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
     let reply = tokio::task::unconstrained(connection.send_packed_command(command));
+    let deadline = Deadline::after(command_timeout);
     let result = tokio::select! {
         biased;
         () = generation.retired.cancelled() => return Err(MaintenanceError::Aborted(ErrorType::Io)),
         result = reply => result,
-        () = async { Deadline::after(command_timeout).wait().await } => {
+        () = deadline.wait() => {
             return Err(MaintenanceError::Aborted(ErrorType::Timeout));
         }
     };
@@ -653,7 +654,7 @@ async fn run_generation(
     Some(generation.cooldown_until)
 }
 
-pub(crate) fn setup_backoff() -> <backon::ExponentialBuilder as BackoffBuilder>::Backoff {
+pub(crate) fn setup_backoff() -> backon::ExponentialBackoff {
     backon::ExponentialBuilder::default()
         .with_min_delay(SETUP_BACKOFF_MIN_DELAY)
         .with_max_delay(SETUP_BACKOFF_BASE_CAP)
