@@ -24,9 +24,6 @@ Global constraints: <active rules, cross-task pinned shared identifiers, shared 
 - Order tasks **topologically** and by **dispatch priority** within each
   frontier (risk-retirement, `prefactor`, `shared-contract`, and critical-path
   blockers first).
-- Start at `status: draft`; set `status: ready` after readiness review permits
-  handoff, or `status: blocked` with `Blocked stop:` when preserving partial
-  work alongside an upstream `blocked` handoff.
 - **Stage syntax:**
   - Unannotated (`T1`) gates coding on `T1`'s integrated `Implemented` code —
     required whenever a task compiles against any Rust type, trait, function,

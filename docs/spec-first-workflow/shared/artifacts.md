@@ -47,8 +47,8 @@ instead of copying them. Split an artifact only when the split creates a real
 owner or materially improves review. Stop when the next actor can act, prove
 the result, and identify the reopen owner without chat archaeology.
 
-Do not persist a task ledger when Planning finds no executable implementation
-unit. Record the no-implementation disposition in the owning phase result.
+Use Planning’s [No-Implementation Exit](../phases/planning.md#no-implementation-exit)
+when neither executable work nor integrated work awaiting acceptance remains.
 
 ## Artifact Lifecycle V1
 
